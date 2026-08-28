@@ -215,6 +215,10 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
         self.client = client
     }
 
+    func serverTime() async throws -> Date {
+        try await client.serverTime()
+    }
+
     func search(
         _ query: GitHubIssueSearchQuery,
         page: Int = 1

@@ -115,6 +115,23 @@ final class GitHubIssueSearchTests: XCTestCase {
         XCTAssertEqual(response.value.items, [])
         XCTAssertEqual(response.ssoHeader, .partialResults(Set([1])))
     }
+
+    func testServerTimeUsesGitHubDateHeader() async throws {
+        let expected = Date(timeIntervalSince1970: 0)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SearchSession(
+                    body: Data(),
+                    headers: ["Date": "Thu, 01 Jan 1970 00:00:00 GMT"]
+                )
+            ),
+            credential: SecretValue("token")
+        )
+
+        let serverTime = try await client.serverTime()
+
+        XCTAssertEqual(serverTime, expected)
+    }
 }
 
 private actor SearchSession: HTTPSession {
