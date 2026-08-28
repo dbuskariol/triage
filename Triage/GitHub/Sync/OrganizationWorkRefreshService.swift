@@ -142,6 +142,14 @@ actor OrganizationWorkRefreshService {
                     repositoryIDsByNodeID[repository.id]
                 }
             )
+            try await refreshPullRequestReviews(
+                restClient: restClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
+                coverageRepository: coverageRepository,
+                attemptedAt: attemptedAt
+            )
             try await coverageRepository.save(
                 coverageRecord(
                     scope: synchronizationScope,
@@ -233,13 +241,14 @@ actor OrganizationWorkRefreshService {
         interval: SearchTimeRange?,
         status: CoverageStatus,
         lastSuccessfulAt: Date?,
-        failureDetail: String?
+        failureDetail: String?,
+        feature: CoverageFeature = .roleDiscovery
     ) -> CoverageRecord {
         CoverageRecord(
             accountID: scope.accountID,
             organizationID: scope.organizationID,
             repositoryID: nil,
-            feature: .roleDiscovery,
+            feature: feature,
             streamID: streamID,
             intervalStart: interval?.start,
             intervalEnd: interval?.end,
@@ -249,5 +258,86 @@ actor OrganizationWorkRefreshService {
             lastSuccessfulAt: lastSuccessfulAt,
             failureDetail: failureDetail
         )
+    }
+
+    private func refreshPullRequestReviews(
+        restClient: GitHubRESTClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        coverageRepository: CoverageRepository,
+        attemptedAt: Date
+    ) async throws {
+        let streamID = SyncStreamID(rawValue: "pull-request-reviews-\(organization.id.rawValue)")!
+        try await coverageRepository.save(
+            coverageRecord(
+                scope: scope,
+                streamID: streamID,
+                interval: nil,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil,
+                feature: .reviews
+            ),
+            attemptedAt: attemptedAt
+        )
+        do {
+            let result = try await PullRequestReviewRefreshService(
+                client: GitHubPullRequestClient(client: restClient),
+                candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
+            ).refresh(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID
+            )
+            let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
+            let status: CoverageStatus = scopedSSOHeader == nil ? .complete : .partial
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: status,
+                    lastSuccessfulAt: status == .complete ? Date() : nil,
+                    failureDetail: status == .complete
+                        ? nil
+                        : "GitHub returned partial pull request review results due to SSO.",
+                    feature: .reviews
+                ),
+                attemptedAt: attemptedAt
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let failure as GitHubFailure {
+            let status: CoverageStatus = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) == nil
+                ? .failed
+                : .requiresSSO
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: status,
+                    lastSuccessfulAt: nil,
+                    failureDetail: status == .requiresSSO
+                        ? "GitHub organization SSO authorization is required for pull request reviews."
+                        : "GitHub pull request review request failed: \(failure.kind.rawValue).",
+                    feature: .reviews
+                ),
+                attemptedAt: attemptedAt
+            )
+        } catch {
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: .failed,
+                    lastSuccessfulAt: nil,
+                    failureDetail: "Pull request review refresh failed: \(String(reflecting: type(of: error))).",
+                    feature: .reviews
+                ),
+                attemptedAt: attemptedAt
+            )
+        }
     }
 }
