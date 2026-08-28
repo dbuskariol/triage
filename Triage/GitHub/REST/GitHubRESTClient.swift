@@ -18,6 +18,7 @@ struct GitHubResponse<Value: Sendable>: Sendable {
 
 enum GitHubRESTClientError: Error, Equatable, Sendable {
     case invalidJSON
+    case missingServerDate
 }
 
 actor GitHubRESTClient {
@@ -89,6 +90,20 @@ actor GitHubRESTClient {
         }
     }
 
+    func serverTime() async throws -> Date {
+        let response = try await send(GitHubRESTRequest(path: "/rate_limit"))
+        if let failure = GitHubFailureClassifier.classify(response) {
+            GitHubDiagnostics.record(failure)
+            throw failure
+        }
+        guard let value = response.header(named: "Date"),
+              let date = Self.parseHTTPDate(value)
+        else {
+            throw GitHubRESTClientError.missingServerDate
+        }
+        return date
+    }
+
     private func send(_ request: GitHubRESTRequest) async throws -> GitHubRESTResponse {
         let resource: GitHubRateLimitResource = request.isSearchRequest ? .search : .core
         guard let rateLimitController else {
@@ -102,6 +117,14 @@ actor GitHubRESTClient {
             try await rateLimitController.record(response: response, fallbackResource: resource)
             return response
         }
+    }
+
+    private nonisolated static func parseHTTPDate(_ value: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: value)
     }
 }
 

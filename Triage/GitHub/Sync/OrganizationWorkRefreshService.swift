@@ -48,29 +48,6 @@ actor OrganizationWorkRefreshService {
             ),
             attemptedAt: attemptedAt
         )
-        let previousHighWater = try await SyncStreamRepository(vault: vault)
-            .stream(withID: streamID, accountID: account.id)?
-            .highWater
-        let incompleteRange = try await coverageRepository.records(
-            for: account.id,
-            organizationID: organization.id
-        ).compactMap { record -> SearchTimeRange? in
-            guard record.feature == .roleDiscovery,
-                  record.streamID == streamID,
-                  record.credentialRevision == synchronizationScope.credentialRevision,
-                  record.capabilityRevision == synchronizationScope.capabilityRevision,
-                  record.status != .complete,
-                  let start = record.intervalStart,
-                  let end = record.intervalEnd
-            else {
-                return nil
-            }
-            return SearchTimeRange(start: start, end: end)
-        }.max { $0.end < $1.end }
-        let searchRange = incompleteRange ?? SearchTimeRange(
-            start: previousHighWater ?? Date(timeIntervalSince1970: 0),
-            end: attemptedAt
-        )
         let rateLimitController = try await rateLimitControllers.controller(
             for: account.id,
             vault: vault
@@ -81,7 +58,34 @@ actor OrganizationWorkRefreshService {
             rateLimitController: rateLimitController,
             requestPriority: requestPriority
         )
+        let searchClient = GitHubIssueSearchClient(client: restClient)
+        var searchRange: SearchTimeRange?
         do {
+            let serverObservedAt = try await searchClient.serverTime()
+            let previousHighWater = try await SyncStreamRepository(vault: vault)
+                .stream(withID: streamID, accountID: account.id)?
+                .highWater
+            let incompleteRange = try await coverageRepository.records(
+                for: account.id,
+                organizationID: organization.id
+            ).compactMap { record -> SearchTimeRange? in
+                guard record.feature == .roleDiscovery,
+                      record.streamID == streamID,
+                      record.credentialRevision == synchronizationScope.credentialRevision,
+                      record.capabilityRevision == synchronizationScope.capabilityRevision,
+                      record.status != .complete,
+                      let start = record.intervalStart,
+                      let end = record.intervalEnd
+                else {
+                    return nil
+                }
+                return SearchTimeRange(start: start, end: end)
+            }.max { $0.end < $1.end }
+            let range = incompleteRange ?? SearchTimeRange(
+                start: previousHighWater ?? Date(timeIntervalSince1970: 0),
+                end: serverObservedAt
+            )
+            searchRange = range
             let inventory = try await OrganizationInventoryRefreshService(
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
@@ -100,10 +104,10 @@ actor OrganizationWorkRefreshService {
             let plan = try RoleDiscoveryPlan(
                 organizationLogin: organization.login,
                 userLogin: account.login,
-                now: attemptedAt
+                now: serverObservedAt
             )
             let workItemIDs = try await RoleDiscoverySynchronizer(
-                searchClient: GitHubIssueSearchClient(client: restClient),
+                searchClient: searchClient,
                 nodeRepository: GitHubNodeRepository(vault: vault),
                 workItemRepository: WorkItemRepository(vault: vault),
                 relationRepository: WorkRelationRepository(vault: vault),
@@ -118,7 +122,7 @@ actor OrganizationWorkRefreshService {
                 organizationID: organization.id,
                 githubOrganizationID: organization.githubOrganizationID,
                 streamID: streamID,
-                searchRange: searchRange,
+                searchRange: range,
                 accessibleRepositoryNames: inventory.map(\.fullName),
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
             )
@@ -126,7 +130,7 @@ actor OrganizationWorkRefreshService {
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
-                    interval: searchRange,
+                    interval: range,
                     status: .complete,
                     lastSuccessfulAt: Date(),
                     failureDetail: nil
