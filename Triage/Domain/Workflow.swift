@@ -110,4 +110,23 @@ struct ActionItem: Codable, Equatable, Sendable, Identifiable {
         self.completedAt = completedAt
         self.dismissedAt = dismissedAt
     }
+
+    func completing(at date: Date) -> ActionItem {
+        ActionItem(
+            id: id,
+            workItemID: workItemID,
+            title: title,
+            detail: detail,
+            origin: origin,
+            state: .completed,
+            priority: priority,
+            dueAt: dueAt,
+            evidenceIDs: evidenceIDs,
+            sourceFingerprint: sourceFingerprint,
+            createdAt: createdAt,
+            updatedAt: date,
+            completedAt: date,
+            dismissedAt: dismissedAt
+        )
+    }
 }

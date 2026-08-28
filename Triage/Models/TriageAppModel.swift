@@ -246,4 +246,22 @@ final class TriageAppModel: ObservableObject {
             refreshError = "Triage could not save this local workflow change."
         }
     }
+
+    func completeActionItem(_ actionItem: ActionItem, in workItem: WorkItem) async {
+        do {
+            let completed = actionItem.completing(at: .now)
+            let secretStore = KeychainSecretStore()
+            guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
+                throw AccountCredentialReaderError.missingAccessToken
+            }
+            let vault = try await VaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
+            try await WorkflowRepository(vault: vault).save(completed)
+            guard let index = workItems.firstIndex(where: { $0.id == workItem.id }) else { return }
+            workItems[index] = workItem.replacing(
+                actionItems: workItem.actionItems.map { $0.id == completed.id ? completed : $0 }
+            )
+        } catch {
+            refreshError = "Triage could not complete this local action item."
+        }
+    }
 }

@@ -83,6 +83,29 @@ struct WorkItem: Codable, Equatable, Sendable, Identifiable {
             score: score
         )
     }
+
+    func replacing(actionItems: [ActionItem]) -> WorkItem {
+        WorkItem(
+            id: id,
+            accountID: accountID,
+            organizationID: organizationID,
+            primaryNodeID: primaryNodeID,
+            title: title,
+            state: state,
+            sourceKind: sourceKind,
+            sourceURL: sourceURL,
+            repository: repository,
+            members: members,
+            contextLinks: contextLinks,
+            relations: relations,
+            attentionReasons: attentionReasons,
+            actionItems: actionItems,
+            workflow: workflow,
+            freshness: freshness,
+            lastRelevantActivityAt: lastRelevantActivityAt,
+            score: score
+        )
+    }
 }
 
 enum GroupingStrength: String, Codable, Comparable, Sendable {
