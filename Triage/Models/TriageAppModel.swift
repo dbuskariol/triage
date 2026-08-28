@@ -101,6 +101,7 @@ final class TriageAppModel: ObservableObject {
             organizationsByAccount = result.organizationsByAccount
             selectedAccountID = result.accounts.first?.id
             selectedOrganizationID = selectedAccountID.flatMap { organizationsByAccount[$0]?.first?.id }
+            await loadCachedSelectedOrganization()
             if !result.unavailableAccountIDs.isEmpty {
                 restorationError = "One or more connected accounts need to be reconnected."
             }
@@ -117,6 +118,7 @@ final class TriageAppModel: ObservableObject {
         else {
             return
         }
+
         refreshError = nil
         isRefreshing = true
         defer {
@@ -154,6 +156,27 @@ final class TriageAppModel: ObservableObject {
         } catch {
             guard refreshGeneration == generation else { return }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
+        }
+    }
+
+    private func loadCachedSelectedOrganization() async {
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization
+        else {
+            return
+        }
+        do {
+            let secretStore = KeychainSecretStore()
+            guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+                throw AccountCredentialReaderError.missingAccessToken
+            }
+            let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+            install(workItems: try await WorkItemRepository(vault: vault).fetch(
+                accountID: account.id,
+                organizationID: organization.id
+            ))
+        } catch {
+            restorationError = "Triage could not load cached work for the selected organization."
         }
     }
 
