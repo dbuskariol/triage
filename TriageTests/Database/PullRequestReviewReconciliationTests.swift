@@ -66,6 +66,48 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         XCTAssertEqual(persistedNodeIDs, ["MDQ6VXNlcjI="])
     }
 
+    func testTransactionScopedHydratedWriteRollsBackOnFailure() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = GitHubNodeDetailsRepository(vault: fixture.vault)
+        let updatedNode = fixture.node(title: "Should not persist")
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.writeTransaction(accountID: fixture.accountID) { database in
+                try GitHubNodeDetailsRepository.save(
+                    HydratedGitHubNode(
+                        node: updatedNode,
+                        details: .pullRequest(
+                            isDraft: false,
+                            mergeableState: nil,
+                            headRef: "feature",
+                            baseRef: "main",
+                            reviewDecision: nil,
+                            assigneeNodeIDs: [],
+                            labelNodeIDs: [],
+                            labelNames: []
+                        )
+                    ),
+                    accountID: fixture.accountID,
+                    observedAtMilliseconds: 2_000,
+                    in: database
+                )
+                throw FixtureError.expectedRollback
+            }
+        } verify: { error in
+            XCTAssertEqual(error as? FixtureError, .expectedRollback)
+        }
+
+        let persistedTitle = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT title FROM github_nodes WHERE github_node_id = ?",
+                arguments: [fixture.pullRequest.nodeID.rawValue]
+            )
+        }
+        XCTAssertEqual(persistedTitle, fixture.pullRequest.title)
+    }
+
     private func review(nodeID: String, state: String) -> GitHubPullRequestReviewDTO {
         GitHubPullRequestReviewDTO(
             id: 1,
@@ -168,6 +210,34 @@ private final class Fixture: @unchecked Sendable {
     func remove() {
         try? FileManager.default.removeItem(at: directory)
     }
+
+    func node(title: String) -> NormalizedGitHubNode {
+        NormalizedGitHubNode(
+            nodeID: pullRequest.nodeID,
+            accountID: pullRequest.accountID,
+            organizationID: pullRequest.organizationID,
+            repositoryID: pullRequest.repositoryID,
+            kind: pullRequest.kind,
+            numericID: pullRequest.numericID,
+            number: pullRequest.number,
+            title: title,
+            state: pullRequest.state,
+            url: pullRequest.url,
+            bodyMarkdown: pullRequest.bodyMarkdown,
+            authorID: pullRequest.authorID,
+            createdAt: pullRequest.createdAt,
+            updatedAt: pullRequest.updatedAt,
+            closedAt: pullRequest.closedAt,
+            mergedAt: pullRequest.mergedAt,
+            sourceRevision: pullRequest.sourceRevision,
+            observedAt: pullRequest.observedAt,
+            accessibility: pullRequest.accessibility
+        )
+    }
+}
+
+private enum FixtureError: Error, Equatable {
+    case expectedRollback
 }
 
 private func XCTAssertThrowsErrorAsync(

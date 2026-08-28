@@ -131,7 +131,6 @@ actor OrganizationWorkRefreshService {
             try await GitHubNodeHydrationService(
                 client: graphqlClient,
                 detailsRepository: GitHubNodeDetailsRepository(vault: vault),
-                actorRepository: ActorRepository(vault: vault),
                 rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
                 normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
                 batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault)

@@ -9,7 +9,6 @@ enum GitHubNodeHydrationServiceError: Error, Equatable, Sendable {
 actor GitHubNodeHydrationService {
     private let client: GitHubGraphQLClient
     private let detailsRepository: GitHubNodeDetailsRepository
-    private let actorRepository: ActorRepository
     private let rawSnapshotRepository: RawAPISnapshotRepository
     private let normalizationFailureRepository: NormalizationFailureRepository
     private let batchMetricRepository: GitHubHydrationBatchMetricRepository
@@ -18,7 +17,6 @@ actor GitHubNodeHydrationService {
     init(
         client: GitHubGraphQLClient,
         detailsRepository: GitHubNodeDetailsRepository,
-        actorRepository: ActorRepository,
         rawSnapshotRepository: RawAPISnapshotRepository,
         normalizationFailureRepository: NormalizationFailureRepository,
         batchMetricRepository: GitHubHydrationBatchMetricRepository,
@@ -26,7 +24,6 @@ actor GitHubNodeHydrationService {
     ) {
         self.client = client
         self.detailsRepository = detailsRepository
-        self.actorRepository = actorRepository
         self.rawSnapshotRepository = rawSnapshotRepository
         self.normalizationFailureRepository = normalizationFailureRepository
         self.batchMetricRepository = batchMetricRepository
@@ -106,10 +103,6 @@ actor GitHubNodeHydrationService {
                 observedAt: observedAt,
                 payload: response.payload
             )
-            try await rawSnapshotRepository.save(snapshot)
-            for actor in actors(in: payload) {
-                try await actorRepository.save(actor, observedAt: observedAt)
-            }
             let normalized: [HydratedGitHubNode]
             do {
                 normalized = try GitHubNodeHydrationNormalizer.normalizeHydrated(
@@ -121,26 +114,48 @@ actor GitHubNodeHydrationService {
                     observedAt: observedAt
                 )
             } catch let error as GitHubNodeHydrationNormalizationError {
-                try await normalizationFailureRepository.record(
-                    NormalizationFailure(
-                        id: UUID(),
-                        accountID: accountID,
-                        rawSnapshotID: snapshot.id,
-                        githubNodeID: nil,
-                        endpoint: snapshot.endpoint,
-                        parserVersion: snapshot.parserVersion,
-                        occurredAt: observedAt,
-                        redactedDiagnostic: redactedDiagnostic(for: error)
+                let diagnostic = Self.redactedDiagnostic(for: error)
+                try await detailsRepository.writeTransaction(accountID: accountID) { database in
+                    try RawAPISnapshotRepository.save(snapshot, in: database)
+                    try NormalizationFailureRepository.record(
+                        NormalizationFailure(
+                            id: UUID(),
+                            accountID: accountID,
+                            rawSnapshotID: snapshot.id,
+                            githubNodeID: nil,
+                            endpoint: snapshot.endpoint,
+                            parserVersion: snapshot.parserVersion,
+                            occurredAt: observedAt,
+                            redactedDiagnostic: diagnostic
+                        ),
+                        in: database
                     )
-                )
+                }
                 throw error
             }
-            for hydratedNode in normalized {
-                try await detailsRepository.save(
-                    hydratedNode,
-                    accountID: accountID,
-                    observedAt: observedAt
-                )
+            let payloadActors = Self.actors(in: payload)
+            do {
+                try await detailsRepository.writeTransaction(accountID: accountID) { database in
+                    try RawAPISnapshotRepository.save(snapshot, in: database)
+                    for actor in payloadActors {
+                        try ActorRepository.save(
+                            actor,
+                            observedAtMilliseconds: Self.milliseconds(observedAt),
+                            in: database
+                        )
+                    }
+                    for hydratedNode in normalized {
+                        try GitHubNodeDetailsRepository.save(
+                            hydratedNode,
+                            accountID: accountID,
+                            observedAtMilliseconds: Self.milliseconds(observedAt),
+                            in: database
+                        )
+                    }
+                }
+            } catch {
+                try await rawSnapshotRepository.save(snapshot)
+                throw error
             }
             batchSize = GitHubHydrationBatchPlanner.nextBatchSize(
                 after: batchSize,
@@ -155,7 +170,7 @@ actor GitHubNodeHydrationService {
         let ids: [String]
     }
 
-    private func actors(in payload: GitHubNodeHydrationPayload) -> [ActorSummary] {
+    private nonisolated static func actors(in payload: GitHubNodeHydrationPayload) -> [ActorSummary] {
         var actors = [ActorID: ActorSummary]()
         let payloadActors = payload.nodes.compactMap(\.?).flatMap { node in
             [node.author].compactMap(\.self) + node.assignees.nodes.compactMap(\.?)
@@ -177,7 +192,9 @@ actor GitHubNodeHydrationService {
         return actors.values.sorted { $0.id.rawValue < $1.id.rawValue }
     }
 
-    private func redactedDiagnostic(for error: GitHubNodeHydrationNormalizationError) -> String {
+    private nonisolated static func redactedDiagnostic(
+        for error: GitHubNodeHydrationNormalizationError
+    ) -> String {
         switch error {
         case .missingRequestedNode:
             "Hydration response omitted a requested GitHub node."
@@ -206,5 +223,9 @@ actor GitHubNodeHydrationService {
         case .incompleteConnection:
             "Hydration response exceeded the supported related-object page size."
         }
+    }
+
+    private nonisolated static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 }
