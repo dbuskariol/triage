@@ -39,6 +39,7 @@
 		689BB5871312602063AE4AB7 /* TriageAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07052B04A11F30A982F01E0 /* TriageAppModel.swift */; };
 		6B638F596E5EA2F5BA86D8DD /* GitHubOAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 152B2A70DEBF7542ECA00583 /* GitHubOAuth.swift */; };
 		733DA040ADF44EB3897070BD /* AccountAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */; };
+		749DB6A555C110E9ABEF1BBB /* GitHubCapabilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */; };
 		76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9690060369E66769608BBCEA /* InboxEligibilityRule.swift */; };
 		7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCAEEFB08793617F029138E /* DirectResponsibilityRule.swift */; };
 		7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */; };
@@ -157,6 +158,7 @@
 		985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectResponsibilityRuleTests.swift; sourceTree = "<group>"; };
 		993826A5AB570E9336F94531 /* GitHubDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnostics.swift; sourceTree = "<group>"; };
 		9B96E89F2CF776FAC365D17E /* AccountAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAccess.swift; sourceTree = "<group>"; };
+		9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCapabilityProbe.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
@@ -233,6 +235,7 @@
 			children = (
 				92ED1ADA9F9B0A13AF694033 /* AuthBrokerClient.swift */,
 				70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */,
+				9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */,
 				152B2A70DEBF7542ECA00583 /* GitHubOAuth.swift */,
 				4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */,
 				77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */,
@@ -620,6 +623,7 @@
 				7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */,
 				1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */,
 				2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */,
+				749DB6A555C110E9ABEF1BBB /* GitHubCapabilityProbe.swift in Sources */,
 				5BC464EE268BBA65B7ADC572 /* GitHubContent.swift in Sources */,
 				E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */,
 				09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */,
