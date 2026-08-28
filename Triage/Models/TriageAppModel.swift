@@ -44,12 +44,15 @@ final class TriageAppModel: ObservableObject {
                 configuration: configuration.oauth,
                 presentationAnchor: presentationAnchor
             )
-            let account = try await AccountConnectionService(
+            let result = try await AccountConnectionService(
                 brokerURL: configuration.brokerURL,
                 secretStore: KeychainSecretStore(),
                 vaultRegistry: VaultRegistry()
             ).connectOAuth(exchangeRequest: request)
-            install(accounts: accounts + [account], organizations: organizations)
+            install(
+                accounts: accounts + [result.account],
+                organizations: result.organizations
+            )
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
             case .missingClientID:
