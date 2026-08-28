@@ -735,6 +735,22 @@ enum TriageDatabaseMigrator {
                     PRIMARY KEY (attention_reason_id, evidence_id)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "014-notification-deliveries",
+            checksum: "e1c8dc56da0071a03b6814be2c88fd8ce3f3294032551a89b1777c2f6ca56d11"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE notification_deliveries (
+                    dedupe_key TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    reason TEXT NOT NULL,
+                    evidence_version TEXT NOT NULL,
+                    delivered_at_ms INTEGER NOT NULL
+                )
+                """)
         }
     ]
 }

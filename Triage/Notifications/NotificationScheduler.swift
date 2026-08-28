@@ -66,7 +66,7 @@ actor NotificationScheduler {
       reason: candidate.reason,
       evidenceVersion: candidate.evidenceVersion
     )
-    guard !(await deliveryLedger.contains(payload.dedupeKey)) else {
+    guard !(try await deliveryLedger.contains(payload.dedupeKey)) else {
       return .suppressedDuplicate
     }
 
@@ -92,7 +92,7 @@ actor NotificationScheduler {
       )
     )
     try await scheduling.schedule(request)
-    await deliveryLedger.record(payload.dedupeKey)
+    try await deliveryLedger.record(payload.dedupeKey)
     return .scheduled(replacing: related.count)
   }
 }
