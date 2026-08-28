@@ -306,6 +306,88 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testSyncShardsRejectMalformedCheckpointsAndUnknownStreams() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let streamID = SyncStreamID(rawValue: "search-discovery")!
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                repositoryID: nil,
+                feature: .issues,
+                streamID: streamID,
+                intervalStart: fixture.date,
+                intervalEnd: fixture.date.addingTimeInterval(60),
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.date
+        )
+        let repository = SyncShardRepository(vault: fixture.vault)
+
+        do {
+            try await repository.save(
+                SyncShard(
+                    id: SyncShardID.make(),
+                    streamID: streamID,
+                    queryKind: "involvement-open",
+                    intervalStart: fixture.date.addingTimeInterval(60),
+                    intervalEnd: fixture.date,
+                    pageCursor: nil,
+                    state: .pending,
+                    completedAt: nil
+                ),
+                accountID: fixture.accountID
+            )
+            XCTFail("Expected an invalid interval.")
+        } catch {
+            XCTAssertEqual(error as? SyncShardRepositoryError, .invalidInterval)
+        }
+
+        do {
+            try await repository.save(
+                SyncShard(
+                    id: SyncShardID.make(),
+                    streamID: streamID,
+                    queryKind: "involvement-open",
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    pageCursor: nil,
+                    state: .running,
+                    completedAt: fixture.date
+                ),
+                accountID: fixture.accountID
+            )
+            XCTFail("Expected an invalid completion state.")
+        } catch {
+            XCTAssertEqual(error as? SyncShardRepositoryError, .invalidCompletionState)
+        }
+
+        do {
+            try await repository.save(
+                SyncShard(
+                    id: SyncShardID.make(),
+                    streamID: SyncStreamID(rawValue: "unknown-stream")!,
+                    queryKind: "involvement-open",
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    pageCursor: nil,
+                    state: .pending,
+                    completedAt: nil
+                ),
+                accountID: fixture.accountID
+            )
+            XCTFail("Expected an unknown stream failure.")
+        } catch {
+            XCTAssertEqual(error as? SyncShardRepositoryError, .streamScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
