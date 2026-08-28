@@ -45,7 +45,10 @@ actor CoverageRepository {
                         credential_revision = excluded.credential_revision,
                         capability_revision = excluded.capability_revision,
                         status = excluded.status,
-                        last_successful_at_ms = excluded.last_successful_at_ms,
+                        last_successful_at_ms = COALESCE(
+                            excluded.last_successful_at_ms,
+                            coverage_records.last_successful_at_ms
+                        ),
                         failure_detail = excluded.failure_detail
                     """,
                 arguments: [
@@ -131,11 +134,19 @@ actor CoverageRepository {
             try database.execute(
                 sql: """
                     UPDATE sync_streams
-                    SET high_water_ms = ?, last_successful_at_ms = ?, last_attempt_at_ms = ?,
+                    SET high_water_ms = CASE
+                            WHEN ? = ? AND ? IS NOT NULL THEN ?
+                            ELSE high_water_ms
+                        END,
+                        last_successful_at_ms = COALESCE(?, last_successful_at_ms),
+                        last_attempt_at_ms = ?,
                         state = ?, failure_detail = ?
                     WHERE id = ?
                     """,
                 arguments: [
+                    record.status.rawValue,
+                    CoverageStatus.complete.rawValue,
+                    record.intervalEnd.map(milliseconds),
                     record.intervalEnd.map(milliseconds),
                     record.lastSuccessfulAt.map(milliseconds),
                     attemptedAtMilliseconds,
