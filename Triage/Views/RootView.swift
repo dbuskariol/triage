@@ -51,6 +51,7 @@ struct RootView: View {
 
 private struct OnboardingView: View {
     @EnvironmentObject private var appModel: TriageAppModel
+    @State private var isPresentingPersonalAccessToken = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -73,6 +74,12 @@ private struct OnboardingView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .disabled(appModel.isConnecting)
+            Button("Use a Personal Access Token") {
+                isPresentingPersonalAccessToken = true
+            }
+            .buttonStyle(.link)
+            .disabled(appModel.isConnecting)
             if let error = appModel.connectionError {
                 Text(error)
                     .font(.callout)
@@ -83,6 +90,81 @@ private struct OnboardingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Triage")
+        .sheet(isPresented: $isPresentingPersonalAccessToken) {
+            PersonalAccessTokenSheet()
+                .environmentObject(appModel)
+        }
+    }
+}
+
+private struct PersonalAccessTokenSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appModel: TriageAppModel
+    @State private var tokenInput = ""
+    @State private var resourceOwnerOrganization = ""
+
+    private var tokenKind: PersonalAccessTokenKind? {
+        try? PersonalAccessToken(rawValue: tokenInput).kind
+    }
+
+    private var needsResourceOwner: Bool {
+        tokenKind == .fineGrained
+    }
+
+    private var canConnect: Bool {
+        tokenKind != nil && (!needsResourceOwner || !resourceOwnerOrganization.isEmpty)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect a Personal Access Token")
+                .font(.title2.weight(.semibold))
+            Text("Triage stores the token only in your macOS Keychain and uses GitHub read APIs.")
+                .foregroundStyle(.secondary)
+            SecureField("GitHub personal access token", text: $tokenInput)
+                .textFieldStyle(.roundedBorder)
+            if needsResourceOwner {
+                TextField("Resource owner organization", text: $resourceOwnerOrganization)
+                    .textFieldStyle(.roundedBorder)
+                Text("Fine-grained tokens may not appear in your organization list. Enter the organization selected when you created this token.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Use a fine-grained token when possible. Classic tokens should include `repo` and `read:org`; Copilot requires a separate sign-in for classic tokens.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = appModel.connectionError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    tokenInput = ""
+                    dismiss()
+                }
+                Button("Connect") {
+                    let token = tokenInput
+                    let organization = needsResourceOwner ? resourceOwnerOrganization : nil
+                    tokenInput = ""
+                    Task {
+                        await appModel.connectPersonalAccessToken(
+                            token,
+                            resourceOwnerOrganization: organization
+                        )
+                        if appModel.hasConnectedAccount {
+                            dismiss()
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canConnect || appModel.isConnecting)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
     }
 }
 
