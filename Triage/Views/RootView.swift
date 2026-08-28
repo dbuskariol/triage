@@ -17,6 +17,11 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
+            .onChange(of: appModel.selectedOrganizationID) {
+                Task {
+                    await appModel.refreshSelectedOrganization()
+                }
+            }
         } else {
             OnboardingView()
         }

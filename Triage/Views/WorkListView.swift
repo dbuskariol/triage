@@ -21,6 +21,18 @@ struct WorkListView: View {
                 )
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            if appModel.isRefreshing {
+                ProgressView("Refreshing GitHub work…")
+                    .controlSize(.small)
+                    .padding(8)
+            } else if let refreshError = appModel.refreshError {
+                Text(refreshError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+            }
+        }
     }
 
     private var filteredWorkItems: [WorkItem] {

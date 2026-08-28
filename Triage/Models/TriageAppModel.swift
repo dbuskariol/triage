@@ -10,6 +10,8 @@ final class TriageAppModel: ObservableObject {
     @Published var selectedOrganizationID: OrganizationID?
     @Published var selectedWorkItemID: WorkItemID?
     @Published private(set) var connectionError: String?
+    @Published private(set) var refreshError: String?
+    @Published private(set) var isRefreshing = false
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
 
@@ -53,6 +55,7 @@ final class TriageAppModel: ObservableObject {
                 accounts: accounts + [result.account],
                 organizations: result.organizations
             )
+            await refreshSelectedOrganization()
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
             case .missingClientID:
@@ -69,5 +72,38 @@ final class TriageAppModel: ObservableObject {
 
     func recordConnectionWindowError() {
         connectionError = "Triage could not find its active window."
+    }
+
+    func refreshSelectedOrganization() async {
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization
+        else {
+            return
+        }
+        refreshError = nil
+        isRefreshing = true
+        defer { isRefreshing = false }
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultRegistry = try VaultRegistry()
+            _ = try await OrganizationWorkRefreshService(
+                credentialReader: AccountCredentialReader(secretStore: secretStore),
+                vaultRegistry: vaultRegistry,
+                secretStore: secretStore
+            ).refresh(account: account, organization: organization)
+            guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+                throw AccountCredentialReaderError.missingAccessToken
+            }
+            let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+            let workItems = try await WorkItemRepository(vault: vault).fetch(
+                accountID: account.id,
+                organizationID: organization.id
+            )
+            install(workItems: workItems)
+        } catch is CancellationError {
+            return
+        } catch {
+            refreshError = "Triage could not refresh this organization. Cached work remains available."
+        }
     }
 }
