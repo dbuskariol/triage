@@ -114,6 +114,7 @@
 		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
+		DB75C0414A7EF20F766048EA /* ActorRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
 		DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */; };
 		DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */; };
@@ -246,6 +247,7 @@
 		B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOAuthConfiguration.swift; sourceTree = "<group>"; };
 		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlan.swift; sourceTree = "<group>"; };
+		B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActorRepository.swift; sourceTree = "<group>"; };
 		B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransition.swift; sourceTree = "<group>"; };
 		BACBE230946C1056771FE56F /* PersonalAccessToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessToken.swift; sourceTree = "<group>"; };
 		BD0C14B59A1223DC3240A96C /* WorkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItem.swift; sourceTree = "<group>"; };
@@ -519,6 +521,7 @@
 			isa = PBXGroup;
 			children = (
 				C80EB94E267D82037DB5FBBC /* AccountRepository.swift */,
+				B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */,
 				94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
@@ -806,6 +809,7 @@
 				8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */,
 				A696AA9FA5238F725FB3DD90 /* AccountRestorationService.swift in Sources */,
 				16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */,
+				DB75C0414A7EF20F766048EA /* ActorRepository.swift in Sources */,
 				CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */,
 				39645229C79AF0AA7C0331BF /* AppNavigationModel.swift in Sources */,
 				FE2A2A80A1010B3638857B10 /* AppPreferences.swift in Sources */,
