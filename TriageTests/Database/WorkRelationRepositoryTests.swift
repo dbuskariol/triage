@@ -388,6 +388,60 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testSyncStreamsReadAndUpdateAccountOwnedCoverageStream() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let streamID = SyncStreamID(rawValue: "search-discovery")!
+        let coverage = CoverageRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            feature: .roleDiscovery,
+            streamID: streamID,
+            intervalStart: fixture.date,
+            intervalEnd: fixture.date.addingTimeInterval(60),
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!,
+            status: .partial,
+            lastSuccessfulAt: nil,
+            failureDetail: nil
+        )
+        try await CoverageRepository(vault: fixture.vault).save(coverage, attemptedAt: fixture.date)
+
+        let repository = SyncStreamRepository(vault: fixture.vault)
+        let initial = try XCTUnwrap(
+            try await repository.stream(withID: streamID, accountID: fixture.accountID)
+        )
+        XCTAssertEqual(initial.status, .partial)
+        XCTAssertEqual(initial.highWater, coverage.intervalEnd)
+        XCTAssertEqual(initial.lastAttemptAt, fixture.date)
+
+        let completed = SyncStream(
+            id: streamID,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            feature: .roleDiscovery,
+            highWater: fixture.date.addingTimeInterval(120),
+            lastSuccessfulAt: fixture.date.addingTimeInterval(120),
+            lastAttemptAt: fixture.date.addingTimeInterval(120),
+            status: .complete,
+            failureDetail: nil
+        )
+        try await repository.save(completed)
+        XCTAssertEqual(
+            try await repository.stream(withID: streamID, accountID: fixture.accountID),
+            completed
+        )
+
+        do {
+            _ = try await repository.stream(withID: streamID, accountID: AccountID.make())
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? SyncStreamRepositoryError, .accountScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
