@@ -45,6 +45,70 @@ actor AccountRepository {
         }
     }
 
+    func organizationAccesses(for accountID: AccountID) async throws -> [OrganizationID: OrganizationAccess] {
+        try await vault.read { database in
+            let accessRows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT organization_id, access_state, capability_revision, checked_at_ms
+                    FROM account_organizations
+                    WHERE account_id = ?
+                    """,
+                arguments: [accountID.rawValue]
+            )
+            let capabilityRows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT organization_id, capability, status, checked_at_ms, detail_fingerprint
+                    FROM capabilities
+                    WHERE account_id = ? AND repository_id IS NULL
+                    """,
+                arguments: [accountID.rawValue]
+            )
+            let capabilitiesByOrganizationID = try Dictionary(grouping: capabilityRows) { row in
+                guard let organizationID = OrganizationID(rawValue: row["organization_id"] as String) else {
+                    throw AccountRepositoryError.invalidPersistedIdentifier
+                }
+                return organizationID
+            }
+
+            return try Dictionary(uniqueKeysWithValues: accessRows.map { row in
+                guard let organizationID = OrganizationID(rawValue: row["organization_id"] as String),
+                      let state = OrganizationAccessState(rawValue: row["access_state"] as String),
+                      let capabilityRevision = CapabilityRevision(rawValue: row["capability_revision"] as String),
+                      let checkedAt = Self.date(milliseconds: row["checked_at_ms"])
+                else {
+                    throw AccountRepositoryError.invalidPersistedIdentifier
+                }
+                let capabilities = try (capabilitiesByOrganizationID[organizationID] ?? []).map { capabilityRow in
+                    guard let capability = GitHubCapability(rawValue: capabilityRow["capability"]),
+                          let status = CapabilityStatus(rawValue: capabilityRow["status"]),
+                          let capabilityCheckedAt = Self.date(milliseconds: capabilityRow["checked_at_ms"])
+                    else {
+                        throw AccountRepositoryError.invalidPersistedIdentifier
+                    }
+                    return CapabilityAvailability(
+                        capability: capability,
+                        status: status,
+                        checkedAt: capabilityCheckedAt,
+                        detail: capabilityRow["detail_fingerprint"]
+                    )
+                }
+                return (
+                    organizationID,
+                    OrganizationAccess(
+                        accountID: accountID,
+                        organizationID: organizationID,
+                        state: state,
+                        capabilityRevision: capabilityRevision,
+                        capabilities: capabilities,
+                        checkedAt: checkedAt
+                    )
+                )
+            })
+        }
+    }
+
     func save(_ account: GitHubAccount, credentialRevision: CredentialRevision) async throws {
         let createdAt = Self.milliseconds(account.createdAt)
         let lastValidatedAt = account.lastValidatedAt.map(Self.milliseconds)

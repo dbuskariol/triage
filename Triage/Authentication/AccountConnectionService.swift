@@ -8,6 +8,7 @@ enum AccountConnectionError: Error, Equatable, Sendable {
 struct AccountConnectionResult: Sendable {
     let account: GitHubAccount
     let organizations: [GitHubOrganization]
+    let organizationAccesses: [OrganizationID: OrganizationAccess]
 }
 
 actor AccountConnectionService {
@@ -159,29 +160,36 @@ actor AccountConnectionService {
                     avatarURL: dto.avatarURL
                 )
             }
+            var organizationAccesses: [OrganizationID: OrganizationAccess] = [:]
             for organization in organizations {
                 let organizationSSOHeader = scopedSSOHeader(
                     for: organization,
                     aggregateHeader: ssoHeader
                 )
+                let access = OrganizationAccess(
+                    accountID: account.id,
+                    organizationID: organization.id,
+                    state: OrganizationAccessEvaluator.state(
+                        statusCode: 200,
+                        ssoHeader: organizationSSOHeader
+                    ),
+                    capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
+                    capabilities: GitHubCapability.allCases.map {
+                        CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
+                    },
+                    checkedAt: now
+                )
                 try await repository.save(
                     organization,
-                    access: OrganizationAccess(
-                        accountID: account.id,
-                        organizationID: organization.id,
-                        state: OrganizationAccessEvaluator.state(
-                            statusCode: 200,
-                            ssoHeader: organizationSSOHeader
-                        ),
-                        capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
-                        capabilities: GitHubCapability.allCases.map {
-                            CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
-                        },
-                        checkedAt: now
-                    )
+                    access: access
                 )
+                organizationAccesses[organization.id] = access
             }
-            return AccountConnectionResult(account: account, organizations: organizations)
+            return AccountConnectionResult(
+                account: account,
+                organizations: organizations,
+                organizationAccesses: organizationAccesses
+            )
         } catch {
             try await secretStore.removeAllSecrets(for: accountID)
             try await vaultRegistry.remove(accountID: accountID)
