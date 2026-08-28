@@ -57,5 +57,30 @@ final class RepositoryAccountScopeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? SearchRepositoryError, .accountScopeMismatch)
         }
+
+        let foreignWorkItemID = WorkItemID.make()
+        do {
+            try await WorkflowRepository(vault: vault).save(
+                WorkflowState(
+                    status: .active,
+                    isPinned: false,
+                    priority: .normal,
+                    updatedAt: .now
+                ),
+                for: foreignWorkItemID
+            )
+            XCTFail("Expected a workflow work item scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? WorkflowRepositoryError, .workItemScopeMismatch)
+        }
+        do {
+            try await AttentionReasonRepository(vault: vault).replaceDiscoveryReasons(
+                workItemID: foreignWorkItemID,
+                reasons: []
+            )
+            XCTFail("Expected an attention work item scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? AttentionReasonRepositoryError, .workItemScopeMismatch)
+        }
     }
 }

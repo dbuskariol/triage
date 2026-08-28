@@ -1,6 +1,10 @@
 import Foundation
 import GRDB
 
+enum AttentionReasonRepositoryError: Error, Equatable, Sendable {
+    case workItemScopeMismatch
+}
+
 actor AttentionReasonRepository {
     private let vault: AccountVault
 
@@ -13,6 +17,7 @@ actor AttentionReasonRepository {
         reasons: [AttentionReason]
     ) async throws {
         try await vault.write { database in
+            try Self.validateWorkItemScope(workItemID, vault: vault, in: database)
             try database.execute(
                 sql: "DELETE FROM attention_reasons WHERE work_item_id = ? AND rule_id LIKE 'discovery.%'",
                 arguments: [workItemID.rawValue]
@@ -51,5 +56,20 @@ actor AttentionReasonRepository {
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func validateWorkItemScope(
+        _ workItemID: WorkItemID,
+        vault: AccountVault,
+        in database: Database
+    ) throws {
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM work_items WHERE id = ? AND account_id = ?",
+            arguments: [workItemID.rawValue, vault.accountID.rawValue]
+        ) ?? 0
+        guard matchingCount == 1 else {
+            throw AttentionReasonRepositoryError.workItemScopeMismatch
+        }
     }
 }
