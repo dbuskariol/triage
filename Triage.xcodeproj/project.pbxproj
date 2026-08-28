@@ -88,6 +88,7 @@
 		7C87ADE50F0AE64ADCA76F0E /* WorkItemRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AC60A407B712E2D8B24B111 /* WorkItemRepository.swift */; };
 		7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */; };
 		7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */; };
+		7F17499F8729F8565734DDCA /* WorkRelationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */; };
 		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */; };
@@ -286,6 +287,7 @@
 		9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCapabilityProbe.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
+		A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkRelationRepositoryTests.swift; sourceTree = "<group>"; };
 		A7CAF6BD25FF8D833C6166EF /* WorkflowTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransitionTests.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
 		AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperClientTests.swift; sourceTree = "<group>"; };
@@ -640,6 +642,7 @@
 				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
 				BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */,
+				A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */,
 			);
 			path = Database;
 			sourceTree = "<group>";
@@ -898,6 +901,7 @@
 				0769B6A2DF3F028CD0D926FC /* WaitingAttentionRuleTests.swift in Sources */,
 				809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */,
 				B5A47F3CEDBFB9524AC770A7 /* WorkItemTests.swift in Sources */,
+				7F17499F8729F8565734DDCA /* WorkRelationRepositoryTests.swift in Sources */,
 				F90C766057275A70937531BD /* WorkflowTests.swift in Sources */,
 				EE590D134E25F172370937EC /* WorkflowTransitionTests.swift in Sources */,
 				CDAD2EC9047B96D284A9DA34 /* WorkspacePresentationCacheTests.swift in Sources */,
