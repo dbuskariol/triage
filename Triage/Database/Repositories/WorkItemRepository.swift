@@ -86,6 +86,35 @@ actor WorkItemRepository {
         }
     }
 
+    func identifiers(
+        for nodeIDs: Set<GitHubNodeID>,
+        accountID: AccountID
+    ) async throws -> [WorkItemID] {
+        try ensureAccountScope(accountID)
+        guard !nodeIDs.isEmpty else {
+            return []
+        }
+        return try await vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: """
+                    SELECT id
+                    FROM work_items
+                    WHERE account_id = ? AND primary_node_id IN (\(nodeIDs.map { _ in "?" }.joined(separator: ",")))
+                    ORDER BY id
+                    """,
+                arguments: StatementArguments(
+                    [accountID.rawValue] + nodeIDs.map(\.rawValue).sorted()
+                )
+            ).map { rawValue in
+                guard let workItemID = WorkItemID(rawValue: rawValue) else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return workItemID
+            }
+        }
+    }
+
     nonisolated static func ensureWorkItem(
         for node: NormalizedGitHubNode,
         in database: Database

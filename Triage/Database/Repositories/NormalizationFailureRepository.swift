@@ -23,6 +23,15 @@ actor NormalizationFailureRepository {
         guard failure.accountID == vault.accountID else {
             throw NormalizationFailureRepositoryError.accountScopeMismatch
         }
+        try await vault.write { database in
+            try Self.record(failure, in: database)
+        }
+    }
+
+    nonisolated static func record(
+        _ failure: NormalizationFailure,
+        in database: Database
+    ) throws {
         guard !failure.endpoint.isEmpty, failure.endpoint.count <= 2_048 else {
             throw NormalizationFailureRepositoryError.invalidEndpoint
         }
@@ -32,40 +41,38 @@ actor NormalizationFailureRepository {
         guard !failure.redactedDiagnostic.isEmpty, failure.redactedDiagnostic.count <= 4_096 else {
             throw NormalizationFailureRepositoryError.invalidDiagnostic
         }
-        try await vault.write { database in
-            let snapshotCount = try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE id = ? AND account_id = ?",
-                arguments: [failure.rawSnapshotID.rawValue, failure.accountID.rawValue]
-            ) ?? 0
-            guard snapshotCount == 1 else {
-                throw NormalizationFailureRepositoryError.snapshotScopeMismatch
-            }
-            if let nodeID = failure.githubNodeID {
-                let nodeCount = try Int.fetchOne(
-                    database,
-                    sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
-                    arguments: [nodeID.rawValue, failure.accountID.rawValue]
-                ) ?? 0
-                guard nodeCount == 1 else {
-                    throw NormalizationFailureRepositoryError.nodeScopeMismatch
-                }
-            }
-            try database.execute(
-                sql: """
-                    INSERT INTO normalization_failures (
-                        id, account_id, raw_snapshot_id, github_node_id, endpoint,
-                        parser_version, occurred_at_ms, redacted_diagnostic
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                arguments: [
-                    failure.id.uuidString.lowercased(), failure.accountID.rawValue,
-                    failure.rawSnapshotID.rawValue, failure.githubNodeID?.rawValue,
-                    failure.endpoint, failure.parserVersion, Self.milliseconds(failure.occurredAt),
-                    failure.redactedDiagnostic
-                ]
-            )
+        let snapshotCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE id = ? AND account_id = ?",
+            arguments: [failure.rawSnapshotID.rawValue, failure.accountID.rawValue]
+        ) ?? 0
+        guard snapshotCount == 1 else {
+            throw NormalizationFailureRepositoryError.snapshotScopeMismatch
         }
+        if let nodeID = failure.githubNodeID {
+            let nodeCount = try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
+                arguments: [nodeID.rawValue, failure.accountID.rawValue]
+            ) ?? 0
+            guard nodeCount == 1 else {
+                throw NormalizationFailureRepositoryError.nodeScopeMismatch
+            }
+        }
+        try database.execute(
+            sql: """
+                INSERT INTO normalization_failures (
+                    id, account_id, raw_snapshot_id, github_node_id, endpoint,
+                    parser_version, occurred_at_ms, redacted_diagnostic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                failure.id.uuidString.lowercased(), failure.accountID.rawValue,
+                failure.rawSnapshotID.rawValue, failure.githubNodeID?.rawValue,
+                failure.endpoint, failure.parserVersion, milliseconds(failure.occurredAt),
+                failure.redactedDiagnostic
+            ]
+        )
     }
 
     func failures(for accountID: AccountID, limit: Int = 100) async throws -> [NormalizationFailure] {
