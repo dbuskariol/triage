@@ -40,6 +40,29 @@ final class WorkItemGrouperTests: XCTestCase {
         XCTAssertEqual(result.memberGroups, [[first, second]])
     }
 
+    func testContextualDecisionNeverMergesAndUnknownNodesAreIgnored() {
+        let first = node("first")
+        let second = node("second")
+        let absent = node("absent")
+        let result = WorkItemGrouper().group(
+            nodeIDs: [second, first, first],
+            relations: [relation(.closes, first, absent)],
+            decisions: [
+                WorkItemGroupingDecision(
+                    sourceNodeID: first,
+                    destinationNodeID: second,
+                    relation: .crossReferences,
+                    strength: .contextual,
+                    evidence: [],
+                    decidedAt: .now
+                )
+            ]
+        )
+
+        XCTAssertEqual(result.memberGroups, [[first], [second]])
+        XCTAssertTrue(result.contextualRelations.isEmpty)
+    }
+
     private func node(_ value: String) -> GitHubNodeID {
         GitHubNodeID(rawValue: value)!
     }

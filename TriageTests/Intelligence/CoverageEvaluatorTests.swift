@@ -53,6 +53,53 @@ final class CoverageEvaluatorTests: XCTestCase {
         XCTAssertEqual(evaluation.freshness.status, .fresh)
     }
 
+    func testStaleCredentialOrCapabilityRevisionsCannotSatisfyCoverage() {
+        let requirement = CoverageRequirement(feature: .issues, repositoryID: nil)
+        let staleCredential = CoverageRecord(
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: SyncStreamID(rawValue: "stream")!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: CredentialRevision(rawValue: "old-credential")!,
+            capabilityRevision: capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: .now,
+            failureDetail: nil
+        )
+        let staleCapability = CoverageRecord(
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: SyncStreamID(rawValue: "stream")!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: credentialRevision,
+            capabilityRevision: CapabilityRevision(rawValue: "old-capability")!,
+            status: .complete,
+            lastSuccessfulAt: .now,
+            failureDetail: nil
+        )
+
+        let evaluation = CoverageEvaluator().evaluate(
+            requirements: [requirement],
+            records: [staleCredential, staleCapability],
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision
+        )
+
+        XCTAssertFalse(evaluation.isComplete)
+        XCTAssertEqual(evaluation.freshness.status, .partial)
+        XCTAssertEqual(evaluation.missing.count, 1)
+        XCTAssertEqual(evaluation.missing.first?.feature, .issues)
+        XCTAssertNil(evaluation.missing.first?.repositoryID)
+    }
+
     private func record(feature: CoverageFeature, status: CoverageStatus) -> CoverageRecord {
         CoverageRecord(
             accountID: accountID,
