@@ -144,6 +144,21 @@ final class SearchRepositoryTests: XCTestCase {
             value: 8,
             breakdown: ["direct": 5, "deadline": 3]
         ))
+        do {
+            try await WorkItemGraphRepository(vault: vault).replace(
+                workItemID: workItemID,
+                members: [
+                    WorkItemMemberReference(
+                        nodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!,
+                        role: .linkedIssue
+                    )
+                ],
+                contextLinks: []
+            )
+            XCTFail("Expected a node scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? WorkItemGraphRepositoryError, .nodeScopeMismatch)
+        }
 
         let repository = SearchRepository(vault: vault)
         try await repository.rebuild(accountID: accountID, organizationID: organizationID)

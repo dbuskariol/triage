@@ -91,5 +91,15 @@ final class RepositoryAccountScopeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? AttentionScoreRepositoryError, .workItemScopeMismatch)
         }
+        do {
+            try await WorkItemGraphRepository(vault: vault).replace(
+                workItemID: foreignWorkItemID,
+                members: [],
+                contextLinks: []
+            )
+            XCTFail("Expected a work item graph scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? WorkItemGraphRepositoryError, .workItemScopeMismatch)
+        }
     }
 }

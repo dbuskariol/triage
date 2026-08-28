@@ -6,6 +6,8 @@ enum WorkItemGraphRepositoryError: Error, Equatable, Sendable {
     case duplicateContextLink
     case invalidMemberRole
     case invalidContextRelation
+    case workItemScopeMismatch
+    case nodeScopeMismatch
 }
 
 struct WorkItemMemberReference: Equatable, Sendable {
@@ -42,6 +44,12 @@ actor WorkItemGraphRepository {
         }
 
         try await vault.write { database in
+            try Self.validateWorkItemScope(workItemID, vault: vault, in: database)
+            try Self.validateNodeScope(
+                Set(members.map(\.nodeID) + contextLinks.map(\.nodeID)),
+                vault: vault,
+                in: database
+            )
             try database.execute(
                 sql: "DELETE FROM work_item_members WHERE work_item_id = ?",
                 arguments: [workItemID.rawValue]
@@ -73,6 +81,47 @@ actor WorkItemGraphRepository {
                     ]
                 )
             }
+        }
+    }
+
+    private nonisolated static func validateWorkItemScope(
+        _ workItemID: WorkItemID,
+        vault: AccountVault,
+        in database: Database
+    ) throws {
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM work_items WHERE id = ? AND account_id = ?",
+            arguments: [workItemID.rawValue, vault.accountID.rawValue]
+        ) ?? 0
+        guard matchingCount == 1 else {
+            throw WorkItemGraphRepositoryError.workItemScopeMismatch
+        }
+    }
+
+    private nonisolated static func validateNodeScope(
+        _ nodeIDs: Set<GitHubNodeID>,
+        vault: AccountVault,
+        in database: Database
+    ) throws {
+        guard !nodeIDs.isEmpty else {
+            return
+        }
+        let placeholders = Array(repeating: "?", count: nodeIDs.count).joined(separator: ", ")
+        let arguments = StatementArguments(
+            [vault.accountID.rawValue] + nodeIDs.map(\.rawValue).sorted()
+        )
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*)
+                FROM github_nodes
+                WHERE account_id = ? AND github_node_id IN (\(placeholders))
+                """,
+            arguments: arguments
+        ) ?? 0
+        guard matchingCount == nodeIDs.count else {
+            throw WorkItemGraphRepositoryError.nodeScopeMismatch
         }
     }
 }
