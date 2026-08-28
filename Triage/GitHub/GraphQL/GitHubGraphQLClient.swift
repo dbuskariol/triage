@@ -139,17 +139,21 @@ actor GitHubGraphQLClient {
     }
 
     private func boundedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        if let boundedSession = session as? any BoundedHTTPSession {
-            return try await boundedSession.data(
-                for: request,
-                maximumResponseBodyBytes: Self.maximumResponseBodyBytes
-            )
-        }
-        let result = try await session.data(for: request)
-        guard result.0.count <= Self.maximumResponseBodyBytes else {
+        do {
+            if let boundedSession = session as? any BoundedHTTPSession {
+                return try await boundedSession.data(
+                    for: request,
+                    maximumResponseBodyBytes: Self.maximumResponseBodyBytes
+                )
+            }
+            let result = try await session.data(for: request)
+            guard result.0.count <= Self.maximumResponseBodyBytes else {
+                throw GitHubGraphQLError.responseTooLarge
+            }
+            return result
+        } catch GitHubTransportError.responseTooLarge {
             throw GitHubGraphQLError.responseTooLarge
         }
-        return result
     }
 }
 

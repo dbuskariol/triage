@@ -74,20 +74,38 @@ final class GitHubGraphQLClientTests: XCTestCase {
         } catch let error as GitHubGraphQLError {
             XCTAssertEqual(error, .invalidResponse)
         }
+    }
 
-        func testDecodesGraphQLISO8601Dates() async throws {
-            let client = GitHubGraphQLClient(
-                session: GraphQLStubSession(body: Data(#"{"data":{"resetAt":"2026-08-29T00:00:00Z"}}"#.utf8)),
-                credential: SecretValue("token")
-            )
+    func testDecodesGraphQLISO8601Dates() async throws {
+        let client = GitHubGraphQLClient(
+            session: GraphQLStubSession(body: Data(#"{"data":{"resetAt":"2026-08-29T00:00:00Z"}}"#.utf8)),
+            credential: SecretValue("token")
+        )
 
-            let response = try await client.executeComplete(
-                GitHubGraphQLQuery(document: "query RateLimit { resetAt }", operationName: "RateLimit"),
+        let response = try await client.executeComplete(
+            GitHubGraphQLQuery(document: "query RateLimit { resetAt }", operationName: "RateLimit"),
+            variables: EmptyVariables(),
+            as: DatePayload.self
+        )
+
+        XCTAssertEqual(response.resetAt, Date(timeIntervalSince1970: 1_788_048_000))
+    }
+
+    func testNormalizesBoundedTransportResponseTooLarge() async throws {
+        let client = GitHubGraphQLClient(
+            session: GraphQLBoundedErrorSession(),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await client.execute(
+                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
                 variables: EmptyVariables(),
-                as: DatePayload.self
+                as: ViewerPayload.self
             )
-
-            XCTAssertEqual(response.resetAt, Date(timeIntervalSince1970: 1_788_048_000))
+            XCTFail("Expected an oversized response failure.")
+        } catch let error as GitHubGraphQLError {
+            XCTAssertEqual(error, .responseTooLarge)
         }
     }
 
@@ -148,5 +166,18 @@ private actor GraphQLStubSession: HTTPSession {
                 headerFields: headers
             )!
         )
+    }
+}
+
+private actor GraphQLBoundedErrorSession: BoundedHTTPSession {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        throw GitHubTransportError.responseTooLarge
+    }
+
+    func data(
+        for request: URLRequest,
+        maximumResponseBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        throw GitHubTransportError.responseTooLarge
     }
 }

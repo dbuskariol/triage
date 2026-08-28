@@ -16,6 +16,7 @@
 		095C080692A931BDA8F343CF /* GitHubCapabilityProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D82D7463B2C1544D108FD85 /* GitHubCapabilityProbeTests.swift */; };
 		09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */; };
 		09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */; };
+		0D7FE35DFA2FB72D71580194 /* GitHubHydrationBatchPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F980D9A0DA94E4FA72F54A86 /* GitHubHydrationBatchPlannerTests.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
 		13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */; };
 		16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91A7C6DA1A31930721EEB27 /* RefreshCadenceTests.swift */; };
@@ -58,6 +59,7 @@
 		441DC1747B0BAFCD229D72ED /* SyncStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = C152D8C003D05F5BBFDA1917 /* SyncStream.swift */; };
 		4470E02F0C96112B0A73A2D2 /* SearchRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850788277C525AE27A2B89B1 /* SearchRepository.swift */; };
 		44C76E7A27BD346F730DDB43 /* NotificationRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5587E58231B932929ED7D363 /* NotificationRoute.swift */; };
+		4B48EF4FBB3048C69B559552 /* GitHubHydrationBatchMetricRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C838C4A9B3245AEEE4E384AC /* GitHubHydrationBatchMetricRepositoryTests.swift */; };
 		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */; };
@@ -101,6 +103,7 @@
 		7F17499F8729F8565734DDCA /* WorkRelationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */; };
 		80608B9D7EA53959A9A053D0 /* SyncShard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */; };
 		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
+		82CC32F04DE20A9754D85E5B /* GitHubHydrationBatchMetricRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = F555FB5455BF4227A5B5FF40 /* GitHubHydrationBatchMetricRepository.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */; };
 		83A66E9AA2DF337823F8B711 /* GitHubNodeRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */; };
@@ -157,6 +160,7 @@
 		CEEEC7705769530CB940273C /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89EB0458B411E6A895FE992B /* main.swift */; };
 		CF349E65B2F02F5D1861B7AB /* ConditionalRequestCacheRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
+		CFDCE4A8114E7FBE1C06BF3C /* GitHubHydrationBatchMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B5F161C63C3CCF14DE4BEDE /* GitHubHydrationBatchMetric.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */; };
 		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
@@ -334,6 +338,7 @@
 		8AD786BBCD2634C9252DD15E /* WorkItemGroupingDecisionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGroupingDecisionRepository.swift; sourceTree = "<group>"; };
 		8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPC.swift; sourceTree = "<group>"; };
 		8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubNodeRepository.swift; sourceTree = "<group>"; };
+		8B5F161C63C3CCF14DE4BEDE /* GitHubHydrationBatchMetric.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHydrationBatchMetric.swift; sourceTree = "<group>"; };
 		8D6771CB3C835C681DA66152 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeaderTests.swift; sourceTree = "<group>"; };
 		8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCServiceClient.swift; sourceTree = "<group>"; };
@@ -377,6 +382,7 @@
 		C152D8C003D05F5BBFDA1917 /* SyncStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStream.swift; sourceTree = "<group>"; };
 		C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncShard.swift; sourceTree = "<group>"; };
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
+		C838C4A9B3245AEEE4E384AC /* GitHubHydrationBatchMetricRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHydrationBatchMetricRepositoryTests.swift; sourceTree = "<group>"; };
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermark.swift; sourceTree = "<group>"; };
@@ -405,10 +411,12 @@
 		F1F032FC6C9DF794D7566896 /* WorkItemGraphRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGraphRepository.swift; sourceTree = "<group>"; };
 		F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperProcess.swift; sourceTree = "<group>"; };
 		F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFollowUpRuleTests.swift; sourceTree = "<group>"; };
+		F555FB5455BF4227A5B5FF40 /* GitHubHydrationBatchMetricRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHydrationBatchMetricRepository.swift; sourceTree = "<group>"; };
 		F74BA70C92A3542C44D29350 /* TriageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageTests.swift; sourceTree = "<group>"; };
 		F79F1622FE7D729E3464C27C /* Workflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workflow.swift; sourceTree = "<group>"; };
 		F9080B82740744E5D971BA1E /* WorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTests.swift; sourceTree = "<group>"; };
 		F91A7C6DA1A31930721EEB27 /* RefreshCadenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshCadenceTests.swift; sourceTree = "<group>"; };
+		F980D9A0DA94E4FA72F54A86 /* GitHubHydrationBatchPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHydrationBatchPlannerTests.swift; sourceTree = "<group>"; };
 		FA1728A0CCB3D88332130654 /* NotificationDeliveryLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDeliveryLedger.swift; sourceTree = "<group>"; };
 		FAA6952357B8ECC6AF45D0D1 /* WorkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkDetailView.swift; sourceTree = "<group>"; };
 		FB8E3FD7D8F400F18F9E4E86 /* WaitingAttentionRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaitingAttentionRuleTests.swift; sourceTree = "<group>"; };
@@ -637,6 +645,7 @@
 			children = (
 				A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */,
 				1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */,
+				F980D9A0DA94E4FA72F54A86 /* GitHubHydrationBatchPlannerTests.swift */,
 				093BC7239ABB9F432076EDC7 /* GitHubIdentityClientTests.swift */,
 				EFD71556D8FD113D6A0CBACE /* GitHubIssueSearchTests.swift */,
 				EB025D2BCA908B24E4152096 /* GitHubNodeHydrationNormalizerTests.swift */,
@@ -671,6 +680,7 @@
 				7BA6D93753D4F71FC83F3C86 /* AttentionScoreRepository.swift */,
 				A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */,
 				5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */,
+				F555FB5455BF4227A5B5FF40 /* GitHubHydrationBatchMetricRepository.swift */,
 				9D434939CDFD99464F574C92 /* GitHubNodeDetailsRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */,
@@ -712,6 +722,7 @@
 		AB2C8AB6AD09722CB2711746 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				8B5F161C63C3CCF14DE4BEDE /* GitHubHydrationBatchMetric.swift */,
 				7443B9424599ADCB985AEEA5 /* GitHubNodeHydrationService.swift */,
 				5392172535BCE1B1A04C9269 /* OrganizationInventoryRefreshService.swift */,
 				015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */,
@@ -732,6 +743,7 @@
 				77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */,
 				E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */,
 				252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */,
+				C838C4A9B3245AEEE4E384AC /* GitHubHydrationBatchMetricRepositoryTests.swift */,
 				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
@@ -1001,6 +1013,8 @@
 				599870307B1D47AC99041467 /* GitHubContentTests.swift in Sources */,
 				40EFEDABCE3F6230EF21FE84 /* GitHubDiagnosticsTests.swift in Sources */,
 				4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */,
+				4B48EF4FBB3048C69B559552 /* GitHubHydrationBatchMetricRepositoryTests.swift in Sources */,
+				0D7FE35DFA2FB72D71580194 /* GitHubHydrationBatchPlannerTests.swift in Sources */,
 				3B07BEEB4B468EE008BE9C14 /* GitHubIdentityClientTests.swift in Sources */,
 				563311CB41EC9A5E14EC36CB /* GitHubIssueSearchTests.swift in Sources */,
 				F6B96DB68B44C9D8A95AE03C /* GitHubNodeHydrationNormalizerTests.swift in Sources */,
@@ -1101,6 +1115,8 @@
 				E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */,
 				09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */,
 				BA2031D754FDBE13A9B7B141 /* GitHubGraphQLQueries.swift in Sources */,
+				CFDCE4A8114E7FBE1C06BF3C /* GitHubHydrationBatchMetric.swift in Sources */,
+				82CC32F04DE20A9754D85E5B /* GitHubHydrationBatchMetricRepository.swift in Sources */,
 				03EB63E47F6B7F9A679B64AE /* GitHubIdentityClient.swift in Sources */,
 				942934936D122D14CBA57543 /* GitHubIssueSearch.swift in Sources */,
 				43EFE2E8DC95A351D048B73D /* GitHubNodeDetailsRepository.swift in Sources */,
