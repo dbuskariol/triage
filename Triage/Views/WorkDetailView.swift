@@ -73,6 +73,7 @@ struct WorkDetailView: View {
     }
 
     private struct WorkInspectorView: View {
+        @EnvironmentObject private var appModel: TriageAppModel
         let item: WorkItem
 
         var body: some View {
@@ -88,6 +89,36 @@ struct WorkDetailView: View {
                     }
                     if let followUpAt = item.workflow.followUpAt {
                         LabeledContent("Follow up", value: followUpAt.formatted())
+                    }
+                    Button(item.workflow.status == .archived ? "Unarchive in Triage" : "Archive in Triage") {
+                        Task {
+                            await appModel.applyWorkflowAction(
+                                item.workflow.status == .archived ? .unarchive : .archive,
+                                to: item
+                            )
+                        }
+                    }
+                    Button(item.workflow.isPinned ? "Unpin" : "Pin") {
+                        Task {
+                            await appModel.applyWorkflowAction(.setPinned(!item.workflow.isPinned), to: item)
+                        }
+                    }
+                    Menu("Priority") {
+                        ForEach(WorkPriority.allCases, id: \.self) { priority in
+                            Button(priorityTitle(priority)) {
+                                Task {
+                                    await appModel.applyWorkflowAction(.setPriority(priority), to: item)
+                                }
+                            }
+                        }
+                    }
+                    Button(item.workflow.status == .waiting ? "Stop Waiting" : "Mark Waiting") {
+                        Task {
+                            await appModel.applyWorkflowAction(
+                                item.workflow.status == .waiting ? .clearWaiting : .markWaiting(followUpAt: nil),
+                                to: item
+                            )
+                        }
                     }
                 }
                 if !item.attentionReasons.isEmpty {
@@ -108,7 +139,11 @@ struct WorkDetailView: View {
         }
 
         private var priorityTitle: String {
-            switch item.workflow.priority {
+            priorityTitle(item.workflow.priority)
+        }
+
+        private func priorityTitle(_ priority: WorkPriority) -> String {
+            switch priority {
             case .low: "Low"
             case .normal: "Normal"
             case .high: "High"
