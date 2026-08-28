@@ -107,4 +107,40 @@ final class AccountRepositoryTests: XCTestCase {
         }
         XCTAssertEqual(count, 1)
     }
+
+    func testAccountScopedOperationsRejectAnotherVaultAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let vaultAccountID = AccountID.make()
+        let foreignAccountID = AccountID.make()
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: vaultAccountID,
+            vaultKey: try VaultKey.generate()
+        )
+        let repository = AccountRepository(vault: vault)
+        let foreignAccount = GitHubAccount(
+            id: foreignAccountID,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!,
+            login: "octocat",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: .now,
+            lastValidatedAt: .now
+        )
+
+        do {
+            try await repository.save(
+                foreignAccount,
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!
+            )
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? AccountRepositoryError, .accountScopeMismatch)
+        }
+        XCTAssertTrue(try await repository.accounts().isEmpty)
+    }
 }
