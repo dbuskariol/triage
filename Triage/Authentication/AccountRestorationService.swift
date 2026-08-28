@@ -9,10 +9,10 @@ struct AccountRestorationResult: Sendable {
 }
 
 actor AccountRestorationService {
-    private let secretStore: KeychainSecretStore
+    private let secretStore: any SecretStore
     private let vaultRegistry: VaultRegistry
 
-    init(secretStore: KeychainSecretStore, vaultRegistry: VaultRegistry) {
+    init(secretStore: any SecretStore, vaultRegistry: VaultRegistry) {
         self.secretStore = secretStore
         self.vaultRegistry = vaultRegistry
     }
@@ -25,7 +25,18 @@ actor AccountRestorationService {
         var unavailableAccountIDs: [AccountID] = []
 
         for accountID in try await secretStore.accountIDs() {
-            guard let vaultKey = try await secretStore.readVaultKey(for: accountID) else {
+            let vaultKey: VaultKey
+            do {
+                guard let vaultKeyData = try await secretStore.read(
+                    kind: .vaultKey,
+                    accountID: accountID,
+                    credentialID: nil
+                ) else {
+                    unavailableAccountIDs.append(accountID)
+                    continue
+                }
+                vaultKey = try VaultKey(data: vaultKeyData)
+            } catch {
                 unavailableAccountIDs.append(accountID)
                 continue
             }
