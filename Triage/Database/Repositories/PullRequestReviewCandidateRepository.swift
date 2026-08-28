@@ -3,6 +3,7 @@ import GRDB
 
 enum PullRequestReviewCandidateRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
+    case invalidLimit
     case invalidPersistedCandidate
 }
 
@@ -11,6 +12,11 @@ struct PullRequestReviewCandidate: Sendable {
     let repositoryID: RepositoryID
     let repository: GitHubRepositoryPath
     let number: Int
+}
+
+struct PullRequestReviewCandidateInventory: Sendable {
+    let candidates: [PullRequestReviewCandidate]
+    let hasRemainingCandidates: Bool
 }
 
 actor PullRequestReviewCandidateRepository {
@@ -24,13 +30,15 @@ actor PullRequestReviewCandidateRepository {
         accountID: AccountID,
         organizationID: OrganizationID,
         limit: Int
-    ) async throws -> [PullRequestReviewCandidate] {
+    ) async throws -> PullRequestReviewCandidateInventory {
         guard accountID == vault.accountID else {
             throw PullRequestReviewCandidateRepositoryError.accountScopeMismatch
         }
-        guard limit > 0 else { return [] }
+        guard limit > 0, limit < .max else {
+            throw PullRequestReviewCandidateRepositoryError.invalidLimit
+        }
         return try await vault.read { database in
-            try Row.fetchAll(
+            let rows = try Row.fetchAll(
                 database,
                 sql: """
                     SELECT github_nodes.github_node_id, repositories.id AS repository_id,
@@ -50,9 +58,14 @@ actor PullRequestReviewCandidateRepository {
                     accountID.rawValue,
                     organizationID.rawValue,
                     GitHubNodeAccessibility.accessible.rawValue,
-                    limit
+                    limit + 1
                 ]
-            ).map(Self.candidate)
+            )
+            let candidates = try rows.prefix(limit).map(Self.candidate)
+            return PullRequestReviewCandidateInventory(
+                candidates: candidates,
+                hasRemainingCandidates: rows.count > limit
+            )
         }
     }
 
