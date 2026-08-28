@@ -870,6 +870,15 @@ enum TriageDatabaseMigrator {
                     account_id, github_node_id, endpoint, parser_version, observed_at_ms DESC, id DESC
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "022-hydrated-label-names",
+            checksum: "c66056d6cf83dc2cb66a6bc5cbd9c065873cf7a526cb9ca1f0f0b3db2fd7e368"
+        ) { database in
+            try database.execute(sql: "ALTER TABLE issues ADD COLUMN label_names_json BLOB NOT NULL DEFAULT '[]'")
+            try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN assignee_node_ids_json BLOB NOT NULL DEFAULT '[]'")
+            try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN label_node_ids_json BLOB NOT NULL DEFAULT '[]'")
+            try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN label_names_json BLOB NOT NULL DEFAULT '[]'")
         }
     ]
 }

@@ -11,6 +11,9 @@ enum GitHubNodeHydrationNormalizationError: Error, Equatable, Sendable {
     case invalidURL
     case invalidState(String)
     case invalidDates
+    case invalidIssueDetails
+    case invalidRelatedNodeID
+    case incompleteConnection
 }
 
 struct GitHubNodeHydrationPayload: Codable, Sendable {
@@ -37,16 +40,23 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
         let closedAt: Date?
         let mergedAt: Date?
         let isDraft: Bool?
+        let locked: Bool?
+        let comments: CommentConnection?
+        let mergeable: String?
+        let headRefName: String?
+        let baseRefName: String?
+        let reviewDecision: String?
         let author: Actor?
         let repository: Repository
-        let assignees: Connection<Actor>?
-        let labels: Connection<Label>?
+        let assignees: Connection<Actor>
+        let labels: Connection<Label>
         let reviewRequests: Connection<ReviewRequest>?
         let closingIssuesReferences: Connection<NodeReference>?
 
         enum CodingKeys: String, CodingKey {
             case typeName = "__typename"
             case id, databaseId, number, title, body, url, state, createdAt, updatedAt, closedAt, mergedAt, isDraft
+            case locked, comments, mergeable, headRefName, baseRefName, reviewDecision
             case author, repository, assignees, labels, reviewRequests, closingIssuesReferences
         }
     }
@@ -72,6 +82,10 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
         let color: String
     }
 
+    struct CommentConnection: Codable, Sendable {
+        let totalCount: Int
+    }
+
     struct ReviewRequest: Codable, Sendable {
         let requestedReviewer: RequestedReviewer?
     }
@@ -87,7 +101,37 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
 
     struct Connection<Value: Codable & Sendable>: Codable, Sendable {
         let nodes: [Value?]
+        let pageInfo: PageInfo
     }
+
+    struct PageInfo: Codable, Sendable {
+        let hasNextPage: Bool
+    }
+}
+
+struct HydratedGitHubNode: Sendable {
+    let node: NormalizedGitHubNode
+    let details: GitHubNodeDetails
+}
+
+enum GitHubNodeDetails: Sendable {
+    case issue(
+        isLocked: Bool,
+        commentsCount: Int,
+        assigneeNodeIDs: [GitHubNodeID],
+        labelNodeIDs: [GitHubNodeID],
+        labelNames: [String]
+    )
+    case pullRequest(
+        isDraft: Bool,
+        mergeableState: String?,
+        headRef: String?,
+        baseRef: String?,
+        reviewDecision: String?,
+        assigneeNodeIDs: [GitHubNodeID],
+        labelNodeIDs: [GitHubNodeID],
+        labelNames: [String]
+    )
 }
 
 enum GitHubNodeHydrationNormalizer {
@@ -99,7 +143,25 @@ enum GitHubNodeHydrationNormalizer {
         repositoryID: (GitHubNodeHydrationPayload.Repository) -> RepositoryID?,
         observedAt: Date
     ) throws -> [NormalizedGitHubNode] {
-        var normalizedByID = [GitHubNodeID: NormalizedGitHubNode]()
+        try normalizeHydrated(
+            payload,
+            requestedNodeIDs: requestedNodeIDs,
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: repositoryID,
+            observedAt: observedAt
+        ).map(\.node)
+    }
+
+    static func normalizeHydrated(
+        _ payload: GitHubNodeHydrationPayload,
+        requestedNodeIDs: Set<GitHubNodeID>,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        repositoryID: (GitHubNodeHydrationPayload.Repository) -> RepositoryID?,
+        observedAt: Date
+    ) throws -> [HydratedGitHubNode] {
+        var normalizedByID = [GitHubNodeID: HydratedGitHubNode]()
 
         for payloadNode in payload.nodes {
             guard let payloadNode else { continue }
@@ -116,7 +178,7 @@ enum GitHubNodeHydrationNormalizer {
                 throw GitHubNodeHydrationNormalizationError.invalidRepositoryID
             }
 
-            normalizedByID[nodeID] = try normalize(
+            let node = try normalize(
                 payloadNode,
                 nodeID: nodeID,
                 accountID: accountID,
@@ -124,13 +186,77 @@ enum GitHubNodeHydrationNormalizer {
                 repositoryID: resolvedRepositoryID,
                 observedAt: observedAt
             )
+            normalizedByID[nodeID] = HydratedGitHubNode(
+                node: node,
+                details: try details(from: payloadNode, kind: node.kind)
+            )
         }
 
         guard normalizedByID.count == requestedNodeIDs.count else {
             let missing = requestedNodeIDs.first { normalizedByID[$0] == nil }!
             throw GitHubNodeHydrationNormalizationError.missingRequestedNode(missing.rawValue)
         }
-        return normalizedByID.values.sorted { $0.nodeID.rawValue < $1.nodeID.rawValue }
+        return normalizedByID.values.sorted { $0.node.nodeID.rawValue < $1.node.nodeID.rawValue }
+    }
+
+    private static func details(
+        from node: GitHubNodeHydrationPayload.Node,
+        kind: GitHubContentKind
+    ) throws -> GitHubNodeDetails {
+        switch kind {
+        case .issue:
+            guard let locked = node.locked, let comments = node.comments, comments.totalCount >= 0 else {
+                throw GitHubNodeHydrationNormalizationError.invalidIssueDetails
+            }
+            try validateCompleteCommonConnections(node)
+            return .issue(
+                isLocked: locked,
+                commentsCount: comments.totalCount,
+                assigneeNodeIDs: try node.assignees.nodes.compactMap(\.?).map(validNodeID),
+                labelNodeIDs: try node.labels.nodes.compactMap(\.?).map(validNodeID),
+                labelNames: node.labels.nodes.compactMap(\.?).map(\.name).sorted()
+            )
+        case .pullRequest:
+            guard let isDraft = node.isDraft else {
+                throw GitHubNodeHydrationNormalizationError.invalidIssueDetails
+            }
+            try validateCompleteCommonConnections(node)
+            return .pullRequest(
+                isDraft: isDraft,
+                mergeableState: node.mergeable,
+                headRef: node.headRefName,
+                baseRef: node.baseRefName,
+                reviewDecision: node.reviewDecision,
+                assigneeNodeIDs: try node.assignees.nodes.compactMap(\.?).map(validNodeID),
+                labelNodeIDs: try node.labels.nodes.compactMap(\.?).map(validNodeID),
+                labelNames: node.labels.nodes.compactMap(\.?).map(\.name).sorted()
+            )
+        default:
+            preconditionFailure("Hydration only supports issue and pull request nodes.")
+        }
+
+    }
+
+    private static func validateCompleteCommonConnections(
+        _ node: GitHubNodeHydrationPayload.Node
+    ) throws {
+        guard !node.assignees.pageInfo.hasNextPage, !node.labels.pageInfo.hasNextPage else {
+            throw GitHubNodeHydrationNormalizationError.incompleteConnection
+        }
+    }
+
+    private static func validNodeID(_ value: GitHubNodeHydrationPayload.Actor) throws -> GitHubNodeID {
+        guard let nodeID = GitHubNodeID(rawValue: value.id) else {
+            throw GitHubNodeHydrationNormalizationError.invalidRelatedNodeID
+        }
+        return nodeID
+    }
+
+    private static func validNodeID(_ value: GitHubNodeHydrationPayload.Label) throws -> GitHubNodeID {
+        guard let nodeID = GitHubNodeID(rawValue: value.id) else {
+            throw GitHubNodeHydrationNormalizationError.invalidRelatedNodeID
+        }
+        return nodeID
     }
 
     private static func normalize(

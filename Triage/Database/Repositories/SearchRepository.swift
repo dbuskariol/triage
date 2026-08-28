@@ -117,11 +117,17 @@ actor SearchRepository {
                         ), '') AS body,
                         COALESCE(repositories.owner_login || '/' || repositories.name, '') AS repository,
                         COALESCE((
-                            SELECT group_concat(label_nodes.title, ' ')
-                            FROM issues
-                            JOIN json_each(CAST(issues.label_node_ids_json AS TEXT)) AS issue_labels
-                            JOIN github_nodes AS label_nodes ON label_nodes.github_node_id = issue_labels.value
-                            WHERE issues.github_node_id = work_items.primary_node_id
+                            SELECT group_concat(label_names.value, ' ')
+                            FROM (
+                                SELECT label_names_json
+                                FROM issues
+                                WHERE issues.github_node_id = work_items.primary_node_id
+                                UNION ALL
+                                SELECT label_names_json
+                                FROM pull_requests
+                                WHERE pull_requests.github_node_id = work_items.primary_node_id
+                            ) AS content_labels
+                            JOIN json_each(CAST(content_labels.label_names_json AS TEXT)) AS label_names
                         ), '') AS labels,
                         COALESCE((
                             SELECT group_concat(login, ' ')

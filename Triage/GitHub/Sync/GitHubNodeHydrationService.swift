@@ -12,7 +12,7 @@ actor GitHubNodeHydrationService {
     private static let maximumQueryCost = 500
 
     private let client: GitHubGraphQLClient
-    private let nodeRepository: GitHubNodeRepository
+    private let detailsRepository: GitHubNodeDetailsRepository
     private let actorRepository: ActorRepository
     private let rawSnapshotRepository: RawAPISnapshotRepository
     private let normalizationFailureRepository: NormalizationFailureRepository
@@ -20,14 +20,14 @@ actor GitHubNodeHydrationService {
 
     init(
         client: GitHubGraphQLClient,
-        nodeRepository: GitHubNodeRepository,
+        detailsRepository: GitHubNodeDetailsRepository,
         actorRepository: ActorRepository,
         rawSnapshotRepository: RawAPISnapshotRepository,
         normalizationFailureRepository: NormalizationFailureRepository,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
-        self.nodeRepository = nodeRepository
+        self.detailsRepository = detailsRepository
         self.actorRepository = actorRepository
         self.rawSnapshotRepository = rawSnapshotRepository
         self.normalizationFailureRepository = normalizationFailureRepository
@@ -66,7 +66,7 @@ actor GitHubNodeHydrationService {
                 githubNodeID: nil,
                 endpoint: "graphql:TriageHydrateNodes",
                 eTag: nil,
-                parserVersion: 1,
+                parserVersion: 2,
                 observedAt: observedAt,
                 payload: response.payload
             )
@@ -74,9 +74,9 @@ actor GitHubNodeHydrationService {
             for actor in actors(in: payload) {
                 try await actorRepository.save(actor, observedAt: observedAt)
             }
-            let normalized: [NormalizedGitHubNode]
+            let normalized: [HydratedGitHubNode]
             do {
-                normalized = try GitHubNodeHydrationNormalizer.normalize(
+                normalized = try GitHubNodeHydrationNormalizer.normalizeHydrated(
                     payload,
                     requestedNodeIDs: Set(batch),
                     accountID: accountID,
@@ -99,8 +99,12 @@ actor GitHubNodeHydrationService {
                 )
                 throw error
             }
-            for node in normalized {
-                try await nodeRepository.save(node)
+            for hydratedNode in normalized {
+                try await detailsRepository.save(
+                    hydratedNode,
+                    accountID: accountID,
+                    observedAt: observedAt
+                )
             }
         }
     }
@@ -111,7 +115,10 @@ actor GitHubNodeHydrationService {
 
     private func actors(in payload: GitHubNodeHydrationPayload) -> [ActorSummary] {
         var actors = [ActorID: ActorSummary]()
-        for actor in payload.nodes.compactMap(\.?.author) {
+        let payloadActors = payload.nodes.compactMap(\.?).flatMap { node in
+            [node.author].compactMap(\.self) + node.assignees.nodes.compactMap(\.?)
+        }
+        for actor in payloadActors {
             guard let id = ActorID(rawValue: actor.id),
                   let login = actor.login, !login.isEmpty
             else {
@@ -150,6 +157,12 @@ actor GitHubNodeHydrationService {
             "Hydration response contained an unsupported issue or pull request state."
         case .invalidDates:
             "Hydration response contained inconsistent issue or pull request timestamps."
+        case .invalidIssueDetails:
+            "Hydration response omitted required issue details."
+        case .invalidRelatedNodeID:
+            "Hydration response contained an invalid related GitHub node identifier."
+        case .incompleteConnection:
+            "Hydration response exceeded the supported related-object page size."
         }
     }
 }

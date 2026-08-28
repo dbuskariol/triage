@@ -62,6 +62,12 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
             closedAt: updatedAt,
             mergedAt: updatedAt,
             isDraft: false,
+            locked: nil,
+            comments: nil,
+            mergeable: "MERGEABLE",
+            headRefName: "feature",
+            baseRefName: "main",
+            reviewDecision: "APPROVED",
             author: .init(id: "USER_1", login: "octocat", avatarUrl: nil),
             repository: .init(
                 id: "REPO_1",
@@ -71,8 +77,8 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
                 hasDiscussions: true,
                 url: URL(string: "https://github.com/octo/triage")!
             ),
-            assignees: nil,
-            labels: nil,
+            assignees: .init(nodes: [], pageInfo: .init(hasNextPage: false)),
+            labels: .init(nodes: [], pageInfo: .init(hasNextPage: false)),
             reviewRequests: nil,
             closingIssuesReferences: nil
         )

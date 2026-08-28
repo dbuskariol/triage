@@ -56,6 +56,107 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testHydratedNodeDetailsPersistIssueAndPullRequestFields() async throws {
+            let fixture = try await Fixture()
+            defer { fixture.remove() }
+
+            let repository = GitHubNodeDetailsRepository(vault: fixture.vault)
+            try await repository.save(
+                HydratedGitHubNode(
+                    node: fixture.node,
+                    details: .issue(
+                        isLocked: true,
+                        commentsCount: 3,
+                        assigneeNodeIDs: [GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!],
+                        labelNodeIDs: [GitHubNodeID(rawValue: "MDU6TGFiZWwx")!],
+                        labelNames: ["bug"]
+                    )
+                ),
+                accountID: fixture.accountID,
+                observedAt: fixture.date
+            )
+
+            let pullRequest = NormalizedGitHubNode(
+                nodeID: GitHubNodeID(rawValue: "MDExOlB1bGxSZXF1ZXN0MQ==")!,
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                repositoryID: nil,
+                kind: .pullRequest,
+                numericID: "2",
+                number: 2,
+                title: "Add review details",
+                state: .open,
+                url: URL(string: "https://github.com/github/triage/pull/2")!,
+                bodyMarkdown: nil,
+                authorID: nil,
+                createdAt: fixture.date,
+                updatedAt: fixture.date,
+                closedAt: nil,
+                mergedAt: nil,
+                sourceRevision: "revision-2",
+                observedAt: fixture.date,
+                accessibility: .accessible
+            )
+            try await repository.save(
+                HydratedGitHubNode(
+                    node: pullRequest,
+                    details: .pullRequest(
+                        isDraft: false,
+                        mergeableState: "MERGEABLE",
+                        headRef: "feature",
+                        baseRef: "main",
+                        reviewDecision: "APPROVED",
+                        assigneeNodeIDs: [],
+                        labelNodeIDs: [],
+                        labelNames: ["documentation"]
+                    )
+                ),
+                accountID: fixture.accountID,
+                observedAt: fixture.date
+            )
+
+            let issue = try await fixture.vault.read { database in
+                try Row.fetchOne(
+                    database,
+                    sql: """
+                        SELECT locked, comments_count, assignee_node_ids_json, label_names_json
+                        FROM issues
+                        WHERE github_node_id = ?
+                        """,
+                    arguments: [fixture.node.nodeID.rawValue]
+                )
+            }
+            XCTAssertEqual(issue?["locked"], 1)
+            XCTAssertEqual(issue?["comments_count"], 3)
+            XCTAssertEqual(
+                try JSONDecoder().decode([String].self, from: issue!["assignee_node_ids_json"]),
+                ["MDQ6VXNlcjE="]
+            )
+            XCTAssertEqual(
+                try JSONDecoder().decode([String].self, from: issue!["label_names_json"]),
+                ["bug"]
+            )
+            let pullRequestRow = try await fixture.vault.read { database in
+                try Row.fetchOne(
+                    database,
+                    sql: """
+                        SELECT mergeable_state, head_ref, base_ref, review_decision, label_names_json
+                        FROM pull_requests
+                        WHERE github_node_id = ?
+                        """,
+                    arguments: [pullRequest.nodeID.rawValue]
+                )
+            }
+            XCTAssertEqual(pullRequestRow?["mergeable_state"], "MERGEABLE")
+            XCTAssertEqual(pullRequestRow?["head_ref"], "feature")
+            XCTAssertEqual(pullRequestRow?["base_ref"], "main")
+            XCTAssertEqual(pullRequestRow?["review_decision"], "APPROVED")
+            XCTAssertEqual(
+                try JSONDecoder().decode([String].self, from: pullRequestRow!["label_names_json"]),
+                ["documentation"]
+            )
+    }
+
     func testRejectsRelationsForANodeOutsideTheVaultAccount() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
