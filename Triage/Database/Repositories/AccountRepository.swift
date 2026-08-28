@@ -129,63 +129,64 @@ actor AccountRepository {
             }
         }
 
-        func save(
-            repository: GitHubRepositoryDTO,
-            organizationID: OrganizationID,
-            accountID: AccountID
-        ) async throws -> RepositorySummary {
-            guard let nodeID = GitHubNodeID(rawValue: repository.nodeID),
-                  let repositoryID = RepositoryID(rawValue: repository.nodeID)
-            else {
-                throw AccountRepositoryError.invalidPersistedIdentifier
-            }
-            let summary = RepositorySummary(
-                id: repositoryID,
-                nodeID: nodeID,
-                ownerLogin: repository.owner.login,
-                name: repository.name,
-                isPrivate: repository.isPrivate,
-                isArchived: repository.isArchived,
-                hasDiscussions: false,
-                url: repository.htmlURL
-            )
-            let updatedAt = Self.milliseconds(repository.updatedAt)
-            try await vault.write { database in
-                try database.execute(
-                    sql: """
-                        INSERT INTO repositories (
-                            id, organization_id, github_repository_id, github_node_id, owner_login, name,
-                            is_private, is_archived, has_discussions, html_url, updated_at_ms, archived_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                            owner_login = excluded.owner_login,
-                            name = excluded.name,
-                            is_private = excluded.is_private,
-                            is_archived = excluded.is_archived,
-                            html_url = excluded.html_url,
-                            updated_at_ms = excluded.updated_at_ms,
-                            archived_at_ms = excluded.archived_at_ms
-                        """,
-                    arguments: [
-                        summary.id.rawValue, organizationID.rawValue, String(repository.id), nodeID.rawValue,
-                        summary.ownerLogin, summary.name, summary.isPrivate, summary.isArchived,
-                        summary.hasDiscussions, summary.url.absoluteString, updatedAt,
-                        summary.isArchived ? updatedAt : nil
-                    ]
-                )
-                try database.execute(
-                    sql: """
-                        INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(account_id, repository_id) DO UPDATE SET
-                            access_state = excluded.access_state,
-                            observed_at_ms = excluded.observed_at_ms
-                        """,
-                    arguments: [accountID.rawValue, summary.id.rawValue, "available", updatedAt]
-                )
-            }
-            return summary
+    }
+
+    func save(
+        repository: GitHubRepositoryDTO,
+        organizationID: OrganizationID,
+        accountID: AccountID
+    ) async throws -> RepositorySummary {
+        guard let nodeID = GitHubNodeID(rawValue: repository.nodeID),
+              let repositoryID = RepositoryID(rawValue: repository.nodeID)
+        else {
+            throw AccountRepositoryError.invalidPersistedIdentifier
         }
+        let summary = RepositorySummary(
+            id: repositoryID,
+            nodeID: nodeID,
+            ownerLogin: repository.owner.login,
+            name: repository.name,
+            isPrivate: repository.isPrivate,
+            isArchived: repository.isArchived,
+            hasDiscussions: false,
+            url: repository.htmlURL
+        )
+        let updatedAt = Self.milliseconds(repository.updatedAt)
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO repositories (
+                        id, organization_id, github_repository_id, github_node_id, owner_login, name,
+                        is_private, is_archived, has_discussions, html_url, updated_at_ms, archived_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        owner_login = excluded.owner_login,
+                        name = excluded.name,
+                        is_private = excluded.is_private,
+                        is_archived = excluded.is_archived,
+                        html_url = excluded.html_url,
+                        updated_at_ms = excluded.updated_at_ms,
+                        archived_at_ms = excluded.archived_at_ms
+                    """,
+                arguments: [
+                    summary.id.rawValue, organizationID.rawValue, String(repository.id), nodeID.rawValue,
+                    summary.ownerLogin, summary.name, summary.isPrivate, summary.isArchived,
+                    summary.hasDiscussions, summary.url.absoluteString, updatedAt,
+                    summary.isArchived ? updatedAt : nil
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(account_id, repository_id) DO UPDATE SET
+                        access_state = excluded.access_state,
+                        observed_at_ms = excluded.observed_at_ms
+                    """,
+                arguments: [accountID.rawValue, summary.id.rawValue, "available", updatedAt]
+            )
+        }
+        return summary
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
