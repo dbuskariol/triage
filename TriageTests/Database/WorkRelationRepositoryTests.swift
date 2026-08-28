@@ -162,6 +162,38 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testConditionalRequestValidatorsRoundTripAndAreAccountScoped() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let validator = ConditionalRequestValidator(
+            requestKey: "GET /repos/github/triage/issues?state=open",
+            accountID: fixture.accountID,
+            eTag: "\"revision-1\"",
+            lastModified: "Fri, 28 Aug 2026 00:00:00 GMT",
+            observedAt: fixture.date
+        )
+        let repository = ConditionalRequestCacheRepository(vault: fixture.vault)
+        try await repository.save(validator)
+        XCTAssertEqual(
+            try await repository.validator(
+                for: validator.requestKey,
+                accountID: fixture.accountID
+            ),
+            validator
+        )
+
+        do {
+            _ = try await repository.validator(
+                for: validator.requestKey,
+                accountID: AccountID.make()
+            )
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .accountScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

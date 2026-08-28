@@ -146,6 +146,7 @@
 		CDAD2EC9047B96D284A9DA34 /* WorkspacePresentationCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E21546AE5CC5019D47902242 /* WorkspacePresentationCacheTests.swift */; };
 		CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */; };
 		CEEEC7705769530CB940273C /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89EB0458B411E6A895FE992B /* main.swift */; };
+		CF349E65B2F02F5D1861B7AB /* ConditionalRequestCacheRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */; };
@@ -153,6 +154,7 @@
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D6BD3ECF42418E448DD9E462 /* RawAPISnapshotRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
+		D8482B0E119CA8260DC5BF1E /* ConditionalRequestValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3CE61BB86F9BBE1B067174F /* ConditionalRequestValidator.swift */; };
 		DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */; };
 		DB75C0414A7EF20F766048EA /* ActorRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
@@ -336,6 +338,7 @@
 		9E96AD1DA22601AF8EDA9993 /* NotificationActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationActions.swift; sourceTree = "<group>"; };
 		9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCapabilityProbe.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
+		A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalRequestCacheRepository.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
 		A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkRelationRepositoryTests.swift; sourceTree = "<group>"; };
 		A7CAF6BD25FF8D833C6166EF /* WorkflowTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransitionTests.swift; sourceTree = "<group>"; };
@@ -346,6 +349,7 @@
 		B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOAuthConfiguration.swift; sourceTree = "<group>"; };
 		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlan.swift; sourceTree = "<group>"; };
+		B3CE61BB86F9BBE1B067174F /* ConditionalRequestValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalRequestValidator.swift; sourceTree = "<group>"; };
 		B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActorRepository.swift; sourceTree = "<group>"; };
 		B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransition.swift; sourceTree = "<group>"; };
 		B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalizationFailureRepository.swift; sourceTree = "<group>"; };
@@ -643,6 +647,7 @@
 				B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */,
 				94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */,
 				7BA6D93753D4F71FC83F3C86 /* AttentionScoreRepository.swift */,
+				A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */,
 				5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */,
@@ -664,6 +669,7 @@
 			isa = PBXGroup;
 			children = (
 				9B96E89F2CF776FAC365D17E /* AccountAccess.swift */,
+				B3CE61BB86F9BBE1B067174F /* ConditionalRequestValidator.swift */,
 				552523AB4B9EC81EE47BDCA4 /* Evidence.swift */,
 				3B59CA16DA269CD50E052F2A /* Freshness.swift */,
 				229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */,
@@ -1042,6 +1048,8 @@
 				1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */,
 				09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */,
 				EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */,
+				CF349E65B2F02F5D1861B7AB /* ConditionalRequestCacheRepository.swift in Sources */,
+				D8482B0E119CA8260DC5BF1E /* ConditionalRequestValidator.swift in Sources */,
 				B7915348E48821782DCEDF14 /* ConversationFollowUpRule.swift in Sources */,
 				764767AE6EE3DEB64351E121 /* CopilotFrameTransport.swift in Sources */,
 				AEA644A0C9EB9AB5C811A120 /* CopilotHelperClient.swift in Sources */,
