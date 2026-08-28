@@ -101,5 +101,37 @@ final class RepositoryAccountScopeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? WorkItemGraphRepositoryError, .workItemScopeMismatch)
         }
+        do {
+            try await TimelineRepository(vault: vault).save(
+                TimelineEventSummary(
+                    id: GitHubEventID(rawValue: "event-1")!,
+                    subjectNodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!,
+                    kind: .commented,
+                    actor: nil,
+                    occurredAt: .now,
+                    url: nil,
+                    body: nil
+                ),
+                sourceRevision: "event-1"
+            )
+            XCTFail("Expected a timeline subject scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? TimelineRepositoryError, .subjectNodeScopeMismatch)
+        }
+        do {
+            try await PullRequestReviewRepository(vault: vault).save(
+                review: GitHubPullRequestReviewDTO(
+                    id: 1,
+                    nodeID: "MDM6UmV2aWV3MQ==",
+                    state: "APPROVED",
+                    body: nil,
+                    submittedAt: nil
+                ),
+                pullRequestNodeID: GitHubNodeID(rawValue: "MDQ6UHVsbFJlcXVlc3Q5OTk=")!
+            )
+            XCTFail("Expected a pull request scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? PullRequestReviewRepositoryError, .pullRequestNodeScopeMismatch)
+        }
     }
 }

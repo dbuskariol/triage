@@ -1,6 +1,10 @@
 import Foundation
 import GRDB
 
+enum PullRequestReviewRepositoryError: Error, Equatable, Sendable {
+    case pullRequestNodeScopeMismatch
+}
+
 actor PullRequestReviewRepository {
     private let vault: AccountVault
 
@@ -18,6 +22,7 @@ actor PullRequestReviewRepository {
         }
         let observedAtMilliseconds = Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())
         try await vault.write { database in
+            try Self.validatePullRequestNodeScope(pullRequestNodeID, vault: vault, in: database)
             try database.execute(
                 sql: """
                     INSERT INTO reviews (
@@ -39,6 +44,26 @@ actor PullRequestReviewRepository {
                     observedAtMilliseconds
                 ]
             )
+        }
+    }
+
+    private nonisolated static func validatePullRequestNodeScope(
+        _ nodeID: GitHubNodeID,
+        vault: AccountVault,
+        in database: Database
+    ) throws {
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*)
+                FROM pull_requests
+                JOIN github_nodes ON github_nodes.github_node_id = pull_requests.github_node_id
+                WHERE pull_requests.github_node_id = ? AND github_nodes.account_id = ?
+                """,
+            arguments: [nodeID.rawValue, vault.accountID.rawValue]
+        ) ?? 0
+        guard matchingCount == 1 else {
+            throw PullRequestReviewRepositoryError.pullRequestNodeScopeMismatch
         }
     }
 }
