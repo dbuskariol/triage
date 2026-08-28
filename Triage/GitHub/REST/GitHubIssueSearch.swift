@@ -103,6 +103,7 @@ struct GitHubIssueSearchItem: Codable, Sendable {
     let updatedAt: Date
     let closedAt: Date?
     let pullRequest: PullRequestMarker?
+    let repositoryURL: URL
 
     struct PullRequestMarker: Codable, Sendable {
         let url: URL?
@@ -119,6 +120,7 @@ struct GitHubIssueSearchItem: Codable, Sendable {
         case updatedAt = "updated_at"
         case closedAt = "closed_at"
         case pullRequest = "pull_request"
+        case repositoryURL = "repository_url"
     }
 }
 

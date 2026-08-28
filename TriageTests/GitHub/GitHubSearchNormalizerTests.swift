@@ -14,7 +14,8 @@ final class GitHubSearchNormalizerTests: XCTestCase {
             createdAt: Date(timeIntervalSince1970: 900),
             updatedAt: updatedAt,
             closedAt: nil,
-            pullRequest: .init(url: nil)
+            pullRequest: .init(url: nil),
+            repositoryURL: URL(string: "https://api.github.com/repos/octo/repo")!
         )
 
         let node = try GitHubSearchNormalizer.normalize(
