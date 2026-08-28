@@ -34,10 +34,10 @@ actor GitHubCapabilityProbe {
                 throw GitHubCapabilityProbeError.organizationIdentityMismatch
             }
             let repositoriesPage = try await identityClient.repositories(in: organization.login)
-            let ssoHeader = scopedSSOHeader(
-                organizationResponse.ssoHeader ?? repositoriesPage.ssoHeader,
-                organization: organization
-            )
+            let ssoHeader = GitHubSSOHeader.combined([
+                organizationResponse.ssoHeader,
+                repositoriesPage.ssoHeader
+            ])?.scoped(to: organization.githubOrganizationID)
             let state = OrganizationAccessEvaluator.state(
                 statusCode: 200,
                 ssoHeader: ssoHeader
@@ -70,19 +70,6 @@ actor GitHubCapabilityProbe {
                 )
             )
         }
-    }
-
-    private func scopedSSOHeader(
-        _ header: GitHubSSOHeader?,
-        organization: GitHubOrganization
-    ) -> GitHubSSOHeader? {
-        guard case let .partialResults(organizationIDs)? = header else {
-            return header
-        }
-        guard organizationIDs.contains(organization.githubOrganizationID) else {
-            return nil
-        }
-        return .partialResults([organization.githubOrganizationID])
     }
 
     private func capabilities(

@@ -11,25 +11,7 @@ struct GitHubOrganizationInventory: Sendable {
     let ssoHeaders: [GitHubSSOHeader]
 
     var ssoHeader: GitHubSSOHeader? {
-        if let authorizationRequired = ssoHeaders.first(where: {
-            if case .authorizationRequired = $0 {
-                return true
-            }
-            return false
-        }) {
-            return authorizationRequired
-        }
-
-        let partialOrganizationIDs = ssoHeaders.reduce(into: Set<UInt64>()) { ids, header in
-            if case let .partialResults(partialIDs) = header {
-                ids.formUnion(partialIDs)
-            }
-        }
-        if !partialOrganizationIDs.isEmpty {
-            return .partialResults(partialOrganizationIDs)
-        }
-
-        return ssoHeaders.contains(.malformed) ? .malformed : nil
+        GitHubSSOHeader.combined(ssoHeaders)
     }
 }
 

@@ -55,4 +55,37 @@ enum GitHubSSOHeader: Equatable, Sendable {
             self = .malformed
         }
     }
+
+    static func combined(_ headers: [GitHubSSOHeader?]) -> GitHubSSOHeader? {
+        let values = headers.compactMap { $0 }
+        if let authorizationRequired = values.first(where: {
+            if case .authorizationRequired = $0 {
+                return true
+            }
+            return false
+        }) {
+            return authorizationRequired
+        }
+
+        let partialOrganizationIDs = values.reduce(into: Set<UInt64>()) { ids, header in
+            if case let .partialResults(partialIDs) = header {
+                ids.formUnion(partialIDs)
+            }
+        }
+        if !partialOrganizationIDs.isEmpty {
+            return .partialResults(partialOrganizationIDs)
+        }
+
+        return values.contains(.malformed) ? .malformed : nil
+    }
+
+    func scoped(to organizationID: UInt64) -> GitHubSSOHeader? {
+        guard case let .partialResults(organizationIDs) = self else {
+            return self
+        }
+        guard organizationIDs.contains(organizationID) else {
+            return nil
+        }
+        return .partialResults([organizationID])
+    }
 }

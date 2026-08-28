@@ -201,12 +201,6 @@ actor AccountConnectionService {
         for organization: GitHubOrganization,
         aggregateHeader: GitHubSSOHeader?
     ) -> GitHubSSOHeader? {
-        guard case let .partialResults(organizationIDs)? = aggregateHeader else {
-            return aggregateHeader
-        }
-        guard organizationIDs.contains(organization.githubOrganizationID) else {
-            return nil
-        }
-        return .partialResults([organization.githubOrganizationID])
+        aggregateHeader?.scoped(to: organization.githubOrganizationID)
     }
 }

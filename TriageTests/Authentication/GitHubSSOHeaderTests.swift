@@ -28,4 +28,14 @@ final class GitHubSSOHeaderTests: XCTestCase {
         XCTAssertEqual(GitHubSSOHeader(value: "partial-results; organizations=abc"), .malformed)
         XCTAssertEqual(GitHubSSOHeader(value: "unknown"), .malformed)
     }
+
+    func testCombiningHeadersPreservesAllPartialOrganizationIDs() {
+        XCTAssertEqual(
+            GitHubSSOHeader.combined([
+                .partialResults(Set([1])),
+                .partialResults(Set([2]))
+            ]),
+            .partialResults(Set([1, 2]))
+        )
+    }
 }
