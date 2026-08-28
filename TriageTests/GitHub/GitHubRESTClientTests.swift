@@ -61,7 +61,7 @@ private struct OrganizationDTO: Codable, Equatable, Sendable {
     let login: String
 }
 
-private actor StubSession: GitHubHTTPSession {
+private actor StubSession: HTTPSession {
     private let statusCode: Int
     private let body: Data
     private let headers: [String: String]

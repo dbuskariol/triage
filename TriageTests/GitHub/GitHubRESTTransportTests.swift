@@ -41,7 +41,7 @@ final class GitHubRESTTransportTests: XCTestCase {
     }
 }
 
-private actor RecordingSession: GitHubHTTPSession {
+private actor RecordingSession: HTTPSession {
     private var capturedRequest: URLRequest?
     private let headers: [String: String]
 
