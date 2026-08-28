@@ -25,6 +25,8 @@ struct RootView: View {
 }
 
 private struct OnboardingView: View {
+    @EnvironmentObject private var appModel: TriageAppModel
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "square.stack.3d.up")
@@ -36,6 +38,22 @@ private struct OnboardingView: View {
             Text("Connect a GitHub account to build your organization-scoped work inbox.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
+            Button("Connect GitHub") {
+                guard let window = NSApp.keyWindow else {
+                    appModel.recordConnectionWindowError()
+                    return
+                }
+                Task {
+                    await appModel.connectGitHub(presentationAnchor: window)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            if let error = appModel.connectionError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
