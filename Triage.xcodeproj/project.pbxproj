@@ -103,6 +103,7 @@
 		8F7084517630A5301FBB9DD1 /* NotificationContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82377E74C059A4BB23BC5347 /* NotificationContentTests.swift */; };
 		8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80EB94E267D82037DB5FBBC /* AccountRepository.swift */; };
 		942934936D122D14CBA57543 /* GitHubIssueSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1137D570B4939F5B2CA238 /* GitHubIssueSearch.swift */; };
+		95F87940D2820DD3230D14CE /* WorkRelationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01AB6295FED1FC53CF1F5429 /* WorkRelationRepository.swift */; };
 		97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B3E254AF248B70DFBBB696 /* SSOAuthorizationCoordinatorTests.swift */; };
 		9828F7BEBE9B27EF47A8E6C6 /* PullRequestAttentionRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CEA0BE253FA4978B2B3641 /* PullRequestAttentionRuleTests.swift */; };
 		9B077224AD72CFDBCEA499AC /* SSOAuthorizationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */; };
@@ -178,6 +179,7 @@
 /* Begin PBXFileReference section */
 		0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRule.swift; sourceTree = "<group>"; };
 		015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSyncCoordinator.swift; sourceTree = "<group>"; };
+		01AB6295FED1FC53CF1F5429 /* WorkRelationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkRelationRepository.swift; sourceTree = "<group>"; };
 		081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageEvaluatorTests.swift; sourceTree = "<group>"; };
 		093BC7239ABB9F432076EDC7 /* GitHubIdentityClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIdentityClientTests.swift; sourceTree = "<group>"; };
 		093F78313766BF56E21E1A0F /* CredentialLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLifecycle.swift; sourceTree = "<group>"; };
@@ -595,6 +597,7 @@
 				2FA4EF715587B009499705BF /* WorkflowRepository.swift */,
 				F1F032FC6C9DF794D7566896 /* WorkItemGraphRepository.swift */,
 				5AC60A407B712E2D8B24B111 /* WorkItemRepository.swift */,
+				01AB6295FED1FC53CF1F5429 /* WorkRelationRepository.swift */,
 			);
 			path = Repositories;
 			sourceTree = "<group>";
@@ -996,6 +999,7 @@
 				D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */,
 				7C87ADE50F0AE64ADCA76F0E /* WorkItemRepository.swift in Sources */,
 				3C4263CB0773B9F3BF689934 /* WorkListView.swift in Sources */,
+				95F87940D2820DD3230D14CE /* WorkRelationRepository.swift in Sources */,
 				BEDF7AC4601449B4A5DB9201 /* Workflow.swift in Sources */,
 				FD825489A2459F105DCE042C /* WorkflowActionService.swift in Sources */,
 				440D552512831BFF25F93150 /* WorkflowRepository.swift in Sources */,

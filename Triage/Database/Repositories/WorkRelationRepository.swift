@@ -1,0 +1,115 @@
+import CryptoKit
+import Foundation
+import GRDB
+
+enum WorkRelationRepositoryError: Error, Equatable, Sendable {
+    case accountScopeMismatch
+    case subjectScopeMismatch
+    case duplicateRelation
+    case duplicateEvidence
+}
+
+actor WorkRelationRepository {
+    private let vault: AccountVault
+
+    init(vault: AccountVault) {
+        self.vault = vault
+    }
+
+    /// Replaces all relations observed for one source node so removed GitHub
+    /// relationships and evidence cannot survive a later synchronization.
+    func replace(
+        _ relations: [WorkRelation],
+        accountID: AccountID,
+        subjectNodeID: GitHubNodeID
+    ) async throws {
+        guard Set(relations.map(\.subjectNodeID)).isSubset(of: [subjectNodeID]) else {
+            throw WorkRelationRepositoryError.subjectScopeMismatch
+        }
+        let relationKeys = relations.map(Self.canonicalKey)
+        guard Set(relationKeys).count == relationKeys.count else {
+            throw WorkRelationRepositoryError.duplicateRelation
+        }
+        guard relations.allSatisfy({
+            Set($0.evidence.map(\.id)).count == $0.evidence.count
+        }) else {
+            throw WorkRelationRepositoryError.duplicateEvidence
+        }
+
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    DELETE FROM relations
+                    WHERE account_id = ? AND subject_node_id = ?
+                    """,
+                arguments: [accountID.rawValue, subjectNodeID.rawValue]
+            )
+
+            for relation in relations {
+                let relationID = Self.identifier(
+                    accountID: accountID,
+                    relation: relation
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO relations (
+                            id, account_id, subject_node_id, object_node_id, kind,
+                            confidence, observed_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        relationID,
+                        accountID.rawValue,
+                        relation.subjectNodeID.rawValue,
+                        relation.objectNodeID?.rawValue,
+                        relation.kind.rawValue,
+                        relation.confidence.rawValue,
+                        Self.milliseconds(relation.observedAt)
+                    ]
+                )
+                for evidence in relation.evidence {
+                    try database.execute(
+                        sql: """
+                            INSERT INTO relation_evidence (
+                                relation_id, evidence_id, source, source_node_id,
+                                source_event_id, source_revision, observed_at_ms, excerpt
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                        arguments: [
+                            relationID,
+                            evidence.id.rawValue,
+                            evidence.source.rawValue,
+                            evidence.nodeID?.rawValue,
+                            evidence.eventID?.rawValue,
+                            evidence.sourceRevision,
+                            Self.milliseconds(evidence.observedAt),
+                            evidence.excerpt
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
+    private nonisolated static func canonicalKey(_ relation: WorkRelation) -> String {
+        [
+            relation.subjectNodeID.rawValue,
+            relation.objectNodeID?.rawValue ?? "",
+            relation.kind.rawValue
+        ].joined(separator: "\u{0}")
+    }
+
+    private nonisolated static func identifier(
+        accountID: AccountID,
+        relation: WorkRelation
+    ) -> String {
+        let canonicalValue = "\(accountID.rawValue)\u{0}\(canonicalKey(relation))"
+        return SHA256.hash(data: Data(canonicalValue.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private nonisolated static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+}

@@ -65,10 +65,12 @@ actor OrganizationWorkRefreshService {
                 searchClient: GitHubIssueSearchClient(client: restClient),
                 nodeRepository: GitHubNodeRepository(vault: vault),
                 workItemRepository: WorkItemRepository(vault: vault),
+                relationRepository: WorkRelationRepository(vault: vault),
                 attentionRepository: AttentionReasonRepository(vault: vault)
             ).synchronize(
                 plan: plan,
                 accountID: account.id,
+                accountNodeID: account.nodeID,
                 organizationID: organization.id,
                 githubOrganizationID: organization.githubOrganizationID,
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }

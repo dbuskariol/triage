@@ -8,6 +8,7 @@ actor RoleDiscoverySynchronizer {
     private let searchClient: GitHubIssueSearchClient
     private let nodeRepository: GitHubNodeRepository
     private let workItemRepository: WorkItemRepository
+    private let relationRepository: WorkRelationRepository
     private let attentionRepository: AttentionReasonRepository
     private let clock: @Sendable () -> Date
 
@@ -15,12 +16,14 @@ actor RoleDiscoverySynchronizer {
         searchClient: GitHubIssueSearchClient,
         nodeRepository: GitHubNodeRepository,
         workItemRepository: WorkItemRepository,
+        relationRepository: WorkRelationRepository,
         attentionRepository: AttentionReasonRepository,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.searchClient = searchClient
         self.nodeRepository = nodeRepository
         self.workItemRepository = workItemRepository
+        self.relationRepository = relationRepository
         self.attentionRepository = attentionRepository
         self.clock = clock
     }
@@ -28,6 +31,7 @@ actor RoleDiscoverySynchronizer {
     func synchronize(
         plan: RoleDiscoveryPlan,
         accountID: AccountID,
+        accountNodeID: GitHubNodeID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?
@@ -85,6 +89,16 @@ actor RoleDiscoverySynchronizer {
         for node in nodes {
             try await nodeRepository.save(node)
             let workItemID = try await workItemRepository.ensureWorkItem(for: node)
+            try await relationRepository.replace(
+                discoveryRelations(
+                    relationships: relationshipsByNodeID[node.nodeID.rawValue] ?? [],
+                    node: node,
+                    accountNodeID: accountNodeID,
+                    observedAt: observedAt
+                ),
+                accountID: accountID,
+                subjectNodeID: node.nodeID
+            )
             try await attentionRepository.replaceDiscoveryReasons(
                 workItemID: workItemID,
                 reasons: discoveryReasons(
@@ -137,6 +151,52 @@ actor RoleDiscoverySynchronizer {
                 evidence: [evidence],
                 evaluatedAt: evaluatedAt
             )
+        }
+    }
+
+    private func discoveryRelations(
+        relationships: Set<GitHubIssueSearchRelationship>,
+        node: NormalizedGitHubNode,
+        accountNodeID: GitHubNodeID,
+        observedAt: Date
+    ) -> [WorkRelation] {
+        relationships.compactMap { relationship in
+            let kind: WorkRelationKind? = switch relationship {
+            case .involves:
+                nil
+            case .authored:
+                WorkRelationKind.authored
+            case .assigned:
+                .assigned
+            case .mentioned:
+                .mentioned
+            case .commented:
+                .commented
+            case .reviewRequested:
+                .reviewRequestedDirectly
+            case .reviewInvolves:
+                .reviewed
+            }
+            guard let kind else {
+                return nil
+            }
+            let evidence = EvidenceReference(
+                id: EvidenceID(rawValue: "discovery-\(relationship.qualifier)-\(node.nodeID.rawValue)")!,
+                source: .restSearch,
+                nodeID: node.nodeID,
+                sourceRevision: node.sourceRevision,
+                observedAt: observedAt
+            )
+            return WorkRelation(
+                kind: kind,
+                subjectNodeID: node.nodeID,
+                objectNodeID: accountNodeID,
+                confidence: .confirmed,
+                evidence: [evidence],
+                observedAt: observedAt
+            )
+        }.sorted { lhs, rhs in
+            lhs.kind.rawValue < rhs.kind.rawValue
         }
     }
 }

@@ -57,6 +57,11 @@ actor WorkItemRepository {
                 let actions = try Self.actionItems(in: database, workItemID: row["id"])
                 let members = try Self.members(in: database, workItemID: row["id"])
                 let contextLinks = try Self.contextLinks(in: database, workItemID: row["id"])
+                let relations = try Self.relations(
+                    in: database,
+                    accountID: accountID,
+                    workItemID: row["id"]
+                )
                 return try Self.workItem(
                     from: row,
                     accountID: accountID,
@@ -64,7 +69,8 @@ actor WorkItemRepository {
                     attentionReasons: reasons,
                     actionItems: actions,
                     members: members,
-                    contextLinks: contextLinks
+                    contextLinks: contextLinks,
+                    relations: relations
                 )
             }
     }
@@ -136,7 +142,8 @@ actor WorkItemRepository {
         attentionReasons: [AttentionReason],
         actionItems: [ActionItem],
         members: [WorkItemMember],
-        contextLinks: [WorkItemContextLink]
+        contextLinks: [WorkItemContextLink],
+        relations: [WorkRelation]
     ) throws -> WorkItem {
         guard let id = WorkItemID(rawValue: row["id"]),
               let nodeID = GitHubNodeID(rawValue: row["primary_node_id"]),
@@ -168,7 +175,7 @@ actor WorkItemRepository {
             repository: try repository(from: row),
             members: members,
             contextLinks: contextLinks,
-            relations: [],
+            relations: relations,
             attentionReasons: attentionReasons,
             actionItems: actionItems,
             workflow: workflow,
@@ -382,6 +389,76 @@ actor WorkItemRepository {
                 )
             }
         }
+
+    private nonisolated static func relations(
+        in database: Database,
+        accountID: AccountID,
+        workItemID: String
+    ) throws -> [WorkRelation] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT relations.id, relations.subject_node_id, relations.object_node_id,
+                       relations.kind, relations.confidence, relations.observed_at_ms
+                FROM relations
+                JOIN work_item_members
+                    ON work_item_members.github_node_id = relations.subject_node_id
+                WHERE relations.account_id = ? AND work_item_members.work_item_id = ?
+                ORDER BY relations.subject_node_id, relations.kind, relations.object_node_id, relations.id
+                """,
+            arguments: [accountID.rawValue, workItemID]
+        ).map { row in
+            guard let subjectNodeID = GitHubNodeID(rawValue: row["subject_node_id"]),
+                  let kind = WorkRelationKind(rawValue: row["kind"]),
+                  let confidence = RelationConfidence(rawValue: row["confidence"]),
+                  let observedAt = date(milliseconds: row["observed_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            let relationID: String = row["id"]
+            return WorkRelation(
+                kind: kind,
+                subjectNodeID: subjectNodeID,
+                objectNodeID: (row["object_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                confidence: confidence,
+                evidence: try relationEvidence(in: database, relationID: relationID),
+                observedAt: observedAt
+            )
+        }
+    }
+
+    private nonisolated static func relationEvidence(
+        in database: Database,
+        relationID: String
+    ) throws -> [EvidenceReference] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT evidence_id, source, source_node_id, source_event_id,
+                       source_revision, observed_at_ms, excerpt
+                FROM relation_evidence
+                WHERE relation_id = ?
+                ORDER BY evidence_id
+                """,
+            arguments: [relationID]
+        ).map { row in
+            guard let id = EvidenceID(rawValue: row["evidence_id"]),
+                  let source = EvidenceSource(rawValue: row["source"]),
+                  let observedAt = date(milliseconds: row["observed_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return EvidenceReference(
+                id: id,
+                source: source,
+                nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
+                sourceRevision: row["source_revision"],
+                observedAt: observedAt,
+                excerpt: row["excerpt"]
+            )
+        }
+    }
 
         private nonisolated static func content(
             in database: Database,
