@@ -17,6 +17,19 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        Task {
+                            await appModel.refreshSelectedOrganization()
+                        }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
+                    .help("Refresh GitHub Work")
+                }
+            }
             .onChange(of: appModel.selectedOrganizationID) {
                 Task {
                     await appModel.refreshSelectedOrganization()
