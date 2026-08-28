@@ -859,6 +859,17 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX normalization_failures_account_occurred
                 ON normalization_failures (account_id, occurred_at_ms DESC)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "021-raw-snapshot-retention-index",
+            checksum: "ce1a5bf39b3a307fa5ef6ae6a22e794bffd209ef2d060fb5b26bf5e6a8b1a432"
+        ) { database in
+            try database.execute(sql: """
+                CREATE INDEX raw_api_snapshots_retention
+                ON raw_api_snapshots (
+                    account_id, github_node_id, endpoint, parser_version, observed_at_ms DESC, id DESC
+                )
+                """)
         }
     ]
 }

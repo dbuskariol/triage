@@ -7,6 +7,7 @@ enum RawAPISnapshotRepositoryError: Error, Equatable, Sendable {
     case invalidEndpoint
     case invalidParserVersion
     case invalidLimit
+    case invalidRetentionLimit
     case invalidPersistedData
     case payloadTooLarge
 }
@@ -86,6 +87,55 @@ actor RawAPISnapshotRepository {
                 """,
                 arguments: [accountID.rawValue, limit]
             ).map { try Self.snapshot(from: $0) }
+        }
+    }
+
+    /// Removes superseded snapshots only when a newer replayable snapshot remains for the same source.
+    /// Snapshots referenced by normalization failures are retained as durable diagnostic provenance.
+    func compact(
+        accountID: AccountID,
+        retainingMostRecentPerSource retentionLimit: Int = 1,
+        before cutoff: Date
+    ) async throws -> Int {
+        guard accountID == vault.accountID else {
+            throw RawAPISnapshotRepositoryError.accountScopeMismatch
+        }
+        guard retentionLimit > 0 else {
+            throw RawAPISnapshotRepositoryError.invalidRetentionLimit
+        }
+        return try await vault.write { database in
+            try database.execute(
+                sql: """
+                    DELETE FROM raw_api_snapshots
+                    WHERE account_id = ?
+                      AND observed_at_ms < ?
+                      AND id IN (
+                          SELECT id
+                          FROM (
+                              SELECT id,
+                                     ROW_NUMBER() OVER (
+                                         PARTITION BY github_node_id, endpoint, parser_version
+                                         ORDER BY observed_at_ms DESC, id DESC
+                                     ) AS retention_rank
+                              FROM raw_api_snapshots
+                              WHERE account_id = ?
+                          )
+                          WHERE retention_rank > ?
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM normalization_failures
+                          WHERE normalization_failures.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    Self.milliseconds(cutoff),
+                    accountID.rawValue,
+                    retentionLimit
+                ]
+            )
+            return database.changesCount
         }
     }
 

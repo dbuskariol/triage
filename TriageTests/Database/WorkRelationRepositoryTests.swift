@@ -113,6 +113,71 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testRawAPISnapshotCompactionPreservesReplayAndFailureProvenance() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+        let endpoint = "/repos/github/triage/issues/1"
+        let oldest = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: endpoint,
+            eTag: "\"revision-1\"",
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("{\"revision\":1}".utf8)
+        )
+        let failedSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: endpoint,
+            eTag: "\"revision-2\"",
+            parserVersion: 1,
+            observedAt: fixture.date.addingTimeInterval(60),
+            payload: Data("{\"revision\":2}".utf8)
+        )
+        let newest = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: endpoint,
+            eTag: "\"revision-3\"",
+            parserVersion: 1,
+            observedAt: fixture.date.addingTimeInterval(120),
+            payload: Data("{\"revision\":3}".utf8)
+        )
+        for snapshot in [oldest, failedSnapshot, newest] {
+            try await repository.save(snapshot)
+        }
+        try await NormalizationFailureRepository(vault: fixture.vault).record(
+            NormalizationFailure(
+                id: UUID(),
+                accountID: fixture.accountID,
+                rawSnapshotID: failedSnapshot.id,
+                githubNodeID: fixture.node.nodeID,
+                endpoint: endpoint,
+                parserVersion: 1,
+                occurredAt: failedSnapshot.observedAt,
+                redactedDiagnostic: "Unknown issue state."
+            )
+        )
+
+        XCTAssertEqual(
+            try await repository.compact(
+                accountID: fixture.accountID,
+                before: fixture.date.addingTimeInterval(180)
+            ),
+            1
+        )
+        XCTAssertEqual(
+            try await repository.snapshots(for: fixture.accountID),
+            [newest, failedSnapshot]
+        )
+    }
+
     func testNormalizationFailuresRetainAccountScopedSnapshotProvenance() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
