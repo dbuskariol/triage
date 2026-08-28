@@ -44,10 +44,25 @@ private struct OnboardingView: View {
 }
 
 private struct AppSidebar: View {
+    @EnvironmentObject private var appModel: TriageAppModel
     @Binding var selection: AppSection
 
     var body: some View {
         VStack(spacing: 0) {
+            if !appModel.organizations.isEmpty {
+                Picker("Organization", selection: $appModel.selectedOrganizationID) {
+                    ForEach(appModel.organizations) { organization in
+                        Text(organization.displayName ?? organization.login)
+                            .tag(Optional(organization.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                Divider()
+            }
             VStack(spacing: 3) {
                 ForEach(AppSection.allCases) { section in
                     sidebarButton(section)
