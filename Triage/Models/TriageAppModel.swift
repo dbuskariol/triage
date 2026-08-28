@@ -221,7 +221,7 @@ final class TriageAppModel: ObservableObject {
                 organizationAccesses: result.organizationAccesses,
                 for: result.account.id
             )
-            await refreshSelectedOrganization()
+            await refreshSelectedOrganizationAfterAccessCheck()
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
             case .missingClientID:
@@ -258,7 +258,7 @@ final class TriageAppModel: ObservableObject {
                 organizationAccesses: result.organizationAccesses,
                 for: result.account.id
             )
-            await refreshSelectedOrganization()
+            await refreshSelectedOrganizationAfterAccessCheck()
         } catch is PersonalAccessTokenError {
             connectionError = "Enter a supported fine-grained or classic GitHub personal access token."
         } catch {
@@ -391,7 +391,7 @@ final class TriageAppModel: ObservableObject {
 
     func startAutomaticRefreshes() async {
         await refreshScheduler.start { [weak self] in
-            await self?.refreshSelectedOrganization()
+            await self?.refreshSelectedOrganizationAfterAccessCheck()
         }
         await inactiveRefreshScheduler.start(cadence: .inactiveAccount) { [weak self] in
             await self?.refreshInactiveOrganizations()
@@ -402,7 +402,7 @@ final class TriageAppModel: ObservableObject {
         if !foregroundRefreshTasksAwaitingCredentialMutation.isEmpty {
             await cancelForegroundRefresh()
         }
-        await refreshSelectedOrganization()
+        await refreshSelectedOrganizationAfterAccessCheck()
     }
 
     func restoreAccounts() async {
@@ -429,7 +429,7 @@ final class TriageAppModel: ObservableObject {
         }
     }
 
-    func refreshSelectedOrganization() async {
+    private func refreshSelectedOrganization() async {
         guard !isCredentialMutationInProgress,
               let accountID = selectedAccountID,
               !accountsBeingRemoved.contains(accountID)
@@ -602,21 +602,30 @@ final class TriageAppModel: ObservableObject {
                     ) == true else {
                         throw CancellationError()
                     }
-                    _ = try await OrganizationWorkRefreshService(
-                        credentialReader: AccountCredentialReader(secretStore: secretStore),
-                        vaultRegistry: vaultRegistry,
-                        secretStore: secretStore,
-                        requestPriority: .inactiveAccountRefresh
-                    ).refresh(account: refreshedAccount, organization: organization)
-                    try Task.checkCancellation()
-                    guard let vaultKey = try await secretStore.readVaultKey(for: refreshedAccount.id) else {
-                        throw AccountCredentialReaderError.missingAccessToken
+                    do {
+                        _ = try await OrganizationWorkRefreshService(
+                            credentialReader: AccountCredentialReader(secretStore: secretStore),
+                            vaultRegistry: vaultRegistry,
+                            secretStore: secretStore,
+                            requestPriority: .inactiveAccountRefresh
+                        ).refresh(account: refreshedAccount, organization: organization)
+                        try Task.checkCancellation()
+                        guard let vaultKey = try await secretStore.readVaultKey(for: refreshedAccount.id) else {
+                            throw AccountCredentialReaderError.missingAccessToken
+                        }
+                        let vault = try await vaultRegistry.open(accountID: refreshedAccount.id, vaultKey: vaultKey)
+                        try await SearchRepository(vault: vault).rebuild(
+                            accountID: refreshedAccount.id,
+                            organizationID: organization.id
+                        )
+                    } catch let error as OrganizationRefreshError {
+                        await self?.recordOrganizationRefreshFailure(
+                            error,
+                            for: refreshedAccount,
+                            organization: organization
+                        )
+                        continue
                     }
-                    let vault = try await vaultRegistry.open(accountID: refreshedAccount.id, vaultKey: vaultKey)
-                    try await SearchRepository(vault: vault).rebuild(
-                        accountID: refreshedAccount.id,
-                        organizationID: organization.id
-                    )
                 }
             }
         }
@@ -699,6 +708,13 @@ final class TriageAppModel: ObservableObject {
             )
         } catch is CancellationError {
             return
+        } catch let error as OrganizationRefreshError {
+            guard refreshGeneration == generation else { return }
+            await recordOrganizationRefreshFailure(
+                error,
+                for: initialAccount,
+                organization: organization
+            )
         } catch let error as GitHubFailure {
             guard refreshGeneration == generation else { return }
             if let credentialStatus = CredentialLifecycle.failureStatus(for: error) {
@@ -977,7 +993,71 @@ final class TriageAppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.loadCachedSelectedOrganization()
-            await self.refreshSelectedOrganization()
+            await self.refreshSelectedOrganizationAfterAccessCheck()
+        }
+    }
+
+    func refreshSelectedOrganizationAfterAccessCheck() async {
+        switch selectedOrganizationAccess?.state {
+        case .ssoAuthorizationRequired, .partialSSOAuthorization:
+            await recheckSelectedOrganizationAccess()
+        default:
+            await refreshSelectedOrganization()
+        }
+    }
+
+    private func recordOrganizationRefreshFailure(
+        _ error: OrganizationRefreshError,
+        for account: GitHubAccount,
+        organization: GitHubOrganization
+    ) async {
+        let header: GitHubSSOHeader
+        switch error {
+        case let .ssoRequirement(value):
+            header = value
+        }
+        let state = OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: header)
+        let checkedAt = Date()
+        let capabilities = GitHubCapability.allCases.map { capability in
+            CapabilityAvailability(
+                capability: capability,
+                status: state == .ssoAuthorizationRequired || state == .partialSSOAuthorization
+                    ? .requiresSSO
+                    : .unknown,
+                checkedAt: checkedAt
+            )
+        }
+        let access = OrganizationAccess(
+            accountID: account.id,
+            organizationID: organization.id,
+            state: state,
+            capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
+            capabilities: capabilities,
+            checkedAt: checkedAt
+        )
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
+            let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+            try await AccountRepository(vault: vault).save(organization, access: access)
+            guard accounts.contains(where: { $0.id == account.id }),
+                  !accountsBeingRemoved.contains(account.id)
+            else {
+                return
+            }
+            organizationAccessesByAccount[account.id, default: [:]][organization.id] = access
+            guard selectedAccountID == account.id, selectedOrganizationID == organization.id else {
+                return
+            }
+            ssoAuthorizationHeader = header
+            refreshError = accessMessage(for: state)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard selectedAccountID == account.id, selectedOrganizationID == organization.id else {
+                return
+            }
+            refreshError = "Triage could not record organization access. Cached work remains available."
         }
     }
 

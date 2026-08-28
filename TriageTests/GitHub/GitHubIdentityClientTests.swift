@@ -54,6 +54,38 @@ final class GitHubIdentityClientTests: XCTestCase {
             XCTAssertEqual(error as? GitHubIdentityClientError, .paginationLoop)
         }
     }
+
+    func testRepositoryInventoryRetainsSSOHeadersAcrossPages() async throws {
+        let secondPage = URL(string: "https://api.github.com/orgs/acme/repos?page=2")!
+        let repository = """
+        {"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,
+        "html_url":"https://github.com/acme/one","updated_at":"2025-01-01T00:00:00Z",
+        "owner":{"login":"acme"}}
+        """
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/orgs/acme/repos?type=all&per_page=100": (
+                        Data("[\(repository)]".utf8),
+                        [
+                            "Link": "<\(secondPage.absoluteString)>; rel=\"next\"",
+                            "X-GitHub-SSO": "partial-results; organizations=1"
+                        ]
+                    ),
+                    "/orgs/acme/repos?page=2": (
+                        Data("[\(repository.replacingOccurrences(of: "\"R_1\"", with: "\"R_2\""))]".utf8),
+                        ["X-GitHub-SSO": "partial-results; organizations=2"]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let inventory = try await GitHubIdentityClient(client: client).allRepositories(in: "acme")
+
+        XCTAssertEqual(inventory.repositories.map(\.nodeID), ["R_1", "R_2"])
+        XCTAssertEqual(inventory.ssoHeader, .partialResults(Set([1, 2])))
+    }
 }
 
 private actor PagingSession: HTTPSession {

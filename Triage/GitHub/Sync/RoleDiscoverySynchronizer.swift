@@ -29,12 +29,18 @@ actor RoleDiscoverySynchronizer {
         plan: RoleDiscoveryPlan,
         accountID: AccountID,
         organizationID: OrganizationID,
+        githubOrganizationID: UInt64,
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?
     ) async throws -> [WorkItemID] {
         var itemsByNodeID: [String: GitHubIssueSearchItem] = [:]
         var relationshipsByNodeID: [String: Set<GitHubIssueSearchRelationship>] = [:]
         for query in plan.openQueries + plan.recentClosedQueries {
-            let firstPage = try await searchClient.search(query)
+            let firstResponse = try await searchClient.searchResponse(query)
+            try throwForSSORequirement(
+                in: firstResponse.ssoHeader,
+                githubOrganizationID: githubOrganizationID
+            )
+            let firstPage = firstResponse.value
             guard !firstPage.incompleteResults,
                   firstPage.totalCount <= SearchShardPlanner.maximumResults
             else {
@@ -42,7 +48,17 @@ actor RoleDiscoverySynchronizer {
             }
             let pageCount = max(1, Int(ceil(Double(firstPage.totalCount) / 100)))
             for page in 1...pageCount {
-                let result = page == 1 ? firstPage : try await searchClient.search(query, page: page)
+                let result: GitHubIssueSearchPage
+                if page == 1 {
+                    result = firstPage
+                } else {
+                    let response = try await searchClient.searchResponse(query, page: page)
+                    try throwForSSORequirement(
+                        in: response.ssoHeader,
+                        githubOrganizationID: githubOrganizationID
+                    )
+                    result = response.value
+                }
                 guard !result.incompleteResults else {
                     throw RoleDiscoverySyncError.shardingRequired
                 }
@@ -80,6 +96,15 @@ actor RoleDiscoverySynchronizer {
             workItemIDs.append(workItemID)
         }
         return workItemIDs
+    }
+
+    private func throwForSSORequirement(
+        in header: GitHubSSOHeader?,
+        githubOrganizationID: UInt64
+    ) throws {
+        if let header = header?.scoped(to: githubOrganizationID) {
+            throw OrganizationRefreshError.ssoRequirement(header)
+        }
     }
 
     private func discoveryReasons(
