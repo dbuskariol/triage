@@ -205,6 +205,42 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX capabilities_lookup
                 ON capabilities (account_id, organization_id, capability)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "003-github-nodes",
+            checksum: "b9072cbeb59ca8924e2e551bac03cb225c1f4b2d4114d19326e8657d1a34fcc5"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE github_nodes (
+                    github_node_id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL,
+                    kind TEXT NOT NULL,
+                    numeric_id TEXT,
+                    number INTEGER,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    html_url TEXT NOT NULL,
+                    body_markdown TEXT,
+                    author_id TEXT REFERENCES actors(id) ON DELETE SET NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    closed_at_ms INTEGER,
+                    merged_at_ms INTEGER,
+                    source_revision TEXT NOT NULL,
+                    last_observed_at_ms INTEGER NOT NULL,
+                    accessibility_state TEXT NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX github_nodes_org_kind_updated
+                ON github_nodes (account_id, organization_id, kind, updated_at_ms DESC)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX github_nodes_repository_number
+                ON github_nodes (repository_id, number)
+                """)
         }
     ]
 }
