@@ -241,6 +241,35 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX github_nodes_repository_number
                 ON github_nodes (repository_id, number)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "004-issues-and-pull-requests",
+            checksum: "ab60c6c3f98275b0fefb127c7d730e70d40514b4249bded7504b59b54ea50bf9"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE issues (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    locked INTEGER NOT NULL CHECK (locked IN (0, 1)),
+                    comments_count INTEGER NOT NULL,
+                    assignee_node_ids_json BLOB NOT NULL,
+                    label_node_ids_json BLOB NOT NULL,
+                    milestone_node_id TEXT,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE pull_requests (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    is_draft INTEGER NOT NULL CHECK (is_draft IN (0, 1)),
+                    mergeable_state TEXT,
+                    head_ref TEXT,
+                    base_ref TEXT,
+                    review_decision TEXT,
+                    unresolved_thread_count INTEGER NOT NULL,
+                    latest_commit_at_ms INTEGER,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
         }
     ]
 }
