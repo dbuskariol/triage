@@ -65,7 +65,7 @@ final class AccountVaultTests: XCTestCase {
                 sql: "SELECT id, checksum FROM schema_migrations ORDER BY id"
             )
         }
-        XCTAssertEqual(migrations.count, 1)
+        XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0]["id"] as String, "001-vault-metadata")
         XCTAssertFalse((migrations[0]["checksum"] as String).isEmpty)
         try await registry.closeAll()

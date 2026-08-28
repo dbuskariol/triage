@@ -12,6 +12,8 @@ private struct TriageDatabaseMigration: Sendable {
 }
 
 enum TriageDatabaseMigrator {
+    static var migrationCount: Int { migrations.count }
+
     static func migrate(_ databasePool: DatabasePool) throws {
         try databasePool.write { database in
             try database.execute(sql: """

@@ -444,6 +444,9 @@ async function exchangeWithGitHub(form: URLSearchParams): Promise<GitHubTokenRes
     throw new RequestProblem(502, "unavailable", "The OAuth service is unavailable. Try again later.");
   }
 
+  if (isRecord(payload) && typeof payload.error === "string") {
+    throw mapGitHubFailure(response.status, payload);
+  }
   if (!response.ok) {
     throw mapGitHubFailure(response.status, payload);
   }
