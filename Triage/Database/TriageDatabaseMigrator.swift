@@ -758,6 +758,43 @@ enum TriageDatabaseMigrator {
         ) { database in
             try database.execute(sql: "ALTER TABLE accounts ADD COLUMN access_token_expires_at_ms INTEGER")
             try database.execute(sql: "ALTER TABLE accounts ADD COLUMN refresh_token_expires_at_ms INTEGER")
+        },
+        TriageDatabaseMigration(
+            id: "016-pull-request-review-context",
+            checksum: "c5d90183a6714e7f82ad6fc2c344e87d6bc9a2b4f07e3b75d39fa3b2ca5d787e"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE review_threads (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    pull_request_node_id TEXT NOT NULL REFERENCES pull_requests(github_node_id) ON DELETE CASCADE,
+                    is_resolved INTEGER NOT NULL CHECK (is_resolved IN (0, 1)),
+                    requires_current_user_response INTEGER NOT NULL CHECK (requires_current_user_response IN (0, 1)),
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE review_requests (
+                    pull_request_node_id TEXT NOT NULL REFERENCES pull_requests(github_node_id) ON DELETE CASCADE,
+                    requested_reviewer_node_id TEXT NOT NULL,
+                    reviewer_kind TEXT NOT NULL,
+                    requested_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (pull_request_node_id, requested_reviewer_node_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE status_checks (
+                    github_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    context TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    is_required INTEGER NOT NULL CHECK (is_required IN (0, 1)),
+                    completed_at_ms INTEGER,
+                    PRIMARY KEY (github_node_id, context)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_threads_pull_request_state
+                ON review_threads (pull_request_node_id, is_resolved)
+                """)
         }
     ]
 }
