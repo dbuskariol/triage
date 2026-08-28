@@ -41,17 +41,32 @@ actor WorkRelationRepository {
         }
 
         try await vault.write { database in
-            try Self.validateSubjectNodeScope(subjectNodeID, accountID: accountID, in: database)
-            try database.execute(
+            try Self.replace(
+                relations,
+                accountID: accountID,
+                subjectNodeID: subjectNodeID,
+                in: database
+            )
+        }
+    }
+
+    nonisolated static func replace(
+        _ relations: [WorkRelation],
+        accountID: AccountID,
+        subjectNodeID: GitHubNodeID,
+        in database: Database
+    ) throws {
+        try validateSubjectNodeScope(subjectNodeID, accountID: accountID, in: database)
+        try database.execute(
                 sql: """
                     DELETE FROM relations
                     WHERE account_id = ? AND subject_node_id = ?
                     """,
                 arguments: [accountID.rawValue, subjectNodeID.rawValue]
-            )
+        )
 
-            for relation in relations {
-                let relationID = Self.identifier(
+        for relation in relations {
+                    let relationID = identifier(
                     accountID: accountID,
                     relation: relation
                 )
@@ -69,7 +84,7 @@ actor WorkRelationRepository {
                         relation.objectNodeID?.rawValue,
                         relation.kind.rawValue,
                         relation.confidence.rawValue,
-                        Self.milliseconds(relation.observedAt)
+                        milliseconds(relation.observedAt)
                     ]
                 )
                 for evidence in relation.evidence {
@@ -87,12 +102,11 @@ actor WorkRelationRepository {
                             evidence.nodeID?.rawValue,
                             evidence.eventID?.rawValue,
                             evidence.sourceRevision,
-                            Self.milliseconds(evidence.observedAt),
+                            milliseconds(evidence.observedAt),
                             evidence.excerpt
                         ]
                     )
                 }
-            }
         }
     }
 

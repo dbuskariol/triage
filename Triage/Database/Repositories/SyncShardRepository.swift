@@ -24,12 +24,22 @@ actor SyncShardRepository {
         }
         try Self.validate(shard)
         try await vault.write { database in
-            try Self.requireStream(
-                shard.streamID,
-                accountID: accountID,
-                database: database
-            )
-            try database.execute(
+            try Self.save(shard, accountID: accountID, in: database)
+        }
+    }
+
+    nonisolated static func save(
+        _ shard: SyncShard,
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        try validate(shard)
+        try requireStream(
+            shard.streamID,
+            accountID: accountID,
+            database: database
+        )
+        try database.execute(
                 sql: """
                     INSERT INTO sync_shards (
                         id, stream_id, query_kind, interval_start_ms, interval_end_ms,
@@ -49,8 +59,7 @@ actor SyncShardRepository {
                     shard.intervalStart.map(Self.milliseconds), shard.intervalEnd.map(Self.milliseconds),
                     shard.pageCursor, shard.state.rawValue, shard.completedAt.map(Self.milliseconds)
                 ]
-            )
-        }
+        )
     }
 
     func shards(

@@ -17,13 +17,28 @@ actor AttentionReasonRepository {
         reasons: [AttentionReason]
     ) async throws {
         try await vault.write { database in
-            try Self.validateWorkItemScope(workItemID, vault: vault, in: database)
-            try database.execute(
+            try Self.replaceDiscoveryReasons(
+                workItemID: workItemID,
+                reasons: reasons,
+                accountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
+    nonisolated static func replaceDiscoveryReasons(
+        workItemID: WorkItemID,
+        reasons: [AttentionReason],
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        try validateWorkItemScope(workItemID, accountID: accountID, in: database)
+        try database.execute(
                 sql: "DELETE FROM attention_reasons WHERE work_item_id = ? AND rule_id LIKE 'discovery.%'",
                 arguments: [workItemID.rawValue]
-            )
-            for reason in reasons {
-                try database.execute(
+        )
+        for reason in reasons {
+            try database.execute(
                     sql: """
                         INSERT INTO attention_reasons (
                             id, work_item_id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
@@ -32,7 +47,7 @@ actor AttentionReasonRepository {
                     arguments: [
                         reason.id, workItemID.rawValue, reason.ruleID, reason.ruleVersion,
                         reason.category.rawValue, reason.strength, reason.title, reason.explanation,
-                        Self.milliseconds(reason.evaluatedAt)
+                        milliseconds(reason.evaluatedAt)
                     ]
                 )
                 for evidence in reason.evidence {
@@ -46,11 +61,10 @@ actor AttentionReasonRepository {
                         arguments: [
                             reason.id, evidence.id.rawValue, evidence.source.rawValue,
                             evidence.nodeID?.rawValue, evidence.eventID?.rawValue,
-                            evidence.sourceRevision, Self.milliseconds(evidence.observedAt), evidence.excerpt
+                            evidence.sourceRevision, milliseconds(evidence.observedAt), evidence.excerpt
                         ]
                     )
                 }
-            }
         }
     }
 
@@ -60,13 +74,13 @@ actor AttentionReasonRepository {
 
     private nonisolated static func validateWorkItemScope(
         _ workItemID: WorkItemID,
-        vault: AccountVault,
+        accountID: AccountID,
         in database: Database
     ) throws {
         let matchingCount = try Int.fetchOne(
             database,
             sql: "SELECT COUNT(*) FROM work_items WHERE id = ? AND account_id = ?",
-            arguments: [workItemID.rawValue, vault.accountID.rawValue]
+            arguments: [workItemID.rawValue, accountID.rawValue]
         ) ?? 0
         guard matchingCount == 1 else {
             throw AttentionReasonRepositoryError.workItemScopeMismatch
