@@ -182,6 +182,7 @@ describe("AuthBroker", () => {
       401,
       "authorizationDenied",
     ],
+    ["HTTP 200 expired grant", 200, { error: "bad_verification_code" }, 400, "invalidGrant"],
     ["expired grant", 400, { error: "bad_verification_code" }, 400, "invalidGrant"],
     ["invalid broker client", 401, { error: "incorrect_client_credentials" }, 502, "invalidClient"],
     ["temporary upstream failure", 503, { error: "server_error" }, 503, "temporarilyUnavailable"],

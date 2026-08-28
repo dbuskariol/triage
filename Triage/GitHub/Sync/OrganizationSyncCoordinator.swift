@@ -15,18 +15,23 @@ actor OrganizationSyncCoordinator {
 
     private var states: [Scope: SyncExecutionState] = [:]
     private var activeTasks: [Scope: Task<Void, Never>] = [:]
+    private var successfulSyncs: [Scope: Date] = [:]
 
     func state(accountID: AccountID, organizationID: OrganizationID) -> SyncExecutionState {
-        states[Scope(accountID: accountID, organizationID: organizationID)] ?? .idle(lastSuccessfulAt: nil)
+        let scope = Scope(accountID: accountID, organizationID: organizationID)
+        return states[scope] ?? .idle(lastSuccessfulAt: successfulSyncs[scope])
     }
 
     func start(
         accountID: AccountID,
         organizationID: OrganizationID,
         operation: @escaping @Sendable () async throws -> Void
-    ) {
+    ) async {
         let key = Scope(accountID: accountID, organizationID: organizationID)
-        activeTasks[key]?.cancel()
+        if let activeTask = activeTasks.removeValue(forKey: key) {
+            activeTask.cancel()
+            await activeTask.value
+        }
         let startedAt = Date()
         states[key] = .refreshing(startedAt: startedAt)
         activeTasks[key] = Task {
@@ -45,25 +50,27 @@ actor OrganizationSyncCoordinator {
         }
     }
 
-    func cancel(accountID: AccountID, organizationID: OrganizationID) {
+    func cancel(accountID: AccountID, organizationID: OrganizationID) async {
         let key = Scope(accountID: accountID, organizationID: organizationID)
-        activeTasks.removeValue(forKey: key)?.cancel()
+        guard let activeTask = activeTasks.removeValue(forKey: key) else { return }
+        activeTask.cancel()
+        await activeTask.value
+        states[key] = .idle(lastSuccessfulAt: lastSuccessfulAt(for: key))
     }
 
     private func complete(key: Scope, succeededAt: Date) {
         activeTasks[key] = nil
+        successfulSyncs[key] = succeededAt
         states[key] = .idle(lastSuccessfulAt: succeededAt)
     }
 
     private func fail(key: Scope, lastSuccessfulAt: Date?, detail: String) {
         activeTasks[key] = nil
-        states[key] = .failed(lastSuccessfulAt: lastSuccessfulAt, detail: detail)
+        states[key] = .failed(lastSuccessfulAt: successfulSyncs[key] ?? lastSuccessfulAt, detail: detail)
     }
 
     private func lastSuccessfulAt(for key: Scope) -> Date? {
-        if case let .idle(lastSuccessfulAt) = states[key] { return lastSuccessfulAt }
-        if case let .failed(lastSuccessfulAt, _) = states[key] { return lastSuccessfulAt }
-        return nil
+        successfulSyncs[key]
     }
 
 }
