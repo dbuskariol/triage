@@ -18,6 +18,7 @@ struct TriageApp: App {
                 .frame(minWidth: 940, minHeight: 680)
                 .task {
                     await appModel.restoreAccounts()
+                    await appModel.startAutomaticRefreshes()
                     await appModel.refreshSelectedOrganization()
                     await notificationScheduler.registerLocalActions()
                 }

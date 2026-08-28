@@ -15,6 +15,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var restorationError: String?
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
+    private let refreshScheduler = ActiveRefreshScheduler()
     private var refreshGeneration = 0
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
@@ -89,6 +90,12 @@ final class TriageAppModel: ObservableObject {
 
     func recordConnectionWindowError() {
         connectionError = "Triage could not find its active window."
+    }
+
+    func startAutomaticRefreshes() async {
+        await refreshScheduler.start { [weak self] in
+            await self?.refreshSelectedOrganization()
+        }
     }
 
     func restoreAccounts() async {
