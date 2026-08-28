@@ -21,6 +21,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var connectionError: String?
     @Published private(set) var refreshError: String?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isConnecting = false
     @Published private(set) var restorationError: String?
     @Published private(set) var ssoAuthorizationHeader: GitHubSSOHeader?
 
@@ -98,6 +99,8 @@ final class TriageAppModel: ObservableObject {
 
     func connectGitHub(presentationAnchor: NSWindow) async {
         connectionError = nil
+        isConnecting = true
+        defer { isConnecting = false }
         do {
             let configuration = try RuntimeOAuthConfiguration()
             let request = try await oauthAuthorizer.authorize(
@@ -122,6 +125,31 @@ final class TriageAppModel: ObservableObject {
             return
         } catch {
             connectionError = "GitHub sign-in could not be completed. Try again."
+        }
+    }
+
+    func connectPersonalAccessToken(
+        _ rawValue: String,
+        resourceOwnerOrganization: String?
+    ) async {
+        connectionError = nil
+        isConnecting = true
+        defer { isConnecting = false }
+        do {
+            let token = try PersonalAccessToken(rawValue: rawValue)
+            let result = try await AccountConnectionService(
+                secretStore: KeychainSecretStore(),
+                vaultRegistry: VaultRegistry()
+            ).connect(
+                personalAccessToken: token,
+                resourceOwnerOrganization: resourceOwnerOrganization
+            )
+            install(accounts: accounts + [result.account], organizations: result.organizations, for: result.account.id)
+            await refreshSelectedOrganization()
+        } catch is PersonalAccessTokenError {
+            connectionError = "Enter a supported fine-grained or classic GitHub personal access token."
+        } catch {
+            connectionError = "Triage could not validate this personal access token. Check its access and try again."
         }
     }
 
