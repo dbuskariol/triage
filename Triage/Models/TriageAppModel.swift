@@ -120,7 +120,7 @@ final class TriageAppModel: ObservableObject {
     func refreshSelectedOrganization() async {
         refreshGeneration += 1
         let generation = refreshGeneration
-        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+        guard let initialAccount = accounts.first(where: { $0.id == selectedAccountID }),
               let organization = selectedOrganization
         else {
             return
@@ -137,6 +137,22 @@ final class TriageAppModel: ObservableObject {
         do {
             let secretStore = KeychainSecretStore()
             let vaultRegistry = try VaultRegistry()
+            let account: GitHubAccount
+            if initialAccount.authenticationKind == .oauth,
+               initialAccount.accessTokenExpiresAt.map({ $0 <= Date().addingTimeInterval(5 * 60) }) ?? false
+            {
+                let runtimeConfiguration = try RuntimeOAuthConfiguration()
+                account = try await OAuthCredentialRefreshService(
+                    brokerURL: runtimeConfiguration.brokerURL,
+                    secretStore: secretStore,
+                    vaultRegistry: vaultRegistry
+                ).refreshIfNeeded(initialAccount)
+                if let index = accounts.firstIndex(where: { $0.id == account.id }) {
+                    accounts[index] = account
+                }
+            } else {
+                account = initialAccount
+            }
             _ = try await OrganizationWorkRefreshService(
                 credentialReader: AccountCredentialReader(secretStore: secretStore),
                 vaultRegistry: vaultRegistry,
