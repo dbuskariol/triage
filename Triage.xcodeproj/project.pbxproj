@@ -49,6 +49,7 @@
 		578CC1E89C6D6601B9599CEF /* ProgressAttentionRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C7B844F72450F775AFAA8EB /* ProgressAttentionRuleTests.swift */; };
 		59361E7D730F026936B600C3 /* GitHubSSOHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */; };
 		593D34E52E35E0A27F81AC9E /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */; };
+		5942E5936789D4F38F413A23 /* OAuthCredentialRefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */; };
 		59DA8B422EDCB24683F2B8D4 /* WorkItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD0C14B59A1223DC3240A96C /* WorkItem.swift */; };
 		5BC464EE268BBA65B7ADC572 /* GitHubContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */; };
 		5D12FECE58088548FECB3BEC /* WorkflowTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */; };
@@ -270,6 +271,7 @@
 		FA1728A0CCB3D88332130654 /* NotificationDeliveryLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDeliveryLedger.swift; sourceTree = "<group>"; };
 		FAA6952357B8ECC6AF45D0D1 /* WorkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkDetailView.swift; sourceTree = "<group>"; };
 		FB8E3FD7D8F400F18F9E4E86 /* WaitingAttentionRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaitingAttentionRuleTests.swift; sourceTree = "<group>"; };
+		FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OAuthCredentialRefreshService.swift; sourceTree = "<group>"; };
 		FE740719DC2E5F12F288FFB9 /* GitHubRESTTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTTransport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -331,6 +333,7 @@
 				9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */,
 				152B2A70DEBF7542ECA00583 /* GitHubOAuth.swift */,
 				4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */,
+				FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */,
 				77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */,
 				BACBE230946C1056771FE56F /* PersonalAccessToken.swift */,
 				B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */,
@@ -825,6 +828,7 @@
 				3CE6D5F4FFFBBABB738F0A61 /* NotificationPolicy.swift in Sources */,
 				44C76E7A27BD346F730DDB43 /* NotificationRoute.swift in Sources */,
 				5230A71A6E673CD4C481347E /* NotificationScheduler.swift in Sources */,
+				5942E5936789D4F38F413A23 /* OAuthCredentialRefreshService.swift in Sources */,
 				8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */,
 				A7ECCD19452B150C7E505B9E /* OrganizationInventoryRefreshService.swift in Sources */,
 				C11C2C6E9A86E94B57617D12 /* OrganizationSyncCoordinator.swift in Sources */,

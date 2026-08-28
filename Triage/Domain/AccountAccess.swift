@@ -127,6 +127,29 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
         self.lastValidatedAt = lastValidatedAt
     }
+
+    func replacingCredentialExpiration(
+        accessTokenExpiresAt: Date?,
+        refreshTokenExpiresAt: Date?,
+        status: CredentialStatus,
+        validatedAt: Date
+    ) -> GitHubAccount {
+        GitHubAccount(
+            id: id,
+            githubUserID: githubUserID,
+            nodeID: nodeID,
+            login: login,
+            displayName: displayName,
+            avatarURL: avatarURL,
+            authenticationKind: authenticationKind,
+            credentialID: credentialID,
+            credentialStatus: status,
+            accessTokenExpiresAt: accessTokenExpiresAt,
+            refreshTokenExpiresAt: refreshTokenExpiresAt,
+            createdAt: createdAt,
+            lastValidatedAt: validatedAt
+        )
+    }
 }
 
 struct GitHubOrganization: Codable, Equatable, Sendable, Identifiable {
