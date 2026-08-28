@@ -22,6 +22,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var refreshError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var restorationError: String?
+    @Published private(set) var ssoAuthorizationHeader: GitHubSSOHeader?
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
@@ -198,6 +199,14 @@ final class TriageAppModel: ObservableObject {
             install(workItems: workItems)
         } catch is CancellationError {
             return
+        } catch let error as GitHubFailure {
+            guard refreshGeneration == generation else { return }
+            ssoAuthorizationHeader = error.ssoHeader
+            if case .authorizationRequired? = error.ssoHeader {
+                refreshError = "GitHub requires SSO authorization for this organization."
+            } else {
+                refreshError = "Triage could not refresh this organization. Cached work remains available."
+            }
         } catch {
             guard refreshGeneration == generation else { return }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
