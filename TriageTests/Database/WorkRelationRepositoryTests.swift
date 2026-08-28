@@ -442,6 +442,21 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testSynchronizationScopeUsesCurrentCredentialAndCapabilityRevisions() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let scope = try await AccountRepository(vault: fixture.vault).synchronizationScope(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+
+        XCTAssertEqual(scope.accountID, fixture.accountID)
+        XCTAssertEqual(scope.organizationID, fixture.organizationID)
+        XCTAssertEqual(scope.credentialRevision, CredentialRevision(rawValue: "credential-1"))
+        XCTAssertEqual(scope.capabilityRevision, CapabilityRevision(rawValue: "capability-1"))
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

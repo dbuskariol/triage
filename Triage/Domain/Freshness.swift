@@ -71,3 +71,10 @@ struct CoverageRecord: Codable, Equatable, Sendable {
     let lastSuccessfulAt: Date?
     let failureDetail: String?
 }
+
+struct SynchronizationScope: Equatable, Sendable {
+    let accountID: AccountID
+    let organizationID: OrganizationID
+    let credentialRevision: CredentialRevision
+    let capabilityRevision: CapabilityRevision
+}
