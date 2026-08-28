@@ -52,6 +52,7 @@
 		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */; };
+		8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
 		8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB5F72324221C0E738D94C7 /* ProgressAttentionRule.swift */; };
 		8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80EB94E267D82037DB5FBBC /* AccountRepository.swift */; };
@@ -79,6 +80,7 @@
 		CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
+		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
@@ -174,6 +176,7 @@
 		8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeaderTests.swift; sourceTree = "<group>"; };
 		90044685B20CE509DAFA633F /* GitHubRateLimit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimit.swift; sourceTree = "<group>"; };
 		926E2C8C201B67494FDEBD5E /* SoftwareUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateController.swift; sourceTree = "<group>"; };
+		92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermarkTests.swift; sourceTree = "<group>"; };
 		92ED1ADA9F9B0A13AF694033 /* AuthBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClient.swift; sourceTree = "<group>"; };
 		94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTTransportTests.swift; sourceTree = "<group>"; };
 		9690060369E66769608BBCEA /* InboxEligibilityRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxEligibilityRule.swift; sourceTree = "<group>"; };
@@ -192,6 +195,7 @@
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermark.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		D962615F59F45990114831EF /* AccountConnectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnectionService.swift; sourceTree = "<group>"; };
 		D988495C37A78AEED9B566A4 /* Identifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identifiers.swift; sourceTree = "<group>"; };
@@ -395,6 +399,7 @@
 				E844E395E5858DFCE770AF44 /* GitHubRESTClientTests.swift */,
 				94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */,
 				16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */,
+				92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */,
 			);
 			path = GitHub;
 			sourceTree = "<group>";
@@ -435,6 +440,7 @@
 			isa = PBXGroup;
 			children = (
 				83A08A743ED79E891E831DFC /* SearchShardPlanner.swift */,
+				CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -646,6 +652,7 @@
 				9828F7BEBE9B27EF47A8E6C6 /* PullRequestAttentionRuleTests.swift in Sources */,
 				97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */,
 				85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */,
+				8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */,
 				62AE7865C93E901751D96D83 /* TriageTests.swift in Sources */,
 				0769B6A2DF3F028CD0D926FC /* WaitingAttentionRuleTests.swift in Sources */,
 				809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */,
@@ -703,6 +710,7 @@
 				B282AD71D7C9C089A4AB8C8F /* SearchShardPlanner.swift in Sources */,
 				548E20C9F071D33CBABF5A45 /* SettingsView.swift in Sources */,
 				63AA4773C2EF01BDC055423C /* SoftwareUpdateController.swift in Sources */,
+				D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */,
 				BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */,
 				689BB5871312602063AE4AB7 /* TriageAppModel.swift in Sources */,
 				CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */,
