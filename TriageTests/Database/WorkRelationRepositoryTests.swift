@@ -56,6 +56,22 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testRejectsRelationsForANodeOutsideTheVaultAccount() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        do {
+            try await WorkRelationRepository(vault: fixture.vault).replace(
+                [],
+                accountID: fixture.accountID,
+                subjectNodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!
+            )
+            XCTFail("Expected a source node scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? WorkRelationRepositoryError, .subjectNodeScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

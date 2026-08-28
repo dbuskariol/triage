@@ -5,6 +5,7 @@ import GRDB
 enum WorkRelationRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
     case subjectScopeMismatch
+    case subjectNodeScopeMismatch
     case duplicateRelation
     case duplicateEvidence
 }
@@ -40,6 +41,7 @@ actor WorkRelationRepository {
         }
 
         try await vault.write { database in
+            try Self.validateSubjectNodeScope(subjectNodeID, accountID: accountID, in: database)
             try database.execute(
                 sql: """
                     DELETE FROM relations
@@ -100,6 +102,21 @@ actor WorkRelationRepository {
             relation.objectNodeID?.rawValue ?? "",
             relation.kind.rawValue
         ].joined(separator: "\u{0}")
+    }
+
+    private nonisolated static func validateSubjectNodeScope(
+        _ subjectNodeID: GitHubNodeID,
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
+            arguments: [subjectNodeID.rawValue, accountID.rawValue]
+        ) ?? 0
+        guard matchingCount == 1 else {
+            throw WorkRelationRepositoryError.subjectNodeScopeMismatch
+        }
     }
 
     private nonisolated static func identifier(
