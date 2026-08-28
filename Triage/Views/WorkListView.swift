@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkListView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
+    @State private var searchText = ""
 
     var body: some View {
         List(selection: $appModel.selectedWorkItemID) {
@@ -12,6 +13,7 @@ struct WorkListView: View {
             }
         }
         .navigationTitle(navigation.section.title)
+        .searchable(text: $searchText, prompt: "Search work")
         .overlay {
             if filteredWorkItems.isEmpty {
                 ContentUnavailableView(
@@ -55,13 +57,32 @@ struct WorkListView: View {
                 true
             }
         }
-        return AttentionRanker().sort(matching, at: now)
+        let searched = matching.filter(matchesSearch)
+        return AttentionRanker().sort(searched, at: now)
     }
 
     private var emptyDescription: String {
-        navigation.section == .inbox
+        if !searchText.isEmpty {
+            return "No cached work in this organization matches “\(searchText)”."
+        }
+        return navigation.section == .inbox
             ? "Nothing currently needs your attention."
             : "No synchronized work matches this view."
+    }
+
+    private func matchesSearch(_ item: WorkItem) -> Bool {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        let searchableText = [
+            item.title,
+            item.repository?.fullName,
+            item.attentionReasons.map(\.title).joined(separator: " "),
+            item.actionItems.map(\.title).joined(separator: " "),
+            item.workflow.localNote
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
+        return searchableText.localizedCaseInsensitiveContains(query)
     }
 }
 
