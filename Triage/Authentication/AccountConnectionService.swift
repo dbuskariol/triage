@@ -91,7 +91,12 @@ actor AccountConnectionService {
             avatarURL: user.avatarURL,
             authenticationKind: authenticationKind,
             credentialID: credentialID,
-            credentialStatus: .active,
+            credentialStatus: CredentialLifecycle.status(
+                authenticationKind: authenticationKind,
+                accessTokenExpiresAt: accessTokenLifetime.map { now.addingTimeInterval($0) },
+                refreshTokenExpiresAt: refreshTokenLifetime.map { now.addingTimeInterval($0) },
+                at: now
+            ),
             accessTokenExpiresAt: accessTokenLifetime.map { now.addingTimeInterval($0) },
             refreshTokenExpiresAt: refreshTokenLifetime.map { now.addingTimeInterval($0) },
             createdAt: now,

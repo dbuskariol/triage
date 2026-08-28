@@ -6,8 +6,6 @@ enum OAuthCredentialRefreshError: Error, Equatable, Sendable {
 }
 
 actor OAuthCredentialRefreshService {
-    private static let refreshLeeway: TimeInterval = 5 * 60
-
     private let brokerURL: URL
     private let secretStore: KeychainSecretStore
     private let vaultRegistry: VaultRegistry
@@ -28,7 +26,7 @@ actor OAuthCredentialRefreshService {
     func refreshIfNeeded(_ account: GitHubAccount) async throws -> GitHubAccount {
         guard account.authenticationKind == .oauth else { return account }
         let now = clock()
-        guard account.accessTokenExpiresAt.map({ $0 <= now.addingTimeInterval(Self.refreshLeeway) }) ?? false else {
+        guard CredentialLifecycle.status(for: account, at: now) == .expiring else {
             return account
         }
         guard let data = try await secretStore.read(
@@ -55,10 +53,18 @@ actor OAuthCredentialRefreshService {
                 credentialID: account.credentialID
             )
         }
+        let accessTokenExpiresAt = response.expiresIn.map { now.addingTimeInterval($0) }
+        let refreshTokenExpiresAt = response.refreshTokenExpiresIn.map { now.addingTimeInterval($0) }
+            ?? account.refreshTokenExpiresAt
         let refreshed = account.replacingCredentialExpiration(
-            accessTokenExpiresAt: response.expiresIn.map { now.addingTimeInterval($0) },
-            refreshTokenExpiresAt: response.refreshTokenExpiresIn.map { now.addingTimeInterval($0) },
-            status: .active,
+            accessTokenExpiresAt: accessTokenExpiresAt,
+            refreshTokenExpiresAt: refreshTokenExpiresAt,
+            status: CredentialLifecycle.status(
+                authenticationKind: account.authenticationKind,
+                accessTokenExpiresAt: accessTokenExpiresAt,
+                refreshTokenExpiresAt: refreshTokenExpiresAt,
+                at: now
+            ),
             validatedAt: now
         )
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {

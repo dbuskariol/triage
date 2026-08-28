@@ -207,9 +207,23 @@ final class TriageAppModel: ObservableObject {
             let secretStore = KeychainSecretStore()
             let vaultRegistry = try VaultRegistry()
             let account: GitHubAccount
-            if initialAccount.authenticationKind == .oauth,
-               initialAccount.accessTokenExpiresAt.map({ $0 <= Date().addingTimeInterval(5 * 60) }) ?? false
-            {
+            let lifecycleStatus = CredentialLifecycle.status(for: initialAccount, at: Date())
+            if let reconnectMessage = CredentialLifecycle.reconnectMessage(
+                for: lifecycleStatus
+            ) {
+                await persistCredentialStatus(
+                    lifecycleStatus,
+                    for: initialAccount,
+                    message: reconnectMessage
+                )
+                return
+            } else if let reconnectMessage = CredentialLifecycle.reconnectMessage(
+                for: initialAccount.credentialStatus
+            ) {
+                refreshError = reconnectMessage
+                return
+            } else if initialAccount.authenticationKind == .oauth,
+                      lifecycleStatus == .expiring {
                 let runtimeConfiguration = try RuntimeOAuthConfiguration()
                 account = try await OAuthCredentialRefreshService(
                     brokerURL: runtimeConfiguration.brokerURL,
@@ -248,6 +262,14 @@ final class TriageAppModel: ObservableObject {
             return
         } catch let error as GitHubFailure {
             guard refreshGeneration == generation else { return }
+            if let credentialStatus = CredentialLifecycle.failureStatus(for: error) {
+                await persistCredentialStatus(
+                    credentialStatus,
+                    for: initialAccount,
+                    message: CredentialLifecycle.reconnectMessage(for: credentialStatus)
+                )
+                return
+            }
             ssoAuthorizationHeader = error.ssoHeader
             if case .authorizationRequired? = error.ssoHeader {
                 refreshError = "GitHub requires SSO authorization for this organization."
@@ -256,7 +278,44 @@ final class TriageAppModel: ObservableObject {
             }
         } catch {
             guard refreshGeneration == generation else { return }
+            if let credentialStatus = CredentialLifecycle.failureStatus(for: error) {
+                await persistCredentialStatus(
+                    credentialStatus,
+                    for: initialAccount,
+                    message: CredentialLifecycle.reconnectMessage(for: credentialStatus)
+                )
+                return
+            }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
+        }
+    }
+
+    private func persistCredentialStatus(
+        _ status: CredentialStatus,
+        for account: GitHubAccount,
+        message: String?
+    ) async {
+        let updatedAccount = account.replacingCredentialExpiration(
+            accessTokenExpiresAt: account.accessTokenExpiresAt,
+            refreshTokenExpiresAt: account.refreshTokenExpiresAt,
+            status: status,
+            validatedAt: account.lastValidatedAt ?? account.createdAt
+        )
+        do {
+            let secretStore = KeychainSecretStore()
+            guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+                throw AccountCredentialReaderError.missingAccessToken
+            }
+            let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+            try await AccountRepository(vault: vault).save(
+                updatedAccount,
+                credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
+            )
+            guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+            accounts[index] = updatedAccount
+            refreshError = message ?? "Triage could not refresh this organization. Cached work remains available."
+        } catch {
+            refreshError = "Triage could not update credential state. Cached work remains available."
         }
     }
 
