@@ -34,6 +34,7 @@ final class TriageAppModel: ObservableObject {
     private var refreshGeneration = 0
     private var foregroundRefreshTask: Task<Void, Never>?
     private var foregroundRefreshTaskID: UUID?
+    private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
     var organizations: [GitHubOrganization] {
@@ -78,7 +79,16 @@ final class TriageAppModel: ObservableObject {
         selectedOrganizationID = organizations.first?.id
     }
 
-    func install(workItems: [WorkItem]) {
+    func install(
+        workItems: [WorkItem],
+        accountID: AccountID,
+        organizationID: OrganizationID
+    ) {
+        cachedWorkItems[accountID, organizationID] = workItems
+        present(workItems: workItems)
+    }
+
+    private func present(workItems: [WorkItem]) {
         self.workItems = workItems
         if !workItems.contains(where: { $0.id == selectedWorkItemID }) {
             selectedWorkItemID = workItems.first?.id
@@ -109,8 +119,7 @@ final class TriageAppModel: ObservableObject {
         invalidateRefreshState()
         selectedAccountID = accountID
         selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
-        self.workItems = []
-        selectedWorkItemID = nil
+        presentCachedWorkItems()
         activateSelectedOrganization()
     }
 
@@ -118,13 +127,17 @@ final class TriageAppModel: ObservableObject {
         guard organizations.contains(where: { $0.id == organizationID }) else { return }
         invalidateRefreshState()
         selectedOrganizationID = organizationID
+        presentCachedWorkItems()
         activateSelectedOrganization()
     }
 
     func removeAccount(_ accountID: AccountID) async throws {
         guard accounts.contains(where: { $0.id == accountID }) else { return }
 
-        invalidateRefreshState()
+        let isRemovingSelectedAccount = selectedAccountID == accountID
+        if isRemovingSelectedAccount {
+            invalidateRefreshState()
+        }
         let fileManager = FileManager.default
         let applicationSupportDirectory = try fileManager.url(
             for: .applicationSupportDirectory,
@@ -149,13 +162,14 @@ final class TriageAppModel: ObservableObject {
         accounts.removeAll { $0.id == accountID }
         organizationsByAccount[accountID] = nil
         organizationAccessesByAccount[accountID] = nil
-        if selectedAccountID == accountID {
+        cachedWorkItems.removeAll(for: accountID)
+        if isRemovingSelectedAccount {
             selectedAccountID = accounts.first?.id
             selectedOrganizationID = selectedAccountID
                 .flatMap { organizationsByAccount[$0]?.first?.id }
+            presentCachedWorkItems()
+            activateSelectedOrganization()
         }
-        workItems = []
-        selectedWorkItemID = nil
     }
 
     var selectedWorkItem: WorkItem? {
@@ -422,7 +436,11 @@ final class TriageAppModel: ObservableObject {
             else {
                 return
             }
-            install(workItems: workItems)
+            install(
+                workItems: workItems,
+                accountID: account.id,
+                organizationID: organization.id
+            )
         } catch is CancellationError {
             return
         } catch let error as GitHubFailure {
@@ -519,7 +537,11 @@ final class TriageAppModel: ObservableObject {
             else {
                 return
             }
-            install(workItems: workItems)
+            install(
+                workItems: workItems,
+                accountID: account.id,
+                organizationID: organization.id
+            )
         } catch {
             restorationError = "Triage could not load cached work for the selected organization."
         }
@@ -533,6 +555,7 @@ final class TriageAppModel: ObservableObject {
             ).apply(action, to: workItem)
             guard let index = workItems.firstIndex(where: { $0.id == updated.id }) else { return }
             workItems[index] = updated
+            cachedWorkItems[updated.accountID, updated.organizationID] = workItems
             try await rebuildSearchIndex(for: updated)
         } catch {
             refreshError = "Triage could not save this local workflow change."
@@ -552,6 +575,7 @@ final class TriageAppModel: ObservableObject {
             workItems[index] = workItem.replacing(
                 actionItems: workItem.actionItems.map { $0.id == completed.id ? completed : $0 }
             )
+            cachedWorkItems[workItem.accountID, workItem.organizationID] = workItems
             try await rebuildSearchIndex(for: workItem)
         } catch {
             refreshError = "Triage could not complete this local action item."
@@ -588,6 +612,17 @@ final class TriageAppModel: ObservableObject {
             await self.loadCachedSelectedOrganization()
             await self.refreshSelectedOrganization()
         }
+    }
+
+    private func presentCachedWorkItems() {
+        guard let accountID = selectedAccountID,
+              let organizationID = selectedOrganizationID,
+              let cachedWorkItems = cachedWorkItems[accountID, organizationID]
+        else {
+            present(workItems: [])
+            return
+        }
+        present(workItems: cachedWorkItems)
     }
 
     private func requiredVaultRegistry() throws -> VaultRegistry {
