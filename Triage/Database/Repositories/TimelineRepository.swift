@@ -1,6 +1,10 @@
 import Foundation
 import GRDB
 
+enum TimelineRepositoryError: Error, Equatable, Sendable {
+    case subjectNodeScopeMismatch
+}
+
 actor TimelineRepository {
     private let vault: AccountVault
 
@@ -11,10 +15,14 @@ actor TimelineRepository {
     func save(_ event: TimelineEventSummary, sourceRevision: String) async throws {
         let payload = try JSONEncoder().encode(event)
         let occurredAt = Int64((event.occurredAt.timeIntervalSince1970 * 1_000).rounded())
+        try await vault.read { database in
+            try Self.validateSubjectNodeScope(event.subjectNodeID, vault: vault, in: database)
+        }
         if let actor = event.actor {
             try await ActorRepository(vault: vault).save(actor, observedAt: event.occurredAt)
         }
         try await vault.write { database in
+            try Self.validateSubjectNodeScope(event.subjectNodeID, vault: vault, in: database)
             try database.execute(
                 sql: """
                     INSERT INTO timeline_events (
@@ -37,6 +45,21 @@ actor TimelineRepository {
                     sourceRevision
                 ]
             )
+        }
+    }
+
+    private nonisolated static func validateSubjectNodeScope(
+        _ nodeID: GitHubNodeID,
+        vault: AccountVault,
+        in database: Database
+    ) throws {
+        let matchingCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
+            arguments: [nodeID.rawValue, vault.accountID.rawValue]
+        ) ?? 0
+        guard matchingCount == 1 else {
+            throw TimelineRepositoryError.subjectNodeScopeMismatch
         }
     }
 }
