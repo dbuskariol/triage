@@ -5,6 +5,7 @@ struct SettingsView: View {
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
+    @EnvironmentObject private var appModel: TriageAppModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,6 +75,11 @@ struct SettingsView: View {
 
     private var categorySubtitle: String {
         switch navigation.settingsCategory {
+        case .accounts: "Manage GitHub identities and encrypted local account data."
+        case .organizations: "Review organization access, capabilities, and synchronization coverage."
+        case .inbox: "Control the local workflow rules that organize your work."
+        case .notifications: "Choose which actionable changes can notify you."
+        case .ai: "Copilot analysis is optional and enabled per organization."
         case .general: "Choose how Triage integrates with macOS."
         case .updates: "Keep Triage current through signed, verified updates."
         case .about: "Review this installation and its privacy baseline."
@@ -83,12 +89,89 @@ struct SettingsView: View {
     @ViewBuilder
     private var categoryContent: some View {
         switch navigation.settingsCategory {
+        case .accounts:
+            accountsSettings
+        case .organizations:
+            organizationSettings
+        case .inbox:
+            inboxSettings
+        case .notifications:
+            notificationSettings
+        case .ai:
+            aiSettings
         case .general:
             generalSettings
         case .updates:
             updateSettings
         case .about:
             aboutSettings
+        }
+    }
+
+    private var accountsSettings: some View {
+        SettingsCard(title: "Connected Accounts") {
+            if appModel.accounts.isEmpty {
+                Text("No GitHub accounts are connected.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(appModel.accounts) { account in
+                    SettingsValueRow(
+                        title: account.login,
+                        detail: account.authenticationKind.title,
+                        systemImage: "person.crop.circle"
+                    ) {
+                        Text(account.credentialStatus.rawValue.capitalized)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var organizationSettings: some View {
+        SettingsCard(title: "Organizations") {
+            if appModel.organizations.isEmpty {
+                Text("Connect an account to discover organizations.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(appModel.organizations) { organization in
+                    SettingsValueRow(
+                        title: organization.displayName ?? organization.login,
+                        detail: organization.login,
+                        systemImage: "building.2"
+                    ) {
+                        Text(organization.id == appModel.selectedOrganizationID ? "Current" : "")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var inboxSettings: some View {
+        SettingsCard(title: "Attention") {
+            SettingsValueRow(
+                title: "Stale progress",
+                detail: "Owned work becomes stale after three business days without qualifying progress.",
+                systemImage: "clock.badge.exclamationmark"
+            ) {
+                Text("3 days")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var notificationSettings: some View {
+        SettingsCard(title: "Notifications") {
+            Text("Notifications are quiet by default and never change GitHub notification state.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var aiSettings: some View {
+        SettingsCard(title: "Copilot") {
+            Text("Copilot analysis is disabled until you explicitly enable it for an organization.")
+                .foregroundStyle(.secondary)
         }
     }
 
