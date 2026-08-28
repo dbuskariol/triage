@@ -28,19 +28,19 @@ enum GitHubGraphQLQueries {
         query TriageHydrateNodes($ids: [ID!]!) {
           nodes(ids: $ids) {
             ... on Issue {
-              id number title body url state createdAt updatedAt closedAt
+              __typename id databaseId number title body url state createdAt updatedAt closedAt
               author { ...ActorFields }
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } }
               labels(first: 100) { nodes { id name color } }
             }
             ... on PullRequest {
-              id number title body url state createdAt updatedAt closedAt mergedAt isDraft
+              __typename id databaseId number title body url state createdAt updatedAt closedAt mergedAt isDraft
               author { ...ActorFields }
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } }
               labels(first: 100) { nodes { id name color } }
-              reviewRequests(first: 50) { nodes { requestedReviewer { ...ActorFields } } }
+              reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { ...ActorFields } } } }
               closingIssuesReferences(first: 50) { nodes { id } }
             }
           }

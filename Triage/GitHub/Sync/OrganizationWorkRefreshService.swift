@@ -101,12 +101,15 @@ actor OrganizationWorkRefreshService {
                     (URL(string: "https://api.github.com/repos/\($0.fullName)")!, $0.id)
                 }
             )
+            let repositoryIDsByNodeID = Dictionary(
+                uniqueKeysWithValues: inventory.map { ($0.nodeID.rawValue, $0.id) }
+            )
             let plan = try RoleDiscoveryPlan(
                 organizationLogin: organization.login,
                 userLogin: account.login,
                 now: serverObservedAt
             )
-            let workItemIDs = try await RoleDiscoverySynchronizer(
+            let discoveryResult = try await RoleDiscoverySynchronizer(
                 searchClient: searchClient,
                 nodeRepository: GitHubNodeRepository(vault: vault),
                 workItemRepository: WorkItemRepository(vault: vault),
@@ -126,6 +129,23 @@ actor OrganizationWorkRefreshService {
                 accessibleRepositoryNames: inventory.map(\.fullName),
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
             )
+            let graphqlClient = GitHubGraphQLClient(
+                credential: token,
+                rateLimitController: rateLimitController
+            )
+            try await GitHubNodeHydrationService(
+                client: graphqlClient,
+                nodeRepository: GitHubNodeRepository(vault: vault),
+                actorRepository: ActorRepository(vault: vault),
+                rawSnapshotRepository: RawAPISnapshotRepository(vault: vault)
+            ).hydrate(
+                nodeIDs: discoveryResult.candidateNodeIDs,
+                accountID: account.id,
+                organizationID: organization.id,
+                repositoryID: { repository in
+                    repositoryIDsByNodeID[repository.id]
+                }
+            )
             try await coverageRepository.save(
                 coverageRecord(
                     scope: synchronizationScope,
@@ -137,7 +157,7 @@ actor OrganizationWorkRefreshService {
                 ),
                 attemptedAt: attemptedAt
             )
-            return workItemIDs
+            return discoveryResult.workItemIDs
         } catch let failure as GitHubFailure {
             if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) {
                 try await coverageRepository.save(

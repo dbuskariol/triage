@@ -74,6 +74,21 @@ final class GitHubGraphQLClientTests: XCTestCase {
         } catch let error as GitHubGraphQLError {
             XCTAssertEqual(error, .invalidResponse)
         }
+
+        func testDecodesGraphQLISO8601Dates() async throws {
+            let client = GitHubGraphQLClient(
+                session: GraphQLStubSession(body: Data(#"{"data":{"resetAt":"2026-08-29T00:00:00Z"}}"#.utf8)),
+                credential: SecretValue("token")
+            )
+
+            let response = try await client.executeComplete(
+                GitHubGraphQLQuery(document: "query RateLimit { resetAt }", operationName: "RateLimit"),
+                variables: EmptyVariables(),
+                as: DatePayload.self
+            )
+
+            XCTAssertEqual(response.resetAt, Date(timeIntervalSince1970: 1_788_048_000))
+        }
     }
 
     func testClassifiesGraphQLSecondaryLimitUsingResponseHeaders() async throws {
@@ -106,6 +121,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 private struct EmptyVariables: Codable, Sendable {}
 private struct ViewerPayload: Codable, Sendable { let viewer: Viewer }
 private struct Viewer: Codable, Sendable { let login: String }
+private struct DatePayload: Codable, Sendable { let resetAt: Date }
 
 private actor GraphQLStubSession: HTTPSession {
     let body: Data
