@@ -66,7 +66,9 @@ actor OrganizationWorkRefreshService {
                 nodeRepository: GitHubNodeRepository(vault: vault),
                 workItemRepository: WorkItemRepository(vault: vault),
                 relationRepository: WorkRelationRepository(vault: vault),
-                attentionRepository: AttentionReasonRepository(vault: vault)
+                attentionRepository: AttentionReasonRepository(vault: vault),
+                rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+                normalizationFailureRepository: NormalizationFailureRepository(vault: vault)
             ).synchronize(
                 plan: plan,
                 accountID: account.id,
