@@ -2,6 +2,7 @@ import Foundation
 
 struct PullRequestReviewRefreshResult: Sendable {
     let refreshedPullRequestNodeIDs: [GitHubNodeID]
+    let hasRemainingCandidates: Bool
     let ssoHeaders: [GitHubSSOHeader]
 
     var ssoHeader: GitHubSSOHeader? {
@@ -27,7 +28,7 @@ actor PullRequestReviewRefreshService {
         limit: Int = 50,
         observedAt: Date = .now
     ) async throws -> PullRequestReviewRefreshResult {
-        let candidates = try await candidateRepository.candidates(
+        let inventory = try await candidateRepository.candidates(
             accountID: accountID,
             organizationID: organizationID,
             limit: limit
@@ -36,7 +37,7 @@ actor PullRequestReviewRefreshService {
         var ssoHeaders = [GitHubSSOHeader]()
         let observedAtMilliseconds = Self.milliseconds(observedAt)
 
-        for candidate in candidates {
+        for candidate in inventory.candidates {
             try Task.checkCancellation()
             let reviews = try await client.allReviews(
                 repository: candidate.repository,
@@ -98,6 +99,7 @@ actor PullRequestReviewRefreshService {
         }
         return PullRequestReviewRefreshResult(
             refreshedPullRequestNodeIDs: refreshedPullRequestNodeIDs,
+            hasRemainingCandidates: inventory.hasRemainingCandidates,
             ssoHeaders: ssoHeaders
         )
     }

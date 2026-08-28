@@ -137,6 +137,7 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         )
 
         XCTAssertEqual(result.refreshedPullRequestNodeIDs, [fixture.pullRequest.nodeID])
+        XCTAssertFalse(result.hasRemainingCandidates)
         let persisted = try await fixture.vault.read { database in
             (
                 try Int.fetchOne(

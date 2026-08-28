@@ -290,7 +290,16 @@ actor OrganizationWorkRefreshService {
                 organizationID: scope.organizationID
             )
             let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
-            let status: CoverageStatus = scopedSSOHeader == nil ? .complete : .partial
+            let status: CoverageStatus = scopedSSOHeader == nil && !result.hasRemainingCandidates
+                ? .complete
+                : .partial
+            let failureDetail: String? = if scopedSSOHeader != nil {
+                "GitHub returned partial pull request review results due to SSO."
+            } else if result.hasRemainingCandidates {
+                "Additional pull request review candidates remain for the next refresh."
+            } else {
+                nil
+            }
             try await coverageRepository.save(
                 coverageRecord(
                     scope: scope,
@@ -298,9 +307,7 @@ actor OrganizationWorkRefreshService {
                     interval: nil,
                     status: status,
                     lastSuccessfulAt: status == .complete ? Date() : nil,
-                    failureDetail: status == .complete
-                        ? nil
-                        : "GitHub returned partial pull request review results due to SSO.",
+                    failureDetail: failureDetail,
                     feature: .reviews
                 ),
                 attemptedAt: attemptedAt
