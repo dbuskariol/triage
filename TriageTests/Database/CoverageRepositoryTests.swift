@@ -93,6 +93,62 @@ final class CoverageRepositoryTests: XCTestCase {
         )
     }
 
+    func testFailedCoveragePreservesPriorSuccessfulWatermark() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let repository = CoverageRepository(vault: fixture.vault)
+        let intervalStart = fixture.date
+        let intervalEnd = fixture.date.addingTimeInterval(3_600)
+        let successful = CoverageRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: fixture.streamID,
+            intervalStart: intervalStart,
+            intervalEnd: intervalEnd,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: intervalEnd,
+            failureDetail: nil
+        )
+        let failed = CoverageRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: fixture.streamID,
+            intervalStart: intervalStart,
+            intervalEnd: intervalEnd,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision,
+            status: .failed,
+            lastSuccessfulAt: nil,
+            failureDetail: "GitHub request failed."
+        )
+
+        try await repository.save(successful, attemptedAt: intervalEnd)
+        try await repository.save(failed, attemptedAt: intervalEnd.addingTimeInterval(60))
+
+        let records = try await repository.records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let record = try XCTUnwrap(records.first)
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.lastSuccessfulAt, intervalEnd)
+        let stream = try XCTUnwrap(try await SyncStreamRepository(vault: fixture.vault).stream(
+            withID: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        )
+        XCTAssertEqual(stream.highWater, intervalEnd)
+        XCTAssertEqual(stream.lastSuccessfulAt, intervalEnd)
+        XCTAssertEqual(stream.status, .failed)
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
