@@ -7,8 +7,9 @@ enum GitHubReadMethod: String, Sendable {
 
 struct GitHubRESTRequest: Sendable {
     let method: GitHubReadMethod
-    let path: String
-    let query: [URLQueryItem]
+    private let path: String?
+    private let absoluteURL: URL?
+    private let query: [URLQueryItem]
     let headers: [String: String]
 
     init(
@@ -24,8 +25,37 @@ struct GitHubRESTRequest: Sendable {
         }
         self.method = method
         self.path = path
+        absoluteURL = nil
         self.query = query
         self.headers = headers
+    }
+
+    init(
+        method: GitHubReadMethod = .get,
+        nextPageURL: URL,
+        headers: [String: String] = [:]
+    ) throws {
+        guard nextPageURL.scheme == "https", nextPageURL.host == "api.github.com" else {
+            throw GitHubTransportError.invalidBaseURL
+        }
+        self.method = method
+        path = nil
+        absoluteURL = nextPageURL
+        query = []
+        self.headers = headers
+    }
+
+    func resolvedURL(baseURL: URL) throws -> URL {
+        if let absoluteURL {
+            return absoluteURL
+        }
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.path = path!
+        components?.queryItems = query.isEmpty ? nil : query
+        guard let url = components?.url else {
+            throw GitHubTransportError.invalidURL
+        }
+        return url
     }
 }
 
@@ -94,12 +124,7 @@ actor GitHubRESTTransport {
         _ request: GitHubRESTRequest,
         credential: SecretValue?
     ) async throws -> GitHubRESTResponse {
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        components?.path = request.path
-        components?.queryItems = request.query.isEmpty ? nil : request.query
-        guard let url = components?.url else {
-            throw GitHubTransportError.invalidURL
-        }
+        let url = try request.resolvedURL(baseURL: baseURL)
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = request.method.rawValue
