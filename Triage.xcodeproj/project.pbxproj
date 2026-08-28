@@ -107,6 +107,7 @@
 		CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
+		D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */; };
 		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
@@ -254,6 +255,7 @@
 		D962615F59F45990114831EF /* AccountConnectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnectionService.swift; sourceTree = "<group>"; };
 		D988495C37A78AEED9B566A4 /* Identifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identifiers.swift; sourceTree = "<group>"; };
 		DBB5F72324221C0E738D94C7 /* ProgressAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressAttentionRule.swift; sourceTree = "<group>"; };
+		DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTimelineClient.swift; sourceTree = "<group>"; };
 		DD24CECDFBC0C38A880B9621 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
 		DD2E16FE17B247D0B7395966 /* NotificationRouteAndActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationRouteAndActionTests.swift; sourceTree = "<group>"; };
 		DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCredentialReader.swift; sourceTree = "<group>"; };
@@ -434,6 +436,7 @@
 				35E87148F627E4D7DD0E97C8 /* GitHubPullRequestClient.swift */,
 				CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */,
 				FE740719DC2E5F12F288FFB9 /* GitHubRESTTransport.swift */,
+				DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */,
 			);
 			path = REST;
 			sourceTree = "<group>";
@@ -823,6 +826,7 @@
 				5365A873C4D57DE2CD51390B /* GitHubRateLimit.swift in Sources */,
 				59361E7D730F026936B600C3 /* GitHubSSOHeader.swift in Sources */,
 				13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */,
+				D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */,
 				1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */,
 				76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
