@@ -58,6 +58,7 @@
 		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */; };
+		521D00B6F868935AC6FE8C53 /* SyncShardRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FDF213EC999CB5B6B21F766 /* SyncShardRepository.swift */; };
 		5230A71A6E673CD4C481347E /* NotificationScheduler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D5033A2348740F39CD5234F /* NotificationScheduler.swift */; };
 		5365A873C4D57DE2CD51390B /* GitHubRateLimit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90044685B20CE509DAFA633F /* GitHubRateLimit.swift */; };
 		548E20C9F071D33CBABF5A45 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B669ABDCC417A36F5EB91E2 /* SettingsView.swift */; };
@@ -94,6 +95,7 @@
 		7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */; };
 		7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */; };
 		7F17499F8729F8565734DDCA /* WorkRelationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60229D39798CC1E0C3CEDC2 /* WorkRelationRepositoryTests.swift */; };
+		80608B9D7EA53959A9A053D0 /* SyncShard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */; };
 		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */; };
@@ -230,6 +232,7 @@
 		0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAccessTests.swift; sourceTree = "<group>"; };
 		0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BusinessDayPolicy.swift; sourceTree = "<group>"; };
 		0F4968D7EB5384EBD536B223 /* GRDB.swift */ = {isa = PBXFileReference; lastKnownFileType = folder; name = GRDB.swift; path = Vendor/GRDB.swift; sourceTree = SOURCE_ROOT; };
+		0FDF213EC999CB5B6B21F766 /* SyncShardRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncShardRepository.swift; sourceTree = "<group>"; };
 		1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubGraphQLClientTests.swift; sourceTree = "<group>"; };
 		13285F293338CA8A4716B490 /* AccountVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountVault.swift; sourceTree = "<group>"; };
 		13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocolTests.swift; sourceTree = "<group>"; };
@@ -358,6 +361,7 @@
 		BE3D67A0FFC1AA8377EEE54A /* RefreshCadence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshCadence.swift; sourceTree = "<group>"; };
 		BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouperTests.swift; sourceTree = "<group>"; };
 		BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchRepositoryTests.swift; sourceTree = "<group>"; };
+		C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncShard.swift; sourceTree = "<group>"; };
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -655,6 +659,7 @@
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
 				4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
+				0FDF213EC999CB5B6B21F766 /* SyncShardRepository.swift */,
 				4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */,
 				2FA4EF715587B009499705BF /* WorkflowRepository.swift */,
 				F1F032FC6C9DF794D7566896 /* WorkItemGraphRepository.swift */,
@@ -676,6 +681,7 @@
 				D988495C37A78AEED9B566A4 /* Identifiers.swift */,
 				84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */,
 				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
+				C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */,
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
 				BD0C14B59A1223DC3240A96C /* WorkItem.swift */,
 			);
@@ -1116,6 +1122,8 @@
 				B282AD71D7C9C089A4AB8C8F /* SearchShardPlanner.swift in Sources */,
 				548E20C9F071D33CBABF5A45 /* SettingsView.swift in Sources */,
 				63AA4773C2EF01BDC055423C /* SoftwareUpdateController.swift in Sources */,
+				80608B9D7EA53959A9A053D0 /* SyncShard.swift in Sources */,
+				521D00B6F868935AC6FE8C53 /* SyncShardRepository.swift in Sources */,
 				D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */,
 				5F1B6917146F96421785E71B /* TimelineRepository.swift in Sources */,
 				BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */,

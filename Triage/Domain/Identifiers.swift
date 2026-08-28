@@ -156,6 +156,19 @@ struct SyncStreamID: TriageIdentifier {
     }
 }
 
+struct SyncShardID: TriageIdentifier {
+    let rawValue: String
+
+    init?(rawValue: String) {
+        guard isValidIdentifier(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+
+    static func make() -> Self {
+        Self(rawValue: UUID().uuidString.lowercased())!
+    }
+}
+
 struct AIRequestID: TriageIdentifier {
     let rawValue: String
 
