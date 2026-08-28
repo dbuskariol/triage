@@ -438,6 +438,89 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX workflow_history_work_item_created
                 ON workflow_history (work_item_id, created_at_ms DESC)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "008-sync-and-coverage",
+            checksum: "f77f0a5b7ce44a6cccb6173d07079d58f46ba7597c54281d935c9a7b29473b5d"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE sync_streams (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL,
+                    high_water_ms INTEGER,
+                    last_successful_at_ms INTEGER,
+                    last_attempt_at_ms INTEGER,
+                    state TEXT NOT NULL,
+                    failure_detail TEXT
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE sync_shards (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    query_kind TEXT NOT NULL,
+                    interval_start_ms INTEGER,
+                    interval_end_ms INTEGER,
+                    page_cursor TEXT,
+                    state TEXT NOT NULL,
+                    completed_at_ms INTEGER
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE conditional_request_cache (
+                    request_key TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    etag TEXT,
+                    last_modified TEXT,
+                    observed_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE rate_limit_buckets (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    resource TEXT NOT NULL,
+                    remaining INTEGER,
+                    reset_at_ms INTEGER,
+                    retry_after_ms INTEGER,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, resource)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE coverage_records (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    repository_id TEXT REFERENCES repositories(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL,
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    interval_start_ms INTEGER,
+                    interval_end_ms INTEGER,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_successful_at_ms INTEGER,
+                    failure_detail TEXT
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE raw_api_snapshots (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    github_node_id TEXT,
+                    endpoint TEXT NOT NULL,
+                    etag TEXT,
+                    parser_version INTEGER NOT NULL,
+                    observed_at_ms INTEGER NOT NULL,
+                    payload BLOB NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX coverage_records_lookup
+                ON coverage_records (account_id, organization_id, feature, status)
+                """)
         }
     ]
 }
