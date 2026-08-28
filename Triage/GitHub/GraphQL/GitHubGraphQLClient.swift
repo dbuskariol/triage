@@ -36,6 +36,7 @@ struct GitHubGraphQLPartialError: Codable, Equatable, Sendable {
 struct GitHubGraphQLResponse<Value: Decodable & Sendable>: Sendable {
     let data: Value?
     let errors: [GitHubGraphQLPartialError]
+    let payload: Data
 }
 
 actor GitHubGraphQLClient {
@@ -83,8 +84,10 @@ actor GitHubGraphQLClient {
             throw GitHubGraphQLError.requestFailed(failure)
         }
         do {
-            let decoded = try JSONDecoder().decode(GraphQLPayload<Value>.self, from: body)
-            return GitHubGraphQLResponse(data: decoded.data, errors: decoded.errors ?? [])
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let decoded = try decoder.decode(GraphQLPayload<Value>.self, from: body)
+            return GitHubGraphQLResponse(data: decoded.data, errors: decoded.errors ?? [], payload: body)
         } catch {
             throw GitHubGraphQLError.invalidResponse
         }

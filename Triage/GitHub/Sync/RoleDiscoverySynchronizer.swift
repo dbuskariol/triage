@@ -5,6 +5,11 @@ enum RoleDiscoverySyncError: Error, Equatable, Sendable {
     case snapshotProvenanceMissing
 }
 
+struct RoleDiscoverySyncResult: Sendable {
+    let workItemIDs: [WorkItemID]
+    let candidateNodeIDs: Set<GitHubNodeID>
+}
+
 actor RoleDiscoverySynchronizer {
     private let searchClient: GitHubIssueSearchClient
     private let nodeRepository: GitHubNodeRepository
@@ -48,7 +53,7 @@ actor RoleDiscoverySynchronizer {
         searchRange: SearchTimeRange,
         accessibleRepositoryNames: [String],
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?
-    ) async throws -> [WorkItemID] {
+    ) async throws -> RoleDiscoverySyncResult {
         let accumulator = RoleDiscoveryAccumulator()
         let shardExecutor = SearchShardExecutor(
             client: searchClient,
@@ -138,7 +143,10 @@ actor RoleDiscoverySynchronizer {
             )
             workItemIDs.append(workItemID)
         }
-        return workItemIDs
+        return RoleDiscoverySyncResult(
+            workItemIDs: workItemIDs,
+            candidateNodeIDs: Set(nodes.map(\.nodeID))
+        )
     }
 
     private func persist(
