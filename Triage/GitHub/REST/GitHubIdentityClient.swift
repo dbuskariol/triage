@@ -50,6 +50,19 @@ actor GitHubIdentityClient {
         )
     }
 
+    func allRepositories(in organization: String) async throws -> [GitHubRepositoryDTO] {
+        var page = try await repositories(in: organization)
+        var repositories = page.values
+        while let nextPageURL = page.nextPageURL {
+            page = try await client.getPage(
+                GitHubRepositoryDTO.self,
+                request: GitHubRESTRequest(nextPageURL: nextPageURL)
+            )
+            repositories.append(contentsOf: page.values)
+        }
+        return repositories
+    }
+
     private func validateOrganizationLogin(_ value: String) throws {
         guard !value.isEmpty,
               value.count <= 39,
