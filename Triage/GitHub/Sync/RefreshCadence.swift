@@ -19,6 +19,11 @@ struct RefreshCadence: Sendable {
         maximumJitter: 5 * 60
     )
 
+    static let dailyCapabilityProbe = RefreshCadence(
+        baseInterval: 24 * 60 * 60,
+        maximumJitter: 60 * 60
+    )
+
     func nextInterval(randomUnit: Double) -> TimeInterval {
         let boundedRandomUnit = min(max(randomUnit, 0), 1)
         return baseInterval + (boundedRandomUnit * maximumJitter)
