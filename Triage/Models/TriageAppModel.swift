@@ -105,6 +105,7 @@ final class TriageAppModel: ObservableObject {
             if refreshGeneration == generation {
                 isRefreshing = false
             }
+
         }
         do {
             let secretStore = KeychainSecretStore()
@@ -135,6 +136,19 @@ final class TriageAppModel: ObservableObject {
         } catch {
             guard refreshGeneration == generation else { return }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
+        }
+    }
+
+    func applyWorkflowAction(_ action: WorkflowAction, to workItem: WorkItem) async {
+        do {
+            let updated = try await WorkflowActionService(
+                secretStore: KeychainSecretStore(),
+                vaultRegistry: VaultRegistry()
+            ).apply(action, to: workItem)
+            guard let index = workItems.firstIndex(where: { $0.id == updated.id }) else { return }
+            workItems[index] = updated
+        } catch {
+            refreshError = "Triage could not save this local workflow change."
         }
     }
 }
