@@ -751,6 +751,13 @@ enum TriageDatabaseMigrator {
                     delivered_at_ms INTEGER NOT NULL
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "015-credential-expiration",
+            checksum: "f0d7a3e0a5d285e0fb9a7cb3d5c1e8cf8d3b2d9e77d8b3d9a7f2c6e4a7b5d0c2"
+        ) { database in
+            try database.execute(sql: "ALTER TABLE accounts ADD COLUMN access_token_expires_at_ms INTEGER")
+            try database.execute(sql: "ALTER TABLE accounts ADD COLUMN refresh_token_expires_at_ms INTEGER")
         }
     ]
 }

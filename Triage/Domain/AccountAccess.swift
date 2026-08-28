@@ -93,6 +93,8 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
     let authenticationKind: AuthenticationKind
     let credentialID: CredentialID
     let credentialStatus: CredentialStatus
+    let accessTokenExpiresAt: Date?
+    let refreshTokenExpiresAt: Date?
     let createdAt: Date
     let lastValidatedAt: Date?
 
@@ -106,6 +108,8 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
         authenticationKind: AuthenticationKind,
         credentialID: CredentialID,
         credentialStatus: CredentialStatus,
+        accessTokenExpiresAt: Date? = nil,
+        refreshTokenExpiresAt: Date? = nil,
         createdAt: Date,
         lastValidatedAt: Date? = nil
     ) {
@@ -118,6 +122,8 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
         self.authenticationKind = authenticationKind
         self.credentialID = credentialID
         self.credentialStatus = credentialStatus
+        self.accessTokenExpiresAt = accessTokenExpiresAt
+        self.refreshTokenExpiresAt = refreshTokenExpiresAt
         self.createdAt = createdAt
         self.lastValidatedAt = lastValidatedAt
     }

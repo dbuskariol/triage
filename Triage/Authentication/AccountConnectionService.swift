@@ -32,7 +32,9 @@ actor AccountConnectionService {
         return try await establishAccount(
             accessToken: tokenResponse.accessToken.value,
             refreshToken: tokenResponse.refreshToken?.value,
-            authenticationKind: .oauth
+            authenticationKind: .oauth,
+            accessTokenLifetime: tokenResponse.expiresIn,
+            refreshTokenLifetime: tokenResponse.refreshTokenExpiresIn
         )
     }
 
@@ -40,14 +42,18 @@ actor AccountConnectionService {
         try await establishAccount(
             accessToken: personalAccessToken.value,
             refreshToken: nil,
-            authenticationKind: personalAccessToken.kind.authenticationKind
+            authenticationKind: personalAccessToken.kind.authenticationKind,
+            accessTokenLifetime: nil,
+            refreshTokenLifetime: nil
         )
     }
 
     private func establishAccount(
         accessToken: SecretValue,
         refreshToken: SecretValue?,
-        authenticationKind: AuthenticationKind
+        authenticationKind: AuthenticationKind,
+        accessTokenLifetime: TimeInterval?,
+        refreshTokenLifetime: TimeInterval?
     ) async throws -> AccountConnectionResult {
         let transport = try GitHubRESTTransport()
         let client = GitHubRESTClient(transport: transport, credential: accessToken)
@@ -69,6 +75,8 @@ actor AccountConnectionService {
             authenticationKind: authenticationKind,
             credentialID: credentialID,
             credentialStatus: .active,
+            accessTokenExpiresAt: accessTokenLifetime.map { now.addingTimeInterval($0) },
+            refreshTokenExpiresAt: refreshTokenLifetime.map { now.addingTimeInterval($0) },
             createdAt: now,
             lastValidatedAt: now
         )
