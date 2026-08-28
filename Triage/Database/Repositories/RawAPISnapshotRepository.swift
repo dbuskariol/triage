@@ -35,17 +35,22 @@ actor RawAPISnapshotRepository {
             throw RawAPISnapshotRepositoryError.payloadTooLarge
         }
         try await vault.write { database in
-            if let nodeID = snapshot.githubNodeID {
-                let matchingCount = try Int.fetchOne(
-                    database,
-                    sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
-                    arguments: [nodeID.rawValue, snapshot.accountID.rawValue]
-                ) ?? 0
-                guard matchingCount == 1 else {
-                    throw RawAPISnapshotRepositoryError.nodeScopeMismatch
-                }
+            try Self.save(snapshot, in: database)
+        }
+    }
+
+    nonisolated static func save(_ snapshot: RawAPISnapshot, in database: Database) throws {
+        if let nodeID = snapshot.githubNodeID {
+            let matchingCount = try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
+                arguments: [nodeID.rawValue, snapshot.accountID.rawValue]
+            ) ?? 0
+            guard matchingCount == 1 else {
+                throw RawAPISnapshotRepositoryError.nodeScopeMismatch
             }
-            try database.execute(
+        }
+        try database.execute(
                 sql: """
                     INSERT INTO raw_api_snapshots (
                         id, account_id, github_node_id, endpoint, etag, parser_version, observed_at_ms, payload
@@ -64,8 +69,7 @@ actor RawAPISnapshotRepository {
                     snapshot.endpoint, snapshot.eTag, snapshot.parserVersion,
                     Self.milliseconds(snapshot.observedAt), snapshot.payload
                 ]
-            )
-        }
+        )
     }
 
     func snapshots(for accountID: AccountID, limit: Int = 100) async throws -> [RawAPISnapshot] {

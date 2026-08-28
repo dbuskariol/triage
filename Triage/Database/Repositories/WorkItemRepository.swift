@@ -82,7 +82,15 @@ actor WorkItemRepository {
     func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
         try ensureAccountScope(node.accountID)
         return try await vault.write { database in
-            if let existingID: String = try String.fetchOne(
+            try Self.ensureWorkItem(for: node, in: database)
+        }
+    }
+
+    nonisolated static func ensureWorkItem(
+        for node: NormalizedGitHubNode,
+        in database: Database
+    ) throws -> WorkItemID {
+        if let existingID: String = try String.fetchOne(
                 database,
                 sql: """
                     SELECT id FROM work_items
@@ -107,10 +115,10 @@ actor WorkItemRepository {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
                 return workItemID
-            }
+        }
 
-            let workItemID = WorkItemID.make()
-            try database.execute(
+        let workItemID = WorkItemID.make()
+        try database.execute(
                 sql: """
                     INSERT INTO work_items (
                         id, account_id, organization_id, primary_node_id, state,
@@ -127,16 +135,15 @@ actor WorkItemRepository {
                     Self.milliseconds(node.observedAt),
                     Self.milliseconds(node.observedAt)
                 ]
-            )
-            try database.execute(
+        )
+        try database.execute(
                 sql: """
                     INSERT INTO work_item_members (work_item_id, github_node_id, role)
                     VALUES (?, ?, ?)
                     """,
-                arguments: [workItemID.rawValue, node.nodeID.rawValue, WorkItemMemberRole.primary.rawValue]
-            )
-            return workItemID
-        }
+                    arguments: [workItemID.rawValue, node.nodeID.rawValue, WorkItemMemberRole.primary.rawValue]
+        )
+        return workItemID
     }
 
     private func ensureAccountScope(_ accountID: AccountID) throws {
