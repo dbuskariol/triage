@@ -5,6 +5,7 @@ struct GitHubPage<Value: Sendable>: Sendable {
     let nextPageURL: URL?
     let etag: String?
     let lastModified: String?
+    let ssoHeader: GitHubSSOHeader?
 }
 
 struct GitHubResponse<Value: Sendable>: Sendable {
@@ -72,7 +73,8 @@ actor GitHubRESTClient {
                 values: try JSONDecoder.github.decode([Value].self, from: response.body),
                 nextPageURL: GitHubLinkHeader(response.header(named: "Link"))?.nextPageURL,
                 etag: response.header(named: "ETag"),
-                lastModified: response.header(named: "Last-Modified")
+                lastModified: response.header(named: "Last-Modified"),
+                ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
             )
         } catch {
             throw GitHubRESTClientError.invalidJSON

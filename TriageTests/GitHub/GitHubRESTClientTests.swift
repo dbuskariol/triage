@@ -9,7 +9,8 @@ final class GitHubRESTClientTests: XCTestCase {
             headers: [
                 "Link": "<\(nextPage)>; rel=\"next\", <https://api.github.com/user/orgs?page=3>; rel=\"last\"",
                 "ETag": "\"etag\"",
-                "Last-Modified": "Tue, 01 Sep 2026 00:00:00 GMT"
+                "Last-Modified": "Tue, 01 Sep 2026 00:00:00 GMT",
+                "X-GitHub-SSO": "partial-results; organizations=21955855"
             ]
         )
         let client = GitHubRESTClient(
@@ -25,6 +26,7 @@ final class GitHubRESTClientTests: XCTestCase {
         XCTAssertEqual(page.values, [OrganizationDTO(id: 1, login: "github")])
         XCTAssertEqual(page.nextPageURL?.absoluteString, nextPage)
         XCTAssertEqual(page.etag, "\"etag\"")
+        XCTAssertEqual(page.ssoHeader, .partialResults(Set([21_955_855])))
     }
 
     func testClientDoesNotExposePrivateErrorBodies() async throws {
