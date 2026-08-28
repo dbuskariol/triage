@@ -129,6 +129,21 @@ final class SearchRepositoryTests: XCTestCase {
                 updatedAt: date
             )
         )
+        try await AttentionScoreRepository(vault: vault).save(
+            AttentionScore(value: 8, breakdown: ["direct": 5, "deadline": 3]),
+            for: workItemID,
+            evaluatedAt: date
+        )
+
+        let persistedWorkItems = try await WorkItemRepository(vault: vault).fetch(
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        XCTAssertEqual(persistedWorkItems.count, 1)
+        XCTAssertEqual(persistedWorkItems[0].score, AttentionScore(
+            value: 8,
+            breakdown: ["direct": 5, "deadline": 3]
+        ))
 
         let repository = SearchRepository(vault: vault)
         try await repository.rebuild(accountID: accountID, organizationID: organizationID)

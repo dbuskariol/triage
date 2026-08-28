@@ -41,7 +41,8 @@ actor WorkItemRepository {
                         workflow_states.follow_up_at_ms,
                         workflow_states.local_note,
                         workflow_states.updated_at_ms AS workflow_updated_at_ms,
-                        attention_scores.score
+                        attention_scores.score,
+                        attention_scores.breakdown_json AS score_breakdown_json
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
                     LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
@@ -190,12 +191,25 @@ actor WorkItemRepository {
             workflow: workflow,
             freshness: FreshnessState(status: .fresh),
             lastRelevantActivityAt: activity,
-            score: AttentionScore(value: row["score"] ?? 0, breakdown: [:])
+            score: try attentionScore(from: row)
         )
     }
 
     private nonisolated static func date(milliseconds: Int64?) -> Date? {
         milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
+    }
+
+    private nonisolated static func attentionScore(from row: Row) throws -> AttentionScore {
+        guard let value: Int = row["score"] else {
+            return AttentionScore(value: 0, breakdown: [:])
+        }
+        guard let breakdownData: Data = row["score_breakdown_json"] else {
+            throw WorkItemRepositoryError.invalidPersistedData
+        }
+        return AttentionScore(
+            value: value,
+            breakdown: try JSONDecoder().decode([String: Int].self, from: breakdownData)
+        )
     }
 
     private nonisolated static func repository(from row: Row) throws -> RepositorySummary? {

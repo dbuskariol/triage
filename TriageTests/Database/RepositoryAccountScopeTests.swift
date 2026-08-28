@@ -82,5 +82,14 @@ final class RepositoryAccountScopeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? AttentionReasonRepositoryError, .workItemScopeMismatch)
         }
+        do {
+            try await AttentionScoreRepository(vault: vault).save(
+                AttentionScore(value: 1, breakdown: ["direct": 1]),
+                for: foreignWorkItemID
+            )
+            XCTFail("Expected an attention score work item scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? AttentionScoreRepositoryError, .workItemScopeMismatch)
+        }
     }
 }
