@@ -58,6 +58,8 @@ protocol SecretStore: Sendable {
         accountID: AccountID,
         credentialID: CredentialID?
     ) async throws
+
+    func accountIDs() async throws -> [AccountID]
 }
 
 actor KeychainSecretStore: SecretStore {

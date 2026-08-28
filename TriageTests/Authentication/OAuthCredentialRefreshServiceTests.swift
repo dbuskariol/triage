@@ -75,6 +75,11 @@ private actor RejectingSecretStore: SecretStore {
         XCTFail("PAT refresh must not remove secrets.")
         throw URLError(.badServerResponse)
     }
+
+    func accountIDs() async throws -> [AccountID] {
+        XCTFail("PAT refresh must not enumerate accounts.")
+        throw URLError(.badServerResponse)
+    }
 }
 
 private actor RejectingBroker: OAuthTokenRefreshing {
