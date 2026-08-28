@@ -25,6 +25,13 @@ actor WorkItemRepository {
                         work_items.last_relevant_activity_at_ms,
                         github_nodes.kind, github_nodes.title, github_nodes.html_url,
                         github_nodes.repository_id,
+                        repositories.github_node_id AS repository_node_id,
+                        repositories.owner_login AS repository_owner_login,
+                        repositories.name AS repository_name,
+                        repositories.is_private AS repository_is_private,
+                        repositories.is_archived AS repository_is_archived,
+                        repositories.has_discussions AS repository_has_discussions,
+                        repositories.html_url AS repository_html_url,
                         workflow_states.status AS workflow_status,
                         workflow_states.pinned AS workflow_pinned,
                         workflow_states.priority AS workflow_priority,
@@ -35,6 +42,7 @@ actor WorkItemRepository {
                         attention_scores.score
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                    LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
                     LEFT JOIN workflow_states ON workflow_states.work_item_id = work_items.id
                     LEFT JOIN attention_scores ON attention_scores.work_item_id = work_items.id
                     WHERE work_items.account_id = ? AND work_items.organization_id = ?
@@ -151,7 +159,7 @@ actor WorkItemRepository {
             state: state,
             sourceKind: kind,
             sourceURL: sourceURL,
-            repository: nil,
+            repository: try repository(from: row),
             members: [],
             contextLinks: [],
             relations: [],
@@ -166,6 +174,30 @@ actor WorkItemRepository {
 
     private nonisolated static func date(milliseconds: Int64?) -> Date? {
         milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
+    }
+
+    private nonisolated static func repository(from row: Row) throws -> RepositorySummary? {
+        guard let rawID: String = row["repository_id"] else {
+            return nil
+        }
+        guard let id = RepositoryID(rawValue: rawID),
+              let rawNodeID: String = row["repository_node_id"],
+              let nodeID = GitHubNodeID(rawValue: rawNodeID),
+              let rawURL: String = row["repository_html_url"],
+              let url = URL(string: rawURL)
+        else {
+            throw WorkItemRepositoryError.invalidPersistedData
+        }
+        return RepositorySummary(
+            id: id,
+            nodeID: nodeID,
+            ownerLogin: row["repository_owner_login"],
+            name: row["repository_name"],
+            isPrivate: row["repository_is_private"],
+            isArchived: row["repository_is_archived"],
+            hasDiscussions: row["repository_has_discussions"],
+            url: url
+        )
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
