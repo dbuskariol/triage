@@ -79,6 +79,47 @@ final class CredentialLifecycleTests: XCTestCase {
         )
     }
 
+    func testNonOAuthCredentialsRemainActiveRegardlessOfExpirationMetadata() {
+        XCTAssertEqual(
+            CredentialLifecycle.status(
+                authenticationKind: .classicPersonalAccessToken,
+                accessTokenExpiresAt: now.addingTimeInterval(-1),
+                refreshTokenExpiresAt: now.addingTimeInterval(-1),
+                at: now
+            ),
+            .active
+        )
+    }
+
+    func testPermanentAndTransientBrokerFailuresHaveDistinctCredentialEffects() {
+        XCTAssertEqual(
+            CredentialLifecycle.failureStatus(
+                for: AuthBrokerClientError.broker(
+                    AuthBrokerFailure(code: .authorizationDenied, recoveryDescription: "Denied")
+                )
+            ),
+            .revoked
+        )
+        XCTAssertNil(
+            CredentialLifecycle.failureStatus(
+                for: AuthBrokerClientError.broker(
+                    AuthBrokerFailure(code: .invalidClient, recoveryDescription: "Retry later")
+                )
+            )
+        )
+    }
+
+    func testRestorationPreservesCapabilityLimitedStatus() {
+        let account = makeAccount(accessTokenExpiresAt: now.addingTimeInterval(60 * 60))
+            .replacingCredentialStatus(.capabilityLimited)
+
+        XCTAssertEqual(
+            CredentialLifecycle.restoredStatus(for: account, hasAccessToken: true, at: now),
+            .capabilityLimited
+        )
+        XCTAssertNil(CredentialLifecycle.reconnectMessage(for: .capabilityLimited))
+    }
+
     private func makeAccount(
         accessTokenExpiresAt: Date?,
         refreshTokenExpiresAt: Date? = nil

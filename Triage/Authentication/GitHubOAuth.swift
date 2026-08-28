@@ -91,14 +91,18 @@ struct OAuthAuthorizationSession: Equatable, Sendable {
         guard callbackURL.scheme == redirectURI.scheme,
               callbackURL.host == redirectURI.host,
               callbackURL.path == redirectURI.path,
-              let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
-              let returnedState = components.queryItems?.first(where: { $0.name == "state" })?.value,
-              returnedState == state.rawValue
+              let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)
         else {
             throw GitHubOAuthError.invalidState
         }
-        guard let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
-              !code.isEmpty
+        let states = components.queryItems?
+            .filter { $0.name == "state" } ?? []
+        guard states.count == 1, states[0].value == state.rawValue else {
+            throw GitHubOAuthError.invalidState
+        }
+        let codes = components.queryItems?
+            .filter { $0.name == "code" } ?? []
+        guard codes.count == 1, let code = codes[0].value, !code.isEmpty
         else {
             throw GitHubOAuthError.missingAuthorizationCode
         }

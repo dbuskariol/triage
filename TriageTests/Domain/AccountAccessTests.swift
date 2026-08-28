@@ -2,6 +2,15 @@ import XCTest
 @testable import Triage
 
 final class AccountAccessTests: XCTestCase {
+    func testNotificationsAreTheOnlyAccountScopedCapability() {
+        XCTAssertEqual(GitHubCapability.notifications.scope, .account)
+        XCTAssertTrue(
+            GitHubCapability.allCases
+                .filter { $0 != .notifications }
+                .allSatisfy { $0.scope == .organization }
+        )
+    }
+
     private let date = Date(timeIntervalSinceReferenceDate: 100)
 
     func testClassicPersonalAccessTokensCannotAuthenticateCopilotDirectly() {
