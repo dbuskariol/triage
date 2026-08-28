@@ -1,0 +1,94 @@
+name: Triage
+
+options:
+  bundleIdPrefix: com.triage
+  createIntermediateGroups: true
+  defaultConfig: Release
+  deploymentTarget:
+    macOS: "26.0"
+  transitivelyLinkDependencies: true
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.4
+
+settings:
+  base:
+    APP_SHORTCUTS_ENABLE_FLEXIBLE_MATCHING: NO
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    ENABLE_HARDENED_RUNTIME: YES
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_VERSION: "6.0"
+  configs:
+    Debug:
+      DEBUG_INFORMATION_FORMAT: dwarf
+    Release:
+      COPY_PHASE_STRIP: NO
+      DEAD_CODE_STRIPPING: YES
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+      STRIP_INSTALLED_PRODUCT: YES
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  Triage:
+    type: application
+    platform: macOS
+    sources:
+      - Triage
+    dependencies:
+      - package: Sparkle
+        product: Sparkle
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Triage/Triage.entitlements
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Configuration/Triage-Info.plist
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        MARKETING_VERSION: 0.1.0
+        PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac
+        PRODUCT_NAME: Triage
+        SKIP_INSTALL: NO
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Triage/TriageDebug.entitlements
+
+  TriageTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - TriageTests
+    dependencies:
+      - target: Triage
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.tests
+
+schemes:
+  Triage:
+    build:
+      targets:
+        Triage: all
+        TriageTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - name: TriageTests
+          parallelizable: true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
