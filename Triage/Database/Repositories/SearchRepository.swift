@@ -1,6 +1,11 @@
 import Foundation
 import GRDB
 
+enum SearchRepositoryError: Error, Equatable, Sendable {
+    case accountScopeMismatch
+    case documentScopeMismatch
+}
+
 struct SearchDocument: Sendable {
     let accountID: AccountID
     let organizationID: OrganizationID
@@ -35,6 +40,12 @@ actor SearchRepository {
         accountID: AccountID,
         organizationID: OrganizationID
     ) async throws {
+        try ensureAccountScope(accountID)
+        guard documents.allSatisfy({
+            $0.accountID == accountID && $0.organizationID == organizationID
+        }) else {
+            throw SearchRepositoryError.documentScopeMismatch
+        }
         let indexedAt = Self.milliseconds(Date.now)
         try await vault.write { database in
             try database.execute(
@@ -86,6 +97,7 @@ actor SearchRepository {
     }
 
     func rebuild(accountID: AccountID, organizationID: OrganizationID) async throws {
+        try ensureAccountScope(accountID)
         let documents = try await vault.read { database in
             let rows = try Row.fetchAll(
                 database,
@@ -191,6 +203,7 @@ actor SearchRepository {
         organizationID: OrganizationID,
         limit: Int = 100
     ) async throws -> [SearchResult] {
+        try ensureAccountScope(accountID)
         guard let matchQuery = Self.matchQuery(for: query) else { return [] }
         return try await vault.read { database in
             try Row.fetchAll(
@@ -214,6 +227,12 @@ actor SearchRepository {
                     rank: row["rank"]
                 )
             }
+        }
+    }
+
+    private func ensureAccountScope(_ accountID: AccountID) throws {
+        guard accountID == vault.accountID else {
+            throw SearchRepositoryError.accountScopeMismatch
         }
     }
 

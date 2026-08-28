@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 
 enum WorkItemRepositoryError: Error, Equatable, Sendable {
+    case accountScopeMismatch
     case invalidPersistedData
 }
 
@@ -16,7 +17,8 @@ actor WorkItemRepository {
         accountID: AccountID,
         organizationID: OrganizationID
     ) async throws -> [WorkItem] {
-        try await vault.read { database in
+        try ensureAccountScope(accountID)
+        return try await vault.read { database in
             return try Row.fetchAll(
                 database,
                 sql: """
@@ -77,7 +79,8 @@ actor WorkItemRepository {
     }
 
     func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
-        try await vault.write { database in
+        try ensureAccountScope(node.accountID)
+        return try await vault.write { database in
             if let existingID: String = try String.fetchOne(
                 database,
                 sql: """
@@ -132,6 +135,12 @@ actor WorkItemRepository {
                 arguments: [workItemID.rawValue, node.nodeID.rawValue, WorkItemMemberRole.primary.rawValue]
             )
             return workItemID
+        }
+    }
+
+    private func ensureAccountScope(_ accountID: AccountID) throws {
+        guard accountID == vault.accountID else {
+            throw WorkItemRepositoryError.accountScopeMismatch
         }
     }
 
