@@ -1,5 +1,9 @@
 import Foundation
 
+enum GitHubIdentityClientError: Error, Equatable, Sendable {
+    case invalidOrganizationLogin
+}
+
 actor GitHubIdentityClient {
     private let client: GitHubRESTClient
 
@@ -25,14 +29,16 @@ actor GitHubIdentityClient {
     }
 
     func organization(named login: String) async throws -> GitHubResponse<GitHubOrganizationDTO> {
-        try await client.getResponse(
+        try validateOrganizationLogin(login)
+        return try await client.getResponse(
             GitHubOrganizationDTO.self,
             request: try GitHubRESTRequest(path: "/orgs/\(login)")
         )
     }
 
     func repositories(in organization: String) async throws -> GitHubPage<GitHubRepositoryDTO> {
-        try await client.getPage(
+        try validateOrganizationLogin(organization)
+        return try await client.getPage(
             GitHubRepositoryDTO.self,
             request: try GitHubRESTRequest(
                 path: "/orgs/\(organization)/repos",
@@ -42,6 +48,20 @@ actor GitHubIdentityClient {
                 ]
             )
         )
+    }
+
+    private func validateOrganizationLogin(_ value: String) throws {
+        guard !value.isEmpty,
+              value.count <= 39,
+              value.unicodeScalars.allSatisfy({
+                  $0.isASCII
+                      && ($0.properties.isAlphabetic
+                          || $0.properties.numericType != nil
+                          || $0 == "-")
+              })
+        else {
+            throw GitHubIdentityClientError.invalidOrganizationLogin
+        }
     }
 }
 
