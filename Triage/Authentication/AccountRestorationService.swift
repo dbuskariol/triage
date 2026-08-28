@@ -35,7 +35,27 @@ actor AccountRestorationService {
                     unavailableAccountIDs.append(accountID)
                     continue
                 }
-                accounts.append(account)
+                let accessTokenKind: TriageSecretKind = account.authenticationKind == .oauth
+                    ? .oauthAccessToken
+                    : .personalAccessToken
+                let accessToken = try await secretStore.read(
+                    kind: accessTokenKind,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                )
+                let restoredStatus = CredentialLifecycle.restoredStatus(
+                    for: account,
+                    hasAccessToken: accessToken.map { !$0.isEmpty } ?? false,
+                    at: Date()
+                )
+                let restoredAccount = account.replacingCredentialStatus(restoredStatus)
+                if restoredAccount != account {
+                    try await repository.save(
+                        restoredAccount,
+                        credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
+                    )
+                }
+                accounts.append(restoredAccount)
                 organizationsByAccount[accountID] = try await repository.organizations(for: accountID)
                 organizationAccessesByAccount[accountID] = try await repository.organizationAccesses(
                     for: accountID
