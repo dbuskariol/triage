@@ -34,6 +34,11 @@ enum AppSection: String, CaseIterable, Identifiable {
 }
 
 enum SettingsCategory: String, CaseIterable, Identifiable {
+    case accounts
+    case organizations
+    case inbox
+    case notifications
+    case ai
     case general
     case updates
     case about
@@ -43,6 +48,11 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .accounts: "person.crop.circle"
+        case .organizations: "building.2"
+        case .inbox: "tray"
+        case .notifications: "bell"
+        case .ai: "sparkles"
         case .general: "gearshape"
         case .updates: "arrow.triangle.2.circlepath"
         case .about: "info.circle"

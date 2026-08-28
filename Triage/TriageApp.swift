@@ -42,6 +42,7 @@ struct TriageApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
