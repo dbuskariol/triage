@@ -71,7 +71,9 @@
 		83A66E9AA2DF337823F8B711 /* GitHubNodeRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */; };
 		85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */; };
 		86357AA1C2EBB572BA6406A5 /* GitHubPullRequestClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E87148F627E4D7DD0E97C8 /* GitHubPullRequestClient.swift */; };
+		8847C6650333DC454C4F1EF4 /* GitHubTimelineNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */; };
 		8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */; };
+		8B18CE60D3734E2B17BE6AEB /* GitHubTimelineNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F904F6D0D32CB06A9BBE9D /* GitHubTimelineNormalizerTests.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
 		8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB5F72324221C0E738D94C7 /* ProgressAttentionRule.swift */; };
 		8F7084517630A5301FBB9DD1 /* NotificationContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82377E74C059A4BB23BC5347 /* NotificationContentTests.swift */; };
@@ -195,6 +197,7 @@
 		5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimitTests.swift; sourceTree = "<group>"; };
 		5C534F0A690622733E79B291 /* Triage.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Triage.entitlements; sourceTree = "<group>"; };
 		61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSearchNormalizer.swift; sourceTree = "<group>"; };
+		646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTimelineNormalizer.swift; sourceTree = "<group>"; };
 		67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClientTests.swift; sourceTree = "<group>"; };
 		69059AEFA8E3488C971070DA /* WorkflowActionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowActionService.swift; sourceTree = "<group>"; };
 		70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocol.swift; sourceTree = "<group>"; };
@@ -202,6 +205,7 @@
 		71298FBEE39EE0073BEE2237 /* Triage.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Triage.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinator.swift; sourceTree = "<group>"; };
 		73E253D2EC34DD35631BE213 /* CoverageEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageEvaluator.swift; sourceTree = "<group>"; };
+		74F904F6D0D32CB06A9BBE9D /* GitHubTimelineNormalizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTimelineNormalizerTests.swift; sourceTree = "<group>"; };
 		77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationAccessEvaluator.swift; sourceTree = "<group>"; };
 		77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepositoryTests.swift; sourceTree = "<group>"; };
 		77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRankerTests.swift; sourceTree = "<group>"; };
@@ -492,6 +496,7 @@
 				E844E395E5858DFCE770AF44 /* GitHubRESTClientTests.swift */,
 				94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */,
 				3BCA90EAF4A677B2A3CC810D /* GitHubSearchNormalizerTests.swift */,
+				74F904F6D0D32CB06A9BBE9D /* GitHubTimelineNormalizerTests.swift */,
 				F91A7C6DA1A31930721EEB27 /* RefreshCadenceTests.swift */,
 				E64FC7E7F88D610CB858C454 /* RoleDiscoveryPlanTests.swift */,
 				16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */,
@@ -582,6 +587,7 @@
 			isa = PBXGroup;
 			children = (
 				61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */,
+				646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */,
 			);
 			path = Normalization;
 			sourceTree = "<group>";
@@ -760,6 +766,7 @@
 				DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */,
 				7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */,
 				045B7390CA22D6FA51470E8A /* GitHubSearchNormalizerTests.swift in Sources */,
+				8B18CE60D3734E2B17BE6AEB /* GitHubTimelineNormalizerTests.swift in Sources */,
 				65623684B07E24F75A9F790C /* IdentifierTests.swift in Sources */,
 				B954C4729FEC6F7BCE320654 /* InboxEligibilityRuleTests.swift in Sources */,
 				CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */,
@@ -827,6 +834,7 @@
 				59361E7D730F026936B600C3 /* GitHubSSOHeader.swift in Sources */,
 				13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */,
 				D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */,
+				8847C6650333DC454C4F1EF4 /* GitHubTimelineNormalizer.swift in Sources */,
 				1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */,
 				76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
