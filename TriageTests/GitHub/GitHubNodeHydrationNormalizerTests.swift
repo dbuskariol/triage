@@ -81,6 +81,50 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         }
     }
 
+    func testRejectsIncompleteClosingIssues() throws {
+        let original = pullRequest()
+        let node = .init(
+            typeName: original.typeName,
+            id: original.id,
+            databaseId: original.databaseId,
+            number: original.number,
+            title: original.title,
+            body: original.body,
+            url: original.url,
+            state: original.state,
+            createdAt: original.createdAt,
+            updatedAt: original.updatedAt,
+            closedAt: original.closedAt,
+            mergedAt: original.mergedAt,
+            isDraft: original.isDraft,
+            locked: original.locked,
+            comments: original.comments,
+            mergeable: original.mergeable,
+            headRefName: original.headRefName,
+            baseRefName: original.baseRefName,
+            reviewDecision: original.reviewDecision,
+            author: original.author,
+            repository: original.repository,
+            assignees: original.assignees,
+            labels: original.labels,
+            reviewRequests: original.reviewRequests,
+            closingIssuesReferences: .init(nodes: [], pageInfo: .init(hasNextPage: true))
+        )
+
+        XCTAssertThrowsError(
+            try GitHubNodeHydrationNormalizer.normalize(
+                payload(node: node),
+                requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                accountID: AccountID(rawValue: "account")!,
+                organizationID: OrganizationID(rawValue: "organization")!,
+                repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                observedAt: Date()
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .incompleteConnection)
+        }
+    }
+
     private func payload(node: GitHubNodeHydrationPayload.Node) -> GitHubNodeHydrationPayload {
         GitHubNodeHydrationPayload(
             nodes: [node],

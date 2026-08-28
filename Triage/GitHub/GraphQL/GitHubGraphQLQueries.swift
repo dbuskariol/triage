@@ -51,7 +51,10 @@ enum GitHubGraphQLQueries {
                 }
                 pageInfo { hasNextPage }
               }
-              closingIssuesReferences(first: 50) { nodes { id } }
+              closingIssuesReferences(first: 50) {
+                nodes { id }
+                pageInfo { hasNextPage }
+              }
             }
           }
           rateLimit { cost remaining resetAt }
