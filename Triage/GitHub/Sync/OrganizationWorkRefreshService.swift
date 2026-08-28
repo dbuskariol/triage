@@ -37,6 +37,40 @@ actor OrganizationWorkRefreshService {
         let coverageRepository = CoverageRepository(vault: vault)
         let streamID = SyncStreamID(rawValue: "role-discovery-\(organization.id.rawValue)")!
         let attemptedAt = Date()
+        try await coverageRepository.save(
+            coverageRecord(
+                scope: synchronizationScope,
+                streamID: streamID,
+                interval: nil,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: attemptedAt
+        )
+        let previousHighWater = try await SyncStreamRepository(vault: vault)
+            .stream(withID: streamID, accountID: account.id)?
+            .highWater
+        let incompleteRange = try await coverageRepository.records(
+            for: account.id,
+            organizationID: organization.id
+        ).compactMap { record -> SearchTimeRange? in
+            guard record.feature == .roleDiscovery,
+                  record.streamID == streamID,
+                  record.credentialRevision == synchronizationScope.credentialRevision,
+                  record.capabilityRevision == synchronizationScope.capabilityRevision,
+                  record.status != .complete,
+                  let start = record.intervalStart,
+                  let end = record.intervalEnd
+            else {
+                return nil
+            }
+            return SearchTimeRange(start: start, end: end)
+        }.max { $0.end < $1.end }
+        let searchRange = incompleteRange ?? SearchTimeRange(
+            start: previousHighWater ?? Date(timeIntervalSince1970: 0),
+            end: attemptedAt
+        )
         let rateLimitController = try await rateLimitControllers.controller(
             for: account.id,
             vault: vault
@@ -75,19 +109,24 @@ actor OrganizationWorkRefreshService {
                 relationRepository: WorkRelationRepository(vault: vault),
                 attentionRepository: AttentionReasonRepository(vault: vault),
                 rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
-                normalizationFailureRepository: NormalizationFailureRepository(vault: vault)
+                normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+                shardRepository: SyncShardRepository(vault: vault)
             ).synchronize(
                 plan: plan,
                 accountID: account.id,
                 accountNodeID: account.nodeID,
                 organizationID: organization.id,
                 githubOrganizationID: organization.githubOrganizationID,
+                streamID: streamID,
+                searchRange: searchRange,
+                accessibleRepositoryNames: inventory.map(\.fullName),
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
             )
             try await coverageRepository.save(
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
+                    interval: searchRange,
                     status: .complete,
                     lastSuccessfulAt: Date(),
                     failureDetail: nil
@@ -101,6 +140,7 @@ actor OrganizationWorkRefreshService {
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
+                        interval: searchRange,
                         status: .requiresSSO,
                         lastSuccessfulAt: nil,
                         failureDetail: "GitHub organization SSO authorization is required."
@@ -113,6 +153,7 @@ actor OrganizationWorkRefreshService {
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
+                    interval: searchRange,
                     status: .failed,
                     lastSuccessfulAt: nil,
                     failureDetail: "GitHub request failed: \(failure.kind.rawValue)."
@@ -129,6 +170,7 @@ actor OrganizationWorkRefreshService {
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
+                    interval: searchRange,
                     status: status,
                     lastSuccessfulAt: nil,
                     failureDetail: "GitHub organization SSO authorization is required."
@@ -141,6 +183,7 @@ actor OrganizationWorkRefreshService {
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
+                    interval: searchRange,
                     status: .partial,
                     lastSuccessfulAt: nil,
                     failureDetail: "Refresh was cancelled before completion."
@@ -153,6 +196,7 @@ actor OrganizationWorkRefreshService {
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
+                    interval: searchRange,
                     status: .failed,
                     lastSuccessfulAt: nil,
                     failureDetail: "Refresh failed: \(String(reflecting: type(of: error)))."
@@ -166,6 +210,7 @@ actor OrganizationWorkRefreshService {
     private func coverageRecord(
         scope: SynchronizationScope,
         streamID: SyncStreamID,
+        interval: SearchTimeRange?,
         status: CoverageStatus,
         lastSuccessfulAt: Date?,
         failureDetail: String?
@@ -176,8 +221,8 @@ actor OrganizationWorkRefreshService {
             repositoryID: nil,
             feature: .roleDiscovery,
             streamID: streamID,
-            intervalStart: nil,
-            intervalEnd: nil,
+            intervalStart: interval?.start,
+            intervalEnd: interval?.end,
             credentialRevision: scope.credentialRevision,
             capabilityRevision: scope.capabilityRevision,
             status: status,

@@ -41,6 +41,7 @@ struct GitHubIssueSearchQuery: Sendable {
     private let userLogin: String
     private let state: GitHubIssueSearchState
     private let closedAfter: Date?
+    private let repositoryFullName: String?
 
     init(
         organizationLogin: String,
@@ -49,7 +50,8 @@ struct GitHubIssueSearchQuery: Sendable {
         relationship: GitHubIssueSearchRelationship,
         updatedAfter: Date? = nil,
         closedAfter: Date? = nil,
-        updatedRange: SearchTimeRange? = nil
+        updatedRange: SearchTimeRange? = nil,
+        repositoryFullName: String? = nil
     ) throws {
         guard Self.isGitHubLogin(organizationLogin) else {
             throw GitHubIssueSearchError.invalidOrganizationLogin
@@ -59,6 +61,9 @@ struct GitHubIssueSearchQuery: Sendable {
         }
         guard updatedAfter == nil || updatedRange == nil else {
             throw GitHubIssueSearchError.conflictingUpdatedConstraints
+        }
+        guard repositoryFullName.map(Self.isRepositoryFullName) ?? true else {
+            throw GitHubIssueSearchError.invalidQualifier
         }
         var qualifiers = [
             "org:\(organizationLogin)",
@@ -76,11 +81,15 @@ struct GitHubIssueSearchQuery: Sendable {
         if let closedAfter {
             qualifiers.append("closed:>=\(Self.dayString(closedAfter))")
         }
+        if let repositoryFullName {
+            qualifiers.append("repo:\(repositoryFullName)")
+        }
         self.organizationLogin = organizationLogin
         self.userLogin = userLogin
         self.state = state
         self.relationship = relationship
         self.closedAfter = closedAfter
+        self.repositoryFullName = repositoryFullName
         value = qualifiers.joined(separator: " ")
     }
 
@@ -91,8 +100,27 @@ struct GitHubIssueSearchQuery: Sendable {
             state: state,
             relationship: relationship,
             closedAfter: closedAfter,
-            updatedRange: updatedRange
+            updatedRange: updatedRange,
+            repositoryFullName: repositoryFullName
         )
+    }
+
+    func scoped(to repositoryFullName: String) throws -> GitHubIssueSearchQuery {
+        try GitHubIssueSearchQuery(
+            organizationLogin: organizationLogin,
+            userLogin: userLogin,
+            state: state,
+            relationship: relationship,
+            closedAfter: closedAfter,
+            repositoryFullName: repositoryFullName
+        )
+    }
+
+    func scoped(
+        to repositoryFullName: String,
+        updatedRange: SearchTimeRange
+    ) throws -> GitHubIssueSearchQuery {
+        try scoped(to: repositoryFullName).bounded(to: updatedRange)
     }
 
     private static func isGitHubLogin(_ value: String) -> Bool {
@@ -101,6 +129,17 @@ struct GitHubIssueSearchQuery: Sendable {
             && value.unicodeScalars.allSatisfy {
                 $0.isASCII && ($0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "-")
             }
+    }
+
+    private static func isRepositoryFullName(_ value: String) -> Bool {
+        let components = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2 else {
+            return false
+        }
+        return (try? GitHubRepositoryPath(
+            owner: String(components[0]),
+            repository: String(components[1])
+        )) != nil
     }
 
     private static func dayString(_ date: Date) -> String {
@@ -162,7 +201,14 @@ struct GitHubIssueSearchItem: Codable, Sendable {
     }
 }
 
-actor GitHubIssueSearchClient {
+protocol GitHubIssueSearchExecuting: Sendable {
+    func searchResponse(
+        _ query: GitHubIssueSearchQuery,
+        page: Int
+    ) async throws -> GitHubResponse<GitHubIssueSearchPage>
+}
+
+actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
     private let client: GitHubRESTClient
 
     init(client: GitHubRESTClient) {
