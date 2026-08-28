@@ -9,11 +9,13 @@
 /* Begin PBXBuildFile section */
 		0157261AEB2710C728B4A609 /* WorkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA6952357B8ECC6AF45D0D1 /* WorkDetailView.swift */; };
 		03EB63E47F6B7F9A679B64AE /* GitHubIdentityClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 326A309D86A0DA32F49BD907 /* GitHubIdentityClient.swift */; };
+		045B7390CA22D6FA51470E8A /* GitHubSearchNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BCA90EAF4A677B2A3CC810D /* GitHubSearchNormalizerTests.swift */; };
 		0769B6A2DF3F028CD0D926FC /* WaitingAttentionRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8E3FD7D8F400F18F9E4E86 /* WaitingAttentionRuleTests.swift */; };
 		07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */; };
 		09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */; };
 		09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
+		13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */; };
 		16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13285F293338CA8A4716B490 /* AccountVault.swift */; };
 		1B2B5B7A986EB0FB38A5C63C /* AccountRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */; };
 		1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = D988495C37A78AEED9B566A4 /* Identifiers.swift */; };
@@ -145,6 +147,7 @@
 		2FA4EF715587B009499705BF /* WorkflowRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowRepository.swift; sourceTree = "<group>"; };
 		326A309D86A0DA32F49BD907 /* GitHubIdentityClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIdentityClient.swift; sourceTree = "<group>"; };
 		3B59CA16DA269CD50E052F2A /* Freshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Freshness.swift; sourceTree = "<group>"; };
+		3BCA90EAF4A677B2A3CC810D /* GitHubSearchNormalizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSearchNormalizerTests.swift; sourceTree = "<group>"; };
 		3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateDataArtifacts.swift; sourceTree = "<group>"; };
 		40CEA0BE253FA4978B2B3641 /* PullRequestAttentionRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRuleTests.swift; sourceTree = "<group>"; };
 		44B3E254AF248B70DFBBB696 /* SSOAuthorizationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinatorTests.swift; sourceTree = "<group>"; };
@@ -159,6 +162,7 @@
 		555658DD05F52459D277E381 /* AttentionRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRanker.swift; sourceTree = "<group>"; };
 		5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimitTests.swift; sourceTree = "<group>"; };
 		5C534F0A690622733E79B291 /* Triage.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Triage.entitlements; sourceTree = "<group>"; };
+		61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSearchNormalizer.swift; sourceTree = "<group>"; };
 		67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClientTests.swift; sourceTree = "<group>"; };
 		70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocol.swift; sourceTree = "<group>"; };
 		70E93ABD004196FC994DFBC9 /* CardContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardContainer.swift; sourceTree = "<group>"; };
@@ -240,6 +244,7 @@
 				993826A5AB570E9336F94531 /* GitHubDiagnostics.swift */,
 				90044685B20CE509DAFA633F /* GitHubRateLimit.swift */,
 				15EBE886A000E3B4A1E8AC60 /* GraphQL */,
+				C15180F33018B4208C87CB90 /* Normalization */,
 				7D3692CA77089D6B095FA548 /* REST */,
 				AB2C8AB6AD09722CB2711746 /* Sync */,
 			);
@@ -402,6 +407,7 @@
 				5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */,
 				E844E395E5858DFCE770AF44 /* GitHubRESTClientTests.swift */,
 				94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */,
+				3BCA90EAF4A677B2A3CC810D /* GitHubSearchNormalizerTests.swift */,
 				16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */,
 				92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */,
 			);
@@ -477,6 +483,14 @@
 				2E84F2F83994E7EED18D38E9 /* TriageTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		C15180F33018B4208C87CB90 /* Normalization */ = {
+			isa = PBXGroup;
+			children = (
+				61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */,
+			);
+			path = Normalization;
 			sourceTree = "<group>";
 		};
 		C90929E15A5AC3C40FE1F75A /* Intelligence */ = {
@@ -648,6 +662,7 @@
 				7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */,
 				DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */,
 				7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */,
+				045B7390CA22D6FA51470E8A /* GitHubSearchNormalizerTests.swift in Sources */,
 				65623684B07E24F75A9F790C /* IdentifierTests.swift in Sources */,
 				B954C4729FEC6F7BCE320654 /* InboxEligibilityRuleTests.swift in Sources */,
 				CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */,
@@ -702,6 +717,7 @@
 				EEB384069794A87C52F10A61 /* GitHubRESTTransport.swift in Sources */,
 				5365A873C4D57DE2CD51390B /* GitHubRateLimit.swift in Sources */,
 				59361E7D730F026936B600C3 /* GitHubSSOHeader.swift in Sources */,
+				13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */,
 				1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */,
 				76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
