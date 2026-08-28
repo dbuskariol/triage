@@ -457,6 +457,41 @@ final class WorkRelationRepositoryTests: XCTestCase {
         XCTAssertEqual(scope.capabilityRevision, CapabilityRevision(rawValue: "capability-1"))
     }
 
+    func testPersistentNotificationLedgerEnforcesVaultAndWorkItemScope() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let workItemID = try await WorkItemRepository(vault: fixture.vault).ensureWorkItem(for: fixture.node)
+        let key = NotificationDedupeKey(
+            route: NotificationRoute(
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                workItemID: workItemID
+            ),
+            reason: .directAssignment,
+            evidenceVersion: "revision-1"
+        )
+        let ledger = PersistentNotificationDeliveryLedger(vault: fixture.vault)
+        try await ledger.record(key)
+        XCTAssertTrue(try await ledger.contains(key))
+
+        let crossAccountKey = NotificationDedupeKey(
+            route: NotificationRoute(
+                accountID: AccountID.make(),
+                organizationID: fixture.organizationID,
+                workItemID: workItemID
+            ),
+            reason: .directAssignment,
+            evidenceVersion: "revision-1"
+        )
+        do {
+            _ = try await ledger.contains(crossAccountKey)
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? NotificationDeliveryLedgerError, .accountScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
