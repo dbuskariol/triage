@@ -16,17 +16,20 @@ struct GitHubFailure: Error, Equatable, Sendable {
     let statusCode: Int
     let requestID: String?
     let retryAfter: TimeInterval?
+    let ssoHeader: GitHubSSOHeader?
 
     init(
         kind: GitHubFailureKind,
         statusCode: Int,
         requestID: String? = nil,
-        retryAfter: TimeInterval? = nil
+        retryAfter: TimeInterval? = nil,
+        ssoHeader: GitHubSSOHeader? = nil
     ) {
         self.kind = kind
         self.statusCode = statusCode
         self.requestID = requestID
         self.retryAfter = retryAfter
+        self.ssoHeader = ssoHeader
     }
 }
 
@@ -57,7 +60,8 @@ enum GitHubFailureClassifier {
             kind: kind,
             statusCode: response.statusCode,
             requestID: response.header(named: "X-GitHub-Request-Id"),
-            retryAfter: retryAfter
+            retryAfter: retryAfter,
+            ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
         )
     }
 }
