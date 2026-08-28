@@ -76,6 +76,7 @@
 		5D12FECE58088548FECB3BEC /* WorkflowTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */; };
 		5F1B6917146F96421785E71B /* TimelineRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */; };
 		62AE7865C93E901751D96D83 /* TriageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F74BA70C92A3542C44D29350 /* TriageTests.swift */; };
+		639B7E593417AF6E3A71451E /* NormalizationFailureRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */; };
 		63AA4773C2EF01BDC055423C /* SoftwareUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 926E2C8C201B67494FDEBD5E /* SoftwareUpdateController.swift */; };
 		65623684B07E24F75A9F790C /* IdentifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D55C61485E13F265EFB7D3 /* IdentifierTests.swift */; };
 		689BB5871312602063AE4AB7 /* TriageAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07052B04A11F30A982F01E0 /* TriageAppModel.swift */; };
@@ -174,6 +175,7 @@
 		F1B233E72F3E02889F3B3F4F /* PersonalAccessTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */; };
 		F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */; };
 		F3AAEBABBED7F89F609F96A5 /* BusinessDayPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80DE672E00FCF7147665285 /* BusinessDayPolicyTests.swift */; };
+		F48CFD7952CFEDEADF3C6879 /* NormalizationFailure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */; };
 		F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */; };
 		F90C766057275A70937531BD /* WorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9080B82740744E5D971BA1E /* WorkflowTests.swift */; };
 		FD825489A2459F105DCE042C /* WorkflowActionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69059AEFA8E3488C971070DA /* WorkflowActionService.swift */; };
@@ -305,6 +307,7 @@
 		8326C3C930B01A4914156D18 /* GitHubGraphQLQueries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubGraphQLQueries.swift; sourceTree = "<group>"; };
 		83392CACBB3AEE37ADD6DF40 /* OAuthCredentialRefreshServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OAuthCredentialRefreshServiceTests.swift; sourceTree = "<group>"; };
 		83A08A743ED79E891E831DFC /* SearchShardPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchShardPlanner.swift; sourceTree = "<group>"; };
+		84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalizationFailure.swift; sourceTree = "<group>"; };
 		850788277C525AE27A2B89B1 /* SearchRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchRepository.swift; sourceTree = "<group>"; };
 		856FB30E15E2FA4A641E07DE /* TriageCopilotXPCService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageCopilotXPCService.swift; sourceTree = "<group>"; };
 		8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateDataArtifactsTests.swift; sourceTree = "<group>"; };
@@ -345,6 +348,7 @@
 		B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlan.swift; sourceTree = "<group>"; };
 		B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActorRepository.swift; sourceTree = "<group>"; };
 		B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransition.swift; sourceTree = "<group>"; };
+		B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalizationFailureRepository.swift; sourceTree = "<group>"; };
 		BACBE230946C1056771FE56F /* PersonalAccessToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessToken.swift; sourceTree = "<group>"; };
 		BD0C14B59A1223DC3240A96C /* WorkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItem.swift; sourceTree = "<group>"; };
 		BE3D67A0FFC1AA8377EEE54A /* RefreshCadence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshCadence.swift; sourceTree = "<group>"; };
@@ -641,6 +645,7 @@
 				7BA6D93753D4F71FC83F3C86 /* AttentionScoreRepository.swift */,
 				5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
+				B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */,
 				2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */,
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
 				4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */,
@@ -663,6 +668,7 @@
 				3B59CA16DA269CD50E052F2A /* Freshness.swift */,
 				229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */,
 				D988495C37A78AEED9B566A4 /* Identifiers.swift */,
+				84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */,
 				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
 				BD0C14B59A1223DC3240A96C /* WorkItem.swift */,
@@ -1071,6 +1077,8 @@
 				76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
+				F48CFD7952CFEDEADF3C6879 /* NormalizationFailure.swift in Sources */,
+				639B7E593417AF6E3A71451E /* NormalizationFailureRepository.swift in Sources */,
 				2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */,
 				082DECABB717AFA793F8E555 /* NotificationDeliveryLedger.swift in Sources */,
 				3CE6D5F4FFFBBABB738F0A61 /* NotificationPolicy.swift in Sources */,
