@@ -140,4 +140,12 @@ actor VaultRegistry {
             try await vault.close()
         }
     }
+
+    func remove(accountID: AccountID) async throws {
+        try await close(accountID: accountID)
+        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
+        if FileManager.default.fileExists(atPath: paths.directory.path) {
+            try FileManager.default.removeItem(at: paths.directory)
+        }
+    }
 }
