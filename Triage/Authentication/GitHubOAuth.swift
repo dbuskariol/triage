@@ -1,3 +1,5 @@
+import AuthenticationServices
+import AppKit
 import CryptoKit
 import Foundation
 import Security
@@ -8,6 +10,8 @@ enum GitHubOAuthError: Error, Equatable, Sendable {
     case invalidCallback
     case invalidState
     case missingAuthorizationCode
+    case authorizationInProgress
+    case failedToStartAuthorization
 }
 
 struct GitHubOAuthConfiguration: Equatable, Sendable {
@@ -110,6 +114,100 @@ struct OAuthAuthorizationSession: Equatable, Sendable {
             throw GitHubOAuthError.randomGenerationFailed(status)
         }
         return Data(bytes).base64URLEncodedString()
+    }
+}
+
+@MainActor
+final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var activeSession: ASWebAuthenticationSession?
+    private var activeAnchor: ASPresentationAnchor?
+    private var continuation: CheckedContinuation<AuthBrokerExchangeRequest, Error>?
+
+    func authorize(
+        configuration: GitHubOAuthConfiguration,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> AuthBrokerExchangeRequest {
+        guard activeSession == nil else {
+            throw GitHubOAuthError.authorizationInProgress
+        }
+
+        let authorization = try OAuthAuthorizationSession.make(configuration: configuration)
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                activeAnchor = presentationAnchor
+                let session = ASWebAuthenticationSession(
+                    url: authorization.authorizationURL,
+                    callbackURLScheme: configuration.redirectURI.scheme
+                ) { [weak self] callbackURL, error in
+                    Task { @MainActor [weak self] in
+                        self?.complete(
+                            callbackURL: callbackURL,
+                            error: error,
+                            authorization: authorization,
+                            redirectURI: configuration.redirectURI
+                        )
+                    }
+                }
+                session.presentationContextProvider = self
+                activeSession = session
+                guard session.start() else {
+                    finish(with: .failure(GitHubOAuthError.failedToStartAuthorization))
+                    return
+                }
+            }
+        }, onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancel()
+            }
+        })
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        activeAnchor!
+    }
+
+    private func complete(
+        callbackURL: URL?,
+        error: Error?,
+        authorization: OAuthAuthorizationSession,
+        redirectURI: URL
+    ) {
+        if let error {
+            finish(with: .failure(error))
+            return
+        }
+        guard let callbackURL else {
+            finish(with: .failure(GitHubOAuthError.invalidCallback))
+            return
+        }
+
+        do {
+            let request = AuthBrokerExchangeRequest(
+                authorizationCode: try authorization.authorizationCode(
+                    from: callbackURL,
+                    redirectURI: redirectURI
+                ),
+                codeVerifier: authorization.verifier,
+                redirectURI: redirectURI
+            )
+            finish(with: .success(request))
+        } catch {
+            finish(with: .failure(error))
+        }
+    }
+
+    private func cancel() {
+        activeSession?.cancel()
+        finish(with: .failure(CancellationError()))
+    }
+
+    private func finish(with result: Result<AuthBrokerExchangeRequest, Error>) {
+        let continuation = continuation
+        self.continuation = nil
+        activeSession = nil
+        activeAnchor = nil
+        continuation?.resume(with: result)
     }
 }
 
