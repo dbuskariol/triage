@@ -194,6 +194,53 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testSyncShardsRequireAnAccountOwnedParentStream() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let streamID = SyncStreamID(rawValue: "search-discovery")!
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                repositoryID: nil,
+                feature: .issues,
+                streamID: streamID,
+                intervalStart: fixture.date,
+                intervalEnd: fixture.date.addingTimeInterval(60),
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.date
+        )
+        let shard = SyncShard(
+            id: SyncShardID.make(),
+            streamID: streamID,
+            queryKind: "involvement-open",
+            intervalStart: fixture.date,
+            intervalEnd: fixture.date.addingTimeInterval(60),
+            pageCursor: "page:2",
+            state: .running,
+            completedAt: nil
+        )
+        let repository = SyncShardRepository(vault: fixture.vault)
+        try await repository.save(shard, accountID: fixture.accountID)
+        XCTAssertEqual(
+            try await repository.shards(for: streamID, accountID: fixture.accountID),
+            [shard]
+        )
+
+        do {
+            try await repository.save(shard, accountID: AccountID.make())
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? SyncShardRepositoryError, .accountScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
