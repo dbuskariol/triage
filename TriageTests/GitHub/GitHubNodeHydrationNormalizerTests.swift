@@ -16,6 +16,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 
         XCTAssertEqual(node.kind, .pullRequest)
         XCTAssertEqual(node.state, .merged)
+        XCTAssertEqual(node.numericID, "42")
         XCTAssertEqual(node.authorID, ActorID(rawValue: "USER_1"))
         XCTAssertEqual(node.bodyMarkdown, "Authoritative body")
         XCTAssertEqual(node.sourceRevision, updatedAt.ISO8601Format())
@@ -55,7 +56,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
             title: "Add hydration",
             body: "Authoritative body",
             url: URL(string: "https://github.com/octo/triage/pull/42")!,
-            state: "CLOSED",
+            state: "MERGED",
             createdAt: createdAt,
             updatedAt: updatedAt,
             closedAt: updatedAt,

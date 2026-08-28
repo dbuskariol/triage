@@ -137,7 +137,8 @@ actor OrganizationWorkRefreshService {
                 client: graphqlClient,
                 nodeRepository: GitHubNodeRepository(vault: vault),
                 actorRepository: ActorRepository(vault: vault),
-                rawSnapshotRepository: RawAPISnapshotRepository(vault: vault)
+                rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+                normalizationFailureRepository: NormalizationFailureRepository(vault: vault)
             ).hydrate(
                 nodeIDs: discoveryResult.candidateNodeIDs,
                 accountID: account.id,

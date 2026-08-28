@@ -15,6 +15,7 @@ actor GitHubNodeHydrationService {
     private let nodeRepository: GitHubNodeRepository
     private let actorRepository: ActorRepository
     private let rawSnapshotRepository: RawAPISnapshotRepository
+    private let normalizationFailureRepository: NormalizationFailureRepository
     private let clock: @Sendable () -> Date
 
     init(
@@ -22,12 +23,14 @@ actor GitHubNodeHydrationService {
         nodeRepository: GitHubNodeRepository,
         actorRepository: ActorRepository,
         rawSnapshotRepository: RawAPISnapshotRepository,
+        normalizationFailureRepository: NormalizationFailureRepository,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
         self.nodeRepository = nodeRepository
         self.actorRepository = actorRepository
         self.rawSnapshotRepository = rawSnapshotRepository
+        self.normalizationFailureRepository = normalizationFailureRepository
         self.clock = clock
     }
 
@@ -71,14 +74,31 @@ actor GitHubNodeHydrationService {
             for actor in actors(in: payload) {
                 try await actorRepository.save(actor, observedAt: observedAt)
             }
-            let normalized = try GitHubNodeHydrationNormalizer.normalize(
-                payload,
-                requestedNodeIDs: Set(batch),
-                accountID: accountID,
-                organizationID: organizationID,
-                repositoryID: repositoryID,
-                observedAt: observedAt
-            )
+            let normalized: [NormalizedGitHubNode]
+            do {
+                normalized = try GitHubNodeHydrationNormalizer.normalize(
+                    payload,
+                    requestedNodeIDs: Set(batch),
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: repositoryID,
+                    observedAt: observedAt
+                )
+            } catch let error as GitHubNodeHydrationNormalizationError {
+                try await normalizationFailureRepository.record(
+                    NormalizationFailure(
+                        id: UUID(),
+                        accountID: accountID,
+                        rawSnapshotID: snapshot.id,
+                        githubNodeID: nil,
+                        endpoint: snapshot.endpoint,
+                        parserVersion: snapshot.parserVersion,
+                        occurredAt: observedAt,
+                        redactedDiagnostic: redactedDiagnostic(for: error)
+                    )
+                )
+                throw error
+            }
             for node in normalized {
                 try await nodeRepository.save(node)
             }
@@ -106,6 +126,31 @@ actor GitHubNodeHydrationService {
             )
         }
         return actors.values.sorted { $0.id.rawValue < $1.id.rawValue }
+    }
+
+    private func redactedDiagnostic(for error: GitHubNodeHydrationNormalizationError) -> String {
+        switch error {
+        case .missingRequestedNode:
+            "Hydration response omitted a requested GitHub node."
+        case .duplicateNode:
+            "Hydration response contained a duplicate GitHub node."
+        case .unsupportedNodeType:
+            "Hydration response contained an unsupported GitHub node type."
+        case .invalidNodeID:
+            "Hydration response contained an invalid GitHub node identifier."
+        case .invalidRepositoryID:
+            "Hydration response could not be mapped to an accessible repository."
+        case .invalidNumber:
+            "Hydration response contained an invalid issue or pull request number."
+        case .invalidTitle:
+            "Hydration response contained an invalid issue or pull request title."
+        case .invalidURL:
+            "Hydration response contained an invalid GitHub URL."
+        case .invalidState:
+            "Hydration response contained an unsupported issue or pull request state."
+        case .invalidDates:
+            "Hydration response contained inconsistent issue or pull request timestamps."
+        }
     }
 }
 
