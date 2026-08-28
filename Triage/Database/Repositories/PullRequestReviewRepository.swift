@@ -47,7 +47,7 @@ actor PullRequestReviewRepository {
         observedAt: Date = .now
     ) async throws {
         let observedAtMilliseconds = Self.milliseconds(observedAt)
-        try await vault.write { database in
+        try await vault.writeTransaction { database in
             try Self.replace(
                 reviews,
                 pullRequestNodeID: pullRequestNodeID,
