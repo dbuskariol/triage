@@ -18,6 +18,13 @@ final class AuthBrokerProtocolTests: XCTestCase {
         XCTAssertEqual(decoded, request)
         XCTAssertFalse(String(describing: request.authorizationCode).contains("secret-code"))
         XCTAssertFalse(String(describing: request.codeVerifier).contains(String(repeating: "a", count: 43)))
+        let wireValue = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(wireValue["version"] as? Int, 1)
+        XCTAssertEqual(wireValue["authorizationCode"] as? String, "secret-code")
+        XCTAssertEqual(wireValue["codeVerifier"] as? String, String(repeating: "a", count: 43))
+        XCTAssertEqual(wireValue["redirectURI"] as? String, "triage://oauth-callback")
     }
 
     func testTokenResponsePreservesOAuthExpirationMetadata() {

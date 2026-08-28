@@ -16,6 +16,15 @@ struct OAuthAuthorizationCode: Codable, Equatable, Sendable, CustomStringConvert
     var description: String {
         "<redacted OAuth authorization code>"
     }
+
+    init(from decoder: Decoder) throws {
+        self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value.rawValue)
+    }
 }
 
 struct OAuthRefreshToken: Codable, Equatable, Sendable, CustomStringConvertible {
@@ -28,6 +37,15 @@ struct OAuthRefreshToken: Codable, Equatable, Sendable, CustomStringConvertible 
     var description: String {
         "<redacted OAuth refresh token>"
     }
+
+    init(from decoder: Decoder) throws {
+        self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value.rawValue)
+    }
 }
 
 struct OAuthAccessToken: Codable, Equatable, Sendable, CustomStringConvertible {
@@ -39,6 +57,15 @@ struct OAuthAccessToken: Codable, Equatable, Sendable, CustomStringConvertible {
 
     var description: String {
         "<redacted OAuth access token>"
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value.rawValue)
     }
 }
 
