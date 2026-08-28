@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct WorkDetailView: View {
+    @EnvironmentObject private var appModel: TriageAppModel
     let item: WorkItem?
     @State private var showsInspector = false
 
@@ -20,21 +21,14 @@ struct WorkDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         if !item.attentionReasons.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Why this is here")
-                                    .font(.headline)
-                                ForEach(item.attentionReasons) { reason in
-                                    Label(reason.explanation, systemImage: "exclamationmark.circle")
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                            AttentionReasonsSection(reasons: item.attentionReasons)
                         }
                         if !item.openActionItems.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Action Items")
                                     .font(.headline)
                                 ForEach(item.openActionItems) { action in
-                                    Label(action.title, systemImage: "circle")
+                                    ActionItemRow(action: action, workItem: item)
                                 }
                             }
                         }
@@ -69,6 +63,46 @@ struct WorkDetailView: View {
             if let item {
                 WorkInspectorView(item: item)
             }
+        }
+    }
+
+    private struct AttentionReasonRow: View {
+        let reason: AttentionReason
+
+        var body: some View {
+            Label(reason.explanation, systemImage: "exclamationmark.circle")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private struct AttentionReasonsSection: View {
+        let reasons: [AttentionReason]
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Why this is here")
+                    .font(.headline)
+                ForEach(reasons) { reason in
+                    AttentionReasonRow(reason: reason)
+                }
+            }
+        }
+    }
+
+    private struct ActionItemRow: View {
+        @EnvironmentObject private var appModel: TriageAppModel
+        let action: ActionItem
+        let workItem: WorkItem
+
+        var body: some View {
+            Button {
+                Task {
+                    await appModel.completeActionItem(action, in: workItem)
+                }
+            } label: {
+                Label(action.title, systemImage: "circle")
+            }
+            .buttonStyle(.plain)
         }
     }
 
