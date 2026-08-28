@@ -76,6 +76,7 @@ final class WorkItemTests: XCTestCase {
             title: "Example work item",
             state: .active,
             sourceKind: .issue,
+            sourceURL: nil,
             repository: nil,
             members: [],
             contextLinks: [],

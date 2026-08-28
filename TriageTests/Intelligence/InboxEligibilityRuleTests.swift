@@ -75,6 +75,7 @@ final class InboxEligibilityRuleTests: XCTestCase {
             title: "Example",
             state: state,
             sourceKind: .issue,
+            sourceURL: nil,
             repository: nil,
             members: [],
             contextLinks: [],

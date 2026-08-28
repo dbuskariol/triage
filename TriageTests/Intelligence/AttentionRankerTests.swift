@@ -85,6 +85,7 @@ final class AttentionRankerTests: XCTestCase {
             title: id,
             state: .active,
             sourceKind: .issue,
+            sourceURL: nil,
             repository: nil,
             members: [],
             contextLinks: [],
