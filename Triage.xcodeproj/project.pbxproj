@@ -99,6 +99,7 @@
 		DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */; };
 		E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */; };
 		E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993826A5AB570E9336F94531 /* GitHubDiagnostics.swift */; };
+		E6581FEDB74600C101B1E376 /* RoleDiscoverySynchronizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE1FCECD11A0F3231E3D317F /* RoleDiscoverySynchronizer.swift */; };
 		E6E211CEB38C07FA9FC64BBC /* AccountVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */; };
 		EDC07FACA4AE6EB03C90979A /* AccountConnectionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D962615F59F45990114831EF /* AccountConnectionService.swift */; };
 		EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E93ABD004196FC994DFBC9 /* CardContainer.swift */; };
@@ -211,6 +212,7 @@
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermark.swift; sourceTree = "<group>"; };
+		CE1FCECD11A0F3231E3D317F /* RoleDiscoverySynchronizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoverySynchronizer.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		D962615F59F45990114831EF /* AccountConnectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnectionService.swift; sourceTree = "<group>"; };
 		D988495C37A78AEED9B566A4 /* Identifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identifiers.swift; sourceTree = "<group>"; };
@@ -463,6 +465,7 @@
 			children = (
 				015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */,
 				B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */,
+				CE1FCECD11A0F3231E3D317F /* RoleDiscoverySynchronizer.swift */,
 				83A08A743ED79E891E831DFC /* SearchShardPlanner.swift */,
 				CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */,
 			);
@@ -742,6 +745,7 @@
 				8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */,
 				C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */,
 				B3FDE6FE018FC2B4DD87C517 /* RoleDiscoveryPlan.swift in Sources */,
+				E6581FEDB74600C101B1E376 /* RoleDiscoverySynchronizer.swift in Sources */,
 				593D34E52E35E0A27F81AC9E /* RootView.swift in Sources */,
 				4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */,
 				9B077224AD72CFDBCEA499AC /* SSOAuthorizationCoordinator.swift in Sources */,
