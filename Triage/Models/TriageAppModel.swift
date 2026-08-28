@@ -3,11 +3,20 @@ import Foundation
 
 @MainActor
 final class TriageAppModel: ObservableObject {
+    private enum PreferenceKey {
+        static let selectedAccountID = "workspace.selected-account-id"
+        static let selectedOrganizationID = "workspace.selected-organization-id"
+    }
+
     @Published private(set) var accounts: [GitHubAccount] = []
     @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
     @Published private(set) var workItems: [WorkItem] = []
-    @Published var selectedAccountID: AccountID?
-    @Published var selectedOrganizationID: OrganizationID?
+    @Published var selectedAccountID: AccountID? {
+        didSet { defaults.set(selectedAccountID?.rawValue, forKey: PreferenceKey.selectedAccountID) }
+    }
+    @Published var selectedOrganizationID: OrganizationID? {
+        didSet { defaults.set(selectedOrganizationID?.rawValue, forKey: PreferenceKey.selectedOrganizationID) }
+    }
     @Published var selectedWorkItemID: WorkItemID?
     @Published private(set) var connectionError: String?
     @Published private(set) var refreshError: String?
@@ -16,6 +25,7 @@ final class TriageAppModel: ObservableObject {
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
+    private let defaults: UserDefaults
     private var refreshGeneration = 0
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
@@ -26,6 +36,14 @@ final class TriageAppModel: ObservableObject {
 
     var selectedOrganization: GitHubOrganization? {
         organizations.first { $0.id == selectedOrganizationID }
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID)
+            .flatMap(AccountID.init(rawValue:))
+        selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
+            .flatMap(OrganizationID.init(rawValue:))
     }
 
     func install(
@@ -106,8 +124,12 @@ final class TriageAppModel: ObservableObject {
             ).restore()
             accounts = result.accounts
             organizationsByAccount = result.organizationsByAccount
-            selectedAccountID = result.accounts.first?.id
-            selectedOrganizationID = selectedAccountID.flatMap { organizationsByAccount[$0]?.first?.id }
+            if !result.accounts.contains(where: { $0.id == selectedAccountID }) {
+                selectedAccountID = result.accounts.first?.id
+            }
+            if !organizations.contains(where: { $0.id == selectedOrganizationID }) {
+                selectedOrganizationID = organizations.first?.id
+            }
             await loadCachedSelectedOrganization()
             if !result.unavailableAccountIDs.isEmpty {
                 restorationError = "One or more connected accounts need to be reconnected."
