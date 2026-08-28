@@ -43,6 +43,31 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         XCTAssertNil(result.ssoHeader)
     }
 
+    func testProbeCombinesPartialSSOHeadersBeforeScopingTheSelectedOrganization() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SequencedProbeSession(responses: [
+                    response(
+                        #"{"id":1,"node_id":"O_1","login":"acme"}"#,
+                        headers: ["X-GitHub-SSO": "partial-results; organizations=2"]
+                    ),
+                    response(
+                        "[]",
+                        headers: ["X-GitHub-SSO": "partial-results; organizations=1"]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client)
+        ).probe(organization: organization())
+
+        XCTAssertEqual(result.accessState, .partialSSOAuthorization)
+        XCTAssertEqual(result.ssoHeader, .partialResults(Set([1])))
+    }
+
     private func organization() -> GitHubOrganization {
         GitHubOrganization(
             id: OrganizationID(rawValue: "O_1")!,
