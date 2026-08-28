@@ -74,7 +74,8 @@ actor GitHubCapabilityProbe {
         } catch let failure as GitHubFailure {
             let state = OrganizationAccessEvaluator.state(
                 statusCode: failure.statusCode,
-                ssoHeader: failure.ssoHeader
+                ssoHeader: failure.ssoHeader,
+                accessRestriction: failure.accessRestriction
             )
             return OrganizationProbeResult(
                 organization: nil,
@@ -327,6 +328,14 @@ actor GitHubCapabilityProbe {
            case .partialResults = ssoHeader {
             return .requiresSSO
         }
+        switch failure.accessRestriction {
+        case .organizationApprovalRequired, .oauthApplicationApprovalRequired:
+            return .requiresApproval
+        case .organizationPolicyBlocked:
+            return .unavailable
+        case nil:
+            break
+        }
         switch failure.kind {
         case .forbidden, .notFound:
             return .unavailable
@@ -350,6 +359,14 @@ actor GitHubCapabilityProbe {
         if let ssoHeader = failure.ssoHeader,
            case .partialResults = ssoHeader {
             return .requiresSSO
+        }
+        switch failure.accessRestriction {
+        case .organizationApprovalRequired, .oauthApplicationApprovalRequired:
+            return .requiresApproval
+        case .organizationPolicyBlocked:
+            return .unavailable
+        case nil:
+            break
         }
         switch failure.kind {
         case .forbidden, .notFound:

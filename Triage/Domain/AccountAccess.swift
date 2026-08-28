@@ -40,6 +40,12 @@ enum OrganizationAccessState: String, Codable, Sendable {
     case unknown
 }
 
+enum GitHubAccessRestriction: Equatable, Sendable {
+    case organizationApprovalRequired
+    case oauthApplicationApprovalRequired
+    case organizationPolicyBlocked
+}
+
 enum CapabilityStatus: String, Codable, Sendable {
     case available
     case unavailable

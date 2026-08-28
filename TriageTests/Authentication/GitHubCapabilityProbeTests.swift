@@ -149,6 +149,42 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         XCTAssertEqual(capabilities.status(for: .notifications), .requiresSSO)
     }
 
+    func testProbeMakesExplicitOrganizationPolicyBlockUnavailable() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: RestrictedProbeSession(
+                    body: #"{"message":"Blocked due to organization policy"}"#
+                )
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client)
+        ).probe(organization: organization())
+
+        XCTAssertEqual(result.accessState, .organizationPolicyBlocked)
+        XCTAssertTrue(result.capabilities.allSatisfy { $0.status == .unavailable })
+    }
+
+    func testProbeMakesExplicitOAuthApprovalRequirementVisibleInCoverage() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: RestrictedProbeSession(
+                    body: #"{"message":"This organization has enabled OAuth App access restrictions."}"#
+                )
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client)
+        ).probe(organization: organization())
+
+        XCTAssertEqual(result.accessState, .oauthApplicationApprovalRequired)
+        XCTAssertEqual(result.capabilities.status(for: .privateRepositories), .requiresApproval)
+    }
+
     private func organization() -> GitHubOrganization {
         GitHubOrganization(
             id: OrganizationID(rawValue: "O_1")!,
@@ -191,6 +227,29 @@ private actor SequencedProbeSession: HTTPSession {
                 statusCode: 200,
                 httpVersion: nil,
                 headerFields: response.1
+            )!
+        )
+    }
+}
+
+private actor RestrictedProbeSession: HTTPSession {
+    private let body: Data
+
+    init(body: String) {
+        self.body = Data(body.utf8)
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard let url = request.url else {
+            throw URLError(.resourceUnavailable)
+        }
+        return (
+            body,
+            HTTPURLResponse(
+                url: url,
+                statusCode: 403,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
             )!
         )
     }

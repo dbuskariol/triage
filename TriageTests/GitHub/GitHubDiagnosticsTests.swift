@@ -33,15 +33,51 @@ final class GitHubDiagnosticsTests: XCTestCase {
         XCTAssertNil(GitHubFailureClassifier.classify(response(status: 200)))
     }
 
+    func testClassifierExtractsOnlyExplicitAccessRestrictions() {
+        XCTAssertEqual(
+            GitHubFailureClassifier.classify(
+                response(status: 403, body: #"{"message":"Blocked due to organization policy"}"#)
+            )?.accessRestriction,
+            .organizationPolicyBlocked
+        )
+        XCTAssertEqual(
+            GitHubFailureClassifier.classify(
+                response(
+                    status: 403,
+                    body: #"{"message":"This organization has enabled OAuth App access restrictions."}"#
+                )
+            )?.accessRestriction,
+            .oauthApplicationApprovalRequired
+        )
+        XCTAssertEqual(
+            GitHubFailureClassifier.classify(
+                response(
+                    status: 403,
+                    body: #"{"message":"This fine-grained personal access token has pending approval."}"#
+                )
+            )?.accessRestriction,
+            .organizationApprovalRequired
+        )
+        XCTAssertNil(
+            GitHubFailureClassifier.classify(
+                response(
+                    status: 403,
+                    body: #"{"message":"Resource not accessible by personal access token"}"#
+                )
+            )?.accessRestriction
+        )
+    }
+
     private func response(
         status: Int,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        body: String = #"{"message":"private content"}"#
     ) -> GitHubRESTResponse {
         GitHubRESTResponse(
             statusCode: status,
             url: URL(string: "https://api.github.com/user")!,
             headers: headers,
-            body: Data("{\"message\":\"private content\"}".utf8)
+            body: Data(body.utf8)
         )
     }
 }
