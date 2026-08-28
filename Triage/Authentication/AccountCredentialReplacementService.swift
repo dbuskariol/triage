@@ -50,18 +50,27 @@ enum CredentialReplacement {
 }
 
 actor AccountCredentialReplacementService {
-    private let secretStore: KeychainSecretStore
+    private let secretStore: any SecretStore
     private let vaultRegistry: VaultRegistry
     private let clock: @Sendable () -> Date
+    private let loadAuthenticatedUser: @Sendable (SecretValue) async throws -> GitHubUserDTO
 
     init(
-        secretStore: KeychainSecretStore,
+        secretStore: any SecretStore,
         vaultRegistry: VaultRegistry,
-        clock: @escaping @Sendable () -> Date = Date.init
+        clock: @escaping @Sendable () -> Date = Date.init,
+        loadAuthenticatedUser: @escaping @Sendable (SecretValue) async throws -> GitHubUserDTO = { accessToken in
+            let client = GitHubRESTClient(
+                transport: try GitHubRESTTransport(),
+                credential: accessToken
+            )
+            return try await GitHubIdentityClient(client: client).authenticatedUser().value
+        }
     ) {
         self.secretStore = secretStore
         self.vaultRegistry = vaultRegistry
         self.clock = clock
+        self.loadAuthenticatedUser = loadAuthenticatedUser
     }
 
     func replace(
@@ -103,11 +112,7 @@ actor AccountCredentialReplacementService {
         refreshTokenLifetime: TimeInterval?,
         for account: GitHubAccount
     ) async throws -> AccountCredentialReplacementResult {
-        let client = GitHubRESTClient(
-            transport: try GitHubRESTTransport(),
-            credential: accessToken
-        )
-        let authenticatedUser = try await GitHubIdentityClient(client: client).authenticatedUser().value
+        let authenticatedUser = try await loadAuthenticatedUser(accessToken)
         try Task.checkCancellation()
 
         let date = clock()
@@ -122,9 +127,14 @@ actor AccountCredentialReplacementService {
             refreshTokenExpiresAt: refreshTokenExpiresAt,
             at: date
         )
-        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+        guard let vaultKeyData = try await secretStore.read(
+            kind: .vaultKey,
+            accountID: account.id,
+            credentialID: nil
+        ) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
+        let vaultKey = try VaultKey(data: vaultKeyData)
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
         let accessTokenKind: TriageSecretKind = account.authenticationKind == .oauth
             ? .oauthAccessToken
