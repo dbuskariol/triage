@@ -10,6 +10,7 @@ final class TriageAppModel: ObservableObject {
 
     @Published private(set) var accounts: [GitHubAccount] = []
     @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
+    @Published private(set) var organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]] = [:]
     @Published private(set) var workItems: [WorkItem] = []
     @Published var selectedAccountID: AccountID? {
         didSet { defaults.set(selectedAccountID?.rawValue, forKey: PreferenceKey.selectedAccountID) }
@@ -44,6 +45,11 @@ final class TriageAppModel: ObservableObject {
         organizations.first { $0.id == selectedOrganizationID }
     }
 
+    var selectedOrganizationAccess: OrganizationAccess? {
+        guard let selectedAccountID, let selectedOrganizationID else { return nil }
+        return organizationAccessesByAccount[selectedAccountID]?[selectedOrganizationID]
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         do {
@@ -62,10 +68,12 @@ final class TriageAppModel: ObservableObject {
     func install(
         accounts: [GitHubAccount],
         organizations: [GitHubOrganization],
+        organizationAccesses: [OrganizationID: OrganizationAccess],
         for accountID: AccountID
     ) {
         self.accounts = accounts
         organizationsByAccount[accountID] = organizations
+        organizationAccessesByAccount[accountID] = organizationAccesses
         selectedAccountID = accountID
         selectedOrganizationID = organizations.first?.id
     }
@@ -140,6 +148,7 @@ final class TriageAppModel: ObservableObject {
 
         accounts.removeAll { $0.id == accountID }
         organizationsByAccount[accountID] = nil
+        organizationAccessesByAccount[accountID] = nil
         if selectedAccountID == accountID {
             selectedAccountID = accounts.first?.id
             selectedOrganizationID = selectedAccountID
@@ -168,7 +177,12 @@ final class TriageAppModel: ObservableObject {
                 secretStore: KeychainSecretStore(),
                 vaultRegistry: requiredVaultRegistry()
             ).connectOAuth(exchangeRequest: request)
-            install(accounts: accounts + [result.account], organizations: result.organizations, for: result.account.id)
+            install(
+                accounts: accounts + [result.account],
+                organizations: result.organizations,
+                organizationAccesses: result.organizationAccesses,
+                for: result.account.id
+            )
             await refreshSelectedOrganization()
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
@@ -200,7 +214,12 @@ final class TriageAppModel: ObservableObject {
                 personalAccessToken: token,
                 resourceOwnerOrganization: resourceOwnerOrganization
             )
-            install(accounts: accounts + [result.account], organizations: result.organizations, for: result.account.id)
+            install(
+                accounts: accounts + [result.account],
+                organizations: result.organizations,
+                organizationAccesses: result.organizationAccesses,
+                for: result.account.id
+            )
             await refreshSelectedOrganization()
         } catch is PersonalAccessTokenError {
             connectionError = "Enter a supported fine-grained or classic GitHub personal access token."
@@ -227,6 +246,7 @@ final class TriageAppModel: ObservableObject {
             ).restore()
             accounts = result.accounts
             organizationsByAccount = result.organizationsByAccount
+            organizationAccessesByAccount = result.organizationAccessesByAccount
             if !result.accounts.contains(where: { $0.id == selectedAccountID }) {
                 selectedAccountID = result.accounts.first?.id
             }
@@ -314,6 +334,7 @@ final class TriageAppModel: ObservableObject {
                 checkedAt: Date()
             )
             try await AccountRepository(vault: vault).save(organization, access: access)
+            organizationAccessesByAccount[initialAccount.id, default: [:]][organization.id] = access
             guard result.accessState == .available else {
                 ssoAuthorizationHeader = result.ssoHeader
                 refreshError = accessMessage(for: result.accessState)

@@ -37,7 +37,14 @@ final class AccountRepositoryTests: XCTestCase {
             organizationID: organizationID,
             state: .available,
             capabilityRevision: CapabilityRevision(rawValue: "cap-1")!,
-            capabilities: [],
+            capabilities: [
+                CapabilityAvailability(
+                    capability: .privateRepositories,
+                    status: .available,
+                    checkedAt: date,
+                    detail: "private repositories confirmed"
+                )
+            ],
             checkedAt: date
         )
 
@@ -52,5 +59,7 @@ final class AccountRepositoryTests: XCTestCase {
         }
         XCTAssertEqual(counts.0, 1)
         XCTAssertEqual(counts.1, 1)
+        let restoredAccesses = try await repository.organizationAccesses(for: accountID)
+        XCTAssertEqual(restoredAccesses[organizationID], access)
     }
 }
