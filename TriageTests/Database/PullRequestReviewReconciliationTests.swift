@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import Triage
 
@@ -108,6 +109,56 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         XCTAssertEqual(persistedTitle, fixture.pullRequest.title)
     }
 
+    func testRefreshPersistsReviewSourcesAndReconciledStateAtomically() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let restClient = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: ReviewRefreshSession(responses: [
+                    "/repos/github/triage/pulls/1/reviews?per_page=100": Data(
+                        #"[{"id":1,"node_id":"R_1","state":"APPROVED","body":"Looks good","submitted_at":"2025-01-01T00:00:00Z"}]"#.utf8
+                    ),
+                    "/repos/github/triage/pulls/1/requested_reviewers": Data(
+                        #"{"users":[{"node_id":"U_1","login":"reviewer"}],"teams":[]}"#.utf8
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+        let service = PullRequestReviewRefreshService(
+            client: GitHubPullRequestClient(client: restClient),
+            candidateRepository: PullRequestReviewCandidateRepository(vault: fixture.vault)
+        )
+
+        let result = try await service.refresh(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.date
+        )
+
+        XCTAssertEqual(result.refreshedPullRequestNodeIDs, [fixture.pullRequest.nodeID])
+        let persisted = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE github_node_id = ?",
+                    arguments: [fixture.pullRequest.nodeID.rawValue]
+                ),
+                try String.fetchAll(
+                    database,
+                    sql: "SELECT github_node_id FROM reviews ORDER BY github_node_id"
+                ),
+                try String.fetchAll(
+                    database,
+                    sql: "SELECT requested_reviewer_node_id FROM review_requests"
+                )
+            )
+        }
+        XCTAssertEqual(persisted.0, 2)
+        XCTAssertEqual(persisted.1, ["R_1"])
+        XCTAssertEqual(persisted.2, ["U_1"])
+    }
+
     private func review(nodeID: String, state: String) -> GitHubPullRequestReviewDTO {
         GitHubPullRequestReviewDTO(
             id: 1,
@@ -123,6 +174,7 @@ private final class Fixture: @unchecked Sendable {
     let directory: URL
     let accountID = AccountID.make()
     let organizationID = OrganizationID(rawValue: "github")!
+    let repositoryID = RepositoryID(rawValue: "triage")!
     let date = Date(timeIntervalSinceReferenceDate: 1_000)
     let vault: AccountVault
     let pullRequest: NormalizedGitHubNode
@@ -167,11 +219,31 @@ private final class Fixture: @unchecked Sendable {
             ),
             selectedAt: date
         )
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO repositories (
+                        id, organization_id, github_repository_id, github_node_id, owner_login, name,
+                        is_private, is_archived, has_discussions, html_url, updated_at_ms, archived_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, NULL)
+                    """,
+                arguments: [
+                    repositoryID.rawValue,
+                    organizationID.rawValue,
+                    "1",
+                    "MDEwOlJlcG9zaXRvcnkx",
+                    "github",
+                    "triage",
+                    "https://github.com/github/triage",
+                    Int64((date.timeIntervalSince1970 * 1_000).rounded())
+                ]
+            )
+        }
         pullRequest = NormalizedGitHubNode(
             nodeID: GitHubNodeID(rawValue: "MDExOlB1bGxSZXF1ZXN0MQ==")!,
             accountID: accountID,
             organizationID: organizationID,
-            repositoryID: nil,
+            repositoryID: repositoryID,
             kind: .pullRequest,
             numericID: "1",
             number: 1,
@@ -238,6 +310,33 @@ private final class Fixture: @unchecked Sendable {
 
 private enum FixtureError: Error, Equatable {
     case expectedRollback
+}
+
+private actor ReviewRefreshSession: HTTPSession {
+    private let responses: [String: Data]
+
+    init(responses: [String: Data]) {
+        self.responses = responses
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard let url = request.url else {
+            throw URLError(.badURL)
+        }
+        let pathAndQuery = [url.path, url.query].compactMap { $0 }.joined(separator: "?")
+        guard let response = responses[pathAndQuery] else {
+            throw URLError(.resourceUnavailable)
+        }
+        return (
+            response,
+            HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )
+    }
 }
 
 private func XCTAssertThrowsErrorAsync(
