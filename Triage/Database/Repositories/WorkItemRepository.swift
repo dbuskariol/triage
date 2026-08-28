@@ -55,15 +55,19 @@ actor WorkItemRepository {
                     workItemID: row["id"]
                 )
                 let actions = try Self.actionItems(in: database, workItemID: row["id"])
+                let members = try Self.members(in: database, workItemID: row["id"])
+                let contextLinks = try Self.contextLinks(in: database, workItemID: row["id"])
                 return try Self.workItem(
                     from: row,
                     accountID: accountID,
                     organizationID: organizationID,
                     attentionReasons: reasons,
-                    actionItems: actions
+                    actionItems: actions,
+                    members: members,
+                    contextLinks: contextLinks
                 )
             }
-        }
+    }
     }
 
     func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
@@ -130,7 +134,9 @@ actor WorkItemRepository {
         accountID: AccountID,
         organizationID: OrganizationID,
         attentionReasons: [AttentionReason],
-        actionItems: [ActionItem]
+        actionItems: [ActionItem],
+        members: [WorkItemMember],
+        contextLinks: [WorkItemContextLink]
     ) throws -> WorkItem {
         guard let id = WorkItemID(rawValue: row["id"]),
               let nodeID = GitHubNodeID(rawValue: row["primary_node_id"]),
@@ -160,8 +166,8 @@ actor WorkItemRepository {
             sourceKind: kind,
             sourceURL: sourceURL,
             repository: try repository(from: row),
-            members: [],
-            contextLinks: [],
+            members: members,
+            contextLinks: contextLinks,
             relations: [],
             attentionReasons: attentionReasons,
             actionItems: actionItems,
@@ -320,4 +326,136 @@ actor WorkItemRepository {
                 )
         }
     }
-}
+
+        private nonisolated static func members(
+            in database: Database,
+            workItemID: String
+        ) throws -> [WorkItemMember] {
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_members.github_node_id, work_item_members.role
+                    FROM work_item_members
+                    WHERE work_item_members.work_item_id = ?
+                    ORDER BY work_item_members.role, work_item_members.github_node_id
+                    """,
+                arguments: [workItemID]
+            ).map { row in
+                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                      let role = WorkItemMemberRole(rawValue: row["role"])
+                else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return WorkItemMember(
+                    id: nodeID,
+                    role: role,
+                    content: try content(in: database, nodeID: nodeID),
+                    evidence: []
+                )
+            }
+        }
+
+        private nonisolated static func contextLinks(
+            in database: Database,
+            workItemID: String
+        ) throws -> [WorkItemContextLink] {
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT github_node_id, relation
+                    FROM work_item_context_links
+                    WHERE work_item_id = ?
+                    ORDER BY relation, github_node_id
+                    """,
+                arguments: [workItemID]
+            ).map { row in
+                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                      let relation = WorkRelationKind(rawValue: row["relation"])
+                else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return WorkItemContextLink(
+                    id: nodeID,
+                    relation: relation,
+                    content: try content(in: database, nodeID: nodeID),
+                    evidence: []
+                )
+            }
+        }
+
+        private nonisolated static func content(
+            in database: Database,
+            nodeID: GitHubNodeID
+        ) throws -> GitHubContentSummary {
+            guard let row = try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT
+                        github_nodes.github_node_id, github_nodes.kind, github_nodes.number,
+                        github_nodes.title, github_nodes.state, github_nodes.html_url,
+                        github_nodes.created_at_ms, github_nodes.updated_at_ms,
+                        github_nodes.closed_at_ms, github_nodes.merged_at_ms,
+                        github_nodes.repository_id,
+                        repositories.github_node_id AS repository_node_id,
+                        repositories.owner_login AS repository_owner_login,
+                        repositories.name AS repository_name,
+                        repositories.is_private AS repository_is_private,
+                        repositories.is_archived AS repository_is_archived,
+                        repositories.has_discussions AS repository_has_discussions,
+                        repositories.html_url AS repository_html_url,
+                        actors.id AS actor_id, actors.github_node_id AS actor_node_id,
+                        actors.login AS actor_login, actors.display_name AS actor_display_name,
+                        actors.avatar_url AS actor_avatar_url
+                    FROM github_nodes
+                    LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
+                    LEFT JOIN actors ON actors.id = github_nodes.author_id
+                    WHERE github_nodes.github_node_id = ?
+                    """,
+                arguments: [nodeID.rawValue]
+            ) else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            guard let kind = GitHubContentKind(rawValue: row["kind"]),
+                  let state = GitHubItemState(rawValue: row["state"]),
+                  let url = URL(string: row["html_url"]),
+                  let createdAt = date(milliseconds: row["created_at_ms"]),
+                  let updatedAt = date(milliseconds: row["updated_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return GitHubContentSummary(
+                id: nodeID,
+                kind: kind,
+                repository: try repository(from: row),
+                number: row["number"],
+                title: row["title"],
+                state: state,
+                author: try actor(from: row),
+                url: url,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                closedAt: date(milliseconds: row["closed_at_ms"]),
+                mergedAt: date(milliseconds: row["merged_at_ms"])
+            )
+        }
+
+        private nonisolated static func actor(from row: Row) throws -> ActorSummary? {
+            guard let rawID: String = row["actor_id"] else {
+                return nil
+            }
+            guard let id = ActorID(rawValue: rawID),
+                  let rawNodeID: String = row["actor_node_id"],
+                  let nodeID = GitHubNodeID(rawValue: rawNodeID)
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            let avatarURL = (row["actor_avatar_url"] as String?).flatMap(URL.init(string:))
+            return ActorSummary(
+                id: id,
+                nodeID: nodeID,
+                login: row["actor_login"],
+                displayName: row["actor_display_name"],
+                avatarURL: avatarURL
+            )
+        }
+    }
