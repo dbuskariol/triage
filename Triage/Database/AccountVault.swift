@@ -82,6 +82,10 @@ actor AccountVault {
         try databasePool.close()
     }
 
+    func applyMigrations() throws {
+        try TriageDatabaseMigrator.migrate(databasePool)
+    }
+
     private static func verify(_ databasePool: DatabasePool) throws {
         try databasePool.read { database in
             guard !(try database.cipherVersion).isEmpty else {
