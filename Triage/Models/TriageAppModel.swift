@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class TriageAppModel: ObservableObject {
     @Published private(set) var accounts: [GitHubAccount] = []
-    @Published private(set) var organizations: [GitHubOrganization] = []
+    @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
     @Published private(set) var workItems: [WorkItem] = []
     @Published var selectedAccountID: AccountID?
     @Published var selectedOrganizationID: OrganizationID?
@@ -18,15 +18,24 @@ final class TriageAppModel: ObservableObject {
     private var refreshGeneration = 0
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
+    var organizations: [GitHubOrganization] {
+        guard let selectedAccountID else { return [] }
+        return organizationsByAccount[selectedAccountID] ?? []
+    }
+
     var selectedOrganization: GitHubOrganization? {
         organizations.first { $0.id == selectedOrganizationID }
     }
 
-    func install(accounts: [GitHubAccount], organizations: [GitHubOrganization]) {
+    func install(
+        accounts: [GitHubAccount],
+        organizations: [GitHubOrganization],
+        for accountID: AccountID
+    ) {
         self.accounts = accounts
-        self.organizations = organizations
-        selectedAccountID = selectedAccountID ?? accounts.first?.id
-        selectedOrganizationID = selectedOrganizationID ?? organizations.first?.id
+        organizationsByAccount[accountID] = organizations
+        selectedAccountID = accountID
+        selectedOrganizationID = organizations.first?.id
     }
 
     func install(workItems: [WorkItem]) {
@@ -34,6 +43,15 @@ final class TriageAppModel: ObservableObject {
         if !workItems.contains(where: { $0.id == selectedWorkItemID }) {
             selectedWorkItemID = workItems.first?.id
         }
+
+    }
+
+    func selectAccount(_ accountID: AccountID) {
+        guard accounts.contains(where: { $0.id == accountID }) else { return }
+        selectedAccountID = accountID
+        selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
+        self.workItems = []
+        selectedWorkItemID = nil
     }
 
     var selectedWorkItem: WorkItem? {
@@ -53,10 +71,7 @@ final class TriageAppModel: ObservableObject {
                 secretStore: KeychainSecretStore(),
                 vaultRegistry: VaultRegistry()
             ).connectOAuth(exchangeRequest: request)
-            install(
-                accounts: accounts + [result.account],
-                organizations: result.organizations
-            )
+            install(accounts: accounts + [result.account], organizations: result.organizations, for: result.account.id)
             await refreshSelectedOrganization()
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
@@ -82,7 +97,10 @@ final class TriageAppModel: ObservableObject {
                 secretStore: KeychainSecretStore(),
                 vaultRegistry: VaultRegistry()
             ).restore()
-            install(accounts: result.accounts, organizations: result.organizations)
+            accounts = result.accounts
+            organizationsByAccount = result.organizationsByAccount
+            selectedAccountID = result.accounts.first?.id
+            selectedOrganizationID = selectedAccountID.flatMap { organizationsByAccount[$0]?.first?.id }
             if !result.unavailableAccountIDs.isEmpty {
                 restorationError = "One or more connected accounts need to be reconnected."
             }

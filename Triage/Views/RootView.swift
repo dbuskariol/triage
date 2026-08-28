@@ -85,6 +85,27 @@ private struct AppSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if appModel.accounts.count > 1 {
+                Picker("Account", selection: Binding(
+                    get: { appModel.selectedAccountID },
+                    set: { accountID in
+                        if let accountID {
+                            appModel.selectAccount(accountID)
+                        }
+                    }
+                )) {
+                    ForEach(appModel.accounts) { account in
+                        Text(account.login)
+                            .tag(Optional(account.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                Divider()
+            }
             if !appModel.organizations.isEmpty {
                 Picker("Organization", selection: $appModel.selectedOrganizationID) {
                     ForEach(appModel.organizations) { organization in
