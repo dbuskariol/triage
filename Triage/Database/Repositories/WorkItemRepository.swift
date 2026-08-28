@@ -45,6 +45,65 @@ actor WorkItemRepository {
         }
     }
 
+    func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
+        try await vault.write { database in
+            if let existingID: String = try String.fetchOne(
+                database,
+                sql: """
+                    SELECT id FROM work_items
+                    WHERE account_id = ? AND primary_node_id = ?
+                    """,
+                arguments: [node.accountID.rawValue, node.nodeID.rawValue]
+            ) {
+                try database.execute(
+                    sql: """
+                        UPDATE work_items
+                        SET state = ?, last_relevant_activity_at_ms = ?, updated_at_ms = ?
+                        WHERE id = ?
+                        """,
+                    arguments: [
+                        node.state == .open || node.state == .draft ? WorkItemState.active.rawValue : WorkItemState.resolved.rawValue,
+                        Self.milliseconds(node.updatedAt),
+                        Self.milliseconds(node.observedAt),
+                        existingID
+                    ]
+                )
+                guard let workItemID = WorkItemID(rawValue: existingID) else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return workItemID
+            }
+
+            let workItemID = WorkItemID.make()
+            try database.execute(
+                sql: """
+                    INSERT INTO work_items (
+                        id, account_id, organization_id, primary_node_id, state,
+                        last_relevant_activity_at_ms, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    workItemID.rawValue,
+                    node.accountID.rawValue,
+                    node.organizationID.rawValue,
+                    node.nodeID.rawValue,
+                    node.state == .open || node.state == .draft ? WorkItemState.active.rawValue : WorkItemState.resolved.rawValue,
+                    Self.milliseconds(node.updatedAt),
+                    Self.milliseconds(node.observedAt),
+                    Self.milliseconds(node.observedAt)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO work_item_members (work_item_id, github_node_id, role)
+                    VALUES (?, ?, ?)
+                    """,
+                arguments: [workItemID.rawValue, node.nodeID.rawValue, WorkItemMemberRole.primary.rawValue]
+            )
+            return workItemID
+        }
+    }
+
     private nonisolated static func workItem(
         from row: Row,
         accountID: AccountID,
@@ -92,5 +151,9 @@ actor WorkItemRepository {
 
     private nonisolated static func date(milliseconds: Int64?) -> Date? {
         milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
+    }
+
+    private nonisolated static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 }
