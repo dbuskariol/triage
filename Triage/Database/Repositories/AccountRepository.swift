@@ -2,8 +2,10 @@ import Foundation
 import GRDB
 
 enum AccountRepositoryError: Error, Equatable, Sendable {
+    case accountScopeMismatch
     case invalidPersistedIdentifier
     case invalidCapabilityScope
+    case organizationIdentityMismatch
 }
 
 actor AccountRepository {
@@ -30,7 +32,8 @@ actor AccountRepository {
     }
 
     func organizations(for accountID: AccountID) async throws -> [GitHubOrganization] {
-        try await vault.read { database in
+        try ensureAccountScope(accountID)
+        return try await vault.read { database in
             try Row.fetchAll(
                 database,
                 sql: """
@@ -47,7 +50,8 @@ actor AccountRepository {
     }
 
     func organizationAccesses(for accountID: AccountID) async throws -> [OrganizationID: OrganizationAccess] {
-        try await vault.read { database in
+        try ensureAccountScope(accountID)
+        return try await vault.read { database in
             let accessRows = try Row.fetchAll(
                 database,
                 sql: """
@@ -111,7 +115,8 @@ actor AccountRepository {
     }
 
     func accountCapabilities(for accountID: AccountID) async throws -> AccountCapabilitySnapshot? {
-        try await vault.read { database in
+        try ensureAccountScope(accountID)
+        return try await vault.read { database in
             let rows = try Row.fetchAll(
                 database,
                 sql: """
@@ -152,6 +157,7 @@ actor AccountRepository {
     }
 
     func save(_ account: GitHubAccount, credentialRevision: CredentialRevision) async throws {
+        try ensureAccountScope(account.id)
         let createdAt = Self.milliseconds(account.createdAt)
         let lastValidatedAt = account.lastValidatedAt.map(Self.milliseconds)
         try await vault.write { database in
@@ -203,6 +209,10 @@ actor AccountRepository {
         selectedAt: Date? = nil,
         accountCapabilities: AccountCapabilitySnapshot? = nil
     ) async throws {
+        try ensureAccountScope(access.accountID)
+        guard organization.id == access.organizationID else {
+            throw AccountRepositoryError.organizationIdentityMismatch
+        }
         guard !access.capabilities.contains(where: { $0.capability.scope != .organization }) else {
             throw AccountRepositoryError.invalidCapabilityScope
         }
@@ -287,6 +297,7 @@ actor AccountRepository {
     }
 
     func save(_ snapshot: AccountCapabilitySnapshot) async throws {
+        try ensureAccountScope(snapshot.accountID)
         guard snapshot.capabilities.allSatisfy({ $0.capability.scope == .account }) else {
             throw AccountRepositoryError.invalidCapabilityScope
         }
@@ -300,6 +311,7 @@ actor AccountRepository {
         organizationID: OrganizationID,
         accountID: AccountID
     ) async throws -> RepositorySummary {
+        try ensureAccountScope(accountID)
         guard let nodeID = GitHubNodeID(rawValue: repository.nodeID),
               let repositoryID = RepositoryID(rawValue: repository.nodeID)
         else {
@@ -351,6 +363,12 @@ actor AccountRepository {
             )
         }
         return summary
+    }
+
+    private func ensureAccountScope(_ accountID: AccountID) throws {
+        guard accountID == vault.accountID else {
+            throw AccountRepositoryError.accountScopeMismatch
+        }
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
