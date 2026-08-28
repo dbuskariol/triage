@@ -22,13 +22,16 @@ enum GitHubRESTClientError: Error, Equatable, Sendable {
 actor GitHubRESTClient {
     private let transport: GitHubRESTTransport
     private let credential: SecretValue
+    private let rateLimitController: GitHubRateLimitController?
 
     init(
         transport: GitHubRESTTransport,
-        credential: SecretValue
+        credential: SecretValue,
+        rateLimitController: GitHubRateLimitController? = nil
     ) {
         self.transport = transport
         self.credential = credential
+        self.rateLimitController = rateLimitController
     }
 
     func get<Value: Decodable & Sendable>(
@@ -42,7 +45,7 @@ actor GitHubRESTClient {
         _ type: Value.Type,
         request: GitHubRESTRequest
     ) async throws -> GitHubResponse<Value> {
-        let response = try await transport.send(request, credential: credential)
+        let response = try await send(request)
         if let failure = GitHubFailureClassifier.classify(response) {
             GitHubDiagnostics.record(failure)
             throw failure
@@ -63,7 +66,7 @@ actor GitHubRESTClient {
         _ type: Value.Type,
         request: GitHubRESTRequest
     ) async throws -> GitHubPage<Value> {
-        let response = try await transport.send(request, credential: credential)
+        let response = try await send(request)
         if let failure = GitHubFailureClassifier.classify(response) {
             GitHubDiagnostics.record(failure)
             throw failure
@@ -79,6 +82,27 @@ actor GitHubRESTClient {
         } catch {
             throw GitHubRESTClientError.invalidJSON
         }
+    }
+
+    private func send(_ request: GitHubRESTRequest) async throws -> GitHubRESTResponse {
+        let resource: GitHubRateLimitResource = request.isSearchRequest ? .search : .core
+        guard let rateLimitController else {
+            return try await transport.send(request, credential: credential)
+        }
+        return try await rateLimitController.execute(
+            resource: resource,
+            priority: .selectedOrganizationRefresh
+        ) {
+            let response = try await self.transport.send(request, credential: self.credential)
+            try await rateLimitController.record(response: response, fallbackResource: resource)
+            return response
+        }
+    }
+}
+
+private extension GitHubRESTRequest {
+    var isSearchRequest: Bool {
+        pathForClassification == "/search/issues"
     }
 }
 

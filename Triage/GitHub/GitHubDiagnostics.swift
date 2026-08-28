@@ -42,7 +42,7 @@ enum GitHubFailureClassifier {
         switch response.statusCode {
         case 401:
             kind = .unauthorized
-        case 403 where retryAfter != nil:
+        case 403 where isSecondaryRateLimited(response):
             kind = .secondaryRateLimited
         case 403:
             kind = .forbidden
@@ -63,6 +63,17 @@ enum GitHubFailureClassifier {
             retryAfter: retryAfter,
             ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
         )
+    }
+
+    static func isSecondaryRateLimited(_ response: GitHubRESTResponse) -> Bool {
+        guard response.statusCode == 403 else { return false }
+        if response.header(named: "Retry-After") != nil {
+            return true
+        }
+        guard let message = String(data: response.body, encoding: .utf8)?.lowercased() else {
+            return false
+        }
+        return message.contains("secondary rate limit") || message.contains("abuse detection")
     }
 }
 
