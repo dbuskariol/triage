@@ -42,6 +42,22 @@ struct GitHubPullRequestReviewDTO: Codable, Sendable {
     }
 }
 
+struct GitHubRequestedReviewersDTO: Codable, Sendable {
+    let users: [Reviewer]
+    let teams: [Reviewer]
+
+    struct Reviewer: Codable, Sendable {
+        let nodeID: String
+        let login: String?
+        let slug: String?
+
+        enum CodingKeys: String, CodingKey {
+            case nodeID = "node_id"
+            case login, slug
+        }
+    }
+}
+
 actor GitHubPullRequestClient {
     private let client: GitHubRESTClient
 
@@ -59,6 +75,19 @@ actor GitHubPullRequestClient {
             request: GitHubRESTRequest(
                 path: "\(repository.path)/pulls/\(number)/reviews",
                 query: [URLQueryItem(name: "per_page", value: "100")]
+            )
+        )
+    }
+
+    func requestedReviewers(
+        repository: GitHubRepositoryPath,
+        number: Int
+    ) async throws -> GitHubResponse<GitHubRequestedReviewersDTO> {
+        guard number > 0 else { throw GitHubRepositoryPathError.invalidPullRequestNumber }
+        return try await client.getResponse(
+            GitHubRequestedReviewersDTO.self,
+            request: GitHubRESTRequest(
+                path: "\(repository.path)/pulls/\(number)/requested_reviewers"
             )
         )
     }
