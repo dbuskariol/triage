@@ -25,7 +25,7 @@ struct WorkListView: View {
 
     private var filteredWorkItems: [WorkItem] {
         let now = Date()
-        return appModel.workItems.filter { item in
+        let matching = appModel.workItems.filter { item in
             switch navigation.section {
             case .inbox:
                 InboxEligibilityRule().disposition(for: item, at: now) == .inbox
@@ -43,6 +43,7 @@ struct WorkListView: View {
                 true
             }
         }
+        return AttentionRanker().sort(matching, at: now)
     }
 
     private var emptyDescription: String {
