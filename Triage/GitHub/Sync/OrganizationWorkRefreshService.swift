@@ -46,7 +46,8 @@ actor OrganizationWorkRefreshService {
         return try await RoleDiscoverySynchronizer(
             searchClient: GitHubIssueSearchClient(client: restClient),
             nodeRepository: GitHubNodeRepository(vault: vault),
-            workItemRepository: WorkItemRepository(vault: vault)
+            workItemRepository: WorkItemRepository(vault: vault),
+            attentionRepository: AttentionReasonRepository(vault: vault)
         ).synchronize(
             plan: plan,
             accountID: account.id,
