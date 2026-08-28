@@ -72,6 +72,7 @@
 		BB544E343A7386DD073B5A15 /* AttentionRanker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 555658DD05F52459D277E381 /* AttentionRanker.swift */; };
 		BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51CCBC527DBD7C20ECD99955 /* TriageApp.swift */; };
 		BEDF7AC4601449B4A5DB9201 /* Workflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F79F1622FE7D729E3464C27C /* Workflow.swift */; };
+		C11C2C6E9A86E94B57617D12 /* OrganizationSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */; };
 		C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */; };
 		C24B45C7B0B463638BFDF3E8 /* ConversationFollowUpRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */; };
 		C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */; };
@@ -117,6 +118,7 @@
 
 /* Begin PBXFileReference section */
 		0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRule.swift; sourceTree = "<group>"; };
+		015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSyncCoordinator.swift; sourceTree = "<group>"; };
 		081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageEvaluatorTests.swift; sourceTree = "<group>"; };
 		09D55C61485E13F265EFB7D3 /* IdentifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentifierTests.swift; sourceTree = "<group>"; };
 		0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStore.swift; sourceTree = "<group>"; };
@@ -439,6 +441,7 @@
 		AB2C8AB6AD09722CB2711746 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */,
 				83A08A743ED79E891E831DFC /* SearchShardPlanner.swift */,
 				CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */,
 			);
@@ -700,6 +703,7 @@
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
 				8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */,
+				C11C2C6E9A86E94B57617D12 /* OrganizationSyncCoordinator.swift in Sources */,
 				82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */,
 				DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */,
 				8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */,
