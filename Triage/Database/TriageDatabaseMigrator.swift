@@ -650,6 +650,38 @@ enum TriageDatabaseMigrator {
                     PRIMARY KEY (account_id, organization_id, model_id)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "011-search",
+            checksum: "f9b78501a43ff2e4452b2b18d2be650b7287e9fc5f5f36e4b2d16aa3a5ec4c53"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE search_document_metadata (
+                    id INTEGER PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    work_item_id TEXT REFERENCES work_items(id) ON DELETE CASCADE,
+                    github_node_id TEXT REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE VIRTUAL TABLE search_documents USING fts5(
+                    title,
+                    body,
+                    repository,
+                    labels,
+                    people,
+                    project_values,
+                    action_text,
+                    local_note,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX search_document_scope
+                ON search_document_metadata (account_id, organization_id, updated_at_ms DESC)
+                """)
         }
     ]
 }
