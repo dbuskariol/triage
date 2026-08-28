@@ -20,6 +20,7 @@ final class TriageAppModel: ObservableObject {
     }
     @Published var selectedWorkItemID: WorkItemID?
     @Published private(set) var connectionError: String?
+    @Published private(set) var credentialActionNotice: String?
     @Published private(set) var refreshError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var isConnecting = false
@@ -34,6 +35,8 @@ final class TriageAppModel: ObservableObject {
     private var refreshGeneration = 0
     private var foregroundRefreshTask: Task<Void, Never>?
     private var foregroundRefreshTaskID: UUID?
+    private var foregroundRefreshTasksAwaitingCredentialMutation: [Task<Void, Never>] = []
+    private var isCredentialMutationInProgress = false
     private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
@@ -114,13 +117,19 @@ final class TriageAppModel: ObservableObject {
         )
     }
 
-    func selectAccount(_ accountID: AccountID) {
+    func selectAccount(_ accountID: AccountID, activatesOrganization: Bool = true) {
         guard accounts.contains(where: { $0.id == accountID }) else { return }
-        invalidateRefreshState()
+        if activatesOrganization {
+            invalidateRefreshState()
+        } else {
+            pauseForegroundRefreshForCredentialMutation()
+        }
         selectedAccountID = accountID
         selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
         presentCachedWorkItems()
-        activateSelectedOrganization()
+        if activatesOrganization {
+            activateSelectedOrganization()
+        }
     }
 
     func selectOrganization(_ organizationID: OrganizationID) {
@@ -242,6 +251,111 @@ final class TriageAppModel: ObservableObject {
         }
     }
 
+    func reconnectGitHub(
+        account: GitHubAccount,
+        presentationAnchor: NSWindow
+    ) async {
+        connectionError = nil
+        credentialActionNotice = nil
+        isConnecting = true
+        defer {
+            isConnecting = false
+            isCredentialMutationInProgress = false
+        }
+        do {
+            guard accounts.contains(where: { $0.id == account.id }) else { return }
+            isCredentialMutationInProgress = true
+            await cancelForegroundRefresh()
+            let configuration = try RuntimeOAuthConfiguration()
+            let request = try await oauthAuthorizer.authorize(
+                configuration: configuration.oauth,
+                presentationAnchor: presentationAnchor
+            )
+            let tokenResponse = try await AuthBrokerClient(baseURL: configuration.brokerURL).exchange(request)
+            let replacement = try await AccountCredentialReplacementService(
+                secretStore: KeychainSecretStore(),
+                vaultRegistry: requiredVaultRegistry()
+            ).replace(oauthTokenResponse: tokenResponse, for: account)
+            installUpdatedAccount(replacement.account)
+            if replacement.retiredCredentialCleanupFailed {
+                credentialActionNotice = "The new credential is active, but Triage could not erase the retired Keychain entry."
+            }
+            isCredentialMutationInProgress = false
+            await recheckSelectedOrganizationAccess()
+        } catch let error as AccountCredentialReplacementError {
+            connectionError = credentialReplacementMessage(for: error)
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        } catch let error as RuntimeOAuthConfigurationError {
+            switch error {
+            case .missingClientID:
+                connectionError = "GitHub sign-in is not configured in this build."
+            case .invalidBrokerURL:
+                connectionError = "The GitHub sign-in service is not configured securely."
+            }
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        } catch is CancellationError {
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+            return
+        } catch {
+            connectionError = "GitHub reconnect could not be completed. Try again."
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        }
+    }
+
+    func replacePersonalAccessToken(
+        _ rawValue: String,
+        for account: GitHubAccount
+    ) async {
+        connectionError = nil
+        credentialActionNotice = nil
+        isConnecting = true
+        defer {
+            isConnecting = false
+            isCredentialMutationInProgress = false
+        }
+        do {
+            guard accounts.contains(where: { $0.id == account.id }) else { return }
+            isCredentialMutationInProgress = true
+            await cancelForegroundRefresh()
+            let replacement = try await AccountCredentialReplacementService(
+                secretStore: KeychainSecretStore(),
+                vaultRegistry: requiredVaultRegistry()
+            ).replace(
+                personalAccessToken: try PersonalAccessToken(rawValue: rawValue),
+                for: account
+            )
+            installUpdatedAccount(replacement.account)
+            if replacement.retiredCredentialCleanupFailed {
+                credentialActionNotice = "The new credential is active, but Triage could not erase the retired Keychain entry."
+            }
+            isCredentialMutationInProgress = false
+            await recheckSelectedOrganizationAccess()
+        } catch let error as PersonalAccessTokenError {
+            switch error {
+            case .unsupportedTokenFormat:
+                connectionError = "Enter a supported personal access token for this account."
+            }
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        } catch let error as AccountCredentialReplacementError {
+            connectionError = credentialReplacementMessage(for: error)
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        } catch is CancellationError {
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+            return
+        } catch {
+            connectionError = "Triage could not replace this personal access token. Check its access and try again."
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
+        }
+    }
+
     func recordConnectionWindowError() {
         connectionError = "Triage could not find its active window."
     }
@@ -250,6 +364,13 @@ final class TriageAppModel: ObservableObject {
         await refreshScheduler.start { [weak self] in
             await self?.refreshSelectedOrganization()
         }
+    }
+
+    func resumeSelectedOrganization() async {
+        if !foregroundRefreshTasksAwaitingCredentialMutation.isEmpty {
+            await cancelForegroundRefresh()
+        }
+        await refreshSelectedOrganization()
     }
 
     func restoreAccounts() async {
@@ -277,7 +398,11 @@ final class TriageAppModel: ObservableObject {
     }
 
     func refreshSelectedOrganization() async {
-        foregroundRefreshTask?.cancel()
+        guard !isCredentialMutationInProgress else { return }
+        if let existingTask = foregroundRefreshTask {
+            existingTask.cancel()
+            await existingTask.value
+        }
         let taskID = UUID()
         refreshGeneration += 1
         let generation = refreshGeneration
@@ -301,7 +426,10 @@ final class TriageAppModel: ObservableObject {
             return
         }
 
-        foregroundRefreshTask?.cancel()
+        if let existingTask = foregroundRefreshTask {
+            existingTask.cancel()
+            await existingTask.value
+        }
         foregroundRefreshTask = nil
         foregroundRefreshTaskID = nil
         refreshGeneration += 1
@@ -481,6 +609,55 @@ final class TriageAppModel: ObservableObject {
         ssoAuthorizationHeader = nil
         refreshError = nil
         isRefreshing = false
+    }
+
+    private func cancelForegroundRefresh() async {
+        refreshGeneration += 1
+        let tasks = foregroundRefreshTasksAwaitingCredentialMutation
+            + [foregroundRefreshTask].compactMap { $0 }
+        foregroundRefreshTasksAwaitingCredentialMutation = []
+        foregroundRefreshTask = nil
+        foregroundRefreshTaskID = nil
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
+            await task.value
+        }
+        isRefreshing = false
+        ssoAuthorizationHeader = nil
+        refreshError = nil
+    }
+
+    private func pauseForegroundRefreshForCredentialMutation() {
+        refreshGeneration += 1
+        if let task = foregroundRefreshTask {
+            task.cancel()
+            foregroundRefreshTasksAwaitingCredentialMutation.append(task)
+        }
+        foregroundRefreshTask = nil
+        foregroundRefreshTaskID = nil
+        isRefreshing = false
+        ssoAuthorizationHeader = nil
+        refreshError = nil
+    }
+
+    private func installUpdatedAccount(_ updatedAccount: GitHubAccount) {
+        guard let index = accounts.firstIndex(where: { $0.id == updatedAccount.id }) else { return }
+        accounts[index] = updatedAccount
+    }
+
+    private func credentialReplacementMessage(for error: AccountCredentialReplacementError) -> String {
+        switch error {
+        case .immutableIdentityMismatch:
+            "This credential belongs to a different GitHub account. The connected profile was not changed."
+        case .authenticationKindMismatch:
+            "Replace a credential with the same authentication kind, or connect a separate profile."
+        case .invalidGitHubIdentity:
+            "GitHub returned an invalid account identity. The connected profile was not changed."
+        case .stagedCredentialCleanupFailed:
+            "Triage could not safely clear a staged Keychain credential. The connected profile was not changed."
+        }
     }
 
     private func persistCredentialStatus(

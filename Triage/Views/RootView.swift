@@ -92,18 +92,23 @@ private struct OnboardingView: View {
     }
 }
 
-private struct PersonalAccessTokenSheet: View {
+struct PersonalAccessTokenSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appModel: TriageAppModel
+    let account: GitHubAccount?
     @State private var tokenInput = ""
     @State private var resourceOwnerOrganization = ""
+
+    init(account: GitHubAccount? = nil) {
+        self.account = account
+    }
 
     private var tokenKind: PersonalAccessTokenKind? {
         try? PersonalAccessToken(rawValue: tokenInput).kind
     }
 
     private var needsResourceOwner: Bool {
-        tokenKind == .fineGrained
+        account == nil && tokenKind == .fineGrained
     }
 
     private var canConnect: Bool {
@@ -112,9 +117,13 @@ private struct PersonalAccessTokenSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Connect a Personal Access Token")
+            Text(account == nil ? "Connect a Personal Access Token" : "Replace Personal Access Token")
                 .font(.title2.weight(.semibold))
-            Text("Triage stores the token only in your macOS Keychain and uses GitHub read APIs.")
+            Text(
+                account == nil
+                    ? "Triage stores the token only in your macOS Keychain and uses GitHub read APIs."
+                    : "Triage validates that the new token belongs to this GitHub account before replacing the Keychain credential."
+            )
                 .foregroundStyle(.secondary)
             SecureField("GitHub personal access token", text: $tokenInput)
                 .textFieldStyle(.roundedBorder)
@@ -139,17 +148,26 @@ private struct PersonalAccessTokenSheet: View {
                 Button("Cancel") {
                     tokenInput = ""
                     dismiss()
+                    if account != nil {
+                        Task {
+                            await appModel.resumeSelectedOrganization()
+                        }
+                    }
                 }
-                Button("Connect") {
+                Button(account == nil ? "Connect" : "Replace") {
                     let token = tokenInput
                     let organization = needsResourceOwner ? resourceOwnerOrganization : nil
                     tokenInput = ""
                     Task {
-                        await appModel.connectPersonalAccessToken(
-                            token,
-                            resourceOwnerOrganization: organization
-                        )
-                        if appModel.hasConnectedAccount {
+                        if let account {
+                            await appModel.replacePersonalAccessToken(token, for: account)
+                        } else {
+                            await appModel.connectPersonalAccessToken(
+                                token,
+                                resourceOwnerOrganization: organization
+                            )
+                        }
+                        if appModel.connectionError == nil {
                             dismiss()
                         }
                     }

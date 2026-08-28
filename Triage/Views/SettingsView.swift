@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
     @EnvironmentObject private var appModel: TriageAppModel
+    @State private var accountReplacingToken: GitHubAccount?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +30,18 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             preferences.refreshLaunchAtLoginStatus()
+        }
+        .sheet(
+            item: $accountReplacingToken,
+            onDismiss: {
+                guard !appModel.isConnecting else { return }
+                Task {
+                    await appModel.resumeSelectedOrganization()
+                }
+            }
+        ) { account in
+            PersonalAccessTokenSheet(account: account)
+                .environmentObject(appModel)
         }
     }
 
@@ -120,11 +133,48 @@ struct SettingsView: View {
                         detail: account.authenticationKind.title,
                         systemImage: "person.crop.circle"
                     ) {
-                        Text(account.credentialStatus.rawValue.capitalized)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            Text(account.credentialStatus.rawValue.capitalized)
+                                .foregroundStyle(.secondary)
+                            accountCredentialAction(for: account)
+                        }
                     }
                 }
             }
+            if let error = appModel.connectionError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+            if let notice = appModel.credentialActionNotice {
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func accountCredentialAction(for account: GitHubAccount) -> some View {
+        switch account.authenticationKind {
+        case .oauth:
+            Button("Reconnect") {
+                guard let window = NSApp.keyWindow else {
+                    appModel.recordConnectionWindowError()
+                    return
+                }
+                appModel.selectAccount(account.id, activatesOrganization: false)
+                Task {
+                    await appModel.reconnectGitHub(account: account, presentationAnchor: window)
+                }
+            }
+            .disabled(appModel.isConnecting)
+        case .fineGrainedPersonalAccessToken, .classicPersonalAccessToken:
+            Button("Replace Token") {
+                appModel.selectAccount(account.id, activatesOrganization: false)
+                accountReplacingToken = account
+            }
+            .disabled(appModel.isConnecting)
         }
     }
 
