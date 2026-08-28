@@ -38,6 +38,15 @@ struct TriageApp: App {
                 .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
                 .keyboardShortcut("r", modifiers: .command)
             }
+
+            CommandMenu("Navigate") {
+                navigationCommand("Inbox", section: .inbox, key: "1")
+                navigationCommand("My Work", section: .myWork, key: "2")
+                navigationCommand("Reviews", section: .reviews, key: "3")
+                navigationCommand("Waiting", section: .waiting, key: "4")
+                navigationCommand("Snoozed", section: .snoozed, key: "5")
+                navigationCommand("All Work", section: .allWork, key: "6")
+            }
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
@@ -68,5 +77,16 @@ struct TriageApp: App {
                 preferences.showMenuBarExtra = isInserted
             }
         )
+    }
+
+    private func navigationCommand(
+        _ title: String,
+        section: AppSection,
+        key: KeyEquivalent
+    ) -> some View {
+        Button(title) {
+            navigation.section = section
+        }
+        .keyboardShortcut(key, modifiers: .command)
     }
 }
