@@ -68,9 +68,9 @@ actor SearchShardExecutor {
             for: streamID,
             accountID: accountID
         ).first { $0.id == shardID }
-        guard priorShard?.state != .completed else {
-            return
-        }
+        // Completed descendants are replayed when resuming an unfinished parent
+        // so the caller can reconstruct its in-memory deduplication state.
+        let resumeCursor = priorShard?.state == .completed ? nil : priorShard?.pageCursor
         var shard = running(
             priorShard ?? SyncShard(
                 id: shardID,
@@ -82,7 +82,7 @@ actor SearchShardExecutor {
                 state: .pending,
                 completedAt: nil
             ),
-            cursor: priorShard?.pageCursor
+            cursor: resumeCursor
         )
         try await shardRepository.save(shard, accountID: accountID)
 
