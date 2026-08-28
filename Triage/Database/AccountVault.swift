@@ -79,6 +79,23 @@ actor AccountVault {
         try databasePool.write(operation)
     }
 
+    /// Commits all writes performed by `operation`, or rolls them all back on failure.
+    func writeTransaction<Value: Sendable>(
+        _ operation: @Sendable (Database) throws -> Value
+    ) throws -> Value {
+        var result: Result<Value, Error>?
+        try databasePool.write { database in
+            try database.inTransaction {
+                result = .success(try operation(database))
+                return .commit
+            }
+        }
+        guard let result else {
+            preconditionFailure("A committed database transaction must produce a result.")
+        }
+        return try result.get()
+    }
+
     func close() throws {
         try databasePool.close()
     }

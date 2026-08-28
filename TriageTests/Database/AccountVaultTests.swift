@@ -71,6 +71,34 @@ final class AccountVaultTests: XCTestCase {
         try await registry.closeAll()
     }
 
+    func testTransactionRollsBackAllWritesWhenItsOperationFails() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(
+            accountID: AccountID.make(),
+            vaultKey: try VaultKey.generate()
+        )
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE transactional_values (value TEXT NOT NULL)")
+        }
+
+        await XCTAssertThrowsErrorAsync {
+            try await vault.writeTransaction { database in
+                try database.execute(sql: "INSERT INTO transactional_values (value) VALUES ('first')")
+                try database.execute(sql: "INSERT INTO transactional_values (value) VALUES ('second')")
+                throw TransactionTestError.expectedFailure
+            }
+        }
+
+        let count = try await vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM transactional_values")
+        }
+        XCTAssertEqual(count, 0)
+        try await registry.closeAll()
+    }
+
     func testRemovingAnOpenVaultClosesAndErasesIt() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -97,6 +125,10 @@ final class AccountVaultTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
+}
+
+private enum TransactionTestError: Error {
+    case expectedFailure
 }
 
 private func XCTAssertThrowsErrorAsync(
