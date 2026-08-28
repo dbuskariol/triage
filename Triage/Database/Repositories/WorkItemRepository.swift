@@ -17,7 +17,7 @@ actor WorkItemRepository {
         organizationID: OrganizationID
     ) async throws -> [WorkItem] {
         try await vault.read { database in
-            try Row.fetchAll(
+            return try Row.fetchAll(
                 database,
                 sql: """
                     SELECT
@@ -46,11 +46,13 @@ actor WorkItemRepository {
                     in: database,
                     workItemID: row["id"]
                 )
+                let actions = try Self.actionItems(in: database, workItemID: row["id"])
                 return try Self.workItem(
                     from: row,
                     accountID: accountID,
                     organizationID: organizationID,
-                    attentionReasons: reasons
+                    attentionReasons: reasons,
+                    actionItems: actions
                 )
             }
         }
@@ -119,7 +121,8 @@ actor WorkItemRepository {
         from row: Row,
         accountID: AccountID,
         organizationID: OrganizationID,
-        attentionReasons: [AttentionReason]
+        attentionReasons: [AttentionReason],
+        actionItems: [ActionItem]
     ) throws -> WorkItem {
         guard let id = WorkItemID(rawValue: row["id"]),
               let nodeID = GitHubNodeID(rawValue: row["primary_node_id"]),
@@ -153,7 +156,7 @@ actor WorkItemRepository {
             contextLinks: [],
             relations: [],
             attentionReasons: attentionReasons,
-            actionItems: [],
+            actionItems: actionItems,
             workflow: workflow,
             freshness: FreshnessState(status: .fresh),
             lastRelevantActivityAt: activity,
@@ -232,6 +235,57 @@ actor WorkItemRepository {
                 observedAt: observedAt,
                 excerpt: row["excerpt"]
             )
+        }
+    }
+
+    private nonisolated static func actionItems(
+            in database: Database,
+            workItemID: String
+        ) throws -> [ActionItem] {
+            guard let typedWorkItemID = WorkItemID(rawValue: workItemID) else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, title, detail, origin, state, priority, due_at_ms, source_fingerprint,
+                           created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
+                    FROM action_items
+                    WHERE work_item_id = ?
+                    ORDER BY state, due_at_ms, id
+                    """,
+                arguments: [workItemID]
+            ).map { row in
+                guard let id = ActionItemID(rawValue: row["id"]),
+                      let origin = ActionItemOrigin(rawValue: row["origin"]),
+                      let state = ActionItemState(rawValue: row["state"]),
+                      let priority = WorkPriority(rawValue: row["priority"]),
+                      let createdAt = date(milliseconds: row["created_at_ms"]),
+                      let updatedAt = date(milliseconds: row["updated_at_ms"])
+                else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                let evidenceIDs = try String.fetchAll(
+                    database,
+                    sql: "SELECT evidence_id FROM action_item_evidence WHERE action_item_id = ? ORDER BY evidence_id",
+                    arguments: [id.rawValue]
+                ).compactMap(EvidenceID.init(rawValue:))
+                return ActionItem(
+                    id: id,
+                    workItemID: typedWorkItemID,
+                    title: row["title"],
+                    detail: row["detail"],
+                    origin: origin,
+                    state: state,
+                    priority: priority,
+                    dueAt: date(milliseconds: row["due_at_ms"]),
+                    evidenceIDs: evidenceIDs,
+                    sourceFingerprint: row["source_fingerprint"],
+                    createdAt: createdAt,
+                    updatedAt: updatedAt,
+                    completedAt: date(milliseconds: row["completed_at_ms"]),
+                    dismissedAt: date(milliseconds: row["dismissed_at_ms"])
+                )
         }
     }
 }
