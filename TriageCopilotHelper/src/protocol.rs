@@ -19,7 +19,7 @@ pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub struct WireRequest {
     pub protocol_version: u16,
     pub request_id: Uuid,
-    pub organization_id: Uuid,
+    pub organization_id: String,
     #[serde(flatten)]
     pub operation: RequestOperation,
 }
@@ -28,6 +28,14 @@ impl WireRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(ProtocolError::UnsupportedVersion);
+        }
+        if self.organization_id.is_empty()
+            || self.organization_id.len() > 255
+            || self.organization_id.chars().any(char::is_whitespace)
+        {
+            return Err(ProtocolError::InvalidRequest(ValidationError::new(
+                "organization_id is invalid",
+            )));
         }
         if let RequestOperation::Analyze { candidate, model } = &self.operation {
             candidate
@@ -62,7 +70,7 @@ pub struct WireResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub organization_id: Option<Uuid>,
+    pub organization_id: Option<String>,
     #[serde(flatten)]
     pub result: ResponseResult,
 }
@@ -72,7 +80,7 @@ impl WireResponse {
         Self {
             protocol_version: PROTOCOL_VERSION,
             request_id: Some(request.request_id),
-            organization_id: Some(request.organization_id),
+            organization_id: Some(request.organization_id.clone()),
             result,
         }
     }
@@ -81,7 +89,7 @@ impl WireResponse {
         Self {
             protocol_version: PROTOCOL_VERSION,
             request_id: request.map(|value| value.request_id),
-            organization_id: request.map(|value| value.organization_id),
+            organization_id: request.map(|value| value.organization_id.clone()),
             result: ResponseResult::Failure { failure },
         }
     }
@@ -488,7 +496,7 @@ mod tests {
         WireRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap(),
-            organization_id: Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap(),
+            organization_id: "MDEyOk9yZ2FuaXphdGlvbjE=".to_owned(),
             operation,
         }
     }
