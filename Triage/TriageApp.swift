@@ -28,6 +28,16 @@ struct TriageApp: App {
                 }
                 .disabled(!softwareUpdates.canCheckForUpdates)
             }
+
+            CommandGroup(after: .toolbar) {
+                Button("Refresh GitHub Work") {
+                    Task {
+                        await appModel.refreshSelectedOrganization()
+                    }
+                }
+                .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
+                .keyboardShortcut("r", modifiers: .command)
+            }
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
