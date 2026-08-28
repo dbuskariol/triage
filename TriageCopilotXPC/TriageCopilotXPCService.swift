@@ -33,6 +33,10 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper {
       }
     }
   }
+
+  func cancelActiveProcess() {
+    CopilotHelperProcess.cancelActive()
+  }
 }
 
 enum CopilotXPCServiceError: Int, Error {
