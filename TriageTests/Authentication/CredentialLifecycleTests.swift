@@ -31,6 +31,10 @@ final class CredentialLifecycleTests: XCTestCase {
             .expired
         )
         XCTAssertEqual(
+            CredentialLifecycle.failureStatus(for: OAuthCredentialRefreshError.vaultKeyUnavailable),
+            .missing
+        )
+        XCTAssertEqual(
             CredentialLifecycle.failureStatus(
                 for: GitHubFailure(kind: .unauthorized, statusCode: 401)
             ),

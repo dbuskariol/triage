@@ -1009,12 +1009,19 @@ final class TriageAppModel: ObservableObject {
         for account: GitHubAccount,
         message: String?
     ) async {
+        guard let index = accounts.firstIndex(where: {
+            $0.id == account.id && $0.credentialID == account.credentialID
+        }) else {
+            return
+        }
         let updatedAccount = account.replacingCredentialExpiration(
             accessTokenExpiresAt: account.accessTokenExpiresAt,
             refreshTokenExpiresAt: account.refreshTokenExpiresAt,
             status: status,
             validatedAt: account.lastValidatedAt ?? account.createdAt
         )
+        accounts[index] = updatedAccount
+        refreshError = message ?? "Triage could not refresh this organization. Cached work remains available."
         do {
             let secretStore = KeychainSecretStore()
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
@@ -1025,11 +1032,8 @@ final class TriageAppModel: ObservableObject {
                 updatedAccount,
                 credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
             )
-            guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
-            accounts[index] = updatedAccount
-            refreshError = message ?? "Triage could not refresh this organization. Cached work remains available."
         } catch {
-            refreshError = "Triage could not update credential state. Cached work remains available."
+            // The status is still accurate even when the unavailable vault cannot retain it.
         }
     }
 

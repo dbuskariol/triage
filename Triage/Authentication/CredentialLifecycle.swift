@@ -35,8 +35,13 @@ enum CredentialLifecycle {
         switch error {
         case is AccountCredentialReaderError:
             return .missing
-        case is OAuthCredentialRefreshError:
-            return .expired
+        case let error as OAuthCredentialRefreshError:
+            switch error {
+            case .vaultKeyUnavailable:
+                return .missing
+            case .refreshTokenUnavailable, .refreshTokenEncodingInvalid, .credentialRollbackFailed:
+                return .expired
+            }
         case let error as AuthBrokerClientError:
             guard case let .broker(failure) = error else { return nil }
             switch failure.code {
