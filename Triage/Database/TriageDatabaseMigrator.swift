@@ -682,6 +682,39 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX search_document_scope
                 ON search_document_metadata (account_id, organization_id, updated_at_ms DESC)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "012-capability-record-identity",
+            checksum: "a77b4849f5a7716183b4acb25c2ee4a7211e00a1265fd0f9bd21c0d15f1d3abc"
+        ) { database in
+            try database.execute(sql: "DROP INDEX capabilities_lookup")
+            try database.execute(sql: "ALTER TABLE capabilities RENAME TO capabilities_legacy")
+            try database.execute(sql: """
+                CREATE TABLE capabilities (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    repository_id TEXT REFERENCES repositories(id) ON DELETE CASCADE,
+                    capability TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    checked_at_ms INTEGER NOT NULL,
+                    detail_fingerprint TEXT
+                )
+                """)
+            try database.execute(sql: """
+                INSERT INTO capabilities (
+                    id, account_id, organization_id, repository_id, capability, status, checked_at_ms, detail_fingerprint
+                )
+                SELECT
+                    account_id || ':' || organization_id || ':' || COALESCE(repository_id, '-') || ':' || capability,
+                    account_id, organization_id, repository_id, capability, status, checked_at_ms, detail_fingerprint
+                FROM capabilities_legacy
+                """)
+            try database.execute(sql: "DROP TABLE capabilities_legacy")
+            try database.execute(sql: """
+                CREATE INDEX capabilities_lookup
+                ON capabilities (account_id, organization_id, repository_id, capability)
+                """)
         }
     ]
 }

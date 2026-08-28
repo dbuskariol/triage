@@ -105,6 +105,28 @@ actor AccountRepository {
                     checkedAt
                 ]
             )
+            try database.execute(
+                sql: "DELETE FROM capabilities WHERE account_id = ? AND organization_id = ? AND repository_id IS NULL",
+                arguments: [access.accountID.rawValue, organization.id.rawValue]
+            )
+            for capability in access.capabilities {
+                try database.execute(
+                    sql: """
+                        INSERT INTO capabilities (
+                            id, account_id, organization_id, repository_id, capability, status, checked_at_ms, detail_fingerprint
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        "\(access.accountID.rawValue):\(organization.id.rawValue):-:\(capability.capability.rawValue)",
+                        access.accountID.rawValue,
+                        organization.id.rawValue,
+                        capability.capability.rawValue,
+                        capability.status.rawValue,
+                        Self.milliseconds(capability.checkedAt),
+                        capability.detail
+                    ]
+                )
+            }
         }
     }
 
