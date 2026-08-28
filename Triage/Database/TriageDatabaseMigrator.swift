@@ -521,6 +521,76 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX coverage_records_lookup
                 ON coverage_records (account_id, organization_id, feature, status)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "009-work-graph",
+            checksum: "6a4ecbc4cda66da3aa8e38f38344d8b6a4c2ef99c9fb3e734404438847e49860"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE work_items (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    primary_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    state TEXT NOT NULL,
+                    last_relevant_activity_at_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    UNIQUE (account_id, primary_node_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE work_item_members (
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    github_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    PRIMARY KEY (work_item_id, github_node_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE work_item_context_links (
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    github_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    relation TEXT NOT NULL,
+                    PRIMARY KEY (work_item_id, github_node_id, relation)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE relations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    subject_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    object_node_id TEXT,
+                    kind TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    observed_at_ms INTEGER NOT NULL,
+                    UNIQUE (account_id, subject_node_id, object_node_id, kind)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE relation_evidence (
+                    relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_node_id TEXT,
+                    source_event_id TEXT,
+                    source_revision TEXT,
+                    observed_at_ms INTEGER NOT NULL,
+                    excerpt TEXT,
+                    PRIMARY KEY (relation_id, evidence_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE grouping_decisions (
+                    source_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    destination_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    relation TEXT NOT NULL,
+                    strength TEXT NOT NULL,
+                    evidence_json BLOB NOT NULL,
+                    decided_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (source_node_id, destination_node_id)
+                )
+                """)
         }
     ]
 }
