@@ -112,6 +112,24 @@ struct WorkDetailView: View {
                             }
                         }
                     }
+                    Menu("Snooze") {
+                        Button("1 Hour") {
+                            Task {
+                                await appModel.applyWorkflowAction(
+                                    .snooze(until: Date().addingTimeInterval(3_600)),
+                                    to: item
+                                )
+                            }
+                        }
+                        Button("Tomorrow") {
+                            Task {
+                                await appModel.applyWorkflowAction(
+                                    .snooze(until: Date().addingTimeInterval(86_400)),
+                                    to: item
+                                )
+                            }
+                        }
+                    }
                     Button(item.workflow.status == .waiting ? "Stop Waiting" : "Mark Waiting") {
                         Task {
                             await appModel.applyWorkflowAction(
