@@ -73,6 +73,26 @@ final class GitHubIssueSearchTests: XCTestCase {
         }
     }
 
+    func testSearchScopesBoundedQueryToAccessibleRepository() throws {
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        ).scoped(
+            to: "github/triage.app_test",
+            updatedRange: SearchTimeRange(
+                start: Date(timeIntervalSince1970: 60),
+                end: Date(timeIntervalSince1970: 120)
+            )
+        )
+
+        XCTAssertEqual(
+            query.value,
+            "org:github is:open involves:octocat updated:1970-01-01T00:01:00Z..1970-01-01T00:02:00Z repo:github/triage.app_test"
+        )
+    }
+
     func testSearchResponseRetainsSuccessfulSSOHeader() async throws {
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(

@@ -13,6 +13,7 @@ actor RoleDiscoverySynchronizer {
     private let attentionRepository: AttentionReasonRepository
     private let rawSnapshotRepository: RawAPISnapshotRepository
     private let normalizationFailureRepository: NormalizationFailureRepository
+    private let shardRepository: SyncShardRepository
     private let clock: @Sendable () -> Date
 
     init(
@@ -23,6 +24,7 @@ actor RoleDiscoverySynchronizer {
         attentionRepository: AttentionReasonRepository,
         rawSnapshotRepository: RawAPISnapshotRepository,
         normalizationFailureRepository: NormalizationFailureRepository,
+        shardRepository: SyncShardRepository,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.searchClient = searchClient
@@ -32,6 +34,7 @@ actor RoleDiscoverySynchronizer {
         self.attentionRepository = attentionRepository
         self.rawSnapshotRepository = rawSnapshotRepository
         self.normalizationFailureRepository = normalizationFailureRepository
+        self.shardRepository = shardRepository
         self.clock = clock
     }
 
@@ -41,73 +44,47 @@ actor RoleDiscoverySynchronizer {
         accountNodeID: GitHubNodeID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
+        streamID: SyncStreamID,
+        searchRange: SearchTimeRange,
+        accessibleRepositoryNames: [String],
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?
     ) async throws -> [WorkItemID] {
-        var itemsByNodeID: [String: GitHubIssueSearchItem] = [:]
-        var relationshipsByNodeID: [String: Set<GitHubIssueSearchRelationship>] = [:]
-        var snapshotsByNodeID: [String: RawAPISnapshotID] = [:]
+        let accumulator = RoleDiscoveryAccumulator()
+        let shardExecutor = SearchShardExecutor(
+            client: searchClient,
+            shardRepository: shardRepository,
+            clock: clock
+        )
         for query in plan.openQueries + plan.recentClosedQueries {
-            let firstResponse = try await searchClient.searchResponse(query)
-            try throwForSSORequirement(
-                in: firstResponse.ssoHeader,
-                githubOrganizationID: githubOrganizationID
-            )
-            let firstPage = firstResponse.value
-            let firstSnapshotID = try await persist(
-                firstResponse,
+            try await shardExecutor.execute(
                 query: query,
-                page: 1,
-                accountID: accountID
-            )
-            guard !firstPage.incompleteResults,
-                  firstPage.totalCount <= SearchShardPlanner.maximumResults
-            else {
-                throw RoleDiscoverySyncError.shardingRequired
-            }
-            let pageCount = max(1, Int(ceil(Double(firstPage.totalCount) / 100)))
-            for page in 1...pageCount {
-                let result: GitHubIssueSearchPage
-                if page == 1 {
-                    result = firstPage
-                    store(
-                        result,
-                        relationship: query.relationship,
-                        snapshotID: firstSnapshotID,
-                        itemsByNodeID: &itemsByNodeID,
-                        relationshipsByNodeID: &relationshipsByNodeID,
-                        snapshotsByNodeID: &snapshotsByNodeID
-                    )
-                } else {
-                    let response = try await searchClient.searchResponse(query, page: page)
-                    try throwForSSORequirement(
-                        in: response.ssoHeader,
-                        githubOrganizationID: githubOrganizationID
-                    )
-                    result = response.value
-                    let snapshotID = try await persist(
-                        response,
-                        query: query,
-                        page: page,
-                        accountID: accountID
-                    )
-                    store(
-                        result,
-                        relationship: query.relationship,
-                        snapshotID: snapshotID,
-                        itemsByNodeID: &itemsByNodeID,
-                        relationshipsByNodeID: &relationshipsByNodeID,
-                        snapshotsByNodeID: &snapshotsByNodeID
-                    )
-                }
-                guard !result.incompleteResults else {
-                    throw RoleDiscoverySyncError.shardingRequired
-                }
+                range: searchRange,
+                streamID: streamID,
+                accountID: accountID,
+                accessibleRepositoryNames: accessibleRepositoryNames
+            ) { [self] response, boundedQuery, page in
+                try await self.throwForSSORequirement(
+                    in: response.ssoHeader,
+                    githubOrganizationID: githubOrganizationID
+                )
+                let snapshotID = try await self.persist(
+                    response,
+                    query: boundedQuery,
+                    page: page,
+                    accountID: accountID
+                )
+                await accumulator.store(
+                    response.value,
+                    relationship: query.relationship,
+                    snapshotID: snapshotID
+                )
             }
         }
 
         let observedAt = clock()
+        let results = await accumulator.results()
         var nodes: [NormalizedGitHubNode] = []
-        for item in itemsByNodeID.values.sorted(by: { $0.nodeID < $1.nodeID }) {
+        for item in results.itemsByNodeID.values.sorted(by: { $0.nodeID < $1.nodeID }) {
             do {
                 nodes.append(
                     try GitHubSearchNormalizer.normalize(
@@ -119,7 +96,7 @@ actor RoleDiscoverySynchronizer {
                     )
                 )
             } catch let error as GitHubSearchNormalizationError {
-                guard let snapshotID = snapshotsByNodeID[item.nodeID] else {
+                guard let snapshotID = results.snapshotsByNodeID[item.nodeID] else {
                     throw RoleDiscoverySyncError.snapshotProvenanceMissing
                 }
                 try await normalizationFailureRepository.record(
@@ -143,7 +120,7 @@ actor RoleDiscoverySynchronizer {
             let workItemID = try await workItemRepository.ensureWorkItem(for: node)
             try await relationRepository.replace(
                 discoveryRelations(
-                    relationships: relationshipsByNodeID[node.nodeID.rawValue] ?? [],
+                    relationships: results.relationshipsByNodeID[node.nodeID.rawValue] ?? [],
                     node: node,
                     accountNodeID: accountNodeID,
                     observedAt: observedAt
@@ -154,7 +131,7 @@ actor RoleDiscoverySynchronizer {
             try await attentionRepository.replaceDiscoveryReasons(
                 workItemID: workItemID,
                 reasons: discoveryReasons(
-                    relationships: relationshipsByNodeID[node.nodeID.rawValue] ?? [],
+                    relationships: results.relationshipsByNodeID[node.nodeID.rawValue] ?? [],
                     node: node,
                     evaluatedAt: observedAt
                 )
@@ -184,23 +161,34 @@ actor RoleDiscoverySynchronizer {
         return snapshot.id
     }
 
-    private func store(
-        _ page: GitHubIssueSearchPage,
-        relationship: GitHubIssueSearchRelationship,
-        snapshotID: RawAPISnapshotID,
-        itemsByNodeID: inout [String: GitHubIssueSearchItem],
-        relationshipsByNodeID: inout [String: Set<GitHubIssueSearchRelationship>],
-        snapshotsByNodeID: inout [String: RawAPISnapshotID]
-    ) {
-        for item in page.items {
-            itemsByNodeID[item.nodeID] = item
-            relationshipsByNodeID[item.nodeID, default: []].insert(relationship)
-            snapshotsByNodeID[item.nodeID] = snapshotID
-        }
-    }
-
     private func searchEndpoint(for item: GitHubIssueSearchItem) -> String {
         "/search/issues"
+    }
+
+    private actor RoleDiscoveryAccumulator {
+        private var itemsByNodeID: [String: GitHubIssueSearchItem] = [:]
+        private var relationshipsByNodeID: [String: Set<GitHubIssueSearchRelationship>] = [:]
+        private var snapshotsByNodeID: [String: RawAPISnapshotID] = [:]
+
+        func store(
+            _ page: GitHubIssueSearchPage,
+            relationship: GitHubIssueSearchRelationship,
+            snapshotID: RawAPISnapshotID
+        ) {
+            for item in page.items {
+                itemsByNodeID[item.nodeID] = item
+                relationshipsByNodeID[item.nodeID, default: []].insert(relationship)
+                snapshotsByNodeID[item.nodeID] = snapshotID
+            }
+        }
+
+        func results() -> (
+            itemsByNodeID: [String: GitHubIssueSearchItem],
+            relationshipsByNodeID: [String: Set<GitHubIssueSearchRelationship>],
+            snapshotsByNodeID: [String: RawAPISnapshotID]
+        ) {
+            (itemsByNodeID, relationshipsByNodeID, snapshotsByNodeID)
+        }
     }
 
     private func redactedDiagnostic(for error: GitHubSearchNormalizationError) -> String {
