@@ -20,6 +20,44 @@ final class GitHubGraphQLClientTests: XCTestCase {
         XCTAssertEqual(response.errors.map(\.message), ["partial"])
     }
 
+    func testRejectsPartialResponseWhenCompleteDataIsRequired() async throws {
+        let client = GitHubGraphQLClient(
+            session: GraphQLStubSession(
+                body: Data(#"{"data":{"viewer":{"login":"octocat"}},"errors":[{"message":"partial"}]}"#.utf8)
+            ),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await client.executeComplete(
+                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                variables: EmptyVariables(),
+                as: ViewerPayload.self
+            )
+            XCTFail("Expected partial response rejection.")
+        } catch let error as GitHubGraphQLError {
+            XCTAssertEqual(error, .partialResponse)
+        }
+    }
+
+    func testRejectsMissingDataWhenCompleteDataIsRequired() async throws {
+        let client = GitHubGraphQLClient(
+            session: GraphQLStubSession(body: Data(#"{"data":null}"#.utf8)),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await client.executeComplete(
+                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                variables: EmptyVariables(),
+                as: ViewerPayload.self
+            )
+            XCTFail("Expected missing data rejection.")
+        } catch let error as GitHubGraphQLError {
+            XCTAssertEqual(error, .missingData)
+        }
+    }
+
     func testRejectsMalformedResponseInsteadOfReturningEmptyData() async throws {
         let client = GitHubGraphQLClient(
             session: GraphQLStubSession(body: Data("{".utf8)),
