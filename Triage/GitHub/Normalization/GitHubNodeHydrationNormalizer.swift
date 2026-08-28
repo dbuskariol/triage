@@ -221,6 +221,9 @@ enum GitHubNodeHydrationNormalizer {
                 throw GitHubNodeHydrationNormalizationError.invalidIssueDetails
             }
             try validateCompleteCommonConnections(node)
+            if node.reviewRequests?.pageInfo.hasNextPage == true {
+                throw GitHubNodeHydrationNormalizationError.incompleteConnection
+            }
             return .pullRequest(
                 isDraft: isDraft,
                 mergeableState: node.mergeable,

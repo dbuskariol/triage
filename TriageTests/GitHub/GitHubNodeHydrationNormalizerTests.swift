@@ -37,6 +37,50 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         }
     }
 
+    func testRejectsIncompletePullRequestReviewRequests() throws {
+        var node = pullRequest()
+        node = .init(
+            typeName: node.typeName,
+            id: node.id,
+            databaseId: node.databaseId,
+            number: node.number,
+            title: node.title,
+            body: node.body,
+            url: node.url,
+            state: node.state,
+            createdAt: node.createdAt,
+            updatedAt: node.updatedAt,
+            closedAt: node.closedAt,
+            mergedAt: node.mergedAt,
+            isDraft: node.isDraft,
+            locked: node.locked,
+            comments: node.comments,
+            mergeable: node.mergeable,
+            headRefName: node.headRefName,
+            baseRefName: node.baseRefName,
+            reviewDecision: node.reviewDecision,
+            author: node.author,
+            repository: node.repository,
+            assignees: node.assignees,
+            labels: node.labels,
+            reviewRequests: .init(nodes: [], pageInfo: .init(hasNextPage: true)),
+            closingIssuesReferences: node.closingIssuesReferences
+        )
+
+        XCTAssertThrowsError(
+            try GitHubNodeHydrationNormalizer.normalize(
+                payload(node: node),
+                requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                accountID: AccountID(rawValue: "account")!,
+                organizationID: OrganizationID(rawValue: "organization")!,
+                repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                observedAt: Date()
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .incompleteConnection)
+        }
+    }
+
     private func payload(node: GitHubNodeHydrationPayload.Node) -> GitHubNodeHydrationPayload {
         GitHubNodeHydrationPayload(
             nodes: [node],

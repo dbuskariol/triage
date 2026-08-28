@@ -42,7 +42,15 @@ enum GitHubGraphQLQueries {
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }
               labels(first: 100) { nodes { id name color } pageInfo { hasNextPage } }
-              reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { ...ActorFields } } } }
+              reviewRequests(first: 50) {
+                nodes {
+                  requestedReviewer {
+                    ... on User { ...ActorFields }
+                    ... on Team { id slug avatarUrl }
+                  }
+                }
+                pageInfo { hasNextPage }
+              }
               closingIssuesReferences(first: 50) { nodes { id } }
             }
           }
