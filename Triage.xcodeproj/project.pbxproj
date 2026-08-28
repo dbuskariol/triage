@@ -27,6 +27,7 @@
 		20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE3D67A0FFC1AA8377EEE54A /* RefreshCadence.swift */; };
 		2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E96AD1DA22601AF8EDA9993 /* NotificationActions.swift */; };
 		2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B59CA16DA269CD50E052F2A /* Freshness.swift */; };
+		346665C51D1520D26ED59777 /* PullRequestReviewRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */; };
 		3740A14045DBE62E64480D5F /* NotificationEligibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7BF02EF9257041D9B18EAC /* NotificationEligibilityTests.swift */; };
 		379DBBD450F2FAD70BC2F7E9 /* AccountAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B96E89F2CF776FAC365D17E /* AccountAccess.swift */; };
 		39645229C79AF0AA7C0331BF /* AppNavigationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */; };
@@ -176,6 +177,7 @@
 		2E84F2F83994E7EED18D38E9 /* TriageTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2F1137D570B4939F5B2CA238 /* GitHubIssueSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIssueSearch.swift; sourceTree = "<group>"; };
 		2FA4EF715587B009499705BF /* WorkflowRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowRepository.swift; sourceTree = "<group>"; };
+		2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewRepository.swift; sourceTree = "<group>"; };
 		326A309D86A0DA32F49BD907 /* GitHubIdentityClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIdentityClient.swift; sourceTree = "<group>"; };
 		35E87148F627E4D7DD0E97C8 /* GitHubPullRequestClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubPullRequestClient.swift; sourceTree = "<group>"; };
 		3B59CA16DA269CD50E052F2A /* Freshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Freshness.swift; sourceTree = "<group>"; };
@@ -524,6 +526,7 @@
 				B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */,
 				94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
+				2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
 				4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */,
 				2FA4EF715587B009499705BF /* WorkflowRepository.swift */,
@@ -860,6 +863,7 @@
 				DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */,
 				8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */,
 				C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */,
+				346665C51D1520D26ED59777 /* PullRequestReviewRepository.swift in Sources */,
 				20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */,
 				B3FDE6FE018FC2B4DD87C517 /* RoleDiscoveryPlan.swift in Sources */,
 				E6581FEDB74600C101B1E376 /* RoleDiscoverySynchronizer.swift in Sources */,
