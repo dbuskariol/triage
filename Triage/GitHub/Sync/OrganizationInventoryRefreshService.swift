@@ -17,12 +17,14 @@ actor OrganizationInventoryRefreshService {
 
     func refreshRepositories(
         account: GitHubAccount,
-        organization: GitHubOrganization
+        organization: GitHubOrganization,
+        rateLimitController: GitHubRateLimitController? = nil
     ) async throws -> [RepositorySummary] {
         let token = try await credentialReader.accessToken(for: account)
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(),
-            credential: token
+            credential: token,
+            rateLimitController: rateLimitController
         )
         let repositories = try await GitHubIdentityClient(client: client)
             .allRepositories(in: organization.login)

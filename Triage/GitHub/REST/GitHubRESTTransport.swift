@@ -49,6 +49,7 @@ struct GitHubRESTRequest: Sendable {
         if let absoluteURL {
             return absoluteURL
         }
+
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.path = path!
         components?.queryItems = query.isEmpty ? nil : query
@@ -56,6 +57,10 @@ struct GitHubRESTRequest: Sendable {
             throw GitHubTransportError.invalidURL
         }
         return url
+    }
+
+    var pathForClassification: String? {
+        path ?? absoluteURL?.path
     }
 }
 
@@ -82,7 +87,14 @@ protocol HTTPSession: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionHTTPSession: HTTPSession {
+protocol BoundedHTTPSession: HTTPSession {
+    func data(
+        for request: URLRequest,
+        maximumResponseBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse)
+}
+
+struct URLSessionHTTPSession: BoundedHTTPSession {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -96,12 +108,32 @@ struct URLSessionHTTPSession: HTTPSession {
         }
         return (data, httpResponse)
     }
+
+    func data(
+        for request: URLRequest,
+        maximumResponseBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GitHubTransportError.unexpectedResponse
+        }
+
+        var body = Data()
+        body.reserveCapacity(min(maximumResponseBodyBytes, 64 * 1_024))
+        for try await byte in bytes {
+            guard body.count < maximumResponseBodyBytes else {
+                throw GitHubTransportError.responseTooLarge
+            }
+            body.append(byte)
+        }
+        return (body, httpResponse)
+    }
 }
 
 actor GitHubRESTTransport {
     static let apiVersion = "2026-03-10"
     static let defaultBaseURL = URL(string: "https://api.github.com")!
-    static let maximumResponseBodyBytes = 10 * 1_024 * 1_024
+    static let maximumResponseBodyBytes = 2 * 1_024 * 1_024
 
     private let session: any HTTPSession
     private let baseURL: URL
@@ -142,7 +174,7 @@ actor GitHubRESTTransport {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (body, response) = try await session.data(for: urlRequest)
+        let (body, response) = try await boundedData(for: urlRequest)
         guard body.count <= Self.maximumResponseBodyBytes else {
             throw GitHubTransportError.responseTooLarge
         }
@@ -157,5 +189,19 @@ actor GitHubRESTTransport {
             headers: headers,
             body: body
         )
+    }
+
+    private func boundedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if let boundedSession = session as? any BoundedHTTPSession {
+            return try await boundedSession.data(
+                for: request,
+                maximumResponseBodyBytes: Self.maximumResponseBodyBytes
+            )
+        }
+        let result = try await session.data(for: request)
+        guard result.0.count <= Self.maximumResponseBodyBytes else {
+            throw GitHubTransportError.responseTooLarge
+        }
+        return result
     }
 }

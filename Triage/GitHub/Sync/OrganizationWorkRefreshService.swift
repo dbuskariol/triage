@@ -4,15 +4,18 @@ actor OrganizationWorkRefreshService {
     private let credentialReader: AccountCredentialReader
     private let vaultRegistry: VaultRegistry
     private let secretStore: KeychainSecretStore
+    private let rateLimitControllers: GitHubRateLimitControllerRegistry
 
     init(
         credentialReader: AccountCredentialReader,
         vaultRegistry: VaultRegistry,
-        secretStore: KeychainSecretStore
+        secretStore: KeychainSecretStore,
+        rateLimitControllers: GitHubRateLimitControllerRegistry = .shared
     ) {
         self.credentialReader = credentialReader
         self.vaultRegistry = vaultRegistry
         self.secretStore = secretStore
+        self.rateLimitControllers = rateLimitControllers
     }
 
     func refresh(
@@ -20,24 +23,33 @@ actor OrganizationWorkRefreshService {
         organization: GitHubOrganization
     ) async throws -> [WorkItemID] {
         let token = try await credentialReader.accessToken(for: account)
+        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+            throw AccountCredentialReaderError.missingAccessToken
+        }
+        let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+        let rateLimitController = try await rateLimitControllers.controller(
+            for: account.id,
+            vault: vault
+        )
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(),
-            credential: token
+            credential: token,
+            rateLimitController: rateLimitController
         )
         let inventory = try await OrganizationInventoryRefreshService(
             credentialReader: credentialReader,
             vaultRegistry: vaultRegistry,
             secretStore: secretStore
-        ).refreshRepositories(account: account, organization: organization)
+        ).refreshRepositories(
+            account: account,
+            organization: organization,
+            rateLimitController: rateLimitController
+        )
         let repositoryIDsByAPIURL = Dictionary(
             uniqueKeysWithValues: inventory.map {
                 (URL(string: "https://api.github.com/repos/\($0.fullName)")!, $0.id)
             }
         )
-        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
-            throw AccountCredentialReaderError.missingAccessToken
-        }
-        let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
         let plan = try RoleDiscoveryPlan(
             organizationLogin: organization.login,
             userLogin: account.login,

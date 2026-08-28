@@ -795,6 +795,18 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX review_threads_pull_request_state
                 ON review_threads (pull_request_node_id, is_resolved)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "017-rate-limit-cooldown",
+            checksum: "9626f1440fd0d13900a7efefc7cf33102d0756a0367bea5d669b417b50868003"
+        ) { database in
+            try database.execute(sql: "ALTER TABLE rate_limit_buckets ADD COLUMN rate_limit INTEGER")
+            try database.execute(sql: """
+                CREATE TABLE rate_limit_secondary_cooldowns (
+                    account_id TEXT PRIMARY KEY NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    pause_until_ms INTEGER NOT NULL
+                )
+                """)
         }
     ]
 }
