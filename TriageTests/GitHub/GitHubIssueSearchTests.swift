@@ -35,6 +35,44 @@ final class GitHubIssueSearchTests: XCTestCase {
         )
     }
 
+    func testSearchCreatesPreciselyBoundedUpdatedRange() throws {
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .closed,
+            relationship: .reviewInvolves,
+            closedAfter: Date(timeIntervalSince1970: 0)
+        ).bounded(
+            to: SearchTimeRange(
+                start: Date(timeIntervalSince1970: 60),
+                end: Date(timeIntervalSince1970: 120)
+            )
+        )
+
+        XCTAssertEqual(
+            query.value,
+            "org:github is:closed review-involves:octocat updated:1970-01-01T00:01:00Z..1970-01-01T00:02:00Z closed:>=1970-01-01"
+        )
+    }
+
+    func testSearchRejectsConflictingUpdatedConstraints() {
+        XCTAssertThrowsError(
+            try GitHubIssueSearchQuery(
+                organizationLogin: "github",
+                userLogin: "octocat",
+                state: .open,
+                relationship: .involves,
+                updatedAfter: Date(timeIntervalSince1970: 0),
+                updatedRange: SearchTimeRange(
+                    start: Date(timeIntervalSince1970: 60),
+                    end: Date(timeIntervalSince1970: 120)
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubIssueSearchError, .conflictingUpdatedConstraints)
+        }
+    }
+
     func testSearchResponseRetainsSuccessfulSSOHeader() async throws {
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(

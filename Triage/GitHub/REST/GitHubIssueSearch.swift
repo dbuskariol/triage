@@ -4,6 +4,7 @@ enum GitHubIssueSearchError: Error, Equatable, Sendable {
     case invalidOrganizationLogin
     case invalidUserLogin
     case invalidQualifier
+    case conflictingUpdatedConstraints
 }
 
 enum GitHubIssueSearchState: String, Sendable {
@@ -36,6 +37,10 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
 struct GitHubIssueSearchQuery: Sendable {
     let value: String
     let relationship: GitHubIssueSearchRelationship
+    private let organizationLogin: String
+    private let userLogin: String
+    private let state: GitHubIssueSearchState
+    private let closedAfter: Date?
 
     init(
         organizationLogin: String,
@@ -43,13 +48,17 @@ struct GitHubIssueSearchQuery: Sendable {
         state: GitHubIssueSearchState,
         relationship: GitHubIssueSearchRelationship,
         updatedAfter: Date? = nil,
-        closedAfter: Date? = nil
+        closedAfter: Date? = nil,
+        updatedRange: SearchTimeRange? = nil
     ) throws {
         guard Self.isGitHubLogin(organizationLogin) else {
             throw GitHubIssueSearchError.invalidOrganizationLogin
         }
         guard Self.isGitHubLogin(userLogin) else {
             throw GitHubIssueSearchError.invalidUserLogin
+        }
+        guard updatedAfter == nil || updatedRange == nil else {
+            throw GitHubIssueSearchError.conflictingUpdatedConstraints
         }
         var qualifiers = [
             "org:\(organizationLogin)",
@@ -59,11 +68,31 @@ struct GitHubIssueSearchQuery: Sendable {
         if let updatedAfter {
             qualifiers.append("updated:>=\(Self.dayString(updatedAfter))")
         }
+        if let updatedRange {
+            qualifiers.append(
+                "updated:\(Self.timestampString(updatedRange.start))..\(Self.timestampString(updatedRange.end))"
+            )
+        }
         if let closedAfter {
             qualifiers.append("closed:>=\(Self.dayString(closedAfter))")
         }
+        self.organizationLogin = organizationLogin
+        self.userLogin = userLogin
+        self.state = state
         self.relationship = relationship
+        self.closedAfter = closedAfter
         value = qualifiers.joined(separator: " ")
+    }
+
+    func bounded(to updatedRange: SearchTimeRange) throws -> GitHubIssueSearchQuery {
+        try GitHubIssueSearchQuery(
+            organizationLogin: organizationLogin,
+            userLogin: userLogin,
+            state: state,
+            relationship: relationship,
+            closedAfter: closedAfter,
+            updatedRange: updatedRange
+        )
     }
 
     private static func isGitHubLogin(_ value: String) -> Bool {
@@ -79,6 +108,13 @@ struct GitHubIssueSearchQuery: Sendable {
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let components = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", components.year!, components.month!, components.day!)
+    }
+
+    private static func timestampString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)!
+        formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        return formatter.string(from: date)
     }
 }
 
