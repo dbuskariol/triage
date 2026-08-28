@@ -10,4 +10,9 @@ final class RefreshCadenceTests: XCTestCase {
         XCTAssertEqual(cadence.nextInterval(randomUnit: 1), 300)
         XCTAssertEqual(cadence.nextInterval(randomUnit: 2), 300)
     }
+
+    func testInactiveAccountCadenceUsesLowerPriorityInterval() {
+        XCTAssertEqual(RefreshCadence.inactiveAccount.nextInterval(randomUnit: 0), 1_200)
+        XCTAssertEqual(RefreshCadence.inactiveAccount.nextInterval(randomUnit: 1), 1_500)
+    }
 }

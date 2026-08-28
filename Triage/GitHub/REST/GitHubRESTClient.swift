@@ -23,15 +23,18 @@ actor GitHubRESTClient {
     private let transport: GitHubRESTTransport
     private let credential: SecretValue
     private let rateLimitController: GitHubRateLimitController?
+    private let requestPriority: GitHubRequestPriority
 
     init(
         transport: GitHubRESTTransport,
         credential: SecretValue,
-        rateLimitController: GitHubRateLimitController? = nil
+        rateLimitController: GitHubRateLimitController? = nil,
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
     ) {
         self.transport = transport
         self.credential = credential
         self.rateLimitController = rateLimitController
+        self.requestPriority = requestPriority
     }
 
     func get<Value: Decodable & Sendable>(
@@ -91,7 +94,7 @@ actor GitHubRESTClient {
         }
         return try await rateLimitController.execute(
             resource: resource,
-            priority: .selectedOrganizationRefresh
+            priority: requestPriority
         ) {
             let response = try await self.transport.send(request, credential: self.credential)
             try await rateLimitController.record(response: response, fallbackResource: resource)

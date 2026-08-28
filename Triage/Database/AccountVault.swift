@@ -5,6 +5,7 @@ enum VaultError: Error, Equatable, Sendable {
     case invalidIntegrityCheck
     case sqlCipherUnavailable
     case missingApplicationSupportDirectory
+    case accountBeingRemoved
 }
 
 struct VaultPaths: Equatable, Sendable {
@@ -105,6 +106,7 @@ actor AccountVault {
 actor VaultRegistry {
     private let rootDirectory: URL
     private var openVaults: [AccountID: AccountVault] = [:]
+    private var accountsBeingRemoved: Set<AccountID> = []
 
     init(rootDirectory: URL? = nil) throws {
         self.rootDirectory = try rootDirectory ?? VaultPaths.defaultRootDirectory()
@@ -114,6 +116,9 @@ actor VaultRegistry {
         accountID: AccountID,
         vaultKey: VaultKey
     ) async throws -> AccountVault {
+        guard !accountsBeingRemoved.contains(accountID) else {
+            throw VaultError.accountBeingRemoved
+        }
         if let vault = openVaults[accountID] {
             return vault
         }
@@ -124,6 +129,10 @@ actor VaultRegistry {
             rootDirectory: rootDirectory
         )
         try await vault.applyMigrations()
+        guard !accountsBeingRemoved.contains(accountID) else {
+            try await vault.close()
+            throw VaultError.accountBeingRemoved
+        }
         openVaults[accountID] = vault
         return vault
     }
@@ -142,10 +151,20 @@ actor VaultRegistry {
     }
 
     func remove(accountID: AccountID) async throws {
+        beginRemoval(accountID: accountID)
+        defer { cancelRemoval(accountID: accountID) }
         try await close(accountID: accountID)
         let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
         if FileManager.default.fileExists(atPath: paths.directory.path) {
             try FileManager.default.removeItem(at: paths.directory)
         }
+    }
+
+    func beginRemoval(accountID: AccountID) {
+        accountsBeingRemoved.insert(accountID)
+    }
+
+    func cancelRemoval(accountID: AccountID) {
+        accountsBeingRemoved.remove(accountID)
     }
 }

@@ -97,18 +97,24 @@ actor AccountDataRemovalService {
     }
 
     func removeAllPrivateData(for accountID: AccountID) async throws {
-        try await vaultRegistry.close(accountID: accountID)
-        try await secretStore.removeAllSecrets(for: accountID)
+        await vaultRegistry.beginRemoval(accountID: accountID)
+        do {
+            try await vaultRegistry.close(accountID: accountID)
+            try await secretStore.removeAllSecrets(for: accountID)
 
-        let artifacts = AccountPrivateDataArtifacts(
-            accountID: accountID,
-            applicationSupportDirectory: applicationSupportDirectory,
-            cachesDirectory: cachesDirectory
-        ).artifacts
-        for artifact in artifacts {
-            if FileManager.default.fileExists(atPath: artifact.url.path) {
-                try FileManager.default.removeItem(at: artifact.url)
+            let artifacts = AccountPrivateDataArtifacts(
+                accountID: accountID,
+                applicationSupportDirectory: applicationSupportDirectory,
+                cachesDirectory: cachesDirectory
+            ).artifacts
+            for artifact in artifacts {
+                if FileManager.default.fileExists(atPath: artifact.url.path) {
+                    try FileManager.default.removeItem(at: artifact.url)
+                }
             }
+        } catch {
+            await vaultRegistry.cancelRemoval(accountID: accountID)
+            throw error
         }
     }
 }
