@@ -24,9 +24,11 @@
 		63AA4773C2EF01BDC055423C /* SoftwareUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 926E2C8C201B67494FDEBD5E /* SoftwareUpdateController.swift */; };
 		65623684B07E24F75A9F790C /* IdentifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D55C61485E13F265EFB7D3 /* IdentifierTests.swift */; };
 		733DA040ADF44EB3897070BD /* AccountAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */; };
+		BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */; };
 		BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51CCBC527DBD7C20ECD99955 /* TriageApp.swift */; };
 		BEDF7AC4601449B4A5DB9201 /* Workflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F79F1622FE7D729E3464C27C /* Workflow.swift */; };
 		CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3390D135CFE41477E727ECD /* AppMetadata.swift */; };
+		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		DE05BC04CD8923DDF0C81E05 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */; };
 		E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */; };
 		EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70E93ABD004196FC994DFBC9 /* CardContainer.swift */; };
@@ -47,6 +49,7 @@
 
 /* Begin PBXFileReference section */
 		09D55C61485E13F265EFB7D3 /* IdentifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentifierTests.swift; sourceTree = "<group>"; };
+		0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStore.swift; sourceTree = "<group>"; };
 		0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAccessTests.swift; sourceTree = "<group>"; };
 		0F4968D7EB5384EBD536B223 /* GRDB.swift */ = {isa = PBXFileReference; lastKnownFileType = folder; name = GRDB.swift; path = Vendor/GRDB.swift; sourceTree = SOURCE_ROOT; };
 		13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocolTests.swift; sourceTree = "<group>"; };
@@ -56,6 +59,7 @@
 		2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2E84F2F83994E7EED18D38E9 /* TriageTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B59CA16DA269CD50E052F2A /* Freshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Freshness.swift; sourceTree = "<group>"; };
+		4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStoreTests.swift; sourceTree = "<group>"; };
 		51CCBC527DBD7C20ECD99955 /* TriageApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageApp.swift; sourceTree = "<group>"; };
 		552523AB4B9EC81EE47BDCA4 /* Evidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Evidence.swift; sourceTree = "<group>"; };
 		5C534F0A690622733E79B291 /* Triage.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Triage.entitlements; sourceTree = "<group>"; };
@@ -146,6 +150,14 @@
 			path = Services;
 			sourceTree = "<group>";
 		};
+		869A4E650232A6C0D96DC16B /* Database */ = {
+			isa = PBXGroup;
+			children = (
+				0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */,
+			);
+			path = Database;
+			sourceTree = "<group>";
+		};
 		8B895F991A914DF2DD4EF63C /* Triage */ = {
 			isa = PBXGroup;
 			children = (
@@ -155,6 +167,7 @@
 				51CCBC527DBD7C20ECD99955 /* TriageApp.swift */,
 				282E4BF03D103669044A5607 /* TriageDebug.entitlements */,
 				1A30248739969B02FB9304E7 /* Authentication */,
+				869A4E650232A6C0D96DC16B /* Database */,
 				A9BB0D2AF5FE7881E2824DE7 /* Domain */,
 				223DCBB60153E84377BFA602 /* Models */,
 				856596893E02C1F55AA8BA2B /* Services */,
@@ -182,6 +195,14 @@
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
 			);
 			path = Domain;
+			sourceTree = "<group>";
+		};
+		AE860E185EC8801A0A64F686 /* Database */ = {
+			isa = PBXGroup;
+			children = (
+				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
+			);
+			path = Database;
 			sourceTree = "<group>";
 		};
 		B94762CD55E04D189174F62A /* Packages */ = {
@@ -216,6 +237,7 @@
 			children = (
 				F74BA70C92A3542C44D29350 /* TriageTests.swift */,
 				731A158D8680E8E0E846B90D /* Authentication */,
+				AE860E185EC8801A0A64F686 /* Database */,
 				19800B1B84C39A9A0ED18DDC /* Domain */,
 			);
 			path = TriageTests;
@@ -320,6 +342,7 @@
 				E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */,
 				F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */,
 				65623684B07E24F75A9F790C /* IdentifierTests.swift in Sources */,
+				CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */,
 				62AE7865C93E901751D96D83 /* TriageTests.swift in Sources */,
 				F90C766057275A70937531BD /* WorkflowTests.swift in Sources */,
 			);
@@ -339,6 +362,7 @@
 				2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */,
 				5BC464EE268BBA65B7ADC572 /* GitHubContent.swift in Sources */,
 				1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */,
+				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
 				593D34E52E35E0A27F81AC9E /* RootView.swift in Sources */,
 				548E20C9F071D33CBABF5A45 /* SettingsView.swift in Sources */,
