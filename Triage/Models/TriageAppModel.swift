@@ -149,7 +149,7 @@ final class TriageAppModel: ObservableObject {
             return
         }
 
-        refreshError = nil
+        ssoAuthorizationHeader = nil
         isRefreshing = true
         defer {
             if refreshGeneration == generation {
