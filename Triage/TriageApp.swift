@@ -70,6 +70,12 @@ struct TriageApp: App {
                     priorityCommand("High", priority: .high, key: "3")
                 }
 
+                Menu("Snooze") {
+                    snoozeCommand("1 Hour", interval: 3_600)
+                    snoozeCommand("Tomorrow", interval: 86_400)
+                    snoozeCommand("Next Week", interval: 7 * 86_400)
+                }
+
                 Button("Mark Waiting") {
                     applyWorkflow(.markWaiting(followUpAt: nil))
                 }
@@ -136,5 +142,12 @@ struct TriageApp: App {
         Task {
             await appModel.applyWorkflowAction(action, to: item)
         }
+    }
+
+    private func snoozeCommand(_ title: String, interval: TimeInterval) -> some View {
+        Button(title) {
+            applyWorkflow(.snooze(until: Date().addingTimeInterval(interval)))
+        }
+        .disabled(appModel.selectedWorkItem == nil)
     }
 }
