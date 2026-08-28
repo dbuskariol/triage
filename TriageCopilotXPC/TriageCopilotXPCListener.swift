@@ -9,6 +9,9 @@ final class TriageCopilotXPCListener: NSObject, NSXPCListenerDelegate {
   ) -> Bool {
     newConnection.exportedInterface = NSXPCInterface(with: TriageCopilotHelper.self)
     newConnection.exportedObject = service
+    newConnection.invalidationHandler = { [weak self] in
+      self?.service.cancelActiveProcess()
+    }
     newConnection.resume()
     return true
   }

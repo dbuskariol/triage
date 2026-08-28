@@ -1,10 +1,15 @@
 import Foundation
 import Security
 
-struct CopilotHelperProcess {
+final class CopilotHelperProcess {
   private static let helperRelativePath =
     "Contents/Resources/TriageCopilotHelper"
   private static let helperIdentifier = "com.triage.mac.copilot-helper"
+  private static let activeProcess = ActiveProcess()
+
+  static func cancelActive() {
+    activeProcess.cancel()
+  }
 
   func exchange(frame: Data) throws -> Data {
     let helperURL = try helperURL()
@@ -51,6 +56,8 @@ struct CopilotHelperProcess {
 
     do {
       try process.run()
+      Self.activeProcess.set(process)
+      defer { Self.activeProcess.clear(process) }
       try input.fileHandleForWriting.write(contentsOf: frame)
       input.fileHandleForWriting.closeFile()
       let response = try readFrame(from: output.fileHandleForReading)
@@ -114,6 +121,33 @@ struct CopilotHelperProcess {
       throw CopilotXPCServiceError.processExited
     }
     return lengthData + payload
+  }
+}
+
+private final class ActiveProcess: @unchecked Sendable {
+  private let lock = NSLock()
+  private var process: Process?
+
+  func set(_ process: Process) {
+    lock.lock()
+    self.process = process
+    lock.unlock()
+  }
+
+  func clear(_ process: Process) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard self.process === process else { return }
+    self.process = nil
+  }
+
+  func cancel() {
+    lock.lock()
+    let process = process
+    lock.unlock()
+    if process?.isRunning == true {
+      process?.terminate()
+    }
   }
 }
 
