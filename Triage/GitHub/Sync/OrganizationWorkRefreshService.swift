@@ -5,17 +5,20 @@ actor OrganizationWorkRefreshService {
     private let vaultRegistry: VaultRegistry
     private let secretStore: KeychainSecretStore
     private let rateLimitControllers: GitHubRateLimitControllerRegistry
+    private let requestPriority: GitHubRequestPriority
 
     init(
         credentialReader: AccountCredentialReader,
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
-        rateLimitControllers: GitHubRateLimitControllerRegistry = .shared
+        rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
     ) {
         self.credentialReader = credentialReader
         self.vaultRegistry = vaultRegistry
         self.secretStore = secretStore
         self.rateLimitControllers = rateLimitControllers
+        self.requestPriority = requestPriority
     }
 
     func refresh(
@@ -34,7 +37,8 @@ actor OrganizationWorkRefreshService {
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(),
             credential: token,
-            rateLimitController: rateLimitController
+            rateLimitController: rateLimitController,
+            requestPriority: requestPriority
         )
         let inventory = try await OrganizationInventoryRefreshService(
             credentialReader: credentialReader,
@@ -43,7 +47,8 @@ actor OrganizationWorkRefreshService {
         ).refreshRepositories(
             account: account,
             organization: organization,
-            rateLimitController: rateLimitController
+            rateLimitController: rateLimitController,
+            requestPriority: requestPriority
         )
         let repositoryIDsByAPIURL = Dictionary(
             uniqueKeysWithValues: inventory.map {

@@ -14,6 +14,11 @@ struct RefreshCadence: Sendable {
         self.maximumJitter = maximumJitter
     }
 
+    static let inactiveAccount = RefreshCadence(
+        baseInterval: 20 * 60,
+        maximumJitter: 5 * 60
+    )
+
     func nextInterval(randomUnit: Double) -> TimeInterval {
         let boundedRandomUnit = min(max(randomUnit, 0), 1)
         return baseInterval + (boundedRandomUnit * maximumJitter)
