@@ -64,6 +64,32 @@ enum GitHubCapability: String, CaseIterable, Codable, Sendable {
     case copilotModels
 }
 
+enum GitHubCapabilityScope: Sendable {
+    case account
+    case organization
+}
+
+extension GitHubCapability {
+    var scope: GitHubCapabilityScope {
+        switch self {
+        case .notifications:
+            .account
+        case .privateRepositories,
+             .visibleTeams,
+             .issueAndPullRequestSearch,
+             .pullRequestReviews,
+             .pullRequestReviewThreads,
+             .issueTimeline,
+             .discussions,
+             .projects,
+             .projectFields,
+             .copilot,
+             .copilotModels:
+            .organization
+        }
+    }
+}
+
 struct CapabilityAvailability: Codable, Equatable, Sendable {
     let capability: GitHubCapability
     let status: CapabilityStatus
@@ -80,6 +106,26 @@ struct CapabilityAvailability: Codable, Equatable, Sendable {
         self.status = status
         self.checkedAt = checkedAt
         self.detail = detail
+    }
+}
+
+struct AccountCapabilitySnapshot: Codable, Equatable, Sendable {
+    let accountID: AccountID
+    let capabilities: [CapabilityAvailability]
+    let checkedAt: Date
+
+    init(
+        accountID: AccountID,
+        capabilities: [CapabilityAvailability],
+        checkedAt: Date
+    ) {
+        self.accountID = accountID
+        self.capabilities = capabilities
+        self.checkedAt = checkedAt
+    }
+
+    func status(for capability: GitHubCapability) -> CapabilityStatus {
+        capabilities.first(where: { $0.capability == capability })?.status ?? .unknown
     }
 }
 

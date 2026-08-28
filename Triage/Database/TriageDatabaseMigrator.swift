@@ -807,6 +807,25 @@ enum TriageDatabaseMigrator {
                     pause_until_ms INTEGER NOT NULL
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "018-account-capabilities",
+            checksum: "19c799017e05deefcf2b409765c1a068c50fedf8e87ca6c4ebc6b9099d1e7a92"
+        ) { database in
+            try database.execute(
+                sql: "DELETE FROM capabilities WHERE capability = ?",
+                arguments: [GitHubCapability.notifications.rawValue]
+            )
+            try database.execute(sql: """
+                CREATE TABLE account_capabilities (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    capability TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    checked_at_ms INTEGER NOT NULL,
+                    detail_fingerprint TEXT,
+                    PRIMARY KEY (account_id, capability)
+                )
+                """)
         }
     ]
 }

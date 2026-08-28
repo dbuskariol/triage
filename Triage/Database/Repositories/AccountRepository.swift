@@ -3,6 +3,7 @@ import GRDB
 
 enum AccountRepositoryError: Error, Equatable, Sendable {
     case invalidPersistedIdentifier
+    case invalidCapabilityScope
 }
 
 actor AccountRepository {
@@ -109,6 +110,47 @@ actor AccountRepository {
         }
     }
 
+    func accountCapabilities(for accountID: AccountID) async throws -> AccountCapabilitySnapshot? {
+        try await vault.read { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT capability, status, checked_at_ms, detail_fingerprint
+                    FROM account_capabilities
+                    WHERE account_id = ?
+                    ORDER BY capability
+                    """,
+                arguments: [accountID.rawValue]
+            )
+            guard !rows.isEmpty else {
+                return nil
+            }
+            let capabilities = try rows.map { row in
+                guard let capability = GitHubCapability(rawValue: row["capability"]),
+                      capability.scope == .account,
+                      let status = CapabilityStatus(rawValue: row["status"]),
+                      let checkedAt = Self.date(milliseconds: row["checked_at_ms"])
+                else {
+                    throw AccountRepositoryError.invalidPersistedIdentifier
+                }
+                return CapabilityAvailability(
+                    capability: capability,
+                    status: status,
+                    checkedAt: checkedAt,
+                    detail: row["detail_fingerprint"]
+                )
+            }
+            guard let checkedAt = capabilities.map(\.checkedAt).max() else {
+                throw AccountRepositoryError.invalidPersistedIdentifier
+            }
+            return AccountCapabilitySnapshot(
+                accountID: accountID,
+                capabilities: capabilities,
+                checkedAt: checkedAt
+            )
+        }
+    }
+
     func save(_ account: GitHubAccount, credentialRevision: CredentialRevision) async throws {
         let createdAt = Self.milliseconds(account.createdAt)
         let lastValidatedAt = account.lastValidatedAt.map(Self.milliseconds)
@@ -158,8 +200,17 @@ actor AccountRepository {
     func save(
         _ organization: GitHubOrganization,
         access: OrganizationAccess,
-        selectedAt: Date? = nil
+        selectedAt: Date? = nil,
+        accountCapabilities: AccountCapabilitySnapshot? = nil
     ) async throws {
+        guard !access.capabilities.contains(where: { $0.capability.scope != .organization }) else {
+            throw AccountRepositoryError.invalidCapabilityScope
+        }
+        if let accountCapabilities,
+           accountCapabilities.accountID != access.accountID ||
+            accountCapabilities.capabilities.contains(where: { $0.capability.scope != .account }) {
+            throw AccountRepositoryError.invalidCapabilityScope
+        }
         let checkedAt = Self.milliseconds(access.checkedAt)
         let selectedAtMilliseconds = selectedAt.map(Self.milliseconds)
         try await vault.write { database in
@@ -228,8 +279,20 @@ actor AccountRepository {
                     ]
                 )
             }
+            if let accountCapabilities {
+                try Self.saveAccountCapabilities(accountCapabilities, in: database)
+            }
         }
 
+    }
+
+    func save(_ snapshot: AccountCapabilitySnapshot) async throws {
+        guard snapshot.capabilities.allSatisfy({ $0.capability.scope == .account }) else {
+            throw AccountRepositoryError.invalidCapabilityScope
+        }
+        try await vault.write { database in
+            try Self.saveAccountCapabilities(snapshot, in: database)
+        }
     }
 
     func save(
@@ -292,6 +355,32 @@ actor AccountRepository {
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func saveAccountCapabilities(
+        _ snapshot: AccountCapabilitySnapshot,
+        in database: Database
+    ) throws {
+        try database.execute(
+            sql: "DELETE FROM account_capabilities WHERE account_id = ?",
+            arguments: [snapshot.accountID.rawValue]
+        )
+        for capability in snapshot.capabilities {
+            try database.execute(
+                sql: """
+                    INSERT INTO account_capabilities (
+                        account_id, capability, status, checked_at_ms, detail_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    snapshot.accountID.rawValue,
+                    capability.capability.rawValue,
+                    capability.status.rawValue,
+                    milliseconds(capability.checkedAt),
+                    capability.detail
+                ]
+            )
+        }
     }
 
     private nonisolated static func account(from row: Row) throws -> GitHubAccount {

@@ -4,6 +4,7 @@ struct AccountRestorationResult: Sendable {
     let accounts: [GitHubAccount]
     let organizationsByAccount: [AccountID: [GitHubOrganization]]
     let organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]]
+    let accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot]
     let unavailableAccountIDs: [AccountID]
 }
 
@@ -20,6 +21,7 @@ actor AccountRestorationService {
         var accounts: [GitHubAccount] = []
         var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
         var organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]] = [:]
+        var accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot] = [:]
         var unavailableAccountIDs: [AccountID] = []
 
         for accountID in try await secretStore.accountIDs() {
@@ -60,6 +62,9 @@ actor AccountRestorationService {
                 organizationAccessesByAccount[accountID] = try await repository.organizationAccesses(
                     for: accountID
                 )
+                if let accountCapabilities = try await repository.accountCapabilities(for: accountID) {
+                    accountCapabilitiesByAccount[accountID] = accountCapabilities
+                }
             } catch {
                 unavailableAccountIDs.append(accountID)
             }
@@ -69,6 +74,7 @@ actor AccountRestorationService {
             accounts: accounts,
             organizationsByAccount: organizationsByAccount,
             organizationAccessesByAccount: organizationAccessesByAccount,
+            accountCapabilitiesByAccount: accountCapabilitiesByAccount,
             unavailableAccountIDs: unavailableAccountIDs
         )
     }

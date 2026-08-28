@@ -91,13 +91,47 @@ actor GitHubCapabilityProbe {
         }
     }
 
+    func probeAccountCapabilities() async throws -> [CapabilityAvailability] {
+        let checkedAt = clock()
+        guard let restClient else {
+            return [
+                CapabilityAvailability(
+                    capability: .notifications,
+                    status: .unknown,
+                    checkedAt: checkedAt
+                )
+            ]
+        }
+        let status = try await probeAccountCapability(client: restClient) {
+            try await restClient.getPage(
+                CapabilityProbeObject.self,
+                request: GitHubRESTRequest(
+                    path: "/notifications",
+                    query: [
+                        URLQueryItem(name: "all", value: "true"),
+                        URLQueryItem(name: "per_page", value: "1")
+                    ]
+                )
+            ).ssoHeader
+        }
+        return [
+            CapabilityAvailability(
+                capability: .notifications,
+                status: status,
+                checkedAt: checkedAt
+            )
+        ]
+    }
+
     private func capabilities(
         privateRepositories: Bool,
         probedStatuses: [GitHubCapability: CapabilityStatus],
         state: OrganizationAccessState,
         checkedAt: Date
     ) -> [CapabilityAvailability] {
-        GitHubCapability.allCases.map { capability in
+        GitHubCapability.allCases
+            .filter { $0.scope == .organization }
+            .map { capability in
             let status: CapabilityStatus
             if unsupportedCapabilityStatus(for: capability) == .unavailable {
                 status = .unavailable
@@ -115,7 +149,7 @@ actor GitHubCapabilityProbe {
                 status = .unavailable
             case .credentialExpired, .unknown:
                 status = .unknown
-                }
+                    }
             }
             return CapabilityAvailability(
                 capability: capability,
@@ -247,6 +281,19 @@ actor GitHubCapabilityProbe {
         }
     }
 
+    private func probeAccountCapability(
+        client: GitHubRESTClient,
+        operation: @escaping @Sendable () async throws -> GitHubSSOHeader?
+    ) async throws -> CapabilityStatus {
+        do {
+            return capabilityStatus(for: try await operation())
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return capabilityStatus(for: error)
+        }
+    }
+
     private func capabilityStatus(
         for header: GitHubSSOHeader?,
         organization: GitHubOrganization
@@ -277,6 +324,30 @@ actor GitHubCapabilityProbe {
             return .requiresSSO
         }
         if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID),
+           case .partialResults = ssoHeader {
+            return .requiresSSO
+        }
+        switch failure.kind {
+        case .forbidden, .notFound:
+            return .unavailable
+        case .unauthorized,
+             .rateLimited,
+             .secondaryRateLimited,
+             .serverFailure,
+             .unexpectedResponse:
+            return .unknown
+        }
+    }
+
+    private func capabilityStatus(for error: Error) -> CapabilityStatus {
+        guard let failure = error as? GitHubFailure else {
+            return .unknown
+        }
+        if let ssoHeader = failure.ssoHeader,
+           case .authorizationRequired = ssoHeader {
+            return .requiresSSO
+        }
+        if let ssoHeader = failure.ssoHeader,
            case .partialResults = ssoHeader {
             return .requiresSSO
         }

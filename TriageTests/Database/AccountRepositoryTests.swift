@@ -62,4 +62,49 @@ final class AccountRepositoryTests: XCTestCase {
         let restoredAccesses = try await repository.organizationAccesses(for: accountID)
         XCTAssertEqual(restoredAccesses[organizationID], access)
     }
+
+    func testAccountCapabilitiesArePersistedSeparatelyFromOrganizationAccess() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        let repository = AccountRepository(vault: vault)
+        let date = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = GitHubAccount(
+            id: accountID,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!,
+            login: "octocat",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: date,
+            lastValidatedAt: date
+        )
+        let snapshot = AccountCapabilitySnapshot(
+            accountID: accountID,
+            capabilities: [
+                CapabilityAvailability(
+                    capability: .notifications,
+                    status: .available,
+                    checkedAt: date
+                )
+            ],
+            checkedAt: date
+        )
+
+        try await repository.save(account, credentialRevision: CredentialRevision(rawValue: "cred-1")!)
+        try await repository.save(snapshot)
+
+        XCTAssertEqual(try await repository.accountCapabilities(for: accountID), snapshot)
+        let count = try await vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM account_capabilities")!
+        }
+        XCTAssertEqual(count, 1)
+    }
 }
