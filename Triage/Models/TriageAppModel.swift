@@ -260,6 +260,77 @@ final class TriageAppModel: ObservableObject {
         }
     }
 
+    func recheckSelectedOrganizationAccess() async {
+        guard let initialAccount = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization
+        else {
+            return
+        }
+
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+        foregroundRefreshTaskID = nil
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        isRefreshing = true
+        defer {
+            if refreshGeneration == generation {
+                isRefreshing = false
+            }
+        }
+
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultRegistry = try requiredVaultRegistry()
+            let vaultKey = try await requiredVaultKey(for: initialAccount, secretStore: secretStore)
+            let vault = try await vaultRegistry.open(accountID: initialAccount.id, vaultKey: vaultKey)
+            let rateLimitController = try await GitHubRateLimitControllerRegistry.shared.controller(
+                for: initialAccount.id,
+                vault: vault
+            )
+            let client = GitHubRESTClient(
+                transport: try GitHubRESTTransport(),
+                credential: try await AccountCredentialReader(secretStore: secretStore)
+                    .accessToken(for: initialAccount),
+                rateLimitController: rateLimitController
+            )
+            let result = try await GitHubCapabilityProbe(
+                identityClient: GitHubIdentityClient(client: client)
+            ).probe(organization: organization)
+            guard
+                refreshGeneration == generation,
+                selectedAccountID == initialAccount.id,
+                selectedOrganizationID == organization.id
+            else {
+                return
+            }
+
+            let access = OrganizationAccess(
+                accountID: initialAccount.id,
+                organizationID: organization.id,
+                state: result.accessState,
+                capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
+                capabilities: result.capabilities,
+                checkedAt: Date()
+            )
+            try await AccountRepository(vault: vault).save(organization, access: access)
+            guard result.accessState == .available else {
+                ssoAuthorizationHeader = result.ssoHeader
+                refreshError = accessMessage(for: result.accessState)
+                return
+            }
+
+            ssoAuthorizationHeader = nil
+            refreshError = nil
+            await refreshSelectedOrganization()
+        } catch is CancellationError {
+            return
+        } catch {
+            guard refreshGeneration == generation else { return }
+            refreshError = "Triage could not confirm organization access. Cached work remains available."
+        }
+    }
+
     private func performRefreshSelectedOrganization(generation: Int) async {
         guard refreshGeneration == generation else { return }
         guard let initialAccount = accounts.first(where: { $0.id == selectedAccountID }),
@@ -503,5 +574,36 @@ final class TriageAppModel: ObservableObject {
             return vaultRegistry
         }
         throw vaultRegistryInitializationError ?? VaultError.missingApplicationSupportDirectory
+    }
+
+    private func requiredVaultKey(
+        for account: GitHubAccount,
+        secretStore: KeychainSecretStore
+    ) async throws -> VaultKey {
+        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+            throw AccountCredentialReaderError.missingAccessToken
+        }
+        return vaultKey
+    }
+
+    private func accessMessage(for state: OrganizationAccessState) -> String {
+        switch state {
+        case .ssoAuthorizationRequired:
+            "GitHub requires SSO authorization for this organization."
+        case .partialSSOAuthorization:
+            "GitHub returned partial organization access. Cached work remains available."
+        case .organizationApprovalRequired, .oauthApplicationApprovalRequired:
+            "GitHub requires organization approval for this account."
+        case .organizationPolicyBlocked:
+            "This organization blocks access for the current credential."
+        case .insufficientPermission:
+            "This credential does not have enough access for this organization."
+        case .inaccessible:
+            "This organization is no longer accessible with the current credential."
+        case .credentialExpired:
+            "This credential has expired. Reconnect the account to continue."
+        case .available, .unknown:
+            "Triage could not confirm organization access. Cached work remains available."
+        }
     }
 }
