@@ -66,6 +66,24 @@ final class TriageAppModel: ObservableObject {
 
     }
 
+    func searchCachedWork(_ query: String) async throws -> [SearchResult] {
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization
+        else {
+            return []
+        }
+        let secretStore = KeychainSecretStore()
+        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+            throw AccountCredentialReaderError.missingAccessToken
+        }
+        let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+        return try await SearchRepository(vault: vault).search(
+            query,
+            accountID: account.id,
+            organizationID: organization.id
+        )
+    }
+
     func selectAccount(_ accountID: AccountID) {
         guard accounts.contains(where: { $0.id == accountID }) else { return }
         selectedAccountID = accountID
@@ -189,6 +207,7 @@ final class TriageAppModel: ObservableObject {
                 accountID: account.id,
                 organizationID: organization.id
             )
+            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
             guard
                 refreshGeneration == generation,
                 selectedAccountID == account.id,
@@ -225,10 +244,12 @@ final class TriageAppModel: ObservableObject {
                 throw AccountCredentialReaderError.missingAccessToken
             }
             let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
-            install(workItems: try await WorkItemRepository(vault: vault).fetch(
+            let workItems = try await WorkItemRepository(vault: vault).fetch(
                 accountID: account.id,
                 organizationID: organization.id
-            ))
+            )
+            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
+            install(workItems: workItems)
         } catch {
             restorationError = "Triage could not load cached work for the selected organization."
         }
@@ -242,6 +263,7 @@ final class TriageAppModel: ObservableObject {
             ).apply(action, to: workItem)
             guard let index = workItems.firstIndex(where: { $0.id == updated.id }) else { return }
             workItems[index] = updated
+            try await rebuildSearchIndex(for: updated)
         } catch {
             refreshError = "Triage could not save this local workflow change."
         }
@@ -260,8 +282,33 @@ final class TriageAppModel: ObservableObject {
             workItems[index] = workItem.replacing(
                 actionItems: workItem.actionItems.map { $0.id == completed.id ? completed : $0 }
             )
+            try await rebuildSearchIndex(for: workItem)
         } catch {
             refreshError = "Triage could not complete this local action item."
         }
+    }
+
+    private func rebuildSearchIndex(for workItem: WorkItem) async throws {
+        let secretStore = KeychainSecretStore()
+        guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
+            throw AccountCredentialReaderError.missingAccessToken
+        }
+        let vault = try await VaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
+        try await rebuildSearchIndex(
+            in: vault,
+            accountID: workItem.accountID,
+            organizationID: workItem.organizationID
+        )
+    }
+
+    private func rebuildSearchIndex(
+        in vault: AccountVault,
+        accountID: AccountID,
+        organizationID: OrganizationID
+    ) async throws {
+        try await SearchRepository(vault: vault).rebuild(
+            accountID: accountID,
+            organizationID: organizationID
+        )
     }
 }
