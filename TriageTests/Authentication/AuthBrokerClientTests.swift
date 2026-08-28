@@ -51,6 +51,58 @@ final class AuthBrokerClientTests: XCTestCase {
             XCTAssertEqual(error, .broker(AuthBrokerFailure(code: .invalidGrant, recoveryDescription: "Expired")))
         }
     }
+
+    func testClientRejectsOversizedBrokerResponsesBeforeDecoding() async throws {
+        let client = try AuthBrokerClient(
+            baseURL: URL(string: "https://oauth.triage.example")!,
+            session: BrokerStubSession(
+                responseBody: Data(
+                    repeating: 0,
+                    count: AuthBrokerProtocol.maximumResponseBodyBytes + 1
+                )
+            )
+        )
+
+        do {
+            _ = try await client.refresh(AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh")))
+            XCTFail("Expected oversized response rejection.")
+        } catch let error as AuthBrokerClientError {
+            XCTAssertEqual(error, .responseTooLarge)
+        }
+    }
+
+    func testClientPropagatesCancellation() async throws {
+        let client = try AuthBrokerClient(
+            baseURL: URL(string: "https://oauth.triage.example")!,
+            session: CancelledBrokerSession()
+        )
+
+        do {
+            _ = try await client.refresh(AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh")))
+            XCTFail("Expected cancellation.")
+        } catch is CancellationError {
+            return
+        } catch {
+            XCTFail("Expected cancellation, got \(error).")
+        }
+    }
+
+    func testClientUsesBoundedSessionReadsWhenSupported() async throws {
+        let session = BoundedBrokerSession(
+            responseBody: Data(#"{"version":1,"accessToken":"token","tokenType":"bearer"}"#.utf8)
+        )
+        let client = try AuthBrokerClient(
+            baseURL: URL(string: "https://oauth.triage.example")!,
+            session: session
+        )
+
+        _ = try await client.refresh(AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh")))
+
+        XCTAssertEqual(
+            await session.maximumResponseBodyBytes(),
+            AuthBrokerProtocol.maximumResponseBodyBytes
+        )
+    }
 }
 
 private actor BrokerStubSession: HTTPSession {
@@ -81,5 +133,45 @@ private actor BrokerStubSession: HTTPSession {
             throw AuthBrokerClientError.invalidResponse
         }
         return capturedRequest
+    }
+}
+
+private actor CancelledBrokerSession: HTTPSession {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        throw CancellationError()
+    }
+}
+
+private actor BoundedBrokerSession: BoundedHTTPSession {
+    private let responseBody: Data
+    private var receivedMaximumResponseBodyBytes: Int?
+
+    init(responseBody: Data) {
+        self.responseBody = responseBody
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        XCTFail("Expected AuthBrokerClient to use bounded reads.")
+        throw URLError(.badServerResponse)
+    }
+
+    func data(
+        for request: URLRequest,
+        maximumResponseBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        receivedMaximumResponseBodyBytes = maximumResponseBodyBytes
+        return (
+            responseBody,
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+        )
+    }
+
+    func maximumResponseBodyBytes() -> Int? {
+        receivedMaximumResponseBodyBytes
     }
 }
