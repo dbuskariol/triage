@@ -29,6 +29,7 @@ struct TriageApp: App {
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
             MenuBarView()
+                .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(softwareUpdates)
         } label: {
