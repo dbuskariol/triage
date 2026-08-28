@@ -25,21 +25,13 @@ actor RawAPISnapshotRepository {
         guard snapshot.accountID == vault.accountID else {
             throw RawAPISnapshotRepositoryError.accountScopeMismatch
         }
-        guard !snapshot.endpoint.isEmpty, snapshot.endpoint.count <= 2_048 else {
-            throw RawAPISnapshotRepositoryError.invalidEndpoint
-        }
-        guard snapshot.parserVersion > 0 else {
-            throw RawAPISnapshotRepositoryError.invalidParserVersion
-        }
-        guard snapshot.payload.count <= Self.maximumPayloadBytes else {
-            throw RawAPISnapshotRepositoryError.payloadTooLarge
-        }
         try await vault.write { database in
             try Self.save(snapshot, in: database)
         }
     }
 
     nonisolated static func save(_ snapshot: RawAPISnapshot, in database: Database) throws {
+        try validate(snapshot)
         if let nodeID = snapshot.githubNodeID {
             let matchingCount = try Int.fetchOne(
                 database,
@@ -70,6 +62,18 @@ actor RawAPISnapshotRepository {
                     Self.milliseconds(snapshot.observedAt), snapshot.payload
                 ]
         )
+    }
+
+    private nonisolated static func validate(_ snapshot: RawAPISnapshot) throws {
+        guard !snapshot.endpoint.isEmpty, snapshot.endpoint.count <= 2_048 else {
+            throw RawAPISnapshotRepositoryError.invalidEndpoint
+        }
+        guard snapshot.parserVersion > 0 else {
+            throw RawAPISnapshotRepositoryError.invalidParserVersion
+        }
+        guard snapshot.payload.count <= maximumPayloadBytes else {
+            throw RawAPISnapshotRepositoryError.payloadTooLarge
+        }
     }
 
     func snapshots(for accountID: AccountID, limit: Int = 100) async throws -> [RawAPISnapshot] {

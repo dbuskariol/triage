@@ -27,19 +27,6 @@ actor WorkRelationRepository {
         guard accountID == vault.accountID else {
             throw WorkRelationRepositoryError.accountScopeMismatch
         }
-        guard Set(relations.map(\.subjectNodeID)).isSubset(of: [subjectNodeID]) else {
-            throw WorkRelationRepositoryError.subjectScopeMismatch
-        }
-        let relationKeys = relations.map(Self.canonicalKey)
-        guard Set(relationKeys).count == relationKeys.count else {
-            throw WorkRelationRepositoryError.duplicateRelation
-        }
-        guard relations.allSatisfy({
-            Set($0.evidence.map(\.id)).count == $0.evidence.count
-        }) else {
-            throw WorkRelationRepositoryError.duplicateEvidence
-        }
-
         try await vault.write { database in
             try Self.replace(
                 relations,
@@ -56,6 +43,7 @@ actor WorkRelationRepository {
         subjectNodeID: GitHubNodeID,
         in database: Database
     ) throws {
+        try validate(relations, subjectNodeID: subjectNodeID)
         try validateSubjectNodeScope(subjectNodeID, accountID: accountID, in: database)
         try database.execute(
                 sql: """
@@ -107,6 +95,24 @@ actor WorkRelationRepository {
                         ]
                     )
                 }
+        }
+    }
+
+    private nonisolated static func validate(
+        _ relations: [WorkRelation],
+        subjectNodeID: GitHubNodeID
+    ) throws {
+        guard Set(relations.map(\.subjectNodeID)).isSubset(of: [subjectNodeID]) else {
+            throw WorkRelationRepositoryError.subjectScopeMismatch
+        }
+        let relationKeys = relations.map(canonicalKey)
+        guard Set(relationKeys).count == relationKeys.count else {
+            throw WorkRelationRepositoryError.duplicateRelation
+        }
+        guard relations.allSatisfy({
+            Set($0.evidence.map(\.id)).count == $0.evidence.count
+        }) else {
+            throw WorkRelationRepositoryError.duplicateEvidence
         }
     }
 

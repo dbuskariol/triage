@@ -41,7 +41,7 @@ final class SearchShardExecutorTests: XCTestCase {
             streamID: fixture.streamID,
             accountID: fixture.accountID,
             accessibleRepositoryNames: [],
-            handlePage: { _, _, _ in }
+            preparePage: { _, _, _ in .empty }
         )
 
         let shards = try await SyncShardRepository(vault: fixture.vault).shards(
@@ -54,6 +54,202 @@ final class SearchShardExecutorTests: XCTestCase {
             shards.filter { $0.pageCursor == "1" }.count,
             2
         )
+    }
+
+    func testFailedPreparedPageWriteRollsBackSnapshotAndCursor() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let recorder = CommitRecorder()
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=test&page=1",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("response".utf8)
+        )
+        let executor = SearchShardExecutor(
+            client: SearchClient { _, _ in
+                GitHubResponse(
+                    value: GitHubIssueSearchPage(
+                        totalCount: 1,
+                        incompleteResults: false,
+                        items: []
+                    ),
+                    payload: Data(),
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            },
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            clock: { fixture.date }
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+
+        do {
+            try await executor.execute(
+                query: query,
+                range: SearchTimeRange(
+                    start: Date(timeIntervalSince1970: 0),
+                    end: Date(timeIntervalSince1970: 120)
+                ),
+                streamID: fixture.streamID,
+                accountID: fixture.accountID,
+                accessibleRepositoryNames: [],
+                preparePage: { _, _, _ in
+                    PreparedSearchShardPageWrite(
+                        write: { database in
+                            try RawAPISnapshotRepository.save(snapshot, in: database)
+                            throw TestPageWriteError.persistenceFailed
+                        },
+                        didCommit: {
+                            await recorder.recordCommit()
+                        }
+                    )
+                }
+            )
+            XCTFail("Expected the prepared page write to fail.")
+        } catch TestPageWriteError.persistenceFailed {
+            // Expected.
+        }
+
+        let snapshots = try await RawAPISnapshotRepository(vault: fixture.vault).snapshots(
+            for: fixture.accountID
+        )
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertTrue(snapshots.isEmpty)
+        XCTAssertEqual(shards.count, 1)
+        XCTAssertEqual(shards[0].pageCursor, nil)
+        XCTAssertEqual(shards[0].state, .failed)
+        XCTAssertFalse(await recorder.didCommit())
+    }
+
+    func testSuccessfulPreparedPageWritePersistsSnapshotBeforeCommitPublication() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let recorder = CommitRecorder()
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=test&page=1",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("response".utf8)
+        )
+        let node = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "MDU6SXNzdWUx")!,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            kind: .issue,
+            numericID: "1",
+            number: 1,
+            title: "Atomic discovery page",
+            state: .open,
+            url: URL(string: "https://github.com/github/triage/issues/1")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: fixture.date,
+            updatedAt: fixture.date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: fixture.date.ISO8601Format(),
+            observedAt: fixture.date,
+            accessibility: .accessible
+        )
+        let executor = SearchShardExecutor(
+            client: SearchClient { _, _ in
+                GitHubResponse(
+                    value: GitHubIssueSearchPage(
+                        totalCount: 1,
+                        incompleteResults: false,
+                        items: []
+                    ),
+                    payload: Data(),
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            },
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            clock: { fixture.date }
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+
+        try await executor.execute(
+            query: query,
+            range: SearchTimeRange(
+                start: Date(timeIntervalSince1970: 0),
+                end: Date(timeIntervalSince1970: 120)
+            ),
+            streamID: fixture.streamID,
+            accountID: fixture.accountID,
+            accessibleRepositoryNames: [],
+            preparePage: { _, _, _ in
+                PreparedSearchShardPageWrite(
+                    write: { database in
+                        try RawAPISnapshotRepository.save(snapshot, in: database)
+                        try GitHubNodeRepository.save(node, in: database)
+                        _ = try WorkItemRepository.ensureWorkItem(for: node, in: database)
+                    },
+                    didCommit: {
+                        await recorder.recordCommit()
+                    }
+                )
+            }
+        )
+
+        let snapshots = try await RawAPISnapshotRepository(vault: fixture.vault).snapshots(
+            for: fixture.accountID
+        )
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        let workItems = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(snapshots.map(\.id), [snapshot.id])
+        XCTAssertEqual(workItems.map(\.primaryNodeID), [node.nodeID])
+        XCTAssertEqual(shards.count, 1)
+        XCTAssertEqual(shards[0].pageCursor, "1")
+        XCTAssertEqual(shards[0].state, .completed)
+        XCTAssertTrue(await recorder.didCommit())
+    }
+}
+
+private enum TestPageWriteError: Error {
+    case persistenceFailed
+}
+
+private actor CommitRecorder {
+    private var committed = false
+
+    func recordCommit() {
+        committed = true
+    }
+
+    func didCommit() -> Bool {
+        committed
     }
 }
 

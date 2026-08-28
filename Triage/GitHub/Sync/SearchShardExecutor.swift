@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GRDB
 
 enum SearchShardExecutorError: Error, Equatable, Sendable {
     case inaccessibleRepositoryPartition
@@ -7,12 +8,22 @@ enum SearchShardExecutorError: Error, Equatable, Sendable {
     case invalidPersistedCursor
 }
 
+struct PreparedSearchShardPageWrite: Sendable {
+    let write: @Sendable (Database) throws -> Void
+    let didCommit: @Sendable () async -> Void
+
+    static let empty = PreparedSearchShardPageWrite(
+        write: { _ in },
+        didCommit: {}
+    )
+}
+
 actor SearchShardExecutor {
-    typealias PageHandler = @Sendable (
+    typealias PagePreparer = @Sendable (
         GitHubResponse<GitHubIssueSearchPage>,
         GitHubIssueSearchQuery,
         Int
-    ) async throws -> Void
+    ) async throws -> PreparedSearchShardPageWrite
 
     private let client: any GitHubIssueSearchExecuting
     private let shardRepository: SyncShardRepository
@@ -37,7 +48,7 @@ actor SearchShardExecutor {
         streamID: SyncStreamID,
         accountID: AccountID,
         accessibleRepositoryNames: [String],
-        handlePage: @escaping PageHandler
+        preparePage: @escaping PagePreparer
     ) async throws {
         let boundedQuery = try query.bounded(to: range)
         try await executeShard(
@@ -46,7 +57,7 @@ actor SearchShardExecutor {
             streamID: streamID,
             accountID: accountID,
             accessibleRepositoryNames: accessibleRepositoryNames,
-            handlePage: handlePage
+            preparePage: preparePage
         )
     }
 
@@ -56,7 +67,7 @@ actor SearchShardExecutor {
         streamID: SyncStreamID,
         accountID: AccountID,
         accessibleRepositoryNames: [String],
-        handlePage: @escaping PageHandler
+        preparePage: @escaping PagePreparer
     ) async throws {
         try Task.checkCancellation()
         let shardID = Self.shardID(
@@ -98,16 +109,22 @@ actor SearchShardExecutor {
                 let pageCount = max(1, Int(ceil(Double(firstPage.totalCount) / 100)))
                 let resumePage = try pageAfter(cursor: shard.pageCursor, pageCount: pageCount)
                 if resumePage == 1 {
-                    try await handlePage(firstResponse, query, 1)
+                    let targetShard = pageCount == 1
+                        ? completed(shard, cursor: "1")
+                        : running(shard, cursor: "1")
+                    try await persistPage(
+                        try await preparePage(firstResponse, query, 1),
+                        advancing: targetShard,
+                        accountID: accountID
+                    )
+                    shard = targetShard
                 }
                 if pageCount == 1 || resumePage > pageCount {
-                    shard = completed(shard, cursor: String(pageCount))
-                    try await shardRepository.save(shard, accountID: accountID)
+                    if shard.state != .completed {
+                        shard = completed(shard, cursor: String(pageCount))
+                        try await shardRepository.save(shard, accountID: accountID)
+                    }
                     return
-                }
-                if resumePage == 1, pageCount > 1 {
-                    shard = running(shard, cursor: "1")
-                    try await shardRepository.save(shard, accountID: accountID)
                 }
                 for page in max(2, resumePage)...pageCount {
                     try Task.checkCancellation()
@@ -115,12 +132,16 @@ actor SearchShardExecutor {
                     guard !response.value.incompleteResults else {
                         throw SearchShardExecutorError.incompleteSearchPage
                     }
-                    try await handlePage(response, query, page)
-                    shard = running(shard, cursor: String(page))
-                    try await shardRepository.save(shard, accountID: accountID)
+                    let targetShard = page == pageCount
+                        ? completed(shard, cursor: String(page))
+                        : running(shard, cursor: String(page))
+                    try await persistPage(
+                        try await preparePage(response, query, page),
+                        advancing: targetShard,
+                        accountID: accountID
+                    )
+                    shard = targetShard
                 }
-                shard = completed(shard, cursor: String(pageCount))
-                try await shardRepository.save(shard, accountID: accountID)
 
             case let .split(firstRange, secondRange):
                 shard = running(shard, cursor: "partitioned")
@@ -131,7 +152,7 @@ actor SearchShardExecutor {
                     streamID: streamID,
                     accountID: accountID,
                     accessibleRepositoryNames: accessibleRepositoryNames,
-                    handlePage: handlePage
+                    preparePage: preparePage
                 )
                 try await executeShard(
                     query: try query.bounded(to: secondRange),
@@ -139,7 +160,7 @@ actor SearchShardExecutor {
                     streamID: streamID,
                     accountID: accountID,
                     accessibleRepositoryNames: accessibleRepositoryNames,
-                    handlePage: handlePage
+                    preparePage: preparePage
                 )
                 shard = completed(shard, cursor: "partitioned")
                 try await shardRepository.save(shard, accountID: accountID)
@@ -160,7 +181,7 @@ actor SearchShardExecutor {
                         streamID: streamID,
                         accountID: accountID,
                         accessibleRepositoryNames: [],
-                        handlePage: handlePage
+                        preparePage: preparePage
                     )
                 }
                 shard = completed(shard, cursor: "partitioned")
@@ -186,6 +207,18 @@ actor SearchShardExecutor {
             state: .running,
             completedAt: nil
         )
+    }
+
+    private func persistPage(
+        _ preparedWrite: PreparedSearchShardPageWrite,
+        advancing shard: SyncShard,
+        accountID: AccountID
+    ) async throws {
+        try await shardRepository.writeTransaction(accountID: accountID) { database in
+            try preparedWrite.write(database)
+            try SyncShardRepository.save(shard, accountID: accountID, in: database)
+        }
+        await preparedWrite.didCommit()
     }
 
     private func completed(_ shard: SyncShard, cursor: String?) -> SyncShard {

@@ -28,6 +28,16 @@ actor SyncShardRepository {
         }
     }
 
+    func writeTransaction<Value: Sendable>(
+        accountID: AccountID,
+        _ operation: @Sendable (Database) throws -> Value
+    ) async throws -> Value {
+        guard accountID == vault.accountID else {
+            throw SyncShardRepositoryError.accountScopeMismatch
+        }
+        return try await vault.writeTransaction(operation)
+    }
+
     nonisolated static func save(
         _ shard: SyncShard,
         accountID: AccountID,
