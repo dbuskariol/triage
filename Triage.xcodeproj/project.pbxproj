@@ -15,17 +15,22 @@
 		082DECABB717AFA793F8E555 /* NotificationDeliveryLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1728A0CCB3D88332130654 /* NotificationDeliveryLedger.swift */; };
 		09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */; };
 		09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */; };
+		10451BCA98F276AF8D00B5DE /* CopilotHelperLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
 		13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */; };
 		16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91A7C6DA1A31930721EEB27 /* RefreshCadenceTests.swift */; };
 		16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13285F293338CA8A4716B490 /* AccountVault.swift */; };
+		16DB25B5871A2929DF7DBEDF /* CopilotXPCPackaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */; };
+		19641C6C946F40E347D14500 /* CopilotProcessTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */; };
 		1B2B5B7A986EB0FB38A5C63C /* AccountRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */; };
 		1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = D988495C37A78AEED9B566A4 /* Identifiers.swift */; };
 		1C47CF39998DDA448A8E4E35 /* OrganizationWorkRefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9211301543573F5417B2F76A /* OrganizationWorkRefreshService.swift */; };
+		1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */; };
 		1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 552523AB4B9EC81EE47BDCA4 /* Evidence.swift */; };
 		1FE6E7920216631C2D7E98CE /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 6946314899C158B0508FF5F7 /* GRDB */; };
 		20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE3D67A0FFC1AA8377EEE54A /* RefreshCadence.swift */; };
 		2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E96AD1DA22601AF8EDA9993 /* NotificationActions.swift */; };
+		2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */; };
 		2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B59CA16DA269CD50E052F2A /* Freshness.swift */; };
 		346665C51D1520D26ED59777 /* PullRequestReviewRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */; };
 		3740A14045DBE62E64480D5F /* NotificationEligibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7BF02EF9257041D9B18EAC /* NotificationEligibilityTests.swift */; };
@@ -64,6 +69,7 @@
 		749DB6A555C110E9ABEF1BBB /* GitHubCapabilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */; };
 		76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9690060369E66769608BBCEA /* InboxEligibilityRule.swift */; };
 		781F02110648028D0D26D3D7 /* SafeGitHubMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64607083C4DDFE64BFE727B3 /* SafeGitHubMarkdown.swift */; };
+		795B2C23261A97E506E9C357 /* CopilotHelperClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */; };
 		7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCAEEFB08793617F029138E /* DirectResponsibilityRule.swift */; };
 		7C87ADE50F0AE64ADCA76F0E /* WorkItemRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AC60A407B712E2D8B24B111 /* WorkItemRepository.swift */; };
 		7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */; };
@@ -88,6 +94,7 @@
 		A696AA9FA5238F725FB3DD90 /* AccountRestorationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DFB7BCAB1FBE80344E837D /* AccountRestorationService.swift */; };
 		A7ECCD19452B150C7E505B9E /* OrganizationInventoryRefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5392172535BCE1B1A04C9269 /* OrganizationInventoryRefreshService.swift */; };
 		A857938AD114BC7AA91103FC /* NotificationDedupeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC727EA2D14A866B0177DBC /* NotificationDedupeTests.swift */; };
+		AEA644A0C9EB9AB5C811A120 /* CopilotHelperClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BA8D4FDAA949D3458861498 /* CopilotHelperClient.swift */; };
 		B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */; };
 		B1F960E9D911324B8BD316DF /* NotificationRouteAndActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2E16FE17B247D0B7395966 /* NotificationRouteAndActionTests.swift */; };
 		B275753FD7DE29E6FEF00C62 /* RoleDiscoveryPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64FC7E7F88D610CB858C454 /* RoleDiscoveryPlanTests.swift */; };
@@ -157,6 +164,7 @@
 		015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSyncCoordinator.swift; sourceTree = "<group>"; };
 		081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageEvaluatorTests.swift; sourceTree = "<group>"; };
 		09D55C61485E13F265EFB7D3 /* IdentifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentifierTests.swift; sourceTree = "<group>"; };
+		0BA8D4FDAA949D3458861498 /* CopilotHelperClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperClient.swift; sourceTree = "<group>"; };
 		0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStore.swift; sourceTree = "<group>"; };
 		0CCAEEFB08793617F029138E /* DirectResponsibilityRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectResponsibilityRule.swift; sourceTree = "<group>"; };
 		0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAccessTests.swift; sourceTree = "<group>"; };
@@ -188,6 +196,8 @@
 		40CEA0BE253FA4978B2B3641 /* PullRequestAttentionRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRuleTests.swift; sourceTree = "<group>"; };
 		4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRepository.swift; sourceTree = "<group>"; };
 		44B3E254AF248B70DFBBB696 /* SSOAuthorizationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinatorTests.swift; sourceTree = "<group>"; };
+		44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCPackaging.swift; sourceTree = "<group>"; };
+		473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCProtocol.swift; sourceTree = "<group>"; };
 		4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStoreTests.swift; sourceTree = "<group>"; };
 		48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessTokenTests.swift; sourceTree = "<group>"; };
 		4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeader.swift; sourceTree = "<group>"; };
@@ -228,6 +238,7 @@
 		8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubNodeRepository.swift; sourceTree = "<group>"; };
 		8D6771CB3C835C681DA66152 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeaderTests.swift; sourceTree = "<group>"; };
+		8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCServiceClient.swift; sourceTree = "<group>"; };
 		8FC727EA2D14A866B0177DBC /* NotificationDedupeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationDedupeTests.swift; sourceTree = "<group>"; };
 		90044685B20CE509DAFA633F /* GitHubRateLimit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimit.swift; sourceTree = "<group>"; };
 		9211301543573F5417B2F76A /* OrganizationWorkRefreshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationWorkRefreshService.swift; sourceTree = "<group>"; };
@@ -246,8 +257,10 @@
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
 		A7CAF6BD25FF8D833C6166EF /* WorkflowTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowTransitionTests.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
+		AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperClientTests.swift; sourceTree = "<group>"; };
 		ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceAndFreshnessTests.swift; sourceTree = "<group>"; };
 		AE7BF02EF9257041D9B18EAC /* NotificationEligibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationEligibilityTests.swift; sourceTree = "<group>"; };
+		B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperLocation.swift; sourceTree = "<group>"; };
 		B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOAuthConfiguration.swift; sourceTree = "<group>"; };
 		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlan.swift; sourceTree = "<group>"; };
@@ -262,6 +275,7 @@
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermark.swift; sourceTree = "<group>"; };
 		CE1FCECD11A0F3231E3D317F /* RoleDiscoverySynchronizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoverySynchronizer.swift; sourceTree = "<group>"; };
+		CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotProcessTransport.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		D4DFB7BCAB1FBE80344E837D /* AccountRestorationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRestorationService.swift; sourceTree = "<group>"; };
 		D962615F59F45990114831EF /* AccountConnectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnectionService.swift; sourceTree = "<group>"; };
@@ -483,6 +497,7 @@
 				51CCBC527DBD7C20ECD99955 /* TriageApp.swift */,
 				282E4BF03D103669044A5607 /* TriageDebug.entitlements */,
 				1A30248739969B02FB9304E7 /* Authentication */,
+				AEFC0DA24D59A47F24B8ACD1 /* CopilotXPC */,
 				869A4E650232A6C0D96DC16B /* Database */,
 				A9BB0D2AF5FE7881E2824DE7 /* Domain */,
 				0522A69535D10D2D845A73CC /* GitHub */,
@@ -578,6 +593,19 @@
 			path = Database;
 			sourceTree = "<group>";
 		};
+		AEFC0DA24D59A47F24B8ACD1 /* CopilotXPC */ = {
+			isa = PBXGroup;
+			children = (
+				0BA8D4FDAA949D3458861498 /* CopilotHelperClient.swift */,
+				B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */,
+				CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */,
+				44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */,
+				473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */,
+				8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */,
+			);
+			path = CopilotXPC;
+			sourceTree = "<group>";
+		};
 		B94762CD55E04D189174F62A /* Packages */ = {
 			isa = PBXGroup;
 			children = (
@@ -602,6 +630,14 @@
 				646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */,
 			);
 			path = Normalization;
+			sourceTree = "<group>";
+		};
+		C4DC3DC1B9F01E87CAD90F51 /* CopilotXPC */ = {
+			isa = PBXGroup;
+			children = (
+				AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */,
+			);
+			path = CopilotXPC;
 			sourceTree = "<group>";
 		};
 		C90929E15A5AC3C40FE1F75A /* Intelligence */ = {
@@ -653,6 +689,7 @@
 			children = (
 				F74BA70C92A3542C44D29350 /* TriageTests.swift */,
 				731A158D8680E8E0E846B90D /* Authentication */,
+				C4DC3DC1B9F01E87CAD90F51 /* CopilotXPC */,
 				AE860E185EC8801A0A64F686 /* Database */,
 				19800B1B84C39A9A0ED18DDC /* Domain */,
 				9B840724F73C721915E3802E /* GitHub */,
@@ -765,6 +802,7 @@
 				E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */,
 				F3AAEBABBED7F89F609F96A5 /* BusinessDayPolicyTests.swift in Sources */,
 				C24B45C7B0B463638BFDF3E8 /* ConversationFollowUpRuleTests.swift in Sources */,
+				795B2C23261A97E506E9C357 /* CopilotHelperClientTests.swift in Sources */,
 				F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */,
 				DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */,
 				B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */,
@@ -826,7 +864,13 @@
 				09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */,
 				EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */,
 				B7915348E48821782DCEDF14 /* ConversationFollowUpRule.swift in Sources */,
+				AEA644A0C9EB9AB5C811A120 /* CopilotHelperClient.swift in Sources */,
+				10451BCA98F276AF8D00B5DE /* CopilotHelperLocation.swift in Sources */,
 				D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */,
+				19641C6C946F40E347D14500 /* CopilotProcessTransport.swift in Sources */,
+				16DB25B5871A2929DF7DBEDF /* CopilotXPCPackaging.swift in Sources */,
+				2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */,
+				1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */,
 				DEAAD030D292A062B542AE1F /* CoverageEvaluator.swift in Sources */,
 				7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */,
 				1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */,
