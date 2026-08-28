@@ -358,6 +358,86 @@ enum TriageDatabaseMigrator {
                     PRIMARY KEY (project_item_node_id, field_name)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "007-workflow-state",
+            checksum: "2ca0b7df2981f7c26d75f342a67b6d1e2a1132398bd6257e492fae0a58d064bc"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE workflow_states (
+                    work_item_id TEXT PRIMARY KEY NOT NULL,
+                    status TEXT NOT NULL,
+                    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+                    priority INTEGER NOT NULL,
+                    snoozed_until_ms INTEGER,
+                    follow_up_at_ms INTEGER,
+                    local_note TEXT,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE action_items (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    work_item_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT,
+                    origin TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    due_at_ms INTEGER,
+                    source_fingerprint TEXT,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    completed_at_ms INTEGER,
+                    dismissed_at_ms INTEGER
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE action_item_evidence (
+                    action_item_id TEXT NOT NULL REFERENCES action_items(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL,
+                    PRIMARY KEY (action_item_id, evidence_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE workflow_history (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    work_item_id TEXT NOT NULL,
+                    action_item_id TEXT REFERENCES action_items(id) ON DELETE SET NULL,
+                    kind TEXT NOT NULL,
+                    prior_state_json BLOB,
+                    next_state_json BLOB,
+                    created_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE user_corrections (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    work_item_id TEXT NOT NULL,
+                    action_item_id TEXT REFERENCES action_items(id) ON DELETE SET NULL,
+                    source_fingerprint TEXT,
+                    correction_kind TEXT NOT NULL,
+                    detail TEXT,
+                    created_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE undo_transactions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    operation_kind TEXT NOT NULL,
+                    inverse_payload_json BLOB NOT NULL,
+                    expires_at_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX action_items_work_item_state
+                ON action_items (work_item_id, state, due_at_ms)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workflow_history_work_item_created
+                ON workflow_history (work_item_id, created_at_ms DESC)
+                """)
         }
     ]
 }
