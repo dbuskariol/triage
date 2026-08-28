@@ -13,6 +13,11 @@ configs:
   Release: release
 
 packages:
+  GRDB:
+    path: Vendor/GRDB.swift
+  SQLCipher:
+    url: https://github.com/sqlcipher/SQLCipher.swift.git
+    exactVersion: 4.18.0
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.9.4
@@ -42,6 +47,8 @@ targets:
     sources:
       - Triage
     dependencies:
+      - package: GRDB
+        product: GRDB
       - package: Sparkle
         product: Sparkle
     settings:

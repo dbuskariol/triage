@@ -15,6 +15,7 @@ done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/Triage.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/TriageDebug.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/PrivacyInfo.xcprivacy" >/dev/null
+/bin/bash "$ROOT_DIR/scripts/verify-vendored-dependencies.sh" >/dev/null
 /usr/bin/grep -Fq '"revision" : "b6496a74a087257ef5e6da1c5b29a447a60f5bd7"' \
   "$ROOT_DIR/Triage.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" \
   || triage_fail 'the Xcode Sparkle dependency is not revision-locked'
