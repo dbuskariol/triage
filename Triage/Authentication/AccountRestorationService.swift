@@ -2,7 +2,7 @@ import Foundation
 
 struct AccountRestorationResult: Sendable {
     let accounts: [GitHubAccount]
-    let organizations: [GitHubOrganization]
+    let organizationsByAccount: [AccountID: [GitHubOrganization]]
     let unavailableAccountIDs: [AccountID]
 }
 
@@ -17,7 +17,7 @@ actor AccountRestorationService {
 
     func restore() async throws -> AccountRestorationResult {
         var accounts: [GitHubAccount] = []
-        var organizations: [GitHubOrganization] = []
+        var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
         var unavailableAccountIDs: [AccountID] = []
 
         for accountID in try await secretStore.accountIDs() {
@@ -34,7 +34,7 @@ actor AccountRestorationService {
                     continue
                 }
                 accounts.append(account)
-                organizations.append(contentsOf: try await repository.organizations(for: accountID))
+                organizationsByAccount[accountID] = try await repository.organizations(for: accountID)
             } catch {
                 unavailableAccountIDs.append(accountID)
             }
@@ -42,7 +42,7 @@ actor AccountRestorationService {
 
         return AccountRestorationResult(
             accounts: accounts,
-            organizations: organizations,
+            organizationsByAccount: organizationsByAccount,
             unavailableAccountIDs: unavailableAccountIDs
         )
     }
