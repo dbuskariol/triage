@@ -15,6 +15,9 @@ struct TriageApp: App {
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
                 .frame(minWidth: 940, minHeight: 680)
+                .task {
+                    await appModel.restoreAccounts()
+                }
         }
         .defaultSize(width: 1080, height: 760)
         .windowStyle(.hiddenTitleBar)

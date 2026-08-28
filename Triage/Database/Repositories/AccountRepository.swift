@@ -12,6 +12,38 @@ actor AccountRepository {
         self.vault = vault
     }
 
+    func accounts() async throws -> [GitHubAccount] {
+        try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, github_user_id, github_node_id, login, display_name, avatar_url,
+                           authentication_kind, credential_id, credential_status, created_at_ms, last_validated_at_ms
+                    FROM accounts
+                    WHERE disabled_at_ms IS NULL
+                    ORDER BY created_at_ms
+                    """
+            ).map { try Self.account(from: $0) }
+        }
+    }
+
+    func organizations(for accountID: AccountID) async throws -> [GitHubOrganization] {
+        try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT organizations.id, organizations.github_organization_id, organizations.github_node_id,
+                           organizations.login, organizations.display_name, organizations.avatar_url
+                    FROM organizations
+                    JOIN account_organizations ON account_organizations.organization_id = organizations.id
+                    WHERE account_organizations.account_id = ?
+                    ORDER BY organizations.login
+                    """,
+                arguments: [accountID.rawValue]
+            ).map { try Self.organization(from: $0) }
+        }
+    }
+
     func save(_ account: GitHubAccount, credentialRevision: CredentialRevision) async throws {
         let createdAt = Self.milliseconds(account.createdAt)
         let lastValidatedAt = account.lastValidatedAt.map(Self.milliseconds)
@@ -191,5 +223,52 @@ actor AccountRepository {
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func account(from row: Row) throws -> GitHubAccount {
+        guard let id = AccountID(rawValue: row["id"]),
+              let githubUserID = UInt64(row["github_user_id"] as String),
+              let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+              let authenticationKind = AuthenticationKind(rawValue: row["authentication_kind"]),
+              let credentialID = CredentialID(rawValue: row["credential_id"]),
+              let credentialStatus = CredentialStatus(rawValue: row["credential_status"]),
+              let createdAt = date(milliseconds: row["created_at_ms"])
+        else {
+            throw AccountRepositoryError.invalidPersistedIdentifier
+        }
+        return GitHubAccount(
+            id: id,
+            githubUserID: githubUserID,
+            nodeID: nodeID,
+            login: row["login"],
+            displayName: row["display_name"],
+            avatarURL: (row["avatar_url"] as String?).flatMap(URL.init(string:)),
+            authenticationKind: authenticationKind,
+            credentialID: credentialID,
+            credentialStatus: credentialStatus,
+            createdAt: createdAt,
+            lastValidatedAt: date(milliseconds: row["last_validated_at_ms"])
+        )
+    }
+
+    private nonisolated static func organization(from row: Row) throws -> GitHubOrganization {
+        guard let id = OrganizationID(rawValue: row["id"]),
+              let githubOrganizationID = UInt64(row["github_organization_id"] as String),
+              let nodeID = GitHubNodeID(rawValue: row["github_node_id"])
+        else {
+            throw AccountRepositoryError.invalidPersistedIdentifier
+        }
+        return GitHubOrganization(
+            id: id,
+            githubOrganizationID: githubOrganizationID,
+            nodeID: nodeID,
+            login: row["login"],
+            displayName: row["display_name"],
+            avatarURL: (row["avatar_url"] as String?).flatMap(URL.init(string:))
+        )
+    }
+
+    private nonisolated static func date(milliseconds: Int64?) -> Date? {
+        milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
     }
 }
