@@ -87,10 +87,17 @@ final class TriageAppModel: ObservableObject {
 
     func selectAccount(_ accountID: AccountID) {
         guard accounts.contains(where: { $0.id == accountID }) else { return }
+        invalidateRefreshState()
         selectedAccountID = accountID
         selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
         self.workItems = []
         selectedWorkItemID = nil
+    }
+
+    func selectOrganization(_ organizationID: OrganizationID) {
+        guard organizations.contains(where: { $0.id == organizationID }) else { return }
+        invalidateRefreshState()
+        selectedOrganizationID = organizationID
     }
 
     var selectedWorkItem: WorkItem? {
@@ -288,6 +295,13 @@ final class TriageAppModel: ObservableObject {
             }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
         }
+    }
+
+    private func invalidateRefreshState() {
+        refreshGeneration += 1
+        ssoAuthorizationHeader = nil
+        refreshError = nil
+        isRefreshing = false
     }
 
     private func persistCredentialStatus(

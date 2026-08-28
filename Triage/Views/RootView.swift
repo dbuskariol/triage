@@ -196,7 +196,14 @@ private struct AppSidebar: View {
                 Divider()
             }
             if !appModel.organizations.isEmpty {
-                Picker("Organization", selection: $appModel.selectedOrganizationID) {
+                Picker("Organization", selection: Binding(
+                    get: { appModel.selectedOrganizationID },
+                    set: { organizationID in
+                        if let organizationID {
+                            appModel.selectOrganization(organizationID)
+                        }
+                    }
+                )) {
                     ForEach(appModel.organizations) { organization in
                         Text(organization.displayName ?? organization.login)
                             .tag(Optional(organization.id))
