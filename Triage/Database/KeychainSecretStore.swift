@@ -157,6 +157,33 @@ actor KeychainSecretStore: SecretStore {
         }
     }
 
+    func accountIDs() throws -> [AccountID] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound {
+            return []
+        }
+        guard status == errSecSuccess else {
+            throw SecretStoreError.keychain(status)
+        }
+        let attributes = result as? [[String: Any]] ?? []
+        return Set(attributes.compactMap { values in
+            guard let data = values[kSecAttrGeneric as String] as? Data,
+                  let value = String(data: data, encoding: .utf8)
+            else {
+                return nil
+            }
+            return AccountID(rawValue: value)
+        }).sorted { $0.rawValue < $1.rawValue }
+    }
+
     private func baseQuery(
         kind: TriageSecretKind,
         accountID: AccountID,

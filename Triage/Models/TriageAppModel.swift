@@ -12,6 +12,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var connectionError: String?
     @Published private(set) var refreshError: String?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var restorationError: String?
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private var refreshGeneration = 0
@@ -73,6 +74,21 @@ final class TriageAppModel: ObservableObject {
 
     func recordConnectionWindowError() {
         connectionError = "Triage could not find its active window."
+    }
+
+    func restoreAccounts() async {
+        do {
+            let result = try await AccountRestorationService(
+                secretStore: KeychainSecretStore(),
+                vaultRegistry: VaultRegistry()
+            ).restore()
+            install(accounts: result.accounts, organizations: result.organizations)
+            if !result.unavailableAccountIDs.isEmpty {
+                restorationError = "One or more connected accounts need to be reconnected."
+            }
+        } catch {
+            restorationError = "Triage could not open its encrypted account data."
+        }
     }
 
     func refreshSelectedOrganization() async {
