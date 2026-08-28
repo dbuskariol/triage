@@ -11,6 +11,9 @@ actor TimelineRepository {
     func save(_ event: TimelineEventSummary, sourceRevision: String) async throws {
         let payload = try JSONEncoder().encode(event)
         let occurredAt = Int64((event.occurredAt.timeIntervalSince1970 * 1_000).rounded())
+        if let actor = event.actor {
+            try await ActorRepository(vault: vault).save(actor, observedAt: event.occurredAt)
+        }
         try await vault.write { database in
             try database.execute(
                 sql: """
