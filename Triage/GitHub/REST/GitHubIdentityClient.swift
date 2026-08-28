@@ -13,6 +13,22 @@ struct GitHubOrganizationInventory: Sendable {
     var ssoHeader: GitHubSSOHeader? {
         GitHubSSOHeader.combined(ssoHeaders)
     }
+
+    var partialResultsSSOHeader: GitHubSSOHeader? {
+        GitHubSSOHeader.combined(ssoHeaders.map { header in
+            guard case .partialResults = header else { return nil }
+            return header
+        })
+    }
+}
+
+struct GitHubRepositoryInventory: Sendable {
+    let repositories: [GitHubRepositoryDTO]
+    let ssoHeaders: [GitHubSSOHeader]
+
+    var ssoHeader: GitHubSSOHeader? {
+        GitHubSSOHeader.combined(ssoHeaders)
+    }
 }
 
 actor GitHubIdentityClient {
@@ -102,17 +118,25 @@ actor GitHubIdentityClient {
         )
     }
 
-    func allRepositories(in organization: String) async throws -> [GitHubRepositoryDTO] {
+    func allRepositories(in organization: String) async throws -> GitHubRepositoryInventory {
         var page = try await repositories(in: organization)
         var repositories = page.values
+        var ssoHeaders = [page.ssoHeader].compactMap { $0 }
         while let nextPageURL = page.nextPageURL {
+            try Task.checkCancellation()
             page = try await client.getPage(
                 GitHubRepositoryDTO.self,
                 request: GitHubRESTRequest(nextPageURL: nextPageURL)
             )
             repositories.append(contentsOf: page.values)
+            if let ssoHeader = page.ssoHeader {
+                ssoHeaders.append(ssoHeader)
+            }
         }
-        return repositories
+        return GitHubRepositoryInventory(
+            repositories: repositories,
+            ssoHeaders: ssoHeaders
+        )
     }
 
     private func validateOrganizationLogin(_ value: String) throws {

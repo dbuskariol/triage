@@ -56,7 +56,7 @@ struct MenuBarView: View {
 
             Button("Refresh GitHub Work") {
                 Task {
-                    await appModel.refreshSelectedOrganization()
+                    await appModel.refreshSelectedOrganizationAfterAccessCheck()
                 }
             }
             .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)

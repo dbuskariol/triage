@@ -22,7 +22,7 @@ struct RootView: View {
                 ToolbarItem {
                     Button {
                         Task {
-                            await appModel.refreshSelectedOrganization()
+                            await appModel.refreshSelectedOrganizationAfterAccessCheck()
                         }
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")

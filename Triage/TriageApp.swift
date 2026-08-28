@@ -19,7 +19,7 @@ struct TriageApp: App {
                 .task {
                     await appModel.restoreAccounts()
                     await appModel.startAutomaticRefreshes()
-                    await appModel.refreshSelectedOrganization()
+                    await appModel.refreshSelectedOrganizationAfterAccessCheck()
                     await notificationScheduler.registerLocalActions()
                 }
         }
@@ -36,7 +36,7 @@ struct TriageApp: App {
             CommandGroup(after: .toolbar) {
                 Button("Refresh GitHub Work") {
                     Task {
-                        await appModel.refreshSelectedOrganization()
+                        await appModel.refreshSelectedOrganizationAfterAccessCheck()
                     }
                 }
                 .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)

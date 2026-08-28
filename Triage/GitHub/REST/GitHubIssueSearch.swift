@@ -137,7 +137,14 @@ actor GitHubIssueSearchClient {
         _ query: GitHubIssueSearchQuery,
         page: Int = 1
     ) async throws -> GitHubIssueSearchPage {
-        try await client.get(
+        try await searchResponse(query, page: page).value
+    }
+
+    func searchResponse(
+        _ query: GitHubIssueSearchQuery,
+        page: Int = 1
+    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+        try await client.getResponse(
             GitHubIssueSearchPage.self,
             request: GitHubRESTRequest(
                 path: "/search/issues",

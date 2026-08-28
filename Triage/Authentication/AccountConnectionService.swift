@@ -135,15 +135,17 @@ actor AccountConnectionService {
 
             let identity = GitHubIdentityClient(client: client)
             let organizationDTOs: [GitHubOrganizationDTO]
-            let ssoHeader: GitHubSSOHeader?
+            let organizationDiscoverySSOHeader: GitHubSSOHeader?
             if let resourceOwnerOrganization {
                 let response = try await identity.organization(named: resourceOwnerOrganization)
                 organizationDTOs = [response.value]
-                ssoHeader = response.ssoHeader
+                organizationDiscoverySSOHeader = response.ssoHeader
             } else {
                 let organizationInventory = try await identity.allOrganizations()
                 organizationDTOs = organizationInventory.organizations
-                ssoHeader = organizationInventory.ssoHeader
+                // A required header on /user/orgs has no immutable organization ID. Only
+                // partial-results can safely be associated with its affected organizations.
+                organizationDiscoverySSOHeader = organizationInventory.partialResultsSSOHeader
             }
 
             let organizations = try organizationDTOs.map { dto in
@@ -164,7 +166,7 @@ actor AccountConnectionService {
             for organization in organizations {
                 let organizationSSOHeader = scopedSSOHeader(
                     for: organization,
-                    aggregateHeader: ssoHeader
+                    aggregateHeader: organizationDiscoverySSOHeader
                 )
                 let access = OrganizationAccess(
                     accountID: account.id,

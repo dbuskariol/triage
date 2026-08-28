@@ -60,16 +60,24 @@ actor OrganizationWorkRefreshService {
             userLogin: account.login,
             now: Date()
         )
-        return try await RoleDiscoverySynchronizer(
-            searchClient: GitHubIssueSearchClient(client: restClient),
-            nodeRepository: GitHubNodeRepository(vault: vault),
-            workItemRepository: WorkItemRepository(vault: vault),
-            attentionRepository: AttentionReasonRepository(vault: vault)
-        ).synchronize(
-            plan: plan,
-            accountID: account.id,
-            organizationID: organization.id,
-            repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
-        )
+        do {
+            return try await RoleDiscoverySynchronizer(
+                searchClient: GitHubIssueSearchClient(client: restClient),
+                nodeRepository: GitHubNodeRepository(vault: vault),
+                workItemRepository: WorkItemRepository(vault: vault),
+                attentionRepository: AttentionReasonRepository(vault: vault)
+            ).synchronize(
+                plan: plan,
+                accountID: account.id,
+                organizationID: organization.id,
+                githubOrganizationID: organization.githubOrganizationID,
+                repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
+            )
+        } catch let failure as GitHubFailure {
+            if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) {
+                throw OrganizationRefreshError.ssoRequirement(ssoHeader)
+            }
+            throw failure
+        }
     }
 }
