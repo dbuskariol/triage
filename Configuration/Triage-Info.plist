@@ -20,6 +20,10 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>TRIAGE_AUTH_BROKER_URL</key>
+	<string>$(TRIAGE_AUTH_BROKER_URL)</string>
+	<key>TRIAGE_GITHUB_OAUTH_CLIENT_ID</key>
+	<string>$(TRIAGE_GITHUB_OAUTH_CLIENT_ID)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

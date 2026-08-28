@@ -30,6 +30,7 @@
 		40EFEDABCE3F6230EF21FE84 /* GitHubDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */; };
 		440D552512831BFF25F93150 /* WorkflowRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FA4EF715587B009499705BF /* WorkflowRepository.swift */; };
 		4470E02F0C96112B0A73A2D2 /* SearchRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850788277C525AE27A2B89B1 /* SearchRepository.swift */; };
+		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */; };
 		5365A873C4D57DE2CD51390B /* GitHubRateLimit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90044685B20CE509DAFA633F /* GitHubRateLimit.swift */; };
@@ -196,6 +197,7 @@
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
 		ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceAndFreshnessTests.swift; sourceTree = "<group>"; };
+		B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOAuthConfiguration.swift; sourceTree = "<group>"; };
 		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		BACBE230946C1056771FE56F /* PersonalAccessToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessToken.swift; sourceTree = "<group>"; };
 		BD0C14B59A1223DC3240A96C /* WorkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItem.swift; sourceTree = "<group>"; };
@@ -283,6 +285,7 @@
 				4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */,
 				77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */,
 				BACBE230946C1056771FE56F /* PersonalAccessToken.swift */,
+				B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */,
 				73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */,
 			);
 			path = Authentication;
@@ -729,6 +732,7 @@
 				8F5A619CDF738AD6E07B6BF2 /* ProgressAttentionRule.swift in Sources */,
 				C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */,
 				593D34E52E35E0A27F81AC9E /* RootView.swift in Sources */,
+				4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */,
 				9B077224AD72CFDBCEA499AC /* SSOAuthorizationCoordinator.swift in Sources */,
 				4470E02F0C96112B0A73A2D2 /* SearchRepository.swift in Sources */,
 				B282AD71D7C9C089A4AB8C8F /* SearchShardPlanner.swift in Sources */,
@@ -836,6 +840,8 @@
 				PRODUCT_NAME = Triage;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
+				TRIAGE_AUTH_BROKER_URL = "";
+				TRIAGE_GITHUB_OAUTH_CLIENT_ID = "";
 			};
 			name = Release;
 		};
@@ -938,6 +944,8 @@
 				PRODUCT_NAME = Triage;
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
+				TRIAGE_AUTH_BROKER_URL = "";
+				TRIAGE_GITHUB_OAUTH_CLIENT_ID = "";
 			};
 			name = Debug;
 		};

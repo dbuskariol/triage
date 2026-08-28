@@ -63,6 +63,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac
         PRODUCT_NAME: Triage
         SKIP_INSTALL: NO
+        TRIAGE_AUTH_BROKER_URL: ""
+        TRIAGE_GITHUB_OAUTH_CLIENT_ID: ""
       configs:
         Debug:
           CODE_SIGN_ENTITLEMENTS: Triage/TriageDebug.entitlements
