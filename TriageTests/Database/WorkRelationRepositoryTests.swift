@@ -113,6 +113,55 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testNormalizationFailuresRetainAccountScopedSnapshotProvenance() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: "/repos/github/triage/issues/1",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("{\"number\":1}".utf8)
+        )
+        try await RawAPISnapshotRepository(vault: fixture.vault).save(snapshot)
+        let failure = NormalizationFailure(
+            id: UUID(),
+            accountID: fixture.accountID,
+            rawSnapshotID: snapshot.id,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: snapshot.endpoint,
+            parserVersion: snapshot.parserVersion,
+            occurredAt: fixture.date,
+            redactedDiagnostic: "Unknown issue state."
+        )
+        let repository = NormalizationFailureRepository(vault: fixture.vault)
+        try await repository.record(failure)
+
+        XCTAssertEqual(try await repository.failures(for: fixture.accountID), [failure])
+
+        do {
+            try await repository.record(
+                NormalizationFailure(
+                    id: UUID(),
+                    accountID: fixture.accountID,
+                    rawSnapshotID: RawAPISnapshotID.make(),
+                    githubNodeID: fixture.node.nodeID,
+                    endpoint: failure.endpoint,
+                    parserVersion: failure.parserVersion,
+                    occurredAt: failure.occurredAt,
+                    redactedDiagnostic: failure.redactedDiagnostic
+                )
+            )
+            XCTFail("Expected a snapshot scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? NormalizationFailureRepositoryError, .snapshotScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

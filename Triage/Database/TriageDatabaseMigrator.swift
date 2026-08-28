@@ -838,6 +838,27 @@ enum TriageDatabaseMigrator {
                     credential_revision, capability_revision, interval_start_ms, interval_end_ms
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "020-normalization-failures",
+            checksum: "3b96595fd56c2e79a7f2b4294c44b31e59382561dc55ccdb7f5757196455f568"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE normalization_failures (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    github_node_id TEXT,
+                    endpoint TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    occurred_at_ms INTEGER NOT NULL,
+                    redacted_diagnostic TEXT NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX normalization_failures_account_occurred
+                ON normalization_failures (account_id, occurred_at_ms DESC)
+                """)
         }
     ]
 }
