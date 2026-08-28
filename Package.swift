@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "Triage", targets: ["Triage"])
     ],
     dependencies: [
+        .package(path: "Vendor/GRDB.swift"),
         .package(
             url: "https://github.com/sparkle-project/Sparkle",
             exact: "2.9.4"
@@ -20,6 +21,7 @@ let package = Package(
         .executableTarget(
             name: "Triage",
             dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Triage",

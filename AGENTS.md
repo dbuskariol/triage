@@ -12,7 +12,8 @@ Preserve these baseline invariants:
 - Local-first and privacy-preserving. Do not add telemetry, analytics, advertising, tracking, or uploaded diagnostics.
 - Universal `arm64` and `x86_64` Developer ID distribution with Hardened Runtime, notarization, and Sparkle update verification.
 - Standard Mac windows, menus, Settings, menu-bar behavior, keyboard navigation, accessibility, appearance, and state restoration.
-- Third-party dependencies require a concrete need. Sparkle is the only baseline dependency.
+- Third-party dependencies require a concrete need. Sparkle and the
+  version-locked GRDB/SQLCipher vault are the only baseline dependencies.
 
 ## Repository map
 

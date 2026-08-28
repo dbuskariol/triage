@@ -1,0 +1,2 @@
+# Preserve audited upstream source formatting in the vendored dependency.
+Vendor/GRDB.swift/** -whitespace
