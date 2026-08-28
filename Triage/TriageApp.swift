@@ -49,6 +49,33 @@ struct TriageApp: App {
                 navigationCommand("Snoozed", section: .snoozed, key: "5")
                 navigationCommand("All Work", section: .allWork, key: "6")
             }
+
+            CommandMenu("Work") {
+                Button("Archive in Triage") {
+                    applyWorkflow(.archive)
+                }
+                .disabled(appModel.selectedWorkItem == nil)
+                .keyboardShortcut(.delete, modifiers: .command)
+
+                Button("Pin") {
+                    guard let item = appModel.selectedWorkItem else { return }
+                    applyWorkflow(.setPinned(!item.workflow.isPinned))
+                }
+                .disabled(appModel.selectedWorkItem == nil)
+                .keyboardShortcut("p", modifiers: [.control, .command])
+
+                Menu("Priority") {
+                    priorityCommand("Low", priority: .low, key: "1")
+                    priorityCommand("Normal", priority: .normal, key: "2")
+                    priorityCommand("High", priority: .high, key: "3")
+                }
+
+                Button("Mark Waiting") {
+                    applyWorkflow(.markWaiting(followUpAt: nil))
+                }
+                .disabled(appModel.selectedWorkItem == nil)
+                .keyboardShortcut("w", modifiers: [.control, .command])
+            }
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
@@ -90,5 +117,24 @@ struct TriageApp: App {
             navigation.section = section
         }
         .keyboardShortcut(key, modifiers: .command)
+    }
+
+    private func priorityCommand(
+        _ title: String,
+        priority: WorkPriority,
+        key: KeyEquivalent
+    ) -> some View {
+        Button(title) {
+            applyWorkflow(.setPriority(priority))
+        }
+        .disabled(appModel.selectedWorkItem == nil)
+        .keyboardShortcut(key, modifiers: [.control, .command])
+    }
+
+    private func applyWorkflow(_ action: WorkflowAction) {
+        guard let item = appModel.selectedWorkItem else { return }
+        Task {
+            await appModel.applyWorkflowAction(action, to: item)
+        }
     }
 }
