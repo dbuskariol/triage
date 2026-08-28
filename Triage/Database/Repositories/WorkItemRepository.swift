@@ -41,7 +41,18 @@ actor WorkItemRepository {
                     ORDER BY work_items.last_relevant_activity_at_ms DESC, work_items.id
                     """,
                 arguments: [accountID.rawValue, organizationID.rawValue]
-            ).map { try Self.workItem(from: $0, accountID: accountID, organizationID: organizationID) }
+            ).map { row in
+                let reasons = try Self.attentionReasons(
+                    in: database,
+                    workItemID: row["id"]
+                )
+                return try Self.workItem(
+                    from: row,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    attentionReasons: reasons
+                )
+            }
         }
     }
 
@@ -107,7 +118,8 @@ actor WorkItemRepository {
     private nonisolated static func workItem(
         from row: Row,
         accountID: AccountID,
-        organizationID: OrganizationID
+        organizationID: OrganizationID,
+        attentionReasons: [AttentionReason]
     ) throws -> WorkItem {
         guard let id = WorkItemID(rawValue: row["id"]),
               let nodeID = GitHubNodeID(rawValue: row["primary_node_id"]),
@@ -140,7 +152,7 @@ actor WorkItemRepository {
             members: [],
             contextLinks: [],
             relations: [],
-            attentionReasons: [],
+            attentionReasons: attentionReasons,
             actionItems: [],
             workflow: workflow,
             freshness: FreshnessState(status: .fresh),
@@ -155,5 +167,71 @@ actor WorkItemRepository {
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func attentionReasons(
+        in database: Database,
+        workItemID: String
+    ) throws -> [AttentionReason] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
+                FROM attention_reasons
+                WHERE work_item_id = ?
+                ORDER BY strength DESC, id
+                """,
+            arguments: [workItemID]
+        ).map { row in
+            guard let category = AttentionCategory(rawValue: row["category"]),
+                  let evaluatedAt = date(milliseconds: row["evaluated_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            let reasonID: String = row["id"]
+            return AttentionReason(
+                id: reasonID,
+                category: category,
+                ruleID: row["rule_id"],
+                ruleVersion: row["rule_version"],
+                strength: row["strength"],
+                title: row["title"],
+                explanation: row["explanation"],
+                evidence: try evidence(in: database, reasonID: reasonID),
+                evaluatedAt: evaluatedAt
+            )
+        }
+    }
+
+    private nonisolated static func evidence(
+        in database: Database,
+        reasonID: String
+    ) throws -> [EvidenceReference] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT evidence_id, source, source_node_id, source_event_id, source_revision, observed_at_ms, excerpt
+                FROM attention_reason_evidence
+                WHERE attention_reason_id = ?
+                ORDER BY evidence_id
+                """,
+            arguments: [reasonID]
+        ).compactMap { row in
+            guard let id = EvidenceID(rawValue: row["evidence_id"]),
+                  let source = EvidenceSource(rawValue: row["source"]),
+                  let observedAt = date(milliseconds: row["observed_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return EvidenceReference(
+                id: id,
+                source: source,
+                nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
+                sourceRevision: row["source_revision"],
+                observedAt: observedAt,
+                excerpt: row["excerpt"]
+            )
+        }
     }
 }

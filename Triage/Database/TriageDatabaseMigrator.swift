@@ -717,6 +717,24 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX capabilities_lookup
                 ON capabilities (account_id, organization_id, repository_id, capability)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "013-attention-reason-evidence",
+            checksum: "7f5d7c2e98b2dcbd20d0794f1c81a64ba6fef2c114aa11f7abf7e6b2704f1ca3"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE attention_reason_evidence (
+                    attention_reason_id TEXT NOT NULL REFERENCES attention_reasons(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_node_id TEXT,
+                    source_event_id TEXT,
+                    source_revision TEXT,
+                    observed_at_ms INTEGER NOT NULL,
+                    excerpt TEXT,
+                    PRIMARY KEY (attention_reason_id, evidence_id)
+                )
+                """)
         }
     ]
 }

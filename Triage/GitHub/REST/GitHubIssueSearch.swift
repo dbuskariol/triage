@@ -11,7 +11,7 @@ enum GitHubIssueSearchState: String, Sendable {
     case closed
 }
 
-enum GitHubIssueSearchRelationship: Sendable {
+enum GitHubIssueSearchRelationship: Hashable, Sendable {
     case involves
     case authored
     case assigned
@@ -35,6 +35,7 @@ enum GitHubIssueSearchRelationship: Sendable {
 
 struct GitHubIssueSearchQuery: Sendable {
     let value: String
+    let relationship: GitHubIssueSearchRelationship
 
     init(
         organizationLogin: String,
@@ -61,6 +62,7 @@ struct GitHubIssueSearchQuery: Sendable {
         if let closedAfter {
             qualifiers.append("closed:>=\(Self.dayString(closedAfter))")
         }
+        self.relationship = relationship
         value = qualifiers.joined(separator: " ")
     }
 
