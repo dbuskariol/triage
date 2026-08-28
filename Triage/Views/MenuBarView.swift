@@ -54,6 +54,13 @@ struct MenuBarView: View {
             }
             .keyboardShortcut(",")
 
+            Button("Refresh GitHub Work") {
+                Task {
+                    await appModel.refreshSelectedOrganization()
+                }
+            }
+            .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
+
             Button("Check for Updates…") {
                 softwareUpdates.checkForUpdates()
             }
