@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var appModel: TriageAppModel
 
@@ -31,6 +32,12 @@ struct RootView: View {
                 }
             }
             .onChange(of: appModel.selectedOrganizationID) {
+                Task {
+                    await appModel.refreshSelectedOrganization()
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
                 Task {
                     await appModel.refreshSelectedOrganization()
                 }
