@@ -583,7 +583,6 @@ Broker endpoints:
 Broker request security:
 
 - application version header;
-- signed request envelope;
 - one-use nonce;
 - issue timestamp and strict expiry;
 - PKCE verifier;
@@ -594,6 +593,12 @@ Broker request security:
 - no cookies;
 - no browser sessions;
 - no response caching.
+
+The broker does not pretend to authenticate a public macOS client: no embedded
+secret, signing key, or device assertion can provide that guarantee. PKCE binds
+the authorization code to the initiating client. The broker's controls protect
+its own availability and strict protocol handling, not an invalid claim of
+public-client attestation.
 
 Broker storage:
 

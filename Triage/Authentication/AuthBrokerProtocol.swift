@@ -1,0 +1,119 @@
+import Foundation
+
+enum AuthBrokerProtocol {
+    static let version = 1
+    static let maximumRequestBodyBytes = 16 * 1_024
+    static let maximumResponseBodyBytes = 32 * 1_024
+}
+
+struct OAuthAuthorizationCode: Codable, Equatable, Sendable, CustomStringConvertible {
+    let value: SecretValue
+
+    init(_ value: String) {
+        self.value = SecretValue(value)
+    }
+
+    var description: String {
+        "<redacted OAuth authorization code>"
+    }
+}
+
+struct OAuthRefreshToken: Codable, Equatable, Sendable, CustomStringConvertible {
+    let value: SecretValue
+
+    init(_ value: String) {
+        self.value = SecretValue(value)
+    }
+
+    var description: String {
+        "<redacted OAuth refresh token>"
+    }
+}
+
+struct OAuthAccessToken: Codable, Equatable, Sendable, CustomStringConvertible {
+    let value: SecretValue
+
+    init(_ value: String) {
+        self.value = SecretValue(value)
+    }
+
+    var description: String {
+        "<redacted OAuth access token>"
+    }
+}
+
+struct AuthBrokerExchangeRequest: Codable, Equatable, Sendable {
+    let version: Int
+    let authorizationCode: OAuthAuthorizationCode
+    let codeVerifier: OAuthCodeVerifier
+    let redirectURI: URL
+
+    init(
+        authorizationCode: OAuthAuthorizationCode,
+        codeVerifier: OAuthCodeVerifier,
+        redirectURI: URL
+    ) {
+        version = AuthBrokerProtocol.version
+        self.authorizationCode = authorizationCode
+        self.codeVerifier = codeVerifier
+        self.redirectURI = redirectURI
+    }
+}
+
+struct AuthBrokerRefreshRequest: Codable, Equatable, Sendable {
+    let version: Int
+    let refreshToken: OAuthRefreshToken
+
+    init(refreshToken: OAuthRefreshToken) {
+        version = AuthBrokerProtocol.version
+        self.refreshToken = refreshToken
+    }
+}
+
+struct AuthBrokerTokenResponse: Codable, Equatable, Sendable {
+    let version: Int
+    let accessToken: OAuthAccessToken
+    let refreshToken: OAuthRefreshToken?
+    let tokenType: String
+    let scope: String?
+    let expiresIn: TimeInterval?
+    let refreshTokenExpiresIn: TimeInterval?
+
+    init(
+        accessToken: OAuthAccessToken,
+        refreshToken: OAuthRefreshToken?,
+        tokenType: String,
+        scope: String?,
+        expiresIn: TimeInterval?,
+        refreshTokenExpiresIn: TimeInterval?
+    ) {
+        version = AuthBrokerProtocol.version
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.tokenType = tokenType
+        self.scope = scope
+        self.expiresIn = expiresIn
+        self.refreshTokenExpiresIn = refreshTokenExpiresIn
+    }
+}
+
+struct AuthBrokerFailure: Codable, Equatable, Sendable, Error {
+    enum Code: String, Codable, Sendable {
+        case invalidRequest
+        case authorizationDenied
+        case invalidGrant
+        case invalidClient
+        case temporarilyUnavailable
+        case unavailable
+    }
+
+    let version: Int
+    let code: Code
+    let recoveryDescription: String
+
+    init(code: Code, recoveryDescription: String) {
+        version = AuthBrokerProtocol.version
+        self.code = code
+        self.recoveryDescription = recoveryDescription
+    }
+}
