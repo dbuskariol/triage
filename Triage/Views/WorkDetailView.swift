@@ -37,8 +37,10 @@ struct WorkDetailView: View {
                                 }
                             }
                         }
-                        Link("Open on GitHub", destination: item.members.first?.content.url ?? item.repository?.url ?? URL(string: "https://github.com")!)
-                            .buttonStyle(.bordered)
+                        if let sourceURL = item.sourceURL {
+                            Link("Open on GitHub", destination: sourceURL)
+                                .buttonStyle(.bordered)
+                        }
                     }
                     .padding(28)
                     .frame(maxWidth: .infinity, alignment: .leading)

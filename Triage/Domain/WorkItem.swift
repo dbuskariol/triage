@@ -39,6 +39,7 @@ struct WorkItem: Codable, Equatable, Sendable, Identifiable {
     let title: String
     let state: WorkItemState
     let sourceKind: GitHubContentKind
+    let sourceURL: URL?
     let repository: RepositorySummary?
     let members: [WorkItemMember]
     let contextLinks: [WorkItemContextLink]
