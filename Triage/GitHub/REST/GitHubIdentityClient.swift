@@ -190,6 +190,7 @@ struct GitHubRepositoryDTO: Codable, Equatable, Sendable {
     let name: String
     let isPrivate: Bool
     let isArchived: Bool
+    let hasDiscussions: Bool?
     let htmlURL: URL
     let updatedAt: Date
     let owner: Owner
@@ -204,6 +205,7 @@ struct GitHubRepositoryDTO: Codable, Equatable, Sendable {
         case name
         case isPrivate = "private"
         case isArchived = "archived"
+        case hasDiscussions = "has_discussions"
         case htmlURL = "html_url"
         case updatedAt = "updated_at"
         case owner

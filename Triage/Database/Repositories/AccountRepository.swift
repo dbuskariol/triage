@@ -348,18 +348,23 @@ actor AccountRepository {
         else {
             throw AccountRepositoryError.invalidPersistedIdentifier
         }
-        let summary = RepositorySummary(
-            id: repositoryID,
-            nodeID: nodeID,
-            ownerLogin: repository.owner.login,
-            name: repository.name,
-            isPrivate: repository.isPrivate,
-            isArchived: repository.isArchived,
-            hasDiscussions: false,
-            url: repository.htmlURL
-        )
         let updatedAt = Self.milliseconds(repository.updatedAt)
-        try await vault.write { database in
+        return try await vault.write { database in
+            let priorHasDiscussions = try Bool.fetchOne(
+                database,
+                sql: "SELECT has_discussions FROM repositories WHERE id = ?",
+                arguments: [repositoryID.rawValue]
+            )
+            let summary = RepositorySummary(
+                id: repositoryID,
+                nodeID: nodeID,
+                ownerLogin: repository.owner.login,
+                name: repository.name,
+                isPrivate: repository.isPrivate,
+                isArchived: repository.isArchived,
+                hasDiscussions: repository.hasDiscussions ?? priorHasDiscussions ?? false,
+                url: repository.htmlURL
+            )
             try database.execute(
                 sql: """
                     INSERT INTO repositories (
@@ -371,6 +376,7 @@ actor AccountRepository {
                         name = excluded.name,
                         is_private = excluded.is_private,
                         is_archived = excluded.is_archived,
+                        has_discussions = excluded.has_discussions,
                         html_url = excluded.html_url,
                         updated_at_ms = excluded.updated_at_ms,
                         archived_at_ms = excluded.archived_at_ms
@@ -392,8 +398,8 @@ actor AccountRepository {
                     """,
                 arguments: [accountID.rawValue, summary.id.rawValue, "available", updatedAt]
             )
+            return summary
         }
-        return summary
     }
 
     private func ensureAccountScope(_ accountID: AccountID) throws {

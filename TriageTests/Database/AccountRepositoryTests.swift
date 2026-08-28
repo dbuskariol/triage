@@ -61,6 +61,65 @@ final class AccountRepositoryTests: XCTestCase {
         XCTAssertEqual(counts.1, 1)
         let restoredAccesses = try await repository.organizationAccesses(for: accountID)
         XCTAssertEqual(restoredAccesses[organizationID], access)
+
+        let remoteRepository = GitHubRepositoryDTO(
+            id: 3,
+            nodeID: "MDEwOlJlcG9zaXRvcnkz",
+            name: "triage",
+            isPrivate: true,
+            isArchived: false,
+            hasDiscussions: true,
+            htmlURL: URL(string: "https://github.com/github/triage")!,
+            updatedAt: date,
+            owner: .init(login: "github")
+        )
+        _ = try await repository.save(
+            repository: remoteRepository,
+            organizationID: organizationID,
+            accountID: accountID
+        )
+        let updatedRepository = GitHubRepositoryDTO(
+            id: remoteRepository.id,
+            nodeID: remoteRepository.nodeID,
+            name: remoteRepository.name,
+            isPrivate: remoteRepository.isPrivate,
+            isArchived: remoteRepository.isArchived,
+            hasDiscussions: false,
+            htmlURL: remoteRepository.htmlURL,
+            updatedAt: remoteRepository.updatedAt.addingTimeInterval(1),
+            owner: remoteRepository.owner
+        )
+        let summary = try await repository.save(
+            repository: updatedRepository,
+            organizationID: organizationID,
+            accountID: accountID
+        )
+        XCTAssertFalse(summary.hasDiscussions)
+        let repositoryWithOmittedDiscussions = GitHubRepositoryDTO(
+            id: updatedRepository.id,
+            nodeID: updatedRepository.nodeID,
+            name: updatedRepository.name,
+            isPrivate: updatedRepository.isPrivate,
+            isArchived: updatedRepository.isArchived,
+            hasDiscussions: nil,
+            htmlURL: updatedRepository.htmlURL,
+            updatedAt: updatedRepository.updatedAt.addingTimeInterval(1),
+            owner: updatedRepository.owner
+        )
+        let preservedSummary = try await repository.save(
+            repository: repositoryWithOmittedDiscussions,
+            organizationID: organizationID,
+            accountID: accountID
+        )
+        XCTAssertFalse(preservedSummary.hasDiscussions)
+        let persistedHasDiscussions = try await vault.read { database in
+            try Bool.fetchOne(
+                database,
+                sql: "SELECT has_discussions FROM repositories WHERE id = ?",
+                arguments: [summary.id.rawValue]
+            )
+        }
+        XCTAssertEqual(persistedHasDiscussions, false)
     }
 
     func testAccountCapabilitiesArePersistedSeparatelyFromOrganizationAccess() async throws {
