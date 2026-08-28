@@ -78,11 +78,11 @@ enum GitHubTransportError: Error, Equatable, Sendable {
     case responseTooLarge
 }
 
-protocol GitHubHTTPSession: Sendable {
+protocol HTTPSession: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionGitHubHTTPSession: GitHubHTTPSession {
+struct URLSessionHTTPSession: HTTPSession {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -103,12 +103,12 @@ actor GitHubRESTTransport {
     static let defaultBaseURL = URL(string: "https://api.github.com")!
     static let maximumResponseBodyBytes = 10 * 1_024 * 1_024
 
-    private let session: any GitHubHTTPSession
+    private let session: any HTTPSession
     private let baseURL: URL
     private let userAgent: String
 
     init(
-        session: any GitHubHTTPSession = URLSessionGitHubHTTPSession(),
+        session: any HTTPSession = URLSessionHTTPSession(),
         baseURL: URL = GitHubRESTTransport.defaultBaseURL,
         userAgent: String = "Triage/0.1.0"
     ) throws {
