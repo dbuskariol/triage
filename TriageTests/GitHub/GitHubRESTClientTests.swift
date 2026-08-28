@@ -49,6 +49,22 @@ final class GitHubRESTClientTests: XCTestCase {
         }
     }
 
+    func testClientPreservesSuccessfulRawPayloadForProvenance() async throws {
+        let payload = Data(#"{"id":1,"login":"github"}"#.utf8)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: StubSession(body: payload)),
+            credential: SecretValue("token")
+        )
+
+        let response = try await client.getResponse(
+            OrganizationDTO.self,
+            request: try GitHubRESTRequest(path: "/user")
+        )
+
+        XCTAssertEqual(response.value, OrganizationDTO(id: 1, login: "github"))
+        XCTAssertEqual(response.payload, payload)
+    }
+
     func testNextPageMustRemainOnGitHubAPI() {
         XCTAssertThrowsError(
             try GitHubRESTRequest(

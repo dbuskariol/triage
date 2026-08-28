@@ -10,6 +10,7 @@ struct GitHubPage<Value: Sendable>: Sendable {
 
 struct GitHubResponse<Value: Sendable>: Sendable {
     let value: Value
+    let payload: Data
     let etag: String?
     let lastModified: String?
     let ssoHeader: GitHubSSOHeader?
@@ -56,6 +57,7 @@ actor GitHubRESTClient {
         do {
             return GitHubResponse(
                 value: try JSONDecoder.github.decode(Value.self, from: response.body),
+                payload: response.body,
                 etag: response.header(named: "ETag"),
                 lastModified: response.header(named: "Last-Modified"),
                 ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
