@@ -31,11 +31,6 @@ struct RootView: View {
                     .help("Refresh GitHub Work")
                 }
             }
-            .onChange(of: appModel.selectedOrganizationID) {
-                Task {
-                    await appModel.refreshSelectedOrganization()
-                }
-            }
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
                 Task {

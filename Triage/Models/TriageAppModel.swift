@@ -28,7 +28,11 @@ final class TriageAppModel: ObservableObject {
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
     private let defaults: UserDefaults
+    private let vaultRegistry: VaultRegistry?
+    private let vaultRegistryInitializationError: Error?
     private var refreshGeneration = 0
+    private var foregroundRefreshTask: Task<Void, Never>?
+    private var foregroundRefreshTaskID: UUID?
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
     var organizations: [GitHubOrganization] {
@@ -42,6 +46,13 @@ final class TriageAppModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        do {
+            vaultRegistry = try VaultRegistry()
+            vaultRegistryInitializationError = nil
+        } catch {
+            vaultRegistry = nil
+            vaultRegistryInitializationError = error
+        }
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID)
             .flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
@@ -77,7 +88,7 @@ final class TriageAppModel: ObservableObject {
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
-        let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+        let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
         return try await SearchRepository(vault: vault).search(
             query,
             accountID: account.id,
@@ -92,12 +103,14 @@ final class TriageAppModel: ObservableObject {
         selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
         self.workItems = []
         selectedWorkItemID = nil
+        activateSelectedOrganization()
     }
 
     func selectOrganization(_ organizationID: OrganizationID) {
         guard organizations.contains(where: { $0.id == organizationID }) else { return }
         invalidateRefreshState()
         selectedOrganizationID = organizationID
+        activateSelectedOrganization()
     }
 
     func removeAccount(_ accountID: AccountID) async throws {
@@ -118,7 +131,7 @@ final class TriageAppModel: ObservableObject {
             create: true
         )
         try await AccountDataRemovalService(
-            vaultRegistry: VaultRegistry(),
+            vaultRegistry: try requiredVaultRegistry(),
             secretStore: KeychainSecretStore(),
             applicationSupportDirectory: applicationSupportDirectory,
             cachesDirectory: cachesDirectory
@@ -153,7 +166,7 @@ final class TriageAppModel: ObservableObject {
             let result = try await AccountConnectionService(
                 brokerURL: configuration.brokerURL,
                 secretStore: KeychainSecretStore(),
-                vaultRegistry: VaultRegistry()
+                vaultRegistry: requiredVaultRegistry()
             ).connectOAuth(exchangeRequest: request)
             install(accounts: accounts + [result.account], organizations: result.organizations, for: result.account.id)
             await refreshSelectedOrganization()
@@ -182,7 +195,7 @@ final class TriageAppModel: ObservableObject {
             let token = try PersonalAccessToken(rawValue: rawValue)
             let result = try await AccountConnectionService(
                 secretStore: KeychainSecretStore(),
-                vaultRegistry: VaultRegistry()
+                vaultRegistry: requiredVaultRegistry()
             ).connect(
                 personalAccessToken: token,
                 resourceOwnerOrganization: resourceOwnerOrganization
@@ -210,7 +223,7 @@ final class TriageAppModel: ObservableObject {
         do {
             let result = try await AccountRestorationService(
                 secretStore: KeychainSecretStore(),
-                vaultRegistry: VaultRegistry()
+                vaultRegistry: requiredVaultRegistry()
             ).restore()
             accounts = result.accounts
             organizationsByAccount = result.organizationsByAccount
@@ -230,8 +243,25 @@ final class TriageAppModel: ObservableObject {
     }
 
     func refreshSelectedOrganization() async {
+        foregroundRefreshTask?.cancel()
+        let taskID = UUID()
         refreshGeneration += 1
         let generation = refreshGeneration
+        let task: Task<Void, Never> = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefreshSelectedOrganization(generation: generation)
+        }
+        foregroundRefreshTask = task
+        foregroundRefreshTaskID = taskID
+        await task.value
+        if foregroundRefreshTaskID == taskID {
+            foregroundRefreshTask = nil
+            foregroundRefreshTaskID = nil
+        }
+    }
+
+    private func performRefreshSelectedOrganization(generation: Int) async {
+        guard refreshGeneration == generation else { return }
         guard let initialAccount = accounts.first(where: { $0.id == selectedAccountID }),
               let organization = selectedOrganization
         else {
@@ -248,7 +278,7 @@ final class TriageAppModel: ObservableObject {
         }
         do {
             let secretStore = KeychainSecretStore()
-            let vaultRegistry = try VaultRegistry()
+            let vaultRegistry = try requiredVaultRegistry()
             let account: GitHubAccount
             let lifecycleStatus = CredentialLifecycle.status(for: initialAccount, at: Date())
             if let reconnectMessage = CredentialLifecycle.reconnectMessage(
@@ -335,6 +365,9 @@ final class TriageAppModel: ObservableObject {
 
     private func invalidateRefreshState() {
         refreshGeneration += 1
+        foregroundRefreshTask?.cancel()
+        foregroundRefreshTask = nil
+        foregroundRefreshTaskID = nil
         ssoAuthorizationHeader = nil
         refreshError = nil
         isRefreshing = false
@@ -356,7 +389,7 @@ final class TriageAppModel: ObservableObject {
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
-            let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+            let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
             try await AccountRepository(vault: vault).save(
                 updatedAccount,
                 credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
@@ -375,17 +408,25 @@ final class TriageAppModel: ObservableObject {
         else {
             return
         }
+        let generation = refreshGeneration
         do {
             let secretStore = KeychainSecretStore()
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
-            let vault = try await VaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
+            let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
             let workItems = try await WorkItemRepository(vault: vault).fetch(
                 accountID: account.id,
                 organizationID: organization.id
             )
             try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
+            guard
+                refreshGeneration == generation,
+                selectedAccountID == account.id,
+                selectedOrganizationID == organization.id
+            else {
+                return
+            }
             install(workItems: workItems)
         } catch {
             restorationError = "Triage could not load cached work for the selected organization."
@@ -396,7 +437,7 @@ final class TriageAppModel: ObservableObject {
         do {
             let updated = try await WorkflowActionService(
                 secretStore: KeychainSecretStore(),
-                vaultRegistry: VaultRegistry()
+                vaultRegistry: requiredVaultRegistry()
             ).apply(action, to: workItem)
             guard let index = workItems.firstIndex(where: { $0.id == updated.id }) else { return }
             workItems[index] = updated
@@ -413,7 +454,7 @@ final class TriageAppModel: ObservableObject {
             guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
-            let vault = try await VaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
+            let vault = try await requiredVaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
             try await WorkflowRepository(vault: vault).save(completed)
             guard let index = workItems.firstIndex(where: { $0.id == workItem.id }) else { return }
             workItems[index] = workItem.replacing(
@@ -430,7 +471,7 @@ final class TriageAppModel: ObservableObject {
         guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
-        let vault = try await VaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
+        let vault = try await requiredVaultRegistry().open(accountID: workItem.accountID, vaultKey: vaultKey)
         try await rebuildSearchIndex(
             in: vault,
             accountID: workItem.accountID,
@@ -447,5 +488,20 @@ final class TriageAppModel: ObservableObject {
             accountID: accountID,
             organizationID: organizationID
         )
+    }
+
+    private func activateSelectedOrganization() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.loadCachedSelectedOrganization()
+            await self.refreshSelectedOrganization()
+        }
+    }
+
+    private func requiredVaultRegistry() throws -> VaultRegistry {
+        if let vaultRegistry {
+            return vaultRegistry
+        }
+        throw vaultRegistryInitializationError ?? VaultError.missingApplicationSupportDirectory
     }
 }

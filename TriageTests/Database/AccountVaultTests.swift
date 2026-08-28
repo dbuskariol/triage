@@ -71,6 +71,26 @@ final class AccountVaultTests: XCTestCase {
         try await registry.closeAll()
     }
 
+    func testRemovingAnOpenVaultClosesAndErasesIt() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE account_private_value (value TEXT NOT NULL)")
+        }
+
+        try await registry.remove(accountID: accountID)
+
+        let paths = VaultPaths(rootDirectory: directory, accountID: accountID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.directory.path))
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
