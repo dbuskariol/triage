@@ -180,6 +180,14 @@ triage_assert_release_app() {
 
   [[ -f "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
     || triage_fail 'the embedded Sparkle framework is missing'
+  local copilot_xpc
+  copilot_xpc="$app/Contents/XPCServices/TriageCopilotXPC.xpc"
+  [[ -d "$copilot_xpc" ]] || triage_fail 'the embedded Copilot XPC service is missing'
+  [[ "$(triage_plist_value CFBundleIdentifier "$copilot_xpc/Contents/Info.plist")" == "com.triage.mac.TriageCopilotXPC" ]] \
+    || triage_fail 'the embedded Copilot XPC service has an unexpected bundle identifier'
+  [[ -x "$copilot_xpc/Contents/MacOS/TriageCopilotXPC" ]] \
+    || triage_fail 'the embedded Copilot XPC service executable is missing'
+  triage_assert_developer_id_signature "$copilot_xpc" "$team" 1
   local sparkle_code
   for sparkle_code in \
     "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
