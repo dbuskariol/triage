@@ -43,35 +43,39 @@ actor GitHubNodeRepository {
         guard node.accountID == vault.accountID else {
             throw GitHubNodeRepositoryError.accountScopeMismatch
         }
-        let values = Values(node)
         try await vault.write { database in
-            try database.execute(
-                sql: """
-                    INSERT INTO github_nodes (
-                        github_node_id, account_id, organization_id, repository_id, kind, numeric_id, number,
-                        title, state, html_url, body_markdown, author_id, created_at_ms, updated_at_ms,
-                        closed_at_ms, merged_at_ms, source_revision, last_observed_at_ms, accessibility_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(github_node_id) DO UPDATE SET
-                        repository_id = excluded.repository_id,
-                        kind = excluded.kind,
-                        numeric_id = excluded.numeric_id,
-                        number = excluded.number,
-                        title = excluded.title,
-                        state = excluded.state,
-                        html_url = excluded.html_url,
-                        body_markdown = excluded.body_markdown,
-                        author_id = excluded.author_id,
-                        updated_at_ms = excluded.updated_at_ms,
-                        closed_at_ms = excluded.closed_at_ms,
-                        merged_at_ms = excluded.merged_at_ms,
-                        source_revision = excluded.source_revision,
-                        last_observed_at_ms = excluded.last_observed_at_ms,
-                        accessibility_state = excluded.accessibility_state
-                    """,
-                arguments: values.arguments
-            )
+            try Self.save(node, in: database)
         }
+    }
+
+    nonisolated static func save(_ node: NormalizedGitHubNode, in database: Database) throws {
+        let values = Values(node)
+        try database.execute(
+            sql: """
+                INSERT INTO github_nodes (
+                    github_node_id, account_id, organization_id, repository_id, kind, numeric_id, number,
+                    title, state, html_url, body_markdown, author_id, created_at_ms, updated_at_ms,
+                    closed_at_ms, merged_at_ms, source_revision, last_observed_at_ms, accessibility_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(github_node_id) DO UPDATE SET
+                    repository_id = excluded.repository_id,
+                    kind = excluded.kind,
+                    numeric_id = excluded.numeric_id,
+                    number = excluded.number,
+                    title = excluded.title,
+                    state = excluded.state,
+                    html_url = excluded.html_url,
+                    body_markdown = excluded.body_markdown,
+                    author_id = excluded.author_id,
+                    updated_at_ms = excluded.updated_at_ms,
+                    closed_at_ms = excluded.closed_at_ms,
+                    merged_at_ms = excluded.merged_at_ms,
+                    source_revision = excluded.source_revision,
+                    last_observed_at_ms = excluded.last_observed_at_ms,
+                    accessibility_state = excluded.accessibility_state
+                """,
+            arguments: values.arguments
+        )
     }
 
     private struct Values: Sendable {
