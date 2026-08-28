@@ -150,6 +150,7 @@
 		D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */; };
 		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
+		D6BD3ECF42418E448DD9E462 /* RawAPISnapshotRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
 		DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */; };
 		DB75C0414A7EF20F766048EA /* ActorRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */; };
@@ -158,6 +159,7 @@
 		DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */; };
 		DE05BC04CD8923DDF0C81E05 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */; };
 		DEAAD030D292A062B542AE1F /* CoverageEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73E253D2EC34DD35631BE213 /* CoverageEvaluator.swift */; };
+		DF26F1B11AE871C9C1CD0D1C /* RawAPISnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */; };
 		DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */; };
 		E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */; };
 		E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993826A5AB570E9336F94531 /* GitHubDiagnostics.swift */; };
@@ -259,6 +261,7 @@
 		44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCPackaging.swift; sourceTree = "<group>"; };
 		4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCInterface.swift; sourceTree = "<group>"; };
 		473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCProtocol.swift; sourceTree = "<group>"; };
+		4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawAPISnapshotRepository.swift; sourceTree = "<group>"; };
 		4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStoreTests.swift; sourceTree = "<group>"; };
 		48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessTokenTests.swift; sourceTree = "<group>"; };
 		4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeader.swift; sourceTree = "<group>"; };
@@ -281,6 +284,7 @@
 		646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTimelineNormalizer.swift; sourceTree = "<group>"; };
 		649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimitRepository.swift; sourceTree = "<group>"; };
 		67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClientTests.swift; sourceTree = "<group>"; };
+		685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawAPISnapshot.swift; sourceTree = "<group>"; };
 		69059AEFA8E3488C971070DA /* WorkflowActionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowActionService.swift; sourceTree = "<group>"; };
 		70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocol.swift; sourceTree = "<group>"; };
 		70C78FBE1F94059E1A646A17 /* AccountCredentialReplacementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCredentialReplacementTests.swift; sourceTree = "<group>"; };
@@ -639,6 +643,7 @@
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */,
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
+				4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
 				4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */,
 				2FA4EF715587B009499705BF /* WorkflowRepository.swift */,
@@ -658,6 +663,7 @@
 				3B59CA16DA269CD50E052F2A /* Freshness.swift */,
 				229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */,
 				D988495C37A78AEED9B566A4 /* Identifiers.swift */,
+				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
 				BD0C14B59A1223DC3240A96C /* WorkItem.swift */,
 			);
@@ -1081,6 +1087,8 @@
 				C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */,
 				346665C51D1520D26ED59777 /* PullRequestReviewRepository.swift in Sources */,
 				3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */,
+				DF26F1B11AE871C9C1CD0D1C /* RawAPISnapshot.swift in Sources */,
+				D6BD3ECF42418E448DD9E462 /* RawAPISnapshotRepository.swift in Sources */,
 				20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */,
 				B3FDE6FE018FC2B4DD87C517 /* RoleDiscoveryPlan.swift in Sources */,
 				E6581FEDB74600C101B1E376 /* RoleDiscoverySynchronizer.swift in Sources */,

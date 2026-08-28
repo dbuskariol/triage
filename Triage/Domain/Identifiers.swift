@@ -99,6 +99,19 @@ struct GitHubEventID: TriageIdentifier {
     }
 }
 
+struct RawAPISnapshotID: TriageIdentifier {
+    let rawValue: String
+
+    init?(rawValue: String) {
+        guard isValidIdentifier(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+
+    static func make() -> Self {
+        Self(rawValue: UUID().uuidString.lowercased())!
+    }
+}
+
 struct WorkItemID: TriageIdentifier {
     let rawValue: String
 

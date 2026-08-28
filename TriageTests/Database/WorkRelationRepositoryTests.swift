@@ -72,6 +72,47 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
+    func testRawAPISnapshotsRoundTripWithinTheirAccountScope() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: fixture.node.nodeID,
+            endpoint: "/repos/github/triage/issues/1",
+            eTag: "\"revision-1\"",
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("{\"number\":1}".utf8)
+        )
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+        try await repository.save(snapshot)
+
+        XCTAssertEqual(
+            try await repository.snapshots(for: fixture.accountID),
+            [snapshot]
+        )
+
+        do {
+            try await repository.save(
+                RawAPISnapshot(
+                    id: RawAPISnapshotID.make(),
+                    accountID: AccountID.make(),
+                    githubNodeID: fixture.node.nodeID,
+                    endpoint: snapshot.endpoint,
+                    eTag: nil,
+                    parserVersion: 1,
+                    observedAt: fixture.date,
+                    payload: snapshot.payload
+                )
+            )
+            XCTFail("Expected an account scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? RawAPISnapshotRepositoryError, .accountScopeMismatch)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
