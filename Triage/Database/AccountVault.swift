@@ -113,7 +113,7 @@ actor VaultRegistry {
     func open(
         accountID: AccountID,
         vaultKey: VaultKey
-    ) throws -> AccountVault {
+    ) async throws -> AccountVault {
         if let vault = openVaults[accountID] {
             return vault
         }
@@ -123,6 +123,7 @@ actor VaultRegistry {
             vaultKey: vaultKey,
             rootDirectory: rootDirectory
         )
+        try await vault.applyMigrations()
         openVaults[accountID] = vault
         return vault
     }

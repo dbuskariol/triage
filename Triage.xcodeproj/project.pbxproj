@@ -13,6 +13,7 @@
 		09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
 		16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13285F293338CA8A4716B490 /* AccountVault.swift */; };
+		1B2B5B7A986EB0FB38A5C63C /* AccountRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */; };
 		1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = D988495C37A78AEED9B566A4 /* Identifiers.swift */; };
 		1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 552523AB4B9EC81EE47BDCA4 /* Evidence.swift */; };
 		1FE6E7920216631C2D7E98CE /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 6946314899C158B0508FF5F7 /* GRDB */; };
@@ -40,6 +41,7 @@
 		7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
+		8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80EB94E267D82037DB5FBBC /* AccountRepository.swift */; };
 		97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B3E254AF248B70DFBBB696 /* SSOAuthorizationCoordinatorTests.swift */; };
 		9B077224AD72CFDBCEA499AC /* SSOAuthorizationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */; };
 		B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */; };
@@ -119,6 +121,7 @@
 		71298FBEE39EE0073BEE2237 /* Triage.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Triage.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinator.swift; sourceTree = "<group>"; };
 		77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationAccessEvaluator.swift; sourceTree = "<group>"; };
+		77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepositoryTests.swift; sourceTree = "<group>"; };
 		77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRankerTests.swift; sourceTree = "<group>"; };
 		7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageDatabaseMigrator.swift; sourceTree = "<group>"; };
 		7B669ABDCC417A36F5EB91E2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -136,6 +139,7 @@
 		ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceAndFreshnessTests.swift; sourceTree = "<group>"; };
 		BACBE230946C1056771FE56F /* PersonalAccessToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessToken.swift; sourceTree = "<group>"; };
 		BD0C14B59A1223DC3240A96C /* WorkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItem.swift; sourceTree = "<group>"; };
+		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
@@ -279,6 +283,7 @@
 				13285F293338CA8A4716B490 /* AccountVault.swift */,
 				0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */,
 				7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */,
+				A81DF1DCBF03F99BFD882782 /* Repositories */,
 			);
 			path = Database;
 			sourceTree = "<group>";
@@ -322,6 +327,14 @@
 			path = Components;
 			sourceTree = "<group>";
 		};
+		A81DF1DCBF03F99BFD882782 /* Repositories */ = {
+			isa = PBXGroup;
+			children = (
+				C80EB94E267D82037DB5FBBC /* AccountRepository.swift */,
+			);
+			path = Repositories;
+			sourceTree = "<group>";
+		};
 		A9BB0D2AF5FE7881E2824DE7 /* Domain */ = {
 			isa = PBXGroup;
 			children = (
@@ -339,6 +352,7 @@
 		AE860E185EC8801A0A64F686 /* Database */ = {
 			isa = PBXGroup;
 			children = (
+				77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */,
 				E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */,
 				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
 			);
@@ -503,6 +517,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				733DA040ADF44EB3897070BD /* AccountAccessTests.swift in Sources */,
+				1B2B5B7A986EB0FB38A5C63C /* AccountRepositoryTests.swift in Sources */,
 				E6E211CEB38C07FA9FC64BBC /* AccountVaultTests.swift in Sources */,
 				DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */,
 				D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */,
@@ -534,6 +549,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				379DBBD450F2FAD70BC2F7E9 /* AccountAccess.swift in Sources */,
+				8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */,
 				16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */,
 				CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */,
 				39645229C79AF0AA7C0331BF /* AppNavigationModel.swift in Sources */,
