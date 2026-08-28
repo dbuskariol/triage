@@ -7,7 +7,13 @@ enum AuthBrokerClientError: Error, Equatable, Sendable {
     case broker(AuthBrokerFailure)
 }
 
-actor AuthBrokerClient {
+protocol OAuthTokenRefreshing: Sendable {
+    func refresh(
+        _ request: AuthBrokerRefreshRequest
+    ) async throws -> AuthBrokerTokenResponse
+}
+
+actor AuthBrokerClient: OAuthTokenRefreshing {
     private let baseURL: URL
     private let session: any HTTPSession
 
@@ -15,6 +21,12 @@ actor AuthBrokerClient {
         baseURL: URL,
         session: any HTTPSession = URLSessionHTTPSession()
     ) throws {
+        try Self.validate(baseURL: baseURL)
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    static func validate(baseURL: URL) throws {
         guard baseURL.scheme == "https",
               baseURL.host != nil,
               baseURL.user == nil,
@@ -24,8 +36,6 @@ actor AuthBrokerClient {
         else {
             throw AuthBrokerClientError.invalidBaseURL
         }
-        self.baseURL = baseURL
-        self.session = session
     }
 
     func exchange(
@@ -52,7 +62,7 @@ actor AuthBrokerClient {
         urlRequest.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (body, response) = try await session.data(for: urlRequest)
+        let (body, response) = try await boundedData(for: urlRequest)
         guard body.count <= AuthBrokerProtocol.maximumResponseBodyBytes else {
             throw AuthBrokerClientError.responseTooLarge
         }
@@ -86,5 +96,19 @@ actor AuthBrokerClient {
             throw AuthBrokerClientError.invalidBaseURL
         }
         return url
+    }
+
+    private func boundedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            if let boundedSession = session as? any BoundedHTTPSession {
+                return try await boundedSession.data(
+                    for: request,
+                    maximumResponseBodyBytes: AuthBrokerProtocol.maximumResponseBodyBytes
+                )
+            }
+            return try await session.data(for: request)
+        } catch GitHubTransportError.responseTooLarge {
+            throw AuthBrokerClientError.responseTooLarge
+        }
     }
 }

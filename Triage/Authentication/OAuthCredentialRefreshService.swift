@@ -7,20 +7,24 @@ enum OAuthCredentialRefreshError: Error, Equatable, Sendable {
 
 actor OAuthCredentialRefreshService {
     private let brokerURL: URL
-    private let secretStore: KeychainSecretStore
+    private let secretStore: any SecretStore
     private let vaultRegistry: VaultRegistry
     private let clock: @Sendable () -> Date
+    private let broker: (any OAuthTokenRefreshing)?
 
     init(
         brokerURL: URL,
-        secretStore: KeychainSecretStore,
+        secretStore: any SecretStore,
         vaultRegistry: VaultRegistry,
-        clock: @escaping @Sendable () -> Date = Date.init
-    ) {
+        clock: @escaping @Sendable () -> Date = Date.init,
+        broker: (any OAuthTokenRefreshing)? = nil
+    ) throws {
+        try AuthBrokerClient.validate(baseURL: brokerURL)
         self.brokerURL = brokerURL
         self.secretStore = secretStore
         self.vaultRegistry = vaultRegistry
         self.clock = clock
+        self.broker = broker
     }
 
     func refreshIfNeeded(_ account: GitHubAccount) async throws -> GitHubAccount {
@@ -36,7 +40,13 @@ actor OAuthCredentialRefreshService {
         ), let refreshToken = String(data: data, encoding: .utf8), !refreshToken.isEmpty else {
             throw OAuthCredentialRefreshError.refreshTokenUnavailable
         }
-        let response = try await AuthBrokerClient(baseURL: brokerURL).refresh(
+        let refreshClient: any OAuthTokenRefreshing
+        if let broker {
+            refreshClient = broker
+        } else {
+            refreshClient = try AuthBrokerClient(baseURL: brokerURL)
+        }
+        let response = try await refreshClient.refresh(
             AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken(refreshToken))
         )
         try await secretStore.write(
@@ -67,9 +77,14 @@ actor OAuthCredentialRefreshService {
             ),
             validatedAt: now
         )
-        guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
+        guard let vaultKeyData = try await secretStore.read(
+            kind: .vaultKey,
+            accountID: account.id,
+            credentialID: nil
+        ) else {
             throw OAuthCredentialRefreshError.refreshTokenUnavailable
         }
+        let vaultKey = try VaultKey(data: vaultKeyData)
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
         try await AccountRepository(vault: vault).save(
             refreshed,
