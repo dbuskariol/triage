@@ -46,6 +46,31 @@ final class AccountVaultTests: XCTestCase {
         }
     }
 
+    func testMigrationsAreIdempotentAndRecordChecksums() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(
+            accountID: AccountID.make(),
+            vaultKey: try VaultKey.generate()
+        )
+
+        try await vault.applyMigrations()
+        try await vault.applyMigrations()
+
+        let migrations = try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: "SELECT id, checksum FROM schema_migrations ORDER BY id"
+            )
+        }
+        XCTAssertEqual(migrations.count, 1)
+        XCTAssertEqual(migrations[0]["id"] as String, "001-vault-metadata")
+        XCTAssertFalse((migrations[0]["checksum"] as String).isEmpty)
+        try await registry.closeAll()
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
