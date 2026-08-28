@@ -200,6 +200,22 @@ struct OAuthCodeVerifier: TriageIdentifier {
     var description: String {
         "<redacted OAuth PKCE verifier>"
     }
+
+    init(from decoder: Decoder) throws {
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        guard let verifier = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: try decoder.singleValueContainer(),
+                debugDescription: "Invalid OAuth PKCE verifier."
+            )
+        }
+        self = verifier
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 struct SecretValue: Codable, Equatable, Sendable, CustomStringConvertible {
@@ -211,5 +227,14 @@ struct SecretValue: Codable, Equatable, Sendable, CustomStringConvertible {
 
     var description: String {
         "<redacted>"
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
