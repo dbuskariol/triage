@@ -270,6 +270,50 @@ enum TriageDatabaseMigrator {
                     updated_at_ms INTEGER NOT NULL
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "005-reviews-comments-timeline",
+            checksum: "579128bcabd7698d18e2d79e2d6f31cd04b2df4bf25827815195a17c25e27ee1"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE reviews (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    pull_request_node_id TEXT NOT NULL REFERENCES pull_requests(github_node_id) ON DELETE CASCADE,
+                    author_id TEXT REFERENCES actors(id) ON DELETE SET NULL,
+                    state TEXT NOT NULL,
+                    body_markdown TEXT,
+                    submitted_at_ms INTEGER,
+                    html_url TEXT,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE comments (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    parent_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    author_id TEXT REFERENCES actors(id) ON DELETE SET NULL,
+                    kind TEXT NOT NULL,
+                    body_markdown TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    html_url TEXT NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE timeline_events (
+                    github_event_id TEXT PRIMARY KEY NOT NULL,
+                    subject_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    actor_id TEXT REFERENCES actors(id) ON DELETE SET NULL,
+                    kind TEXT NOT NULL,
+                    occurred_at_ms INTEGER NOT NULL,
+                    payload_json BLOB NOT NULL,
+                    source_revision TEXT NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX timeline_events_subject_occurred
+                ON timeline_events (subject_node_id, occurred_at_ms DESC)
+                """)
         }
     ]
 }
