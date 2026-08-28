@@ -24,6 +24,13 @@ actor GitHubIdentityClient {
         )
     }
 
+    func organization(named login: String) async throws -> GitHubResponse<GitHubOrganizationDTO> {
+        try await client.getResponse(
+            GitHubOrganizationDTO.self,
+            request: try GitHubRESTRequest(path: "/orgs/\(login)")
+        )
+    }
+
     func repositories(in organization: String) async throws -> GitHubPage<GitHubRepositoryDTO> {
         try await client.getPage(
             GitHubRepositoryDTO.self,
