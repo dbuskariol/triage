@@ -2,6 +2,7 @@ import Foundation
 
 struct GitHubPage<Value: Sendable>: Sendable {
     let values: [Value]
+    let payload: Data
     let nextPageURL: URL?
     let etag: String?
     let lastModified: String?
@@ -80,6 +81,7 @@ actor GitHubRESTClient {
         do {
             return GitHubPage(
                 values: try JSONDecoder.github.decode([Value].self, from: response.body),
+                payload: response.body,
                 nextPageURL: GitHubLinkHeader(response.header(named: "Link"))?.nextPageURL,
                 etag: response.header(named: "ETag"),
                 lastModified: response.header(named: "Last-Modified"),
