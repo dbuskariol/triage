@@ -35,7 +35,9 @@
 		2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */; };
 		2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B59CA16DA269CD50E052F2A /* Freshness.swift */; };
 		346665C51D1520D26ED59777 /* PullRequestReviewRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */; };
+		364AF9C5BE29D893800B3C8A /* CoverageRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */; };
 		3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */; };
+		373594353CB0240CB731F891 /* CoverageRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */; };
 		3740A14045DBE62E64480D5F /* NotificationEligibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7BF02EF9257041D9B18EAC /* NotificationEligibilityTests.swift */; };
 		379DBBD450F2FAD70BC2F7E9 /* AccountAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B96E89F2CF776FAC365D17E /* AccountAccess.swift */; };
 		39645229C79AF0AA7C0331BF /* AppNavigationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */; };
@@ -197,6 +199,7 @@
 		1E8AE2B35C2B7F989AD3A1E1 /* GitHubContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubContentTests.swift; sourceTree = "<group>"; };
 		21A864B722A778E85F99A052 /* ConversationFollowUpRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFollowUpRule.swift; sourceTree = "<group>"; };
 		229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubContent.swift; sourceTree = "<group>"; };
+		252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRepositoryTests.swift; sourceTree = "<group>"; };
 		26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationModel.swift; sourceTree = "<group>"; };
 		282E4BF03D103669044A5607 /* TriageDebug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TriageDebug.entitlements; sourceTree = "<group>"; };
 		28B1B9B44356DF52DF727463 /* OrganizationAccessEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationAccessEvaluatorTests.swift; sourceTree = "<group>"; };
@@ -228,6 +231,7 @@
 		552523AB4B9EC81EE47BDCA4 /* Evidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Evidence.swift; sourceTree = "<group>"; };
 		555658DD05F52459D277E381 /* AttentionRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRanker.swift; sourceTree = "<group>"; };
 		5587E58231B932929ED7D363 /* NotificationRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationRoute.swift; sourceTree = "<group>"; };
+		5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRepository.swift; sourceTree = "<group>"; };
 		5AC60A407B712E2D8B24B111 /* WorkItemRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemRepository.swift; sourceTree = "<group>"; };
 		5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimitTests.swift; sourceTree = "<group>"; };
 		5C534F0A690622733E79B291 /* Triage.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Triage.entitlements; sourceTree = "<group>"; };
@@ -580,6 +584,7 @@
 				C80EB94E267D82037DB5FBBC /* AccountRepository.swift */,
 				B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */,
 				94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */,
+				5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */,
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
@@ -625,6 +630,7 @@
 			children = (
 				77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */,
 				E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */,
+				252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */,
 				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
 				BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */,
@@ -846,6 +852,7 @@
 				795B2C23261A97E506E9C357 /* CopilotHelperClientTests.swift in Sources */,
 				F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */,
 				DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */,
+				364AF9C5BE29D893800B3C8A /* CoverageRepositoryTests.swift in Sources */,
 				54DFA6EA6877C636EB142DB3 /* CredentialLifecycleTests.swift in Sources */,
 				B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */,
 				F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */,
@@ -921,6 +928,7 @@
 				2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */,
 				1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */,
 				DEAAD030D292A062B542AE1F /* CoverageEvaluator.swift in Sources */,
+				373594353CB0240CB731F891 /* CoverageRepository.swift in Sources */,
 				3ABE0BAEB34FB0FC696F7351 /* CredentialLifecycle.swift in Sources */,
 				7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */,
 				1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */,

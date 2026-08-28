@@ -826,6 +826,18 @@ enum TriageDatabaseMigrator {
                     PRIMARY KEY (account_id, capability)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "019-coverage-scope-index",
+            checksum: "1c7ac6e9ab0875da22db9348e75cf4f3e5b76355e837d177c393f955fa1fdf36"
+        ) { database in
+            try database.execute(sql: """
+                CREATE INDEX coverage_records_current_scope
+                ON coverage_records (
+                    account_id, organization_id, feature, stream_id, repository_id,
+                    credential_revision, capability_revision, interval_start_ms, interval_end_ms
+                )
+                """)
         }
     ]
 }
