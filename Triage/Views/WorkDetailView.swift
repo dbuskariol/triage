@@ -2,6 +2,7 @@ import SwiftUI
 
 struct WorkDetailView: View {
     let item: WorkItem?
+    @State private var showsInspector = false
 
     var body: some View {
         Group {
@@ -54,6 +55,65 @@ struct WorkDetailView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    showsInspector.toggle()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.right")
+                }
+                .help("Show Inspector")
+            }
+        }
+        .inspector(isPresented: $showsInspector) {
+            if let item {
+                WorkInspectorView(item: item)
+            }
+        }
+    }
+
+    private struct WorkInspectorView: View {
+        let item: WorkItem
+
+        var body: some View {
+            Form {
+                Section("Triage") {
+                    LabeledContent("Status", value: item.workflow.status.rawValue.capitalized)
+                    LabeledContent("Priority", value: priorityTitle)
+                    if item.workflow.isPinned {
+                        Label("Pinned", systemImage: "pin.fill")
+                    }
+                    if let snoozedUntil = item.workflow.snoozedUntil {
+                        LabeledContent("Snoozed until", value: snoozedUntil.formatted())
+                    }
+                    if let followUpAt = item.workflow.followUpAt {
+                        LabeledContent("Follow up", value: followUpAt.formatted())
+                    }
+                }
+                if !item.attentionReasons.isEmpty {
+                    Section("Evidence") {
+                        ForEach(item.attentionReasons) { reason in
+                            Text(reason.title)
+                        }
+                    }
+                }
+                Section {
+                    Text("Triage status is stored locally and does not change GitHub.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Inspector")
+        }
+
+        private var priorityTitle: String {
+            switch item.workflow.priority {
+            case .low: "Low"
+            case .normal: "Normal"
+            case .high: "High"
+            }
+        }
     }
 
     private var sourceSymbol: String {
