@@ -10,6 +10,22 @@ extension TriageIdentifier {
     var description: String {
         rawValue
     }
+
+    init(from decoder: Decoder) throws {
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        guard let identifier = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: try decoder.singleValueContainer(),
+                debugDescription: "Invalid Triage identifier."
+            )
+        }
+        self = identifier
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 private func isValidIdentifier(_ value: String) -> Bool {
