@@ -2,45 +2,61 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var appModel: TriageAppModel
 
     var body: some View {
-        NavigationSplitView {
-            AppSidebar(selection: $navigation.section)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
-        } detail: {
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if appModel.hasConnectedAccount {
+            NavigationSplitView {
+                AppSidebar(selection: $navigation.section)
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
+            } detail: {
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .navigationSplitViewStyle(.balanced)
+        } else {
+            OnboardingView()
         }
-        .navigationSplitViewStyle(.balanced)
     }
 
     @ViewBuilder
     private var detail: some View {
         switch navigation.section {
-        case .overview:
-            EmptyWorkspaceView()
-        case .settings:
-            SettingsView()
+        case .inbox, .myWork, .reviews, .waiting, .snoozed, .allWork:
+            WorkListPlaceholder(section: navigation.section)
         }
     }
 }
 
-private struct EmptyWorkspaceView: View {
+private struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "square.stack.3d.up")
                 .font(.system(size: 46, weight: .light))
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
-            Text("Triage")
+            Text("Connect GitHub")
                 .font(.largeTitle.weight(.bold))
-            Text("Ready for its product definition.")
+            Text("Connect a GitHub account to build your organization-scoped work inbox.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("Overview")
+        .navigationTitle("Triage")
+    }
+}
+
+private struct WorkListPlaceholder: View {
+    let section: AppSection
+
+    var body: some View {
+        ContentUnavailableView(
+            section.title,
+            systemImage: section.systemImage,
+            description: Text("Triage will show synchronized GitHub work here.")
+        )
+        .navigationTitle(section.title)
     }
 }
 
@@ -50,19 +66,13 @@ private struct AppSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 3) {
-                ForEach(AppSection.allCases.filter { $0 != .settings }) { section in
+                ForEach(AppSection.allCases) { section in
                     sidebarButton(section)
                 }
             }
             .padding(.horizontal, 9)
             .padding(.top, 8)
-
             Spacer(minLength: 12)
-
-            Divider()
-            sidebarButton(.settings)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 9)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
