@@ -18,7 +18,8 @@ actor AccountRepository {
                 database,
                 sql: """
                     SELECT id, github_user_id, github_node_id, login, display_name, avatar_url,
-                           authentication_kind, credential_id, credential_status, created_at_ms, last_validated_at_ms
+                           authentication_kind, credential_id, credential_status, access_token_expires_at_ms,
+                           refresh_token_expires_at_ms, created_at_ms, last_validated_at_ms
                     FROM accounts
                     WHERE disabled_at_ms IS NULL
                     ORDER BY created_at_ms
@@ -53,8 +54,8 @@ actor AccountRepository {
                     INSERT INTO accounts (
                         id, github_user_id, github_node_id, login, display_name, avatar_url,
                         authentication_kind, credential_id, credential_status, credential_revision,
-                        created_at_ms, last_validated_at_ms, disabled_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        access_token_expires_at_ms, refresh_token_expires_at_ms, created_at_ms, last_validated_at_ms, disabled_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     ON CONFLICT(id) DO UPDATE SET
                         github_user_id = excluded.github_user_id,
                         github_node_id = excluded.github_node_id,
@@ -65,6 +66,8 @@ actor AccountRepository {
                         credential_id = excluded.credential_id,
                         credential_status = excluded.credential_status,
                         credential_revision = excluded.credential_revision,
+                        access_token_expires_at_ms = excluded.access_token_expires_at_ms,
+                        refresh_token_expires_at_ms = excluded.refresh_token_expires_at_ms,
                         last_validated_at_ms = excluded.last_validated_at_ms,
                         disabled_at_ms = NULL
                     """,
@@ -79,6 +82,8 @@ actor AccountRepository {
                     account.credentialID.rawValue,
                     account.credentialStatus.rawValue,
                     credentialRevision.rawValue,
+                    account.accessTokenExpiresAt.map(Self.milliseconds),
+                    account.refreshTokenExpiresAt.map(Self.milliseconds),
                     createdAt,
                     lastValidatedAt
                 ]
@@ -246,6 +251,8 @@ actor AccountRepository {
             authenticationKind: authenticationKind,
             credentialID: credentialID,
             credentialStatus: credentialStatus,
+            accessTokenExpiresAt: date(milliseconds: row["access_token_expires_at_ms"]),
+            refreshTokenExpiresAt: date(milliseconds: row["refresh_token_expires_at_ms"]),
             createdAt: createdAt,
             lastValidatedAt: date(milliseconds: row["last_validated_at_ms"])
         )
