@@ -3,6 +3,23 @@ import Foundation
 struct CoverageRequirement: Sendable {
     let feature: CoverageFeature
     let repositoryID: RepositoryID?
+    let streamID: SyncStreamID
+    let intervalStart: Date?
+    let intervalEnd: Date?
+
+    init(
+        feature: CoverageFeature,
+        repositoryID: RepositoryID?,
+        streamID: SyncStreamID,
+        intervalStart: Date? = nil,
+        intervalEnd: Date? = nil
+    ) {
+        self.feature = feature
+        self.repositoryID = repositoryID
+        self.streamID = streamID
+        self.intervalStart = intervalStart
+        self.intervalEnd = intervalEnd
+    }
 }
 
 struct CoverageEvaluation: Sendable {
@@ -31,8 +48,10 @@ struct CoverageEvaluator: Sendable {
                     && $0.organizationID == organizationID
                     && $0.repositoryID == requirement.repositoryID
                     && $0.feature == requirement.feature
+                    && $0.streamID == requirement.streamID
                     && $0.credentialRevision == credentialRevision
                     && $0.capabilityRevision == capabilityRevision
+                    && Self.covers(record: $0, requirement: requirement)
             }
             guard let record = matching.max(by: { ($0.lastSuccessfulAt ?? .distantPast) < ($1.lastSuccessfulAt ?? .distantPast) }) else {
                 missing.append(requirement)
@@ -65,5 +84,21 @@ struct CoverageEvaluator: Sendable {
             ),
             missing: missing
         )
+    }
+
+    private static func covers(record: CoverageRecord, requirement: CoverageRequirement) -> Bool {
+        switch (
+            record.intervalStart,
+            record.intervalEnd,
+            requirement.intervalStart,
+            requirement.intervalEnd
+        ) {
+        case (nil, nil, nil, nil):
+            true
+        case let (recordStart?, recordEnd?, requirementStart?, requirementEnd?):
+            recordStart <= requirementStart && recordEnd >= requirementEnd
+        default:
+            false
+        }
     }
 }
