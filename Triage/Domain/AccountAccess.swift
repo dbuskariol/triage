@@ -168,6 +168,33 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
             lastValidatedAt: lastValidatedAt
         )
     }
+
+    func replacingCredential(
+        credentialID: CredentialID,
+        login: String,
+        displayName: String?,
+        avatarURL: URL?,
+        accessTokenExpiresAt: Date?,
+        refreshTokenExpiresAt: Date?,
+        status: CredentialStatus,
+        validatedAt: Date
+    ) -> GitHubAccount {
+        GitHubAccount(
+            id: id,
+            githubUserID: githubUserID,
+            nodeID: nodeID,
+            login: login,
+            displayName: displayName,
+            avatarURL: avatarURL,
+            authenticationKind: authenticationKind,
+            credentialID: credentialID,
+            credentialStatus: status,
+            accessTokenExpiresAt: accessTokenExpiresAt,
+            refreshTokenExpiresAt: refreshTokenExpiresAt,
+            createdAt: createdAt,
+            lastValidatedAt: validatedAt
+        )
+    }
 }
 
 struct GitHubOrganization: Codable, Equatable, Sendable, Identifiable {
