@@ -797,6 +797,10 @@ Every normalized feature has a committed source contract recording:
 - normalization owner;
 - coverage effect on failure.
 
+The concrete contracts for currently supported and intentionally unavailable
+features are maintained in
+[`GITHUB_FEATURE_CONTRACTS.md`](GITHUB_FEATURE_CONTRACTS.md).
+
 GraphQL batch size is adaptive. The planner begins with a conservative batch,
 records actual query cost and decoded payload size, and shrinks or grows within
 hard bounds. Timeline, review-thread, Project-item, and discussion connections

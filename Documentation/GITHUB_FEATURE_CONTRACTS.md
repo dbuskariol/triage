@@ -1,0 +1,88 @@
+# GitHub feature source contracts
+
+This document is the committed source contract for every feature that Triage
+normalizes from GitHub. `IMPLEMENTATION_PLAN.md` remains the product contract.
+Synchronizers must implement these contracts exactly or leave the affected
+coverage incomplete. They must not substitute a broader endpoint, a mutation,
+or an undocumented fallback.
+
+## Shared transport rules
+
+All REST sources use an authenticated `GET`, GitHub API version headers, and
+the `Link` header for pagination. When GitHub returns an `ETag`, the next
+incremental request sends `If-None-Match`; a `304` records a successful,
+unchanged interval. REST cursor overlap is five minutes, except the discovery
+searches defined below. REST page and GraphQL connection limits are 100 and
+50 respectively unless a contract states otherwise.
+
+All GraphQL documents must be committed under
+`Triage/GitHub/GraphQL/GitHubGraphQLQueries.swift`, use a named `query`
+operation, and include `rateLimit { cost remaining resetAt }`. A document is
+rejected if it contains `mutation`. Node hydration begins at 25 IDs and may
+grow to 50 only after the observed cost and decoded payload remain under the
+limits below. Timeline, review-thread, Project-item, and Discussion
+connections are independently paginated; they are never deeply nested in node
+hydration.
+
+OAuth scopes are minimum grants, not a claim that a resource is visible.
+Fine-grained token permissions apply to the selected resource owner and are
+still subject to organization approval and SSO. Classic PATs use the same
+OAuth-scope column; they cannot authenticate Copilot. A permission, SSO,
+approval, rate-limit, malformed-payload, or incomplete-result failure always
+records incomplete coverage for the named feature and interval. It never
+produces an empty or complete inbox.
+
+| Contract term | Rule |
+| --- | --- |
+| Cached raw payload | Store only encrypted, bounded snapshots with endpoint/query name, immutable object ID, ETag, parser version, and fetch timestamp. |
+| REST budget | Maximum 100 objects per page and 2 MiB decoded response. |
+| GraphQL budget | Maximum 50 hydrated nodes, 500 points, and 4 MiB decoded response per request. Shrink the next batch after exceeding either threshold. |
+| Failure fallback | A fallback may provide discovery evidence only unless explicitly marked authoritative. It cannot overwrite authoritative normalized data. |
+| Coverage owner | Records account, organization, repository where applicable, feature, stream, interval, credential revision, capability revision, result, and failure. |
+
+## Identity and inventory
+
+| Feature | Authoritative source and normalizer | Minimum access | Pagination and incremental strategy | ETag / budget | Fallback and coverage on failure |
+| --- | --- | --- | --- | --- | --- |
+| Authenticated identity | `GET /user`; `GitHubIdentityClient.authenticatedUser` | OAuth `repo read:org`; fine-grained token valid for its owner | None; validate at sign-in, replacement, and daily active-account probe | ETag if provided; 256 KiB | None. Invalid identity marks the credential revoked; no account profile is overwritten. |
+| Organization visibility | `GET /user/orgs`; `GitHubIdentityClient.organizations` | OAuth/classic `read:org`; fine-grained owner selected manually | `Link`; full list after sign-in, then daily | ETag; 1 MiB | Fine-grained PAT uses `GET /orgs/{org}`. Empty `/user/orgs` is not negative evidence. Failure leaves organization visibility incomplete. |
+| Selected organization | `GET /orgs/{org}`; `GitHubIdentityClient.organization` | OAuth/classic `read:org`; fine-grained organization Metadata read | None; probe after selection, token replacement, and SSO return | ETag; 256 KiB | None. SSO or approval failure blocks only this organization. |
+| Repository inventory and private visibility | `GET /orgs/{org}/repos?type=all`; `GitHubIdentityClient.allRepositories` | OAuth/classic `repo`; fine-grained Metadata read on included repositories | `Link`; five-minute overlap, daily full reconciliation | ETag; 2 MiB/page | No fallback. An empty result is authoritative only after all pages succeed; otherwise repository and private-repository coverage are incomplete. |
+| Team visibility | `GET /orgs/{org}/teams` and member endpoints, committed before use | OAuth/classic `read:org`; fine-grained organization Members read when GitHub permits | `Link`; daily, with five-minute overlap | ETag; 2 MiB/page | None. Hidden membership remains unknown; mention coverage must not claim complete team resolution. |
+
+## Work discovery and current fields
+
+| Feature | Authoritative source and normalizer | Minimum access | Pagination and incremental strategy | ETag / budget | Fallback and coverage on failure |
+| --- | --- | --- | --- | --- | --- |
+| Issue and pull request discovery | `GET /search/issues`; `GitHubIssueSearchClient`, then `GitHubSearchNormalizer` | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | REST page numbers. Partition each relationship into open plus closed/merged in the preceding 90 days. Snapshot time before search; bisect updated ranges when a shard is incomplete or reaches the result cap. | Search ETags when supplied; 100 results/page, 30 requests/minute search budget | Repository/time-range shards may replace a too-large organization shard. Notifications are discovery evidence only. Any unresolved shard leaves issue/PR search coverage incomplete. |
+| Current issue and PR fields | `TriageHydrateNodes` GraphQL query; `GitHubGraphQLQueries.hydrateNodes`, then node normalizer | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | `nodes(ids:)`; 25-50 IDs, five-minute updated-at overlap | No ETag; 500 points / 4 MiB | REST search supplies candidate identity only. Missing node, partial GraphQL error, or query budget exhaustion leaves the field and repository coverage incomplete. |
+| Private repository membership | Repository inventory plus hydrated `Repository.isPrivate` | Same as repository inventory | Same inventory/reconciliation cadence | Inventory budget | No fallback. A hidden repository is inaccessible, not absent. |
+| Issue timeline | `GET /repos/{owner}/{repo}/issues/{number}/timeline`; `GitHubTimelineClient`, then `GitHubTimelineNormalizer` | OAuth/classic `repo`; fine-grained Issues read or Pull requests read | `Link`; first page on candidate update, then continue from durable page cursor | ETag; 2 MiB/page | None. Timeline events are REST-authoritative; a failure downgrades only timeline coverage. |
+| Pull request review history | `GET /repos/{owner}/{repo}/pulls/{number}/reviews`; `GitHubPullRequestClient.reviews` | OAuth/classic `repo`; fine-grained Pull requests read | `Link`; full first load, then five-minute overlap | ETag; 2 MiB/page | None. Failure leaves review-history coverage incomplete. |
+| Requested reviewers | `GET /repos/{owner}/{repo}/pulls/{number}/requested_reviewers`; `GitHubPullRequestClient.requestedReviewers` | OAuth/classic `repo`; fine-grained Pull requests read | None; fetch after candidate or PR update | ETag; 256 KiB | GraphQL `reviewRequests` corroborates but cannot silently disagree. A disagreement records partial review coverage. |
+| Review threads and comments | A committed, independently paginated GraphQL query before use | OAuth/classic `repo`; fine-grained Pull requests read | Cursor per PR review-thread connection, five-minute overlap | 500 points / 4 MiB | None. This feature stays unknown until the document exists; it must not be inferred from review summaries. |
+
+## Context features
+
+| Feature | Authoritative source and normalizer | Minimum access | Pagination and incremental strategy | ETag / budget | Fallback and coverage on failure |
+| --- | --- | --- | --- | --- | --- |
+| Discussions | A committed GraphQL Discussion query before use | OAuth/classic `repo`; fine-grained Discussions read | Cursor per repository and Discussion connection; five-minute overlap | 500 points / 4 MiB | None. The feature is unavailable until a committed query exists; issues and comments are not a substitute. |
+| Projects V2 and fields | A committed GraphQL Project V2 inventory and item/field query before use | OAuth/classic `repo read:org`; fine-grained Projects read for the owner | Cursor per project and item/field connection; five-minute overlap | 500 points / 4 MiB | None. The feature is unavailable until committed query documents exist. Partial unions downgrade only the affected project fields. |
+| Notifications | `GET /notifications`; normalizer records discovery evidence only | OAuth/classic `notifications`; fine-grained notifications access when available | `Link`; ETag-driven polling | ETag; 2 MiB/page | No content fallback. Notification state never authoritatively changes GitHub content or local unread workflow state. |
+
+## Copilot capability contracts
+
+| Feature | Source and authority | Minimum access | Coverage and failure behavior |
+| --- | --- | --- | --- |
+| Copilot entitlement | Approved, signed, bundled Copilot runtime through the narrow XPC bridge | Separate explicit Copilot sign-in matching the selected GitHub identity. OAuth and fine-grained PAT credentials may be passed ephemerally only after consent; classic PATs are never passed. | The runtime is currently unavailable by contract because no approved redistributable artifact and signing identity are provisioned. Capability remains unavailable; no ambient CLI, download, or unsigned runtime is a fallback. |
+| Copilot model list | Same approved runtime | Same as entitlement | Model list failure leaves AI unavailable and never affects deterministic inbox coverage or ranking. |
+
+## Contract change rules
+
+1. Add or revise a source contract in the same commit as its client, query
+   document, normalizer, coverage handling, and fixture tests.
+2. Append a new query document rather than accepting caller-supplied GraphQL.
+3. Preserve raw snapshots and normalized data when a new parser fails; record
+   parser version and a redacted diagnostic.
+4. Treat a GitHub access error as scoped evidence. Do not disable another
+   account, organization, repository, or feature because one contract failed.
