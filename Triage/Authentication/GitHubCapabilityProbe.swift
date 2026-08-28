@@ -1,5 +1,9 @@
 import Foundation
 
+enum GitHubCapabilityProbeError: Error, Equatable, Sendable {
+    case organizationIdentityMismatch
+}
+
 struct OrganizationProbeResult: Sendable {
     let organization: GitHubOrganizationDTO?
     let repositories: [GitHubRepositoryDTO]
@@ -20,12 +24,20 @@ actor GitHubCapabilityProbe {
         self.clock = clock
     }
 
-    func probe(organizationLogin: String) async throws -> OrganizationProbeResult {
+    func probe(organization: GitHubOrganization) async throws -> OrganizationProbeResult {
         let checkedAt = clock()
         do {
-            let organizationResponse = try await identityClient.organization(named: organizationLogin)
-            let repositoriesPage = try await identityClient.repositories(in: organizationLogin)
-            let ssoHeader = organizationResponse.ssoHeader ?? repositoriesPage.ssoHeader
+            let organizationResponse = try await identityClient.organization(named: organization.login)
+            guard organizationResponse.value.id == organization.githubOrganizationID,
+                  organizationResponse.value.nodeID == organization.nodeID.rawValue
+            else {
+                throw GitHubCapabilityProbeError.organizationIdentityMismatch
+            }
+            let repositoriesPage = try await identityClient.repositories(in: organization.login)
+            let ssoHeader = scopedSSOHeader(
+                organizationResponse.ssoHeader ?? repositoriesPage.ssoHeader,
+                organization: organization
+            )
             let state = OrganizationAccessEvaluator.state(
                 statusCode: 200,
                 ssoHeader: ssoHeader
@@ -58,6 +70,19 @@ actor GitHubCapabilityProbe {
                 )
             )
         }
+    }
+
+    private func scopedSSOHeader(
+        _ header: GitHubSSOHeader?,
+        organization: GitHubOrganization
+    ) -> GitHubSSOHeader? {
+        guard case let .partialResults(organizationIDs)? = header else {
+            return header
+        }
+        guard organizationIDs.contains(organization.githubOrganizationID) else {
+            return nil
+        }
+        return .partialResults([organization.githubOrganizationID])
     }
 
     private func capabilities(

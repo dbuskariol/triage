@@ -34,7 +34,7 @@ struct RootView: View {
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
                 Task {
-                    await appModel.refreshSelectedOrganization()
+                    await appModel.recheckSelectedOrganizationAccess()
                 }
             }
         } else {
