@@ -23,6 +23,9 @@ actor WorkRelationRepository {
         accountID: AccountID,
         subjectNodeID: GitHubNodeID
     ) async throws {
+        guard accountID == vault.accountID else {
+            throw WorkRelationRepositoryError.accountScopeMismatch
+        }
         guard Set(relations.map(\.subjectNodeID)).isSubset(of: [subjectNodeID]) else {
             throw WorkRelationRepositoryError.subjectScopeMismatch
         }
