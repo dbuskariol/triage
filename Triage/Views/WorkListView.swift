@@ -29,10 +29,20 @@ struct WorkListView: View {
                     .controlSize(.small)
                     .padding(8)
             } else if let refreshError = appModel.refreshError {
-                Text(refreshError)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(8)
+                HStack(spacing: 10) {
+                    Text(refreshError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let header = appModel.ssoAuthorizationHeader,
+                       case .authorizationRequired = header
+                    {
+                        Button("Authorize in Browser") {
+                            _ = SSOAuthorizationCoordinator().authorizeInBrowser(header)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
             }
         }
     }
