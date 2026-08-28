@@ -58,7 +58,7 @@ final class GitHubIdentityClientTests: XCTestCase {
     func testRepositoryInventoryRetainsSSOHeadersAcrossPages() async throws {
         let secondPage = URL(string: "https://api.github.com/orgs/acme/repos?page=2")!
         let repository = """
-        {"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,
+        {"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,"has_discussions":true,
         "html_url":"https://github.com/acme/one","updated_at":"2025-01-01T00:00:00Z",
         "owner":{"login":"acme"}}
         """
@@ -84,7 +84,28 @@ final class GitHubIdentityClientTests: XCTestCase {
         let inventory = try await GitHubIdentityClient(client: client).allRepositories(in: "acme")
 
         XCTAssertEqual(inventory.repositories.map(\.nodeID), ["R_1", "R_2"])
+        XCTAssertTrue(inventory.repositories.allSatisfy { $0.hasDiscussions == true })
         XCTAssertEqual(inventory.ssoHeader, .partialResults(Set([1, 2])))
+    }
+
+    func testRepositoryInventoryAcceptsAnOmittedDiscussionsField() async throws {
+        let repository = """
+        [{"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,
+        "html_url":"https://github.com/acme/one","updated_at":"2025-01-01T00:00:00Z",
+        "owner":{"login":"acme"}}]
+        """
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/orgs/acme/repos?type=all&per_page=100": (Data(repository.utf8), [:])
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let inventory = try await GitHubIdentityClient(client: client).allRepositories(in: "acme")
+
+        XCTAssertEqual(inventory.repositories.map(\.hasDiscussions), [nil])
     }
 }
 
