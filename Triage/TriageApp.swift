@@ -6,6 +6,7 @@ struct TriageApp: App {
     @StateObject private var appModel = TriageAppModel()
     @StateObject private var preferences = AppPreferences()
     @StateObject private var softwareUpdates = SoftwareUpdateController()
+    private let notificationScheduler = UserNotificationCenterScheduler()
 
     var body: some Scene {
         Window("Triage", id: "main") {
@@ -17,6 +18,7 @@ struct TriageApp: App {
                 .frame(minWidth: 940, minHeight: 680)
                 .task {
                     await appModel.restoreAccounts()
+                    await notificationScheduler.registerLocalActions()
                 }
         }
         .defaultSize(width: 1080, height: 760)
