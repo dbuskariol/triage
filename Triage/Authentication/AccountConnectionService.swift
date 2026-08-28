@@ -4,6 +4,11 @@ enum AccountConnectionError: Error, Equatable, Sendable {
     case invalidGitHubIdentity
 }
 
+struct AccountConnectionResult: Sendable {
+    let account: GitHubAccount
+    let organizations: [GitHubOrganization]
+}
+
 actor AccountConnectionService {
     private let brokerURL: URL
     private let secretStore: KeychainSecretStore
@@ -21,7 +26,7 @@ actor AccountConnectionService {
 
     func connectOAuth(
         exchangeRequest: AuthBrokerExchangeRequest
-    ) async throws -> GitHubAccount {
+    ) async throws -> AccountConnectionResult {
         let broker = try AuthBrokerClient(baseURL: brokerURL)
         let tokenResponse = try await broker.exchange(exchangeRequest)
         return try await establishAccount(
@@ -31,7 +36,7 @@ actor AccountConnectionService {
         )
     }
 
-    func connect(personalAccessToken: PersonalAccessToken) async throws -> GitHubAccount {
+    func connect(personalAccessToken: PersonalAccessToken) async throws -> AccountConnectionResult {
         try await establishAccount(
             accessToken: personalAccessToken.value,
             refreshToken: nil,
@@ -43,7 +48,7 @@ actor AccountConnectionService {
         accessToken: SecretValue,
         refreshToken: SecretValue?,
         authenticationKind: AuthenticationKind
-    ) async throws -> GitHubAccount {
+    ) async throws -> AccountConnectionResult {
         let transport = try GitHubRESTTransport()
         let client = GitHubRESTClient(transport: transport, credential: accessToken)
         let user = try await GitHubIdentityClient(client: client).authenticatedUser().value
@@ -91,7 +96,8 @@ actor AccountConnectionService {
                     credentialID: credentialID
                 )
             }
-            try await AccountRepository(vault: vault).save(
+            let repository = AccountRepository(vault: vault)
+            try await repository.save(
                 account,
                 credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
             )
@@ -100,6 +106,41 @@ actor AccountConnectionService {
             try await vaultRegistry.remove(accountID: accountID)
             throw error
         }
-        return account
+        let repository = AccountRepository(vault: vault)
+        let organizationPage = try await GitHubIdentityClient(client: client).organizations()
+        let accessState = OrganizationAccessEvaluator.state(
+            statusCode: 200,
+            ssoHeader: organizationPage.ssoHeader
+        )
+        let organizations = try organizationPage.values.map { dto in
+            guard let nodeID = GitHubNodeID(rawValue: dto.nodeID),
+                  let organizationID = OrganizationID(rawValue: dto.nodeID)
+            else {
+                throw AccountConnectionError.invalidGitHubIdentity
+            }
+            return GitHubOrganization(
+                id: organizationID,
+                githubOrganizationID: dto.id,
+                nodeID: nodeID,
+                login: dto.login,
+                avatarURL: dto.avatarURL
+            )
+        }
+        for organization in organizations {
+            try await repository.save(
+                organization,
+                access: OrganizationAccess(
+                    accountID: account.id,
+                    organizationID: organization.id,
+                    state: accessState,
+                    capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
+                    capabilities: GitHubCapability.allCases.map {
+                        CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
+                    },
+                    checkedAt: now
+                )
+            )
+        }
+        return AccountConnectionResult(account: account, organizations: organizations)
     }
 }
