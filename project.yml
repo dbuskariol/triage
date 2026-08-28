@@ -51,6 +51,9 @@ targets:
         product: GRDB
       - package: Sparkle
         product: Sparkle
+      - target: TriageCopilotXPC
+        embed: true
+        codeSign: true
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -64,10 +67,30 @@ targets:
         PRODUCT_NAME: Triage
         SKIP_INSTALL: NO
         TRIAGE_AUTH_BROKER_URL: ""
+        TRIAGE_DEVELOPMENT_TEAM: ""
         TRIAGE_GITHUB_OAUTH_CLIENT_ID: ""
       configs:
         Debug:
           CODE_SIGN_ENTITLEMENTS: Triage/TriageDebug.entitlements
+
+  TriageCopilotXPC:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - TriageCopilotXPC
+      - Triage/CopilotXPC/CopilotXPCInterface.swift
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: TriageCopilotXPC/TriageCopilotXPC.entitlements
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Configuration/TriageCopilotXPC-Info.plist
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @loader_path/../Frameworks"
+        MARKETING_VERSION: 0.1.0
+        PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.TriageCopilotXPC
+        PRODUCT_NAME: TriageCopilotXPC
+        SKIP_INSTALL: YES
+        TRIAGE_DEVELOPMENT_TEAM: ""
 
   TriageTests:
     type: bundle.unit-test

@@ -14,6 +14,8 @@ done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/Triage-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/Triage.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/TriageDebug.entitlements" >/dev/null
+/usr/bin/plutil -lint "$ROOT_DIR/Configuration/TriageCopilotXPC-Info.plist" >/dev/null
+/usr/bin/plutil -lint "$ROOT_DIR/TriageCopilotXPC/TriageCopilotXPC.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/PrivacyInfo.xcprivacy" >/dev/null
 /bin/bash "$ROOT_DIR/scripts/verify-vendored-dependencies.sh" >/dev/null
 /usr/bin/grep -Fq '"revision" : "b6496a74a087257ef5e6da1c5b29a447a60f5bd7"' \
@@ -53,6 +55,12 @@ INFO="$UNSIGNED_APP/Contents/Info.plist"
   || triage_fail 'CI release has an unexpected Sparkle feed URL'
 [[ -f "$UNSIGNED_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
   || triage_fail 'CI release is missing Sparkle'
+XPC_SERVICE="$UNSIGNED_APP/Contents/XPCServices/TriageCopilotXPC.xpc"
+[[ -d "$XPC_SERVICE" ]] || triage_fail 'CI release is missing the Copilot XPC service'
+[[ "$(triage_plist_value CFBundleIdentifier "$XPC_SERVICE/Contents/Info.plist")" == "com.triage.mac.TriageCopilotXPC" ]] \
+  || triage_fail 'CI release has an unexpected Copilot XPC service bundle identifier'
+[[ -x "$XPC_SERVICE/Contents/MacOS/TriageCopilotXPC" ]] \
+  || triage_fail 'CI release is missing the Copilot XPC service executable'
 PRIVACY_MANIFEST="$UNSIGNED_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 [[ -f "$PRIVACY_MANIFEST" ]] || triage_fail 'CI release is missing its privacy manifest'
 /usr/bin/plutil -lint "$PRIVACY_MANIFEST" >/dev/null \

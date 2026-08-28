@@ -15,13 +15,6 @@ actor CopilotHelperClient: TriageCopilotHelping {
     self.transport = transport
   }
 
-  init(
-    configuration: CopilotHelperLaunchConfiguration,
-    launcher: any CopilotHelperLaunching
-  ) throws {
-    transport = try launcher.launch(configuration: configuration)
-  }
-
   func health(_ request: CopilotHealthRequest) async throws -> CopilotHealthResponse {
     let response: CopilotHealthResponse = try await exchange(
       request,

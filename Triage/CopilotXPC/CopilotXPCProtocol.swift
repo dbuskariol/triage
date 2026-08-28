@@ -1,16 +1,5 @@
 import Foundation
 
-/// The only Objective-C-compatible interface exposed by the future XPC service.
-///
-/// Requests and responses are length-framed JSON values. The service must reject
-/// malformed frames before passing their payload to the helper.
-@objc protocol TriageCopilotHelper {
-  func exchange(
-    frame: Data,
-    withReply reply: @escaping @Sendable (Data?, NSError?) -> Void
-  )
-}
-
 protocol CopilotXPCFrameService: Sendable {
   func exchange(frame: Data) async throws -> Data
   func invalidate() async

@@ -16,20 +16,20 @@
 		095C080692A931BDA8F343CF /* GitHubCapabilityProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D82D7463B2C1544D108FD85 /* GitHubCapabilityProbeTests.swift */; };
 		09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */; };
 		09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */; };
-		10451BCA98F276AF8D00B5DE /* CopilotHelperLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
 		13C8FC70DF7C592EB8A6C77B /* GitHubSearchNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F32706B4C1639BD3AF5059 /* GitHubSearchNormalizer.swift */; };
 		16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91A7C6DA1A31930721EEB27 /* RefreshCadenceTests.swift */; };
 		16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13285F293338CA8A4716B490 /* AccountVault.swift */; };
 		16DB25B5871A2929DF7DBEDF /* CopilotXPCPackaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */; };
-		19641C6C946F40E347D14500 /* CopilotProcessTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */; };
 		1B2B5B7A986EB0FB38A5C63C /* AccountRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */; };
 		1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = D988495C37A78AEED9B566A4 /* Identifiers.swift */; };
 		1C47CF39998DDA448A8E4E35 /* OrganizationWorkRefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9211301543573F5417B2F76A /* OrganizationWorkRefreshService.swift */; };
 		1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */; };
+		1CD6C3FFBC1ED71A40025FE5 /* TriageCopilotXPCService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 856FB30E15E2FA4A641E07DE /* TriageCopilotXPCService.swift */; };
 		1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 552523AB4B9EC81EE47BDCA4 /* Evidence.swift */; };
 		1FE6E7920216631C2D7E98CE /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 6946314899C158B0508FF5F7 /* GRDB */; };
 		20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE3D67A0FFC1AA8377EEE54A /* RefreshCadence.swift */; };
+		23223F01D8B92B7392253D78 /* TriageCopilotXPC.xpc in CopyFiles */ = {isa = PBXBuildFile; fileRef = 1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		296A723D11E2B61AF6895EA0 /* AccountCredentialReplacementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70C78FBE1F94059E1A646A17 /* AccountCredentialReplacementTests.swift */; };
 		2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E96AD1DA22601AF8EDA9993 /* NotificationActions.swift */; };
 		2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */; };
@@ -47,6 +47,7 @@
 		3C4263CB0773B9F3BF689934 /* WorkListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E57B347714FC4EB7CDE4693D /* WorkListView.swift */; };
 		3C78FA216FA70BB26E87F03E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8D6771CB3C835C681DA66152 /* Assets.xcassets */; };
 		3CE6D5F4FFFBBABB738F0A61 /* NotificationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AC3286A215E6FDEF8BA3B38 /* NotificationPolicy.swift */; };
+		40401FB69538105A05F50C8A /* TriageCopilotXPCListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */; };
 		40EFEDABCE3F6230EF21FE84 /* GitHubDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */; };
 		427601B0808349E815508769 /* AttentionReasonRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */; };
 		440D552512831BFF25F93150 /* WorkflowRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FA4EF715587B009499705BF /* WorkflowRepository.swift */; };
@@ -80,6 +81,7 @@
 		733DA040ADF44EB3897070BD /* AccountAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBAB3808E2E9A40C8862FF2 /* AccountAccessTests.swift */; };
 		749DB6A555C110E9ABEF1BBB /* GitHubCapabilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */; };
 		76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9690060369E66769608BBCEA /* InboxEligibilityRule.swift */; };
+		764767AE6EE3DEB64351E121 /* CopilotFrameTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 810F7432BDAB1BF8E130F35A /* CopilotFrameTransport.swift */; };
 		7805CABD99AB794E944B137C /* AccountRestorationServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9543E49311E7209BFE245AA3 /* AccountRestorationServiceTests.swift */; };
 		781F02110648028D0D26D3D7 /* SafeGitHubMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64607083C4DDFE64BFE727B3 /* SafeGitHubMarkdown.swift */; };
 		795B2C23261A97E506E9C357 /* CopilotHelperClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */; };
@@ -96,6 +98,7 @@
 		84B1FA4D389DB3CD807B890A /* SearchRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */; };
 		85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */; };
 		86357AA1C2EBB572BA6406A5 /* GitHubPullRequestClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E87148F627E4D7DD0E97C8 /* GitHubPullRequestClient.swift */; };
+		86C27F2AEAD8B377C934DFB7 /* CopilotXPCInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */; };
 		8847C6650333DC454C4F1EF4 /* GitHubTimelineNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 646CA0E1200403E14E44E60B /* GitHubTimelineNormalizer.swift */; };
 		8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */; };
 		8B18CE60D3734E2B17BE6AEB /* GitHubTimelineNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F904F6D0D32CB06A9BBE9D /* GitHubTimelineNormalizerTests.swift */; };
@@ -111,6 +114,7 @@
 		A696AA9FA5238F725FB3DD90 /* AccountRestorationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DFB7BCAB1FBE80344E837D /* AccountRestorationService.swift */; };
 		A7ECCD19452B150C7E505B9E /* OrganizationInventoryRefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5392172535BCE1B1A04C9269 /* OrganizationInventoryRefreshService.swift */; };
 		A857938AD114BC7AA91103FC /* NotificationDedupeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC727EA2D14A866B0177DBC /* NotificationDedupeTests.swift */; };
+		A864239EB7212CD8B4839E1D /* CopilotXPCFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = E98F5372A9B97D56766FD587 /* CopilotXPCFrame.swift */; };
 		AEA644A0C9EB9AB5C811A120 /* CopilotHelperClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BA8D4FDAA949D3458861498 /* CopilotHelperClient.swift */; };
 		B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */; };
 		B1F960E9D911324B8BD316DF /* NotificationRouteAndActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2E16FE17B247D0B7395966 /* NotificationRouteAndActionTests.swift */; };
@@ -130,17 +134,21 @@
 		C11C2C6E9A86E94B57617D12 /* OrganizationSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */; };
 		C1854FAF46AE0265C1F5737C /* PullRequestAttentionRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */; };
 		C24B45C7B0B463638BFDF3E8 /* ConversationFollowUpRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */; };
+		C456BE7D94C6C310182F71F1 /* CopilotXPCCallerValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */; };
 		C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */; };
 		CA6F8228E24BBABC51E755C5 /* WaitingAttentionRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1405559965FD08B544B84AF9 /* WaitingAttentionRule.swift */; };
+		CB8977237CA5B88F54D6278D /* CopilotXPCInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */; };
 		CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3390D135CFE41477E727ECD /* AppMetadata.swift */; };
 		CDAD2EC9047B96D284A9DA34 /* WorkspacePresentationCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E21546AE5CC5019D47902242 /* WorkspacePresentationCacheTests.swift */; };
 		CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */; };
+		CEEEC7705769530CB940273C /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89EB0458B411E6A895FE992B /* main.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D38C1EAE0E08E4949CD0A275 /* GitHubTimelineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD21F7D30B3F293BD9A9E060 /* GitHubTimelineClient.swift */; };
 		D3C5CD82C67477E429553FFC /* SyncWatermark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
+		DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */; };
 		DB75C0414A7EF20F766048EA /* ActorRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
 		DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */; };
@@ -168,6 +176,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		3621F15346C78CBD27CBE064 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FEB5A19E7FAEE77CAC1D0551 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 82F24F16ECF5A4FE1EFC02F2;
+			remoteInfo = TriageCopilotXPC;
+		};
 		48B0717F858CACD557473097 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = FEB5A19E7FAEE77CAC1D0551 /* Project object */;
@@ -176,6 +191,19 @@
 			remoteInfo = Triage;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D8DCFB5113FABEAD15D1F15B /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				23223F01D8B92B7392253D78 /* TriageCopilotXPC.xpc in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRule.swift; sourceTree = "<group>"; };
@@ -201,6 +229,7 @@
 		16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchShardPlannerTests.swift; sourceTree = "<group>"; };
 		1CC47AE55CA5D1EEE6B4F120 /* CredentialLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLifecycleTests.swift; sourceTree = "<group>"; };
 		1E8AE2B35C2B7F989AD3A1E1 /* GitHubContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubContentTests.swift; sourceTree = "<group>"; };
+		1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = TriageCopilotXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 		21A864B722A778E85F99A052 /* ConversationFollowUpRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFollowUpRule.swift; sourceTree = "<group>"; };
 		229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubContent.swift; sourceTree = "<group>"; };
 		252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRepositoryTests.swift; sourceTree = "<group>"; };
@@ -223,6 +252,7 @@
 		4289A7065C7F8E2894DB41F1 /* TimelineRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRepository.swift; sourceTree = "<group>"; };
 		44B3E254AF248B70DFBBB696 /* SSOAuthorizationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinatorTests.swift; sourceTree = "<group>"; };
 		44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCPackaging.swift; sourceTree = "<group>"; };
+		4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCInterface.swift; sourceTree = "<group>"; };
 		473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCProtocol.swift; sourceTree = "<group>"; };
 		4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSecretStoreTests.swift; sourceTree = "<group>"; };
 		48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessTokenTests.swift; sourceTree = "<group>"; };
@@ -230,11 +260,13 @@
 		4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubGraphQLClient.swift; sourceTree = "<group>"; };
 		4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPCTests.swift; sourceTree = "<group>"; };
 		4C7B844F72450F775AFAA8EB /* ProgressAttentionRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressAttentionRuleTests.swift; sourceTree = "<group>"; };
+		4F41FC37AB834658D482AC5E /* TriageCopilotXPC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TriageCopilotXPC.entitlements; sourceTree = "<group>"; };
 		51CCBC527DBD7C20ECD99955 /* TriageApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageApp.swift; sourceTree = "<group>"; };
 		5392172535BCE1B1A04C9269 /* OrganizationInventoryRefreshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationInventoryRefreshService.swift; sourceTree = "<group>"; };
 		552523AB4B9EC81EE47BDCA4 /* Evidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Evidence.swift; sourceTree = "<group>"; };
 		555658DD05F52459D277E381 /* AttentionRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRanker.swift; sourceTree = "<group>"; };
 		5587E58231B932929ED7D363 /* NotificationRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationRoute.swift; sourceTree = "<group>"; };
+		55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCCallerValidator.swift; sourceTree = "<group>"; };
 		5652FCC8AE1B528B5A92BBCA /* CoverageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRepository.swift; sourceTree = "<group>"; };
 		5AC60A407B712E2D8B24B111 /* WorkItemRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemRepository.swift; sourceTree = "<group>"; };
 		5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRateLimitTests.swift; sourceTree = "<group>"; };
@@ -258,12 +290,16 @@
 		7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageDatabaseMigrator.swift; sourceTree = "<group>"; };
 		7B669ABDCC417A36F5EB91E2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7D82D7463B2C1544D108FD85 /* GitHubCapabilityProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCapabilityProbeTests.swift; sourceTree = "<group>"; };
+		810F7432BDAB1BF8E130F35A /* CopilotFrameTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotFrameTransport.swift; sourceTree = "<group>"; };
 		82377E74C059A4BB23BC5347 /* NotificationContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationContentTests.swift; sourceTree = "<group>"; };
 		8326C3C930B01A4914156D18 /* GitHubGraphQLQueries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubGraphQLQueries.swift; sourceTree = "<group>"; };
 		83392CACBB3AEE37ADD6DF40 /* OAuthCredentialRefreshServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OAuthCredentialRefreshServiceTests.swift; sourceTree = "<group>"; };
 		83A08A743ED79E891E831DFC /* SearchShardPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchShardPlanner.swift; sourceTree = "<group>"; };
 		850788277C525AE27A2B89B1 /* SearchRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchRepository.swift; sourceTree = "<group>"; };
+		856FB30E15E2FA4A641E07DE /* TriageCopilotXPCService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageCopilotXPCService.swift; sourceTree = "<group>"; };
 		8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateDataArtifactsTests.swift; sourceTree = "<group>"; };
+		89EB0458B411E6A895FE992B /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageCopilotXPCListener.swift; sourceTree = "<group>"; };
 		8AC3286A215E6FDEF8BA3B38 /* NotificationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPolicy.swift; sourceTree = "<group>"; };
 		8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPC.swift; sourceTree = "<group>"; };
 		8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubNodeRepository.swift; sourceTree = "<group>"; };
@@ -293,7 +329,6 @@
 		AC3736865DB67D0E42374D19 /* CopilotHelperClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperClientTests.swift; sourceTree = "<group>"; };
 		ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceAndFreshnessTests.swift; sourceTree = "<group>"; };
 		AE7BF02EF9257041D9B18EAC /* NotificationEligibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationEligibilityTests.swift; sourceTree = "<group>"; };
-		B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperLocation.swift; sourceTree = "<group>"; };
 		B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeOAuthConfiguration.swift; sourceTree = "<group>"; };
 		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		B27F829E49324D16F20E57BA /* RoleDiscoveryPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlan.swift; sourceTree = "<group>"; };
@@ -309,7 +344,6 @@
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		CDE0DF820CB5AD98C7972661 /* SyncWatermark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncWatermark.swift; sourceTree = "<group>"; };
 		CE1FCECD11A0F3231E3D317F /* RoleDiscoverySynchronizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoverySynchronizer.swift; sourceTree = "<group>"; };
-		CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotProcessTransport.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		D4DFB7BCAB1FBE80344E837D /* AccountRestorationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRestorationService.swift; sourceTree = "<group>"; };
 		D962615F59F45990114831EF /* AccountConnectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountConnectionService.swift; sourceTree = "<group>"; };
@@ -326,9 +360,11 @@
 		E64FC7E7F88D610CB858C454 /* RoleDiscoveryPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleDiscoveryPlanTests.swift; sourceTree = "<group>"; };
 		E80DE672E00FCF7147665285 /* BusinessDayPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BusinessDayPolicyTests.swift; sourceTree = "<group>"; };
 		E844E395E5858DFCE770AF44 /* GitHubRESTClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClientTests.swift; sourceTree = "<group>"; };
+		E98F5372A9B97D56766FD587 /* CopilotXPCFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotXPCFrame.swift; sourceTree = "<group>"; };
 		EFD71556D8FD113D6A0CBACE /* GitHubIssueSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIssueSearchTests.swift; sourceTree = "<group>"; };
 		F02109B1F0588F53598FB02E /* InboxEligibilityRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxEligibilityRuleTests.swift; sourceTree = "<group>"; };
 		F1F032FC6C9DF794D7566896 /* WorkItemGraphRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGraphRepository.swift; sourceTree = "<group>"; };
+		F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperProcess.swift; sourceTree = "<group>"; };
 		F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationFollowUpRuleTests.swift; sourceTree = "<group>"; };
 		F74BA70C92A3542C44D29350 /* TriageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageTests.swift; sourceTree = "<group>"; };
 		F79F1622FE7D729E3464C27C /* Workflow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workflow.swift; sourceTree = "<group>"; };
@@ -650,9 +686,9 @@
 		AEFC0DA24D59A47F24B8ACD1 /* CopilotXPC */ = {
 			isa = PBXGroup;
 			children = (
+				810F7432BDAB1BF8E130F35A /* CopilotFrameTransport.swift */,
 				0BA8D4FDAA949D3458861498 /* CopilotHelperClient.swift */,
-				B1954E311A1570B88EDA87DA /* CopilotHelperLocation.swift */,
-				CE38F84E050160D39CE8FCE5 /* CopilotProcessTransport.swift */,
+				4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */,
 				44BFDCAE6C16FDFFA5BC7310 /* CopilotXPCPackaging.swift */,
 				473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */,
 				8F3982839319D2099FD7A25D /* CopilotXPCServiceClient.swift */,
@@ -672,6 +708,7 @@
 			isa = PBXGroup;
 			children = (
 				71298FBEE39EE0073BEE2237 /* Triage.app */,
+				1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */,
 				2E84F2F83994E7EED18D38E9 /* TriageTests.xctest */,
 			);
 			name = Products;
@@ -733,6 +770,7 @@
 			children = (
 				B94762CD55E04D189174F62A /* Packages */,
 				8B895F991A914DF2DD4EF63C /* Triage */,
+				F5F8A207BDBF51D3648B3161 /* TriageCopilotXPC */,
 				EBEB28A1084AD1468D8DFC02 /* TriageTests */,
 				C02D11886386D6206049C072 /* Products */,
 			);
@@ -753,6 +791,20 @@
 			path = TriageTests;
 			sourceTree = "<group>";
 		};
+		F5F8A207BDBF51D3648B3161 /* TriageCopilotXPC */ = {
+			isa = PBXGroup;
+			children = (
+				F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */,
+				55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */,
+				E98F5372A9B97D56766FD587 /* CopilotXPCFrame.swift */,
+				89EB0458B411E6A895FE992B /* main.swift */,
+				4F41FC37AB834658D482AC5E /* TriageCopilotXPC.entitlements */,
+				8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */,
+				856FB30E15E2FA4A641E07DE /* TriageCopilotXPCService.swift */,
+			);
+			path = TriageCopilotXPC;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -762,11 +814,13 @@
 			buildPhases = (
 				9678AC1BCB47124EDF9ED6AC /* Sources */,
 				14824E603244FFDF7795C4A8 /* Resources */,
+				D8DCFB5113FABEAD15D1F15B /* CopyFiles */,
 				96D8EDB8113947CCA2F70656 /* Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				7A6758C0BB3BFF68907A3C3C /* PBXTargetDependency */,
 			);
 			name = Triage;
 			packageProductDependencies = (
@@ -776,6 +830,23 @@
 			productName = Triage;
 			productReference = 71298FBEE39EE0073BEE2237 /* Triage.app */;
 			productType = "com.apple.product-type.application";
+		};
+		82F24F16ECF5A4FE1EFC02F2 /* TriageCopilotXPC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8892B6985665D3143FCA4C4B /* Build configuration list for PBXNativeTarget "TriageCopilotXPC" */;
+			buildPhases = (
+				7F876D730DA4BEC7FABD5F59 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TriageCopilotXPC;
+			packageProductDependencies = (
+			);
+			productName = TriageCopilotXPC;
+			productReference = 1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */;
+			productType = "com.apple.product-type.xpc-service";
 		};
 		B6FA0A368BF7D8AD4BC57863 /* TriageTests */ = {
 			isa = PBXNativeTarget;
@@ -826,6 +897,7 @@
 			projectRoot = "";
 			targets = (
 				7C350C05841D66493EA1789A /* Triage */,
+				82F24F16ECF5A4FE1EFC02F2 /* TriageCopilotXPC */,
 				B6FA0A368BF7D8AD4BC57863 /* TriageTests */,
 			);
 		};
@@ -908,6 +980,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7F876D730DA4BEC7FABD5F59 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */,
+				C456BE7D94C6C310182F71F1 /* CopilotXPCCallerValidator.swift in Sources */,
+				A864239EB7212CD8B4839E1D /* CopilotXPCFrame.swift in Sources */,
+				86C27F2AEAD8B377C934DFB7 /* CopilotXPCInterface.swift in Sources */,
+				40401FB69538105A05F50C8A /* TriageCopilotXPCListener.swift in Sources */,
+				1CD6C3FFBC1ED71A40025FE5 /* TriageCopilotXPCService.swift in Sources */,
+				CEEEC7705769530CB940273C /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		9678AC1BCB47124EDF9ED6AC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -930,10 +1016,10 @@
 				09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */,
 				EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */,
 				B7915348E48821782DCEDF14 /* ConversationFollowUpRule.swift in Sources */,
+				764767AE6EE3DEB64351E121 /* CopilotFrameTransport.swift in Sources */,
 				AEA644A0C9EB9AB5C811A120 /* CopilotHelperClient.swift in Sources */,
-				10451BCA98F276AF8D00B5DE /* CopilotHelperLocation.swift in Sources */,
 				D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */,
-				19641C6C946F40E347D14500 /* CopilotProcessTransport.swift in Sources */,
+				CB8977237CA5B88F54D6278D /* CopilotXPCInterface.swift in Sources */,
 				16DB25B5871A2929DF7DBEDF /* CopilotXPCPackaging.swift in Sources */,
 				2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */,
 				1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */,
@@ -1020,6 +1106,11 @@
 			target = 7C350C05841D66493EA1789A /* Triage */;
 			targetProxy = 48B0717F858CACD557473097 /* PBXContainerItemProxy */;
 		};
+		7A6758C0BB3BFF68907A3C3C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 82F24F16ECF5A4FE1EFC02F2 /* TriageCopilotXPC */;
+			targetProxy = 3621F15346C78CBD27CBE064 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -1101,6 +1192,7 @@
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				TRIAGE_AUTH_BROKER_URL = "";
+				TRIAGE_DEVELOPMENT_TEAM = "";
 				TRIAGE_GITHUB_OAUTH_CLIENT_ID = "";
 			};
 			name = Release;
@@ -1205,6 +1297,7 @@
 				SDKROOT = macosx;
 				SKIP_INSTALL = NO;
 				TRIAGE_AUTH_BROKER_URL = "";
+				TRIAGE_DEVELOPMENT_TEAM = "";
 				TRIAGE_GITHUB_OAUTH_CLIENT_ID = "";
 			};
 			name = Debug;
@@ -1225,6 +1318,42 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Triage.app/Contents/MacOS/Triage";
 			};
 			name = Release;
+		};
+		9E3BB901221046A9DCF11733 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TriageCopilotXPC/TriageCopilotXPC.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Configuration/TriageCopilotXPC-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac.TriageCopilotXPC;
+				PRODUCT_NAME = TriageCopilotXPC;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				TRIAGE_DEVELOPMENT_TEAM = "";
+			};
+			name = Release;
+		};
+		FDB8F1947F60816380ED0A5D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TriageCopilotXPC/TriageCopilotXPC.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Configuration/TriageCopilotXPC-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac.TriageCopilotXPC;
+				PRODUCT_NAME = TriageCopilotXPC;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				TRIAGE_DEVELOPMENT_TEAM = "";
+			};
+			name = Debug;
 		};
 /* End XCBuildConfiguration section */
 
@@ -1252,6 +1381,15 @@
 			buildConfigurations = (
 				6CDA60A117B7D0413A78A882 /* Debug */,
 				07EA49ABF8758190A14F71DC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8892B6985665D3143FCA4C4B /* Build configuration list for PBXNativeTarget "TriageCopilotXPC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDB8F1947F60816380ED0A5D /* Debug */,
+				9E3BB901221046A9DCF11733 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
