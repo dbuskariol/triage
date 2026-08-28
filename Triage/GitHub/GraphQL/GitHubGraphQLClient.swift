@@ -5,6 +5,8 @@ enum GitHubGraphQLError: Error, Equatable, Sendable {
     case invalidQuery
     case invalidResponse
     case responseTooLarge
+    case partialResponse
+    case missingData
     case requestFailed(GitHubFailure)
 }
 
@@ -86,6 +88,24 @@ actor GitHubGraphQLClient {
         } catch {
             throw GitHubGraphQLError.invalidResponse
         }
+    }
+
+    /// Executes a document only when GitHub returned a complete, usable payload.
+    /// Synchronizers use this to prevent partial GraphQL data from becoming
+    /// authoritative normalized state.
+    func executeComplete<Value: Decodable & Sendable, Variables: Encodable & Sendable>(
+        _ query: GitHubGraphQLQuery,
+        variables: Variables,
+        as type: Value.Type
+    ) async throws -> Value {
+        let response = try await execute(query, variables: variables, as: type)
+        guard response.errors.isEmpty else {
+            throw GitHubGraphQLError.partialResponse
+        }
+        guard let data = response.data else {
+            throw GitHubGraphQLError.missingData
+        }
+        return data
     }
 
     private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
