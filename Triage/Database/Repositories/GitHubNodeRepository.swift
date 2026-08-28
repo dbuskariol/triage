@@ -1,6 +1,10 @@
 import Foundation
 import GRDB
 
+enum GitHubNodeRepositoryError: Error, Equatable, Sendable {
+    case accountScopeMismatch
+}
+
 enum GitHubNodeAccessibility: String, Sendable {
     case accessible
     case inaccessible
@@ -36,6 +40,9 @@ actor GitHubNodeRepository {
     }
 
     func save(_ node: NormalizedGitHubNode) async throws {
+        guard node.accountID == vault.accountID else {
+            throw GitHubNodeRepositoryError.accountScopeMismatch
+        }
         let values = Values(node)
         try await vault.write { database in
             try database.execute(
