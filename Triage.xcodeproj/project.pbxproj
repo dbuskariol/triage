@@ -58,6 +58,7 @@
 		CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3390D135CFE41477E727ECD /* AppMetadata.swift */; };
 		CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */; };
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
+		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
 		DE05BC04CD8923DDF0C81E05 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */; };
@@ -70,6 +71,7 @@
 		F1B233E72F3E02889F3B3F4F /* PersonalAccessTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */; };
 		F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */; };
 		F3AAEBABBED7F89F609F96A5 /* BusinessDayPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80DE672E00FCF7147665285 /* BusinessDayPolicyTests.swift */; };
+		F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */; };
 		F90C766057275A70937531BD /* WorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9080B82740744E5D971BA1E /* WorkflowTests.swift */; };
 		FE2A2A80A1010B3638857B10 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD24CECDFBC0C38A880B9621 /* AppPreferences.swift */; };
 		FEE2A59033AEF4AA0869951E /* OrganizationAccessEvaluatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28B1B9B44356DF52DF727463 /* OrganizationAccessEvaluatorTests.swift */; };
@@ -111,6 +113,7 @@
 		48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessTokenTests.swift; sourceTree = "<group>"; };
 		4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeader.swift; sourceTree = "<group>"; };
 		4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubGraphQLClient.swift; sourceTree = "<group>"; };
+		4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPCTests.swift; sourceTree = "<group>"; };
 		51CCBC527DBD7C20ECD99955 /* TriageApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageApp.swift; sourceTree = "<group>"; };
 		552523AB4B9EC81EE47BDCA4 /* Evidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Evidence.swift; sourceTree = "<group>"; };
 		555658DD05F52459D277E381 /* AttentionRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRanker.swift; sourceTree = "<group>"; };
@@ -125,6 +128,7 @@
 		77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionRankerTests.swift; sourceTree = "<group>"; };
 		7AA0FEB1FCA35ED0DE035CC0 /* TriageDatabaseMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageDatabaseMigrator.swift; sourceTree = "<group>"; };
 		7B669ABDCC417A36F5EB91E2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPC.swift; sourceTree = "<group>"; };
 		8D6771CB3C835C681DA66152 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSSOHeaderTests.swift; sourceTree = "<group>"; };
 		926E2C8C201B67494FDEBD5E /* SoftwareUpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdateController.swift; sourceTree = "<group>"; };
@@ -232,6 +236,14 @@
 				9690060369E66769608BBCEA /* InboxEligibilityRule.swift */,
 			);
 			path = Rules;
+			sourceTree = "<group>";
+		};
+		45955E73235F6A9A7801A664 /* Copilot */ = {
+			isa = PBXGroup;
+			children = (
+				8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */,
+			);
+			path = Copilot;
 			sourceTree = "<group>";
 		};
 		731A158D8680E8E0E846B90D /* Authentication */ = {
@@ -382,6 +394,7 @@
 				77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */,
 				E80DE672E00FCF7147665285 /* BusinessDayPolicyTests.swift */,
 				F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */,
+				4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */,
 				985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */,
 				F02109B1F0588F53598FB02E /* InboxEligibilityRuleTests.swift */,
 			);
@@ -393,6 +406,7 @@
 			children = (
 				555658DD05F52459D277E381 /* AttentionRanker.swift */,
 				0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */,
+				45955E73235F6A9A7801A664 /* Copilot */,
 				3B4586A00F767C288A0FA1A5 /* Rules */,
 			);
 			path = Intelligence;
@@ -524,6 +538,7 @@
 				E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */,
 				F3AAEBABBED7F89F609F96A5 /* BusinessDayPolicyTests.swift in Sources */,
 				C24B45C7B0B463638BFDF3E8 /* ConversationFollowUpRuleTests.swift in Sources */,
+				F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */,
 				B0EA61E046EEC5120428D6E4 /* DirectResponsibilityRuleTests.swift in Sources */,
 				F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */,
 				40EFEDABCE3F6230EF21FE84 /* GitHubDiagnosticsTests.swift in Sources */,
@@ -560,6 +575,7 @@
 				09EAD1B6F003FD7FC73FB626 /* BusinessDayPolicy.swift in Sources */,
 				EDCB787E56D616D874CB3295 /* CardContainer.swift in Sources */,
 				B7915348E48821782DCEDF14 /* ConversationFollowUpRule.swift in Sources */,
+				D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */,
 				7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */,
 				1D636275FC9A96A3FBD42DBC /* Evidence.swift in Sources */,
 				2DD000DBCAFECD32AC462A93 /* Freshness.swift in Sources */,
