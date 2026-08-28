@@ -46,10 +46,15 @@ struct NotificationDedupeKey: Codable, Equatable, Hashable, Sendable {
   }
 
   var requestIdentifier: String {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.sortedKeys]
-    let data = (try? encoder.encode(self)) ?? Data()
-    let digest = SHA256.hash(data: data)
+    let canonicalValue = [
+      route.accountID.rawValue,
+      route.organizationID.rawValue,
+      route.workItemID.rawValue,
+      route.destination.rawValue,
+      reason.rawValue,
+      evidenceVersion,
+    ].joined(separator: "\u{1F}")
+    let digest = SHA256.hash(data: Data(canonicalValue.utf8))
     let digestString = digest.map { String(format: "%02x", $0) }.joined()
     return "triage.notification.\(digestString)"
   }
