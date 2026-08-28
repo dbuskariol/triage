@@ -65,6 +65,7 @@ struct GitHubRequestedReviewersDTO: Codable, Sendable {
 
 struct GitHubPullRequestReviewInventory: Sendable {
     let reviews: [GitHubPullRequestReviewDTO]
+    let pages: [GitHubPage<GitHubPullRequestReviewDTO>]
     let ssoHeaders: [GitHubSSOHeader]
 
     var ssoHeader: GitHubSSOHeader? {
@@ -101,6 +102,7 @@ actor GitHubPullRequestClient {
     ) async throws -> GitHubPullRequestReviewInventory {
         var page = try await reviews(repository: repository, number: number)
         var reviews: [GitHubPullRequestReviewDTO] = []
+        var pages = [page]
         var reviewNodeIDs = Set<String>()
         var ssoHeaders = [page.ssoHeader].compactMap { $0 }
         var visitedPageURLs = Set<String>()
@@ -126,6 +128,7 @@ actor GitHubPullRequestClient {
                 request: GitHubRESTRequest(nextPageURL: nextPageURL)
             )
             pageCount += 1
+            pages.append(page)
             append(page.values)
             if let ssoHeader = page.ssoHeader {
                 ssoHeaders.append(ssoHeader)
@@ -134,6 +137,7 @@ actor GitHubPullRequestClient {
 
         return GitHubPullRequestReviewInventory(
             reviews: reviews,
+            pages: pages,
             ssoHeaders: ssoHeaders
         )
     }

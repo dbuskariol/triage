@@ -29,6 +29,8 @@ final class GitHubPullRequestClientTests: XCTestCase {
         )
 
         XCTAssertEqual(inventory.reviews.map(\.nodeID), ["R_1", "R_2"])
+        XCTAssertEqual(inventory.pages.count, 2)
+        XCTAssertTrue(inventory.pages.allSatisfy { !$0.payload.isEmpty })
         XCTAssertEqual(inventory.ssoHeader, .partialResults(Set([1, 2])))
     }
 }
