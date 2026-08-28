@@ -140,12 +140,11 @@ actor AccountConnectionService {
                 organizationDTOs = [response.value]
                 ssoHeader = response.ssoHeader
             } else {
-                let organizationPage = try await identity.organizations()
-                organizationDTOs = organizationPage.values
-                ssoHeader = organizationPage.ssoHeader
+                let organizationInventory = try await identity.allOrganizations()
+                organizationDTOs = organizationInventory.organizations
+                ssoHeader = organizationInventory.ssoHeader
             }
 
-            let accessState = OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: ssoHeader)
             let organizations = try organizationDTOs.map { dto in
                 guard let organizationNodeID = GitHubNodeID(rawValue: dto.nodeID),
                       let organizationID = OrganizationID(rawValue: dto.nodeID)
@@ -161,12 +160,19 @@ actor AccountConnectionService {
                 )
             }
             for organization in organizations {
+                let organizationSSOHeader = scopedSSOHeader(
+                    for: organization,
+                    aggregateHeader: ssoHeader
+                )
                 try await repository.save(
                     organization,
                     access: OrganizationAccess(
                         accountID: account.id,
                         organizationID: organization.id,
-                        state: accessState,
+                        state: OrganizationAccessEvaluator.state(
+                            statusCode: 200,
+                            ssoHeader: organizationSSOHeader
+                        ),
                         capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
                         capabilities: GitHubCapability.allCases.map {
                             CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
@@ -181,5 +187,18 @@ actor AccountConnectionService {
             try await vaultRegistry.remove(accountID: accountID)
             throw error
         }
+    }
+
+    private func scopedSSOHeader(
+        for organization: GitHubOrganization,
+        aggregateHeader: GitHubSSOHeader?
+    ) -> GitHubSSOHeader? {
+        guard case let .partialResults(organizationIDs)? = aggregateHeader else {
+            return aggregateHeader
+        }
+        guard organizationIDs.contains(organization.githubOrganizationID) else {
+            return nil
+        }
+        return .partialResults([organization.githubOrganizationID])
     }
 }

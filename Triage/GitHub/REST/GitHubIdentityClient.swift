@@ -2,6 +2,35 @@ import Foundation
 
 enum GitHubIdentityClientError: Error, Equatable, Sendable {
     case invalidOrganizationLogin
+    case paginationLoop
+    case paginationLimitExceeded
+}
+
+struct GitHubOrganizationInventory: Sendable {
+    let organizations: [GitHubOrganizationDTO]
+    let ssoHeaders: [GitHubSSOHeader]
+
+    var ssoHeader: GitHubSSOHeader? {
+        if let authorizationRequired = ssoHeaders.first(where: {
+            if case .authorizationRequired = $0 {
+                return true
+            }
+            return false
+        }) {
+            return authorizationRequired
+        }
+
+        let partialOrganizationIDs = ssoHeaders.reduce(into: Set<UInt64>()) { ids, header in
+            if case let .partialResults(partialIDs) = header {
+                ids.formUnion(partialIDs)
+            }
+        }
+        if !partialOrganizationIDs.isEmpty {
+            return .partialResults(partialOrganizationIDs)
+        }
+
+        return ssoHeaders.contains(.malformed) ? .malformed : nil
+    }
 }
 
 actor GitHubIdentityClient {
@@ -25,6 +54,47 @@ actor GitHubIdentityClient {
                 path: "/user/orgs",
                 query: [URLQueryItem(name: "per_page", value: "100")]
             )
+        )
+    }
+
+    func allOrganizations() async throws -> GitHubOrganizationInventory {
+        var page = try await organizations()
+        var organizations: [GitHubOrganizationDTO] = []
+        var organizationIDs = Set<UInt64>()
+        var ssoHeaders = [page.ssoHeader].compactMap { $0 }
+        var visitedPageURLs = Set<String>()
+        var pageCount = 1
+
+        func append(_ values: [GitHubOrganizationDTO]) {
+            for organization in values where organizationIDs.insert(organization.id).inserted {
+                organizations.append(organization)
+            }
+        }
+        append(page.values)
+
+        while let nextPageURL = page.nextPageURL {
+            try Task.checkCancellation()
+            guard visitedPageURLs.insert(nextPageURL.absoluteString).inserted else {
+                throw GitHubIdentityClientError.paginationLoop
+            }
+            guard pageCount < 100 else {
+                throw GitHubIdentityClientError.paginationLimitExceeded
+            }
+
+            page = try await client.getPage(
+                GitHubOrganizationDTO.self,
+                request: try GitHubRESTRequest(nextPageURL: nextPageURL)
+            )
+            pageCount += 1
+            append(page.values)
+            if let ssoHeader = page.ssoHeader {
+                ssoHeaders.append(ssoHeader)
+            }
+        }
+
+        return GitHubOrganizationInventory(
+            organizations: organizations,
+            ssoHeaders: ssoHeaders
         )
     }
 
