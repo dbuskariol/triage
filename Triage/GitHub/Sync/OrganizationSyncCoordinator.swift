@@ -8,11 +8,16 @@ enum SyncExecutionState: Equatable, Sendable {
 }
 
 actor OrganizationSyncCoordinator {
-    private var states: [String: SyncExecutionState] = [:]
-    private var activeTasks: [String: Task<Void, Never>] = [:]
+    private struct Scope: Hashable, Sendable {
+        let accountID: AccountID
+        let organizationID: OrganizationID
+    }
+
+    private var states: [Scope: SyncExecutionState] = [:]
+    private var activeTasks: [Scope: Task<Void, Never>] = [:]
 
     func state(accountID: AccountID, organizationID: OrganizationID) -> SyncExecutionState {
-        states[key(accountID: accountID, organizationID: organizationID)] ?? .idle(lastSuccessfulAt: nil)
+        states[Scope(accountID: accountID, organizationID: organizationID)] ?? .idle(lastSuccessfulAt: nil)
     }
 
     func start(
@@ -20,7 +25,7 @@ actor OrganizationSyncCoordinator {
         organizationID: OrganizationID,
         operation: @escaping @Sendable () async throws -> Void
     ) {
-        let key = key(accountID: accountID, organizationID: organizationID)
+        let key = Scope(accountID: accountID, organizationID: organizationID)
         activeTasks[key]?.cancel()
         let startedAt = Date()
         states[key] = .refreshing(startedAt: startedAt)
@@ -41,27 +46,24 @@ actor OrganizationSyncCoordinator {
     }
 
     func cancel(accountID: AccountID, organizationID: OrganizationID) {
-        let key = key(accountID: accountID, organizationID: organizationID)
+        let key = Scope(accountID: accountID, organizationID: organizationID)
         activeTasks.removeValue(forKey: key)?.cancel()
     }
 
-    private func complete(key: String, succeededAt: Date) {
+    private func complete(key: Scope, succeededAt: Date) {
         activeTasks[key] = nil
         states[key] = .idle(lastSuccessfulAt: succeededAt)
     }
 
-    private func fail(key: String, lastSuccessfulAt: Date?, detail: String) {
+    private func fail(key: Scope, lastSuccessfulAt: Date?, detail: String) {
         activeTasks[key] = nil
         states[key] = .failed(lastSuccessfulAt: lastSuccessfulAt, detail: detail)
     }
 
-    private func lastSuccessfulAt(for key: String) -> Date? {
+    private func lastSuccessfulAt(for key: Scope) -> Date? {
         if case let .idle(lastSuccessfulAt) = states[key] { return lastSuccessfulAt }
         if case let .failed(lastSuccessfulAt, _) = states[key] { return lastSuccessfulAt }
         return nil
     }
 
-    private func key(accountID: AccountID, organizationID: OrganizationID) -> String {
-        "\(accountID.rawValue):\(organizationID.rawValue)"
-    }
 }
