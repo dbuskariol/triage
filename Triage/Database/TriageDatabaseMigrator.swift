@@ -879,6 +879,27 @@ enum TriageDatabaseMigrator {
             try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN assignee_node_ids_json BLOB NOT NULL DEFAULT '[]'")
             try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN label_node_ids_json BLOB NOT NULL DEFAULT '[]'")
             try database.execute(sql: "ALTER TABLE pull_requests ADD COLUMN label_names_json BLOB NOT NULL DEFAULT '[]'")
+        },
+        TriageDatabaseMigration(
+            id: "023-hydration-batch-metrics",
+            checksum: "ef792a505bc5c9d451bfef8f5ff4fec9982487809643551b4c7fc67c2099a43c"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE github_hydration_batch_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    requested_node_count INTEGER NOT NULL CHECK (requested_node_count BETWEEN 1 AND 50),
+                    response_bytes INTEGER NOT NULL CHECK (response_bytes BETWEEN 1 AND 4194304),
+                    query_cost INTEGER NOT NULL CHECK (query_cost >= 0),
+                    rate_limit_remaining INTEGER NOT NULL CHECK (rate_limit_remaining >= 0),
+                    rate_limit_reset_at_ms INTEGER NOT NULL,
+                    observed_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX github_hydration_batch_metrics_recent
+                ON github_hydration_batch_metrics (account_id, observed_at_ms DESC, id DESC)
+                """)
         }
     ]
 }

@@ -138,7 +138,8 @@ actor OrganizationWorkRefreshService {
                 detailsRepository: GitHubNodeDetailsRepository(vault: vault),
                 actorRepository: ActorRepository(vault: vault),
                 rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
-                normalizationFailureRepository: NormalizationFailureRepository(vault: vault)
+                normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+                batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault)
             ).hydrate(
                 nodeIDs: discoveryResult.candidateNodeIDs,
                 accountID: account.id,

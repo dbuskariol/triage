@@ -7,15 +7,12 @@ enum GitHubNodeHydrationServiceError: Error, Equatable, Sendable {
 }
 
 actor GitHubNodeHydrationService {
-    private static let initialBatchSize = 25
-    private static let maximumBatchSize = 50
-    private static let maximumQueryCost = 500
-
     private let client: GitHubGraphQLClient
     private let detailsRepository: GitHubNodeDetailsRepository
     private let actorRepository: ActorRepository
     private let rawSnapshotRepository: RawAPISnapshotRepository
     private let normalizationFailureRepository: NormalizationFailureRepository
+    private let batchMetricRepository: GitHubHydrationBatchMetricRepository
     private let clock: @Sendable () -> Date
 
     init(
@@ -24,6 +21,7 @@ actor GitHubNodeHydrationService {
         actorRepository: ActorRepository,
         rawSnapshotRepository: RawAPISnapshotRepository,
         normalizationFailureRepository: NormalizationFailureRepository,
+        batchMetricRepository: GitHubHydrationBatchMetricRepository,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
@@ -31,6 +29,7 @@ actor GitHubNodeHydrationService {
         self.actorRepository = actorRepository
         self.rawSnapshotRepository = rawSnapshotRepository
         self.normalizationFailureRepository = normalizationFailureRepository
+        self.batchMetricRepository = batchMetricRepository
         self.clock = clock
     }
 
@@ -42,24 +41,61 @@ actor GitHubNodeHydrationService {
     ) async throws {
         guard !nodeIDs.isEmpty else { return }
         let query = try GitHubGraphQLQueries.hydrateNodes()
-        for batch in nodeIDs.sorted(by: { $0.rawValue < $1.rawValue }).chunked(into: Self.initialBatchSize) {
+        let sortedNodeIDs = nodeIDs.sorted { $0.rawValue < $1.rawValue }
+        var nextIndex = 0
+        var batchSize = GitHubHydrationBatchPlanner.initialBatchSize
+        while nextIndex < sortedNodeIDs.count {
             try Task.checkCancellation()
-            guard batch.count <= Self.maximumBatchSize else {
+            let endIndex = min(nextIndex + batchSize, sortedNodeIDs.count)
+            let batch = Array(sortedNodeIDs[nextIndex ..< endIndex])
+            guard batch.count <= GitHubHydrationBatchPlanner.maximumBatchSize else {
                 throw GitHubNodeHydrationServiceError.batchTooLarge
             }
-            let response = try await client.execute(
-                query,
-                variables: Variables(ids: batch.map(\.rawValue)),
-                as: GitHubNodeHydrationPayload.self
-            )
-            guard response.errors.isEmpty, let payload = response.data else {
-                throw GitHubGraphQLError.partialResponse
+            let response: GitHubGraphQLResponse<GitHubNodeHydrationPayload>
+            do {
+                response = try await client.execute(
+                    query,
+                    variables: Variables(ids: batch.map(\.rawValue)),
+                    as: GitHubNodeHydrationPayload.self
+                )
+            } catch GitHubGraphQLError.responseTooLarge {
+                guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
+                    for: batch.count
+                ) else {
+                    throw GitHubGraphQLError.responseTooLarge
+                }
+                batchSize = reducedBatchSize
+                continue
             }
-            guard payload.rateLimit.cost <= Self.maximumQueryCost else {
-                throw GitHubNodeHydrationServiceError.queryCostExceeded(payload.rateLimit.cost)
+            guard let payload = response.data else {
+                throw GitHubGraphQLError.partialResponse
             }
 
             let observedAt = clock()
+            try await batchMetricRepository.record(
+                GitHubHydrationBatchMetric(
+                    accountID: accountID,
+                    requestedNodeCount: batch.count,
+                    responseBytes: response.payload.count,
+                    queryCost: payload.rateLimit.cost,
+                    rateLimitRemaining: payload.rateLimit.remaining,
+                    rateLimitResetAt: payload.rateLimit.resetAt,
+                    observedAt: observedAt
+                )
+            )
+            guard response.errors.isEmpty else {
+                throw GitHubGraphQLError.partialResponse
+            }
+            guard payload.rateLimit.cost <= GitHubHydrationBatchPlanner.maximumQueryCost else {
+                guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
+                    for: batch.count
+                ) else {
+                    throw GitHubNodeHydrationServiceError.queryCostExceeded(payload.rateLimit.cost)
+                }
+                batchSize = reducedBatchSize
+                continue
+            }
+
             let snapshot = RawAPISnapshot(
                 id: RawAPISnapshotID.make(),
                 accountID: accountID,
@@ -106,6 +142,12 @@ actor GitHubNodeHydrationService {
                     observedAt: observedAt
                 )
             }
+            batchSize = GitHubHydrationBatchPlanner.nextBatchSize(
+                after: batchSize,
+                queryCost: payload.rateLimit.cost,
+                responseBytes: response.payload.count
+            )
+            nextIndex = endIndex
         }
     }
 
@@ -163,14 +205,6 @@ actor GitHubNodeHydrationService {
             "Hydration response contained an invalid related GitHub node identifier."
         case .incompleteConnection:
             "Hydration response exceeded the supported related-object page size."
-        }
-    }
-}
-
-private extension Array {
-    func chunked(into size: Int) -> [[Element]] {
-        stride(from: 0, to: count, by: size).map {
-            Array(self[$0 ..< Swift.min($0 + size, count)])
         }
     }
 }
