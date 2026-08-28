@@ -101,13 +101,52 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         XCTAssertEqual(result.capabilities.status(for: .issueAndPullRequestSearch), .available)
         XCTAssertEqual(result.capabilities.status(for: .pullRequestReviews), .available)
         XCTAssertEqual(result.capabilities.status(for: .issueTimeline), .available)
-        XCTAssertEqual(result.capabilities.status(for: .notifications), .unknown)
+        XCTAssertFalse(result.capabilities.contains { $0.capability == .notifications })
         XCTAssertEqual(result.capabilities.status(for: .pullRequestReviewThreads), .unavailable)
         XCTAssertEqual(result.capabilities.status(for: .discussions), .unavailable)
         XCTAssertEqual(result.capabilities.status(for: .projects), .unavailable)
         XCTAssertEqual(result.capabilities.status(for: .projectFields), .unavailable)
         XCTAssertEqual(result.capabilities.status(for: .copilot), .unavailable)
         XCTAssertEqual(result.capabilities.status(for: .copilotModels), .unavailable)
+    }
+
+    func testProbeRecordsAccountScopedNotificationCapabilityIndependently() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SequencedProbeSession(responses: [
+                    response("[]")
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let capabilities = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client),
+            restClient: client
+        ).probeAccountCapabilities()
+
+        XCTAssertEqual(capabilities.status(for: .notifications), .available)
+    }
+
+    func testProbeRecordsAccountScopedNotificationSSORequirement() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SequencedProbeSession(responses: [
+                    response(
+                        "[]",
+                        headers: ["X-GitHub-SSO": "partial-results; organizations=1"]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let capabilities = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client),
+            restClient: client
+        ).probeAccountCapabilities()
+
+        XCTAssertEqual(capabilities.status(for: .notifications), .requiresSSO)
     }
 
     private func organization() -> GitHubOrganization {

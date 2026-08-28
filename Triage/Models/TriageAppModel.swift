@@ -8,6 +8,11 @@ final class TriageAppModel: ObservableObject {
         case accessAvailable
     }
 
+    var selectedAccountCapabilities: AccountCapabilitySnapshot? {
+        guard let selectedAccountID else { return nil }
+        return accountCapabilitiesByAccount[selectedAccountID]
+    }
+
     private enum PreferenceKey {
         static let selectedAccountID = "workspace.selected-account-id"
         static let selectedOrganizationID = "workspace.selected-organization-id"
@@ -16,6 +21,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var accounts: [GitHubAccount] = []
     @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
     @Published private(set) var organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]] = [:]
+    @Published private(set) var accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot] = [:]
     @Published private(set) var workItems: [WorkItem] = []
     @Published var selectedAccountID: AccountID? {
         didSet { defaults.set(selectedAccountID?.rawValue, forKey: PreferenceKey.selectedAccountID) }
@@ -84,11 +90,15 @@ final class TriageAppModel: ObservableObject {
         accounts: [GitHubAccount],
         organizations: [GitHubOrganization],
         organizationAccesses: [OrganizationID: OrganizationAccess],
+        accountCapabilities: AccountCapabilitySnapshot? = nil,
         for accountID: AccountID
     ) {
         self.accounts = accounts
         organizationsByAccount[accountID] = organizations
         organizationAccessesByAccount[accountID] = organizationAccesses
+        if let accountCapabilities {
+            accountCapabilitiesByAccount[accountID] = accountCapabilities
+        }
         selectedAccountID = accountID
         selectedOrganizationID = organizations.first?.id
     }
@@ -192,6 +202,7 @@ final class TriageAppModel: ObservableObject {
         accounts.removeAll { $0.id == accountID }
         organizationsByAccount[accountID] = nil
         organizationAccessesByAccount[accountID] = nil
+        accountCapabilitiesByAccount[accountID] = nil
         cachedWorkItems.removeAll(for: accountID)
         if isRemovingSelectedAccount {
             selectedAccountID = accounts.first?.id
@@ -225,6 +236,7 @@ final class TriageAppModel: ObservableObject {
                 accounts: accounts + [result.account],
                 organizations: result.organizations,
                 organizationAccesses: result.organizationAccesses,
+                accountCapabilities: result.accountCapabilities,
                 for: result.account.id
             )
             await recheckSelectedOrganizationAccess()
@@ -262,6 +274,7 @@ final class TriageAppModel: ObservableObject {
                 accounts: accounts + [result.account],
                 organizations: result.organizations,
                 organizationAccesses: result.organizationAccesses,
+                accountCapabilities: result.accountCapabilities,
                 for: result.account.id
             )
             await recheckSelectedOrganizationAccess()
@@ -423,6 +436,7 @@ final class TriageAppModel: ObservableObject {
             accounts = result.accounts
             organizationsByAccount = result.organizationsByAccount
             organizationAccessesByAccount = result.organizationAccessesByAccount
+            accountCapabilitiesByAccount = result.accountCapabilitiesByAccount
             if !result.accounts.contains(where: { $0.id == selectedAccountID }) {
                 selectedAccountID = result.accounts.first?.id
             }
@@ -469,9 +483,12 @@ final class TriageAppModel: ObservableObject {
 
     func recheckSelectedOrganizationAccess() async {
         guard let initialAccount = accounts.first(where: { $0.id == selectedAccountID }),
-              let organization = selectedOrganization,
               !accountsBeingRemoved.contains(initialAccount.id)
         else {
+            return
+        }
+        guard let organization = selectedOrganization else {
+            await recheckAccountCapabilities(for: initialAccount)
             return
         }
 
@@ -507,6 +524,66 @@ final class TriageAppModel: ObservableObject {
         await refreshSelectedOrganization()
     }
 
+    private func recheckAccountCapabilities(for initialAccount: GitHubAccount) async {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        isRefreshing = true
+        defer {
+            if refreshGeneration == generation {
+                isRefreshing = false
+            }
+        }
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultRegistry = try requiredVaultRegistry()
+            let vaultKey = try await requiredVaultKey(for: initialAccount, secretStore: secretStore)
+            let vault = try await vaultRegistry.open(accountID: initialAccount.id, vaultKey: vaultKey)
+            let rateLimitController = try await GitHubRateLimitControllerRegistry.shared.controller(
+                for: initialAccount.id,
+                vault: vault
+            )
+            let client = GitHubRESTClient(
+                transport: try GitHubRESTTransport(),
+                credential: try await AccountCredentialReader(secretStore: secretStore)
+                    .accessToken(for: initialAccount),
+                rateLimitController: rateLimitController
+            )
+            let probe = GitHubCapabilityProbe(
+                identityClient: GitHubIdentityClient(client: client),
+                restClient: client
+            )
+            let capabilities = try await probe.probeAccountCapabilities()
+            let snapshot = AccountCapabilitySnapshot(
+                accountID: initialAccount.id,
+                capabilities: capabilities,
+                checkedAt: capabilities.map(\.checkedAt).max() ?? Date()
+            )
+            try Task.checkCancellation()
+            guard refreshGeneration == generation,
+                  selectedAccountID == initialAccount.id,
+                  selectedOrganizationID == nil,
+                  !accountsBeingRemoved.contains(initialAccount.id)
+            else {
+                return
+            }
+            try await AccountRepository(vault: vault).save(snapshot)
+            guard refreshGeneration == generation,
+                  selectedAccountID == initialAccount.id,
+                  selectedOrganizationID == nil,
+                  !accountsBeingRemoved.contains(initialAccount.id)
+            else {
+                return
+            }
+            accountCapabilitiesByAccount[initialAccount.id] = snapshot
+            refreshError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard refreshGeneration == generation else { return }
+            refreshError = "Triage could not confirm notification access. Cached work remains available."
+        }
+    }
+
     private func performRecheckSelectedOrganizationAccess(
         account initialAccount: GitHubAccount,
         organization: GitHubOrganization,
@@ -534,10 +611,20 @@ final class TriageAppModel: ObservableObject {
                     .accessToken(for: initialAccount),
                 rateLimitController: rateLimitController
             )
-            let result = try await GitHubCapabilityProbe(
+            let probe = GitHubCapabilityProbe(
                 identityClient: GitHubIdentityClient(client: client),
                 restClient: client
-            ).probe(organization: organization, accountLogin: initialAccount.login)
+            )
+            let probedAccountCapabilities = try await probe.probeAccountCapabilities()
+            let accountCapabilities = AccountCapabilitySnapshot(
+                accountID: initialAccount.id,
+                capabilities: probedAccountCapabilities,
+                checkedAt: probedAccountCapabilities.map(\.checkedAt).max() ?? Date()
+            )
+            let result = try await probe.probe(
+                organization: organization,
+                accountLogin: initialAccount.login
+            )
             try Task.checkCancellation()
             guard
                 refreshGeneration == generation,
@@ -555,7 +642,11 @@ final class TriageAppModel: ObservableObject {
                 capabilities: result.capabilities,
                 checkedAt: Date()
             )
-            try await AccountRepository(vault: vault).save(organization, access: access)
+            try await AccountRepository(vault: vault).save(
+                organization,
+                access: access,
+                accountCapabilities: accountCapabilities
+            )
             guard
                 refreshGeneration == generation,
                 selectedAccountID == initialAccount.id,
@@ -564,6 +655,7 @@ final class TriageAppModel: ObservableObject {
                 return .completed
             }
             organizationAccessesByAccount[initialAccount.id, default: [:]][organization.id] = access
+            accountCapabilitiesByAccount[initialAccount.id] = accountCapabilities
             guard result.accessState == .available else {
                 ssoAuthorizationHeader = result.ssoHeader
                 refreshError = accessMessage(for: result.accessState)
@@ -1075,7 +1167,9 @@ final class TriageAppModel: ObservableObject {
         }
         let state = OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: header)
         let checkedAt = Date()
-        let capabilities = GitHubCapability.allCases.map { capability in
+        let capabilities = GitHubCapability.allCases
+            .filter { $0.scope == .organization }
+            .map { capability in
             CapabilityAvailability(
                 capability: capability,
                 status: state == .ssoAuthorizationRequired || state == .partialSSOAuthorization
@@ -1083,7 +1177,7 @@ final class TriageAppModel: ObservableObject {
                     : .unknown,
                 checkedAt: checkedAt
             )
-        }
+            }
         let access = OrganizationAccess(
             accountID: account.id,
             organizationID: organization.id,

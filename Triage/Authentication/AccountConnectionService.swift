@@ -9,6 +9,7 @@ struct AccountConnectionResult: Sendable {
     let account: GitHubAccount
     let organizations: [GitHubOrganization]
     let organizationAccesses: [OrganizationID: OrganizationAccess]
+    let accountCapabilities: AccountCapabilitySnapshot
 }
 
 actor AccountConnectionService {
@@ -132,6 +133,16 @@ actor AccountConnectionService {
                 account,
                 credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
             )
+            let probedAccountCapabilities = try await GitHubCapabilityProbe(
+                identityClient: GitHubIdentityClient(client: client),
+                restClient: client
+            ).probeAccountCapabilities()
+            let accountCapabilities = AccountCapabilitySnapshot(
+                accountID: account.id,
+                capabilities: probedAccountCapabilities,
+                checkedAt: probedAccountCapabilities.map(\.checkedAt).max() ?? now
+            )
+            try await repository.save(accountCapabilities)
 
             let identity = GitHubIdentityClient(client: client)
             let organizationDTOs: [GitHubOrganizationDTO]
@@ -176,9 +187,11 @@ actor AccountConnectionService {
                         ssoHeader: organizationSSOHeader
                     ),
                     capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
-                    capabilities: GitHubCapability.allCases.map {
+                    capabilities: GitHubCapability.allCases
+                        .filter { $0.scope == .organization }
+                        .map {
                         CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
-                    },
+                        },
                     checkedAt: now
                 )
                 try await repository.save(
@@ -190,7 +203,8 @@ actor AccountConnectionService {
             return AccountConnectionResult(
                 account: account,
                 organizations: organizations,
-                organizationAccesses: organizationAccesses
+                organizationAccesses: organizationAccesses,
+                accountCapabilities: accountCapabilities
             )
         } catch {
             try await secretStore.removeAllSecrets(for: accountID)
