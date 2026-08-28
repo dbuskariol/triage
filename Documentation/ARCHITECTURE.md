@@ -1,5 +1,8 @@
 # Triage Architecture
 
+The authoritative product scope and implementation sequence are defined in
+`Documentation/IMPLEMENTATION_PLAN.md`.
+
 Triage currently contains only the application shell. Product architecture will be added after the product definition is known.
 
 ## Baseline boundaries
