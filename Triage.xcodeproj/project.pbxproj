@@ -39,6 +39,7 @@
 		7A1CC29DD493FB633EA059F6 /* DirectResponsibilityRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CCAEEFB08793617F029138E /* DirectResponsibilityRule.swift */; };
 		7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */; };
 		7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */; };
+		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
 		8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80EB94E267D82037DB5FBBC /* AccountRepository.swift */; };
@@ -61,6 +62,7 @@
 		CF371BF996BBEE4C9F3B63D6 /* KeychainSecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
+		D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */; };
 		DCC814A3987D40F361EAB0E5 /* AttentionRankerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E1AF04356966FA9E7F0CAE /* AttentionRankerTests.swift */; };
 		DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */; };
 		DE05BC04CD8923DDF0C81E05 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */; };
@@ -145,8 +147,10 @@
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
 		ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceAndFreshnessTests.swift; sourceTree = "<group>"; };
+		B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouper.swift; sourceTree = "<group>"; };
 		BACBE230946C1056771FE56F /* PersonalAccessToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessToken.swift; sourceTree = "<group>"; };
 		BD0C14B59A1223DC3240A96C /* WorkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItem.swift; sourceTree = "<group>"; };
+		BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkItemGrouperTests.swift; sourceTree = "<group>"; };
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -403,6 +407,7 @@
 				4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */,
 				985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */,
 				F02109B1F0588F53598FB02E /* InboxEligibilityRuleTests.swift */,
+				BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */,
 			);
 			path = Intelligence;
 			sourceTree = "<group>";
@@ -412,6 +417,7 @@
 			children = (
 				555658DD05F52459D277E381 /* AttentionRanker.swift */,
 				0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */,
+				B1F2D5B7F9A7A85943A94CFA /* WorkItemGrouper.swift */,
 				45955E73235F6A9A7801A664 /* Copilot */,
 				3B4586A00F767C288A0FA1A5 /* Rules */,
 			);
@@ -561,6 +567,7 @@
 				C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */,
 				97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */,
 				62AE7865C93E901751D96D83 /* TriageTests.swift in Sources */,
+				809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */,
 				B5A47F3CEDBFB9524AC770A7 /* WorkItemTests.swift in Sources */,
 				F90C766057275A70937531BD /* WorkflowTests.swift in Sources */,
 			);
@@ -608,6 +615,7 @@
 				BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */,
 				CEDD500031D308DB7F8C0750 /* TriageDatabaseMigrator.swift in Sources */,
 				59DA8B422EDCB24683F2B8D4 /* WorkItem.swift in Sources */,
+				D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */,
 				BEDF7AC4601449B4A5DB9201 /* Workflow.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
