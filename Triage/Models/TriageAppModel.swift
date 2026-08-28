@@ -100,6 +100,42 @@ final class TriageAppModel: ObservableObject {
         selectedOrganizationID = organizationID
     }
 
+    func removeAccount(_ accountID: AccountID) async throws {
+        guard accounts.contains(where: { $0.id == accountID }) else { return }
+
+        invalidateRefreshState()
+        let fileManager = FileManager.default
+        let applicationSupportDirectory = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let cachesDirectory = try fileManager.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        try await AccountDataRemovalService(
+            vaultRegistry: VaultRegistry(),
+            secretStore: KeychainSecretStore(),
+            applicationSupportDirectory: applicationSupportDirectory,
+            cachesDirectory: cachesDirectory
+        ).removeAllPrivateData(for: accountID)
+        await GitHubRateLimitControllerRegistry.shared.removeController(for: accountID)
+
+        accounts.removeAll { $0.id == accountID }
+        organizationsByAccount[accountID] = nil
+        if selectedAccountID == accountID {
+            selectedAccountID = accounts.first?.id
+            selectedOrganizationID = selectedAccountID
+                .flatMap { organizationsByAccount[$0]?.first?.id }
+        }
+        workItems = []
+        selectedWorkItemID = nil
+    }
+
     var selectedWorkItem: WorkItem? {
         workItems.first { $0.id == selectedWorkItemID }
     }
