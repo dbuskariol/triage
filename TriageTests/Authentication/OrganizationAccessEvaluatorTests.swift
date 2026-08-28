@@ -23,5 +23,15 @@ final class OrganizationAccessEvaluatorTests: XCTestCase {
         XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: nil), .available)
         XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 401, ssoHeader: nil), .credentialExpired)
         XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 404, ssoHeader: nil), .inaccessible)
+        XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 403, ssoHeader: nil), .insufficientPermission)
+        XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 429, ssoHeader: nil), .unknown)
+        XCTAssertEqual(OrganizationAccessEvaluator.state(statusCode: 500, ssoHeader: nil), .unknown)
+    }
+
+    func testMalformedSSOHeaderDoesNotImplyAnAccessDecision() {
+        XCTAssertEqual(
+            OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: .malformed),
+            .unknown
+        )
     }
 }

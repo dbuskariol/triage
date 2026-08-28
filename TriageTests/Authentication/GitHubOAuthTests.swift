@@ -52,6 +52,63 @@ final class GitHubOAuthTests: XCTestCase {
         )
     }
 
+    func testCallbackRejectsAmbiguousOrMissingAuthorizationParameters() throws {
+        let configuration = try GitHubOAuthConfiguration(
+            clientID: "client-id",
+            redirectURI: redirectURI
+        )
+        let session = try OAuthAuthorizationSession.make(configuration: configuration)
+
+        XCTAssertThrowsError(
+            try session.authorizationCode(
+                from: URL(
+                    string: "triage://oauth-callback?code=code&state=\(session.state.rawValue)&state=attacker"
+                )!,
+                redirectURI: redirectURI
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubOAuthError, .invalidState)
+        }
+        XCTAssertThrowsError(
+            try session.authorizationCode(
+                from: URL(
+                    string: "triage://oauth-callback?code=code&state=\(session.state.rawValue)&state"
+                )!,
+                redirectURI: redirectURI
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubOAuthError, .invalidState)
+        }
+        XCTAssertThrowsError(
+            try session.authorizationCode(
+                from: URL(
+                    string: "triage://oauth-callback?code=code&code=attacker&state=\(session.state.rawValue)"
+                )!,
+                redirectURI: redirectURI
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubOAuthError, .missingAuthorizationCode)
+        }
+        XCTAssertThrowsError(
+            try session.authorizationCode(
+                from: URL(
+                    string: "triage://oauth-callback?code=code&code&state=\(session.state.rawValue)"
+                )!,
+                redirectURI: redirectURI
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubOAuthError, .missingAuthorizationCode)
+        }
+        XCTAssertThrowsError(
+            try session.authorizationCode(
+                from: URL(string: "triage://oauth-callback?state=\(session.state.rawValue)")!,
+                redirectURI: redirectURI
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubOAuthError, .missingAuthorizationCode)
+        }
+    }
+
     func testConfigurationRejectsASecretlessOrUntrustedAuthorizationEndpoint() {
         XCTAssertThrowsError(
             try GitHubOAuthConfiguration(
