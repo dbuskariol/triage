@@ -14,6 +14,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var isRefreshing = false
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
+    private var refreshGeneration = 0
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
     var selectedOrganization: GitHubOrganization? {
@@ -75,6 +76,8 @@ final class TriageAppModel: ObservableObject {
     }
 
     func refreshSelectedOrganization() async {
+        refreshGeneration += 1
+        let generation = refreshGeneration
         guard let account = accounts.first(where: { $0.id == selectedAccountID }),
               let organization = selectedOrganization
         else {
@@ -82,7 +85,11 @@ final class TriageAppModel: ObservableObject {
         }
         refreshError = nil
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer {
+            if refreshGeneration == generation {
+                isRefreshing = false
+            }
+        }
         do {
             let secretStore = KeychainSecretStore()
             let vaultRegistry = try VaultRegistry()
@@ -99,10 +106,18 @@ final class TriageAppModel: ObservableObject {
                 accountID: account.id,
                 organizationID: organization.id
             )
+            guard
+                refreshGeneration == generation,
+                selectedAccountID == account.id,
+                selectedOrganizationID == organization.id
+            else {
+                return
+            }
             install(workItems: workItems)
         } catch is CancellationError {
             return
         } catch {
+            guard refreshGeneration == generation else { return }
             refreshError = "Triage could not refresh this organization. Cached work remains available."
         }
     }
