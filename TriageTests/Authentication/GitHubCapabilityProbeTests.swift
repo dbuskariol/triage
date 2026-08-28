@@ -68,6 +68,48 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         XCTAssertEqual(result.ssoHeader, .partialResults(Set([1])))
     }
 
+    func testProbeRecordsIndependentAvailableAndUnavailableCapabilities() async throws {
+        let repository = """
+        [{"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,
+        "html_url":"https://github.com/acme/one","updated_at":"2025-01-01T00:00:00Z",
+        "owner":{"login":"acme"}}]
+        """
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SequencedProbeSession(responses: [
+                    response(#"{"id":1,"node_id":"O_1","login":"acme"}"#),
+                    response(repository),
+                    response("[{}]"),
+                    response(#"{"total_count":0,"incomplete_results":false,"items":[]}"#),
+                    response(#"[{"number":1}]"#),
+                    response("[]"),
+                    response(#"{"users":[],"teams":[]}"#),
+                    response("[]")
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client),
+            restClient: client
+        ).probe(organization: organization(), accountLogin: "octocat")
+
+        XCTAssertEqual(result.accessState, .available)
+        XCTAssertEqual(result.capabilities.status(for: .privateRepositories), .available)
+        XCTAssertEqual(result.capabilities.status(for: .visibleTeams), .available)
+        XCTAssertEqual(result.capabilities.status(for: .issueAndPullRequestSearch), .available)
+        XCTAssertEqual(result.capabilities.status(for: .pullRequestReviews), .available)
+        XCTAssertEqual(result.capabilities.status(for: .issueTimeline), .available)
+        XCTAssertEqual(result.capabilities.status(for: .notifications), .unknown)
+        XCTAssertEqual(result.capabilities.status(for: .pullRequestReviewThreads), .unavailable)
+        XCTAssertEqual(result.capabilities.status(for: .discussions), .unavailable)
+        XCTAssertEqual(result.capabilities.status(for: .projects), .unavailable)
+        XCTAssertEqual(result.capabilities.status(for: .projectFields), .unavailable)
+        XCTAssertEqual(result.capabilities.status(for: .copilot), .unavailable)
+        XCTAssertEqual(result.capabilities.status(for: .copilotModels), .unavailable)
+    }
+
     private func organization() -> GitHubOrganization {
         GitHubOrganization(
             id: OrganizationID(rawValue: "O_1")!,
@@ -82,6 +124,12 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         headers: [String: String] = [:]
     ) -> (Data, [String: String]) {
         (Data(body.utf8), headers)
+    }
+}
+
+private extension Array where Element == CapabilityAvailability {
+    func status(for capability: GitHubCapability) -> CapabilityStatus? {
+        first(where: { $0.capability == capability })?.status
     }
 }
 

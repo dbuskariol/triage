@@ -3,6 +3,11 @@ import Foundation
 
 @MainActor
 final class TriageAppModel: ObservableObject {
+    private enum ForegroundRefreshResult: Equatable, Sendable {
+        case completed
+        case accessAvailable
+    }
+
     private enum PreferenceKey {
         static let selectedAccountID = "workspace.selected-account-id"
         static let selectedOrganizationID = "workspace.selected-organization-id"
@@ -30,6 +35,7 @@ final class TriageAppModel: ObservableObject {
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
     private let inactiveRefreshScheduler = ActiveRefreshScheduler()
+    private let capabilityRefreshScheduler = ActiveRefreshScheduler()
     private let organizationSyncCoordinator = OrganizationSyncCoordinator()
     private let defaults: UserDefaults
     private let vaultRegistry: VaultRegistry?
@@ -37,10 +43,10 @@ final class TriageAppModel: ObservableObject {
     private var refreshGeneration = 0
     private var backgroundRefreshGeneration: UInt64 = 0
     private var accountsBeingRemoved: Set<AccountID> = []
-    private var foregroundRefreshTask: Task<Void, Never>?
+    private var foregroundRefreshTask: Task<ForegroundRefreshResult, Never>?
     private var foregroundRefreshTaskID: UUID?
-    private var foregroundRefreshTasksAwaitingCredentialMutation: [Task<Void, Never>] = []
-    private var foregroundRefreshTasksAwaitingAccountRemoval: [AccountID: [Task<Void, Never>]] = [:]
+    private var foregroundRefreshTasksAwaitingCredentialMutation: [Task<ForegroundRefreshResult, Never>] = []
+    private var foregroundRefreshTasksAwaitingAccountRemoval: [AccountID: [Task<ForegroundRefreshResult, Never>]] = [:]
     private var isCredentialMutationInProgress = false
     private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
 
@@ -221,7 +227,7 @@ final class TriageAppModel: ObservableObject {
                 organizationAccesses: result.organizationAccesses,
                 for: result.account.id
             )
-            await refreshSelectedOrganizationAfterAccessCheck()
+            await recheckSelectedOrganizationAccess()
         } catch let error as RuntimeOAuthConfigurationError {
             switch error {
             case .missingClientID:
@@ -258,7 +264,7 @@ final class TriageAppModel: ObservableObject {
                 organizationAccesses: result.organizationAccesses,
                 for: result.account.id
             )
-            await refreshSelectedOrganizationAfterAccessCheck()
+            await recheckSelectedOrganizationAccess()
         } catch is PersonalAccessTokenError {
             connectionError = "Enter a supported fine-grained or classic GitHub personal access token."
         } catch {
@@ -396,6 +402,9 @@ final class TriageAppModel: ObservableObject {
         await inactiveRefreshScheduler.start(cadence: .inactiveAccount) { [weak self] in
             await self?.refreshInactiveOrganizations()
         }
+        await capabilityRefreshScheduler.start(cadence: .dailyCapabilityProbe) { [weak self] in
+            await self?.refreshSelectedOrganizationAfterAccessCheck()
+        }
     }
 
     func resumeSelectedOrganization() async {
@@ -439,18 +448,19 @@ final class TriageAppModel: ObservableObject {
         await organizationSyncCoordinator.cancelAccount(accountID: accountID)
         if let existingTask = foregroundRefreshTask {
             existingTask.cancel()
-            await existingTask.value
+            _ = await existingTask.value
         }
         let taskID = UUID()
         refreshGeneration += 1
         let generation = refreshGeneration
-        let task: Task<Void, Never> = Task { [weak self] in
-            guard let self else { return }
+        let task: Task<ForegroundRefreshResult, Never> = Task { [weak self] in
+            guard let self else { return .completed }
             await self.performRefreshSelectedOrganization(generation: generation)
+            return .completed
         }
         foregroundRefreshTask = task
         foregroundRefreshTaskID = taskID
-        await task.value
+        _ = await task.value
         if foregroundRefreshTaskID == taskID {
             foregroundRefreshTask = nil
             foregroundRefreshTaskID = nil
@@ -465,14 +475,43 @@ final class TriageAppModel: ObservableObject {
             return
         }
 
+        await organizationSyncCoordinator.cancelAccount(accountID: initialAccount.id)
         if let existingTask = foregroundRefreshTask {
             existingTask.cancel()
-            await existingTask.value
+            _ = await existingTask.value
         }
-        foregroundRefreshTask = nil
-        foregroundRefreshTaskID = nil
         refreshGeneration += 1
         let generation = refreshGeneration
+        let taskID = UUID()
+        let task: Task<ForegroundRefreshResult, Never> = Task { [weak self] in
+            guard let self else { return .completed }
+            return await self.performRecheckSelectedOrganizationAccess(
+                account: initialAccount,
+                organization: organization,
+                generation: generation
+            )
+        }
+        foregroundRefreshTask = task
+        foregroundRefreshTaskID = taskID
+        let result = await task.value
+        guard foregroundRefreshTaskID == taskID else { return }
+        foregroundRefreshTask = nil
+        foregroundRefreshTaskID = nil
+        guard result == .accessAvailable,
+              refreshGeneration == generation,
+              selectedAccountID == initialAccount.id,
+              selectedOrganizationID == organization.id
+        else {
+            return
+        }
+        await refreshSelectedOrganization()
+    }
+
+    private func performRecheckSelectedOrganizationAccess(
+        account initialAccount: GitHubAccount,
+        organization: GitHubOrganization,
+        generation: Int
+    ) async -> ForegroundRefreshResult {
         isRefreshing = true
         defer {
             if refreshGeneration == generation {
@@ -496,14 +535,16 @@ final class TriageAppModel: ObservableObject {
                 rateLimitController: rateLimitController
             )
             let result = try await GitHubCapabilityProbe(
-                identityClient: GitHubIdentityClient(client: client)
-            ).probe(organization: organization)
+                identityClient: GitHubIdentityClient(client: client),
+                restClient: client
+            ).probe(organization: organization, accountLogin: initialAccount.login)
+            try Task.checkCancellation()
             guard
                 refreshGeneration == generation,
                 selectedAccountID == initialAccount.id,
                 selectedOrganizationID == organization.id
             else {
-                return
+                return .completed
             }
 
             let access = OrganizationAccess(
@@ -515,21 +556,29 @@ final class TriageAppModel: ObservableObject {
                 checkedAt: Date()
             )
             try await AccountRepository(vault: vault).save(organization, access: access)
+            guard
+                refreshGeneration == generation,
+                selectedAccountID == initialAccount.id,
+                selectedOrganizationID == organization.id
+            else {
+                return .completed
+            }
             organizationAccessesByAccount[initialAccount.id, default: [:]][organization.id] = access
             guard result.accessState == .available else {
                 ssoAuthorizationHeader = result.ssoHeader
                 refreshError = accessMessage(for: result.accessState)
-                return
+                return .completed
             }
 
             ssoAuthorizationHeader = nil
             refreshError = nil
-            await refreshSelectedOrganization()
+            return .accessAvailable
         } catch is CancellationError {
-            return
+            return .completed
         } catch {
-            guard refreshGeneration == generation else { return }
+            guard refreshGeneration == generation else { return .completed }
             refreshError = "Triage could not confirm organization access. Cached work remains available."
+            return .completed
         }
     }
 
@@ -774,7 +823,7 @@ final class TriageAppModel: ObservableObject {
             task.cancel()
         }
         for task in tasks {
-            await task.value
+            _ = await task.value
         }
     }
 
@@ -825,7 +874,7 @@ final class TriageAppModel: ObservableObject {
             task.cancel()
         }
         for task in tasks {
-            await task.value
+            _ = await task.value
         }
         isRefreshing = false
         ssoAuthorizationHeader = nil
@@ -993,16 +1042,24 @@ final class TriageAppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.loadCachedSelectedOrganization()
-            await self.refreshSelectedOrganizationAfterAccessCheck()
+            await self.recheckSelectedOrganizationAccess()
         }
     }
 
     func refreshSelectedOrganizationAfterAccessCheck() async {
-        switch selectedOrganizationAccess?.state {
+        guard let access = selectedOrganizationAccess else {
+            await recheckSelectedOrganizationAccess()
+            return
+        }
+        switch access.state {
         case .ssoAuthorizationRequired, .partialSSOAuthorization:
             await recheckSelectedOrganizationAccess()
         default:
-            await refreshSelectedOrganization()
+            if Date().timeIntervalSince(access.checkedAt) >= RefreshCadence.dailyCapabilityProbe.baseInterval {
+                await recheckSelectedOrganizationAccess()
+            } else {
+                await refreshSelectedOrganization()
+            }
         }
     }
 
