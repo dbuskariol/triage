@@ -24,6 +24,7 @@
 		3B3C071426CD280CFC578AAE /* GitHubRESTClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */; };
 		3C78FA216FA70BB26E87F03E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8D6771CB3C835C681DA66152 /* Assets.xcassets */; };
 		40EFEDABCE3F6230EF21FE84 /* GitHubDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */; };
+		440D552512831BFF25F93150 /* WorkflowRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FA4EF715587B009499705BF /* WorkflowRepository.swift */; };
 		4470E02F0C96112B0A73A2D2 /* SearchRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850788277C525AE27A2B89B1 /* SearchRepository.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */; };
@@ -121,6 +122,7 @@
 		28B1B9B44356DF52DF727463 /* OrganizationAccessEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationAccessEvaluatorTests.swift; sourceTree = "<group>"; };
 		2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2E84F2F83994E7EED18D38E9 /* TriageTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2FA4EF715587B009499705BF /* WorkflowRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowRepository.swift; sourceTree = "<group>"; };
 		326A309D86A0DA32F49BD907 /* GitHubIdentityClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubIdentityClient.swift; sourceTree = "<group>"; };
 		3B59CA16DA269CD50E052F2A /* Freshness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Freshness.swift; sourceTree = "<group>"; };
 		3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateDataArtifacts.swift; sourceTree = "<group>"; };
@@ -376,6 +378,7 @@
 			children = (
 				C80EB94E267D82037DB5FBBC /* AccountRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
+				2FA4EF715587B009499705BF /* WorkflowRepository.swift */,
 			);
 			path = Repositories;
 			sourceTree = "<group>";
@@ -653,6 +656,7 @@
 				59DA8B422EDCB24683F2B8D4 /* WorkItem.swift in Sources */,
 				D7E2F803FEC4626C09BDF5DD /* WorkItemGrouper.swift in Sources */,
 				BEDF7AC4601449B4A5DB9201 /* Workflow.swift in Sources */,
+				440D552512831BFF25F93150 /* WorkflowRepository.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
