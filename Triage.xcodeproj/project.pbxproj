@@ -55,6 +55,7 @@
 		7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94D923BB7F928F047F4CB44A /* GitHubRESTTransportTests.swift */; };
 		809B81CF8ABC96D88DD46160 /* WorkItemGrouperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEC2152D444415C19A88E92C /* WorkItemGrouperTests.swift */; };
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
+		8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */; };
 		83A66E9AA2DF337823F8B711 /* GitHubNodeRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */; };
 		85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F06A676D75CC3ACDE2D9C1 /* SearchShardPlannerTests.swift */; };
 		8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92EC16B50B0835FFC2780D1B /* SyncWatermarkTests.swift */; };
@@ -218,6 +219,7 @@
 		D988495C37A78AEED9B566A4 /* Identifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identifiers.swift; sourceTree = "<group>"; };
 		DBB5F72324221C0E738D94C7 /* ProgressAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressAttentionRule.swift; sourceTree = "<group>"; };
 		DD24CECDFBC0C38A880B9621 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
+		DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCredentialReader.swift; sourceTree = "<group>"; };
 		E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountVaultTests.swift; sourceTree = "<group>"; };
 		E3390D135CFE41477E727ECD /* AppMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMetadata.swift; sourceTree = "<group>"; };
 		E57B347714FC4EB7CDE4693D /* WorkListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkListView.swift; sourceTree = "<group>"; };
@@ -286,6 +288,7 @@
 			isa = PBXGroup;
 			children = (
 				D962615F59F45990114831EF /* AccountConnectionService.swift */,
+				DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */,
 				92ED1ADA9F9B0A13AF694033 /* AuthBrokerClient.swift */,
 				70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */,
 				9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */,
@@ -704,6 +707,7 @@
 			files = (
 				379DBBD450F2FAD70BC2F7E9 /* AccountAccess.swift in Sources */,
 				EDC07FACA4AE6EB03C90979A /* AccountConnectionService.swift in Sources */,
+				8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */,
 				8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */,
 				16B6EA406A3E9D1326AE89C5 /* AccountVault.swift in Sources */,
 				CBE75798B90F7F2E0EF5ED13 /* AppMetadata.swift in Sources */,
