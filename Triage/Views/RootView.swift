@@ -9,8 +9,11 @@ struct RootView: View {
             NavigationSplitView {
                 AppSidebar(selection: $navigation.section)
                     .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
+            } content: {
+                WorkListView()
+                    .navigationSplitViewColumnWidth(min: 320, ideal: 390, max: 520)
             } detail: {
-                detail
+                WorkDetailView(item: appModel.selectedWorkItem)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
@@ -19,13 +22,6 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
-    private var detail: some View {
-        switch navigation.section {
-        case .inbox, .myWork, .reviews, .waiting, .snoozed, .allWork:
-            WorkListPlaceholder(section: navigation.section)
-        }
-    }
 }
 
 private struct OnboardingView: View {
@@ -44,19 +40,6 @@ private struct OnboardingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Triage")
-    }
-}
-
-private struct WorkListPlaceholder: View {
-    let section: AppSection
-
-    var body: some View {
-        ContentUnavailableView(
-            section.title,
-            systemImage: section.systemImage,
-            description: Text("Triage will show synchronized GitHub work here.")
-        )
-        .navigationTitle(section.title)
     }
 }
 
