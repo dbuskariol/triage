@@ -39,20 +39,47 @@ final class GitHubRESTTransportTests: XCTestCase {
 
         XCTAssertEqual(response.header(named: "x-github-sso"), "required; url=https://github.com/orgs/acme/sso")
     }
+
+    func testTransportRejectsOversizedFallbackResponse() async throws {
+        let session = RecordingSession(
+            body: Data(repeating: 0, count: GitHubRESTTransport.maximumResponseBodyBytes + 1)
+        )
+        let transport = try GitHubRESTTransport(session: session)
+
+        do {
+            _ = try await transport.send(try GitHubRESTRequest(path: "/user"), credential: SecretValue("token"))
+            XCTFail("Expected response size failure.")
+        } catch let error as GitHubTransportError {
+            XCTAssertEqual(error, .responseTooLarge)
+        }
+    }
+
+    func testTransportPropagatesCancellation() async throws {
+        let transport = try GitHubRESTTransport(session: CancellingSession())
+
+        do {
+            _ = try await transport.send(try GitHubRESTRequest(path: "/user"), credential: SecretValue("token"))
+            XCTFail("Expected cancellation.")
+        } catch is CancellationError {
+            return
+        }
+    }
 }
 
 private actor RecordingSession: HTTPSession {
     private var capturedRequest: URLRequest?
     private let headers: [String: String]
+    private let body: Data
 
-    init(headers: [String: String] = [:]) {
+    init(headers: [String: String] = [:], body: Data = Data()) {
         self.headers = headers
+        self.body = body
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         capturedRequest = request
         return (
-            Data(),
+            body,
             HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
@@ -67,5 +94,11 @@ private actor RecordingSession: HTTPSession {
             throw GitHubTransportError.unexpectedResponse
         }
         return capturedRequest
+    }
+}
+
+private struct CancellingSession: HTTPSession {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        throw CancellationError()
     }
 }

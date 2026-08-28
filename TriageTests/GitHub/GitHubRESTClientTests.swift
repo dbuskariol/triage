@@ -56,6 +56,23 @@ final class GitHubRESTClientTests: XCTestCase {
             )
         )
     }
+
+    func testClientRejectsMalformedPayloadWithoutReturningAnEmptyPage() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: StubSession(body: Data("{".utf8))),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await client.getPage(
+                OrganizationDTO.self,
+                request: try GitHubRESTRequest(path: "/user/orgs")
+            )
+            XCTFail("Expected malformed response failure.")
+        } catch let error as GitHubRESTClientError {
+            XCTAssertEqual(error, .invalidJSON)
+        }
+    }
 }
 
 private struct OrganizationDTO: Codable, Equatable, Sendable {
