@@ -591,6 +591,65 @@ enum TriageDatabaseMigrator {
                     PRIMARY KEY (source_node_id, destination_node_id)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "010-intelligence",
+            checksum: "8e8c2fe3dc92a5814a9491d3b3c1199d290dd6aedb49b19a85efaf9bf8a7a5ee"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE attention_reasons (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    rule_id TEXT NOT NULL,
+                    rule_version INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    strength INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    explanation TEXT NOT NULL,
+                    evaluated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE attention_scores (
+                    work_item_id TEXT PRIMARY KEY NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    score INTEGER NOT NULL,
+                    breakdown_json BLOB NOT NULL,
+                    evaluated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE ai_consents (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    selected_model TEXT,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE ai_analyses (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    fingerprint TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    prompt_version INTEGER NOT NULL,
+                    output_schema_version INTEGER NOT NULL,
+                    result_json BLOB NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    UNIQUE (work_item_id, fingerprint, model_id, prompt_version, output_schema_version)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE ai_model_cache (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    model_id TEXT NOT NULL,
+                    metadata_json BLOB NOT NULL,
+                    expires_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, model_id)
+                )
+                """)
         }
     ]
 }
