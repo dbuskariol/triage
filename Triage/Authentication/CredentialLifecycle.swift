@@ -52,6 +52,22 @@ enum CredentialLifecycle {
         }
     }
 
+    static func restoredStatus(
+        for account: GitHubAccount,
+        hasAccessToken: Bool,
+        at date: Date
+    ) -> CredentialStatus {
+        guard hasAccessToken else {
+            return .missing
+        }
+        switch account.credentialStatus {
+        case .expired, .revoked, .missing, .capabilityLimited:
+            return account.credentialStatus
+        case .active, .expiring:
+            return status(for: account, at: date)
+        }
+    }
+
     static func reconnectMessage(for status: CredentialStatus) -> String? {
         switch status {
         case .missing:

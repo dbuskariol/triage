@@ -46,6 +46,39 @@ final class CredentialLifecycleTests: XCTestCase {
         XCTAssertNil(CredentialLifecycle.failureStatus(for: error))
     }
 
+    func testRestorationMarksMissingCredentialBeforeSync() {
+        XCTAssertEqual(
+            CredentialLifecycle.restoredStatus(
+                for: makeAccount(accessTokenExpiresAt: now.addingTimeInterval(60 * 60)),
+                hasAccessToken: false,
+                at: now
+            ),
+            .missing
+        )
+    }
+
+    func testRestorationPreservesExplicitRevocation() {
+        let revokedAccount = makeAccount(
+            accessTokenExpiresAt: now.addingTimeInterval(60 * 60)
+        ).replacingCredentialStatus(.revoked)
+
+        XCTAssertEqual(
+            CredentialLifecycle.restoredStatus(for: revokedAccount, hasAccessToken: true, at: now),
+            .revoked
+        )
+    }
+
+    func testRestorationSurfacesTokenExpiration() {
+        XCTAssertEqual(
+            CredentialLifecycle.restoredStatus(
+                for: makeAccount(accessTokenExpiresAt: now.addingTimeInterval(60)),
+                hasAccessToken: true,
+                at: now
+            ),
+            .expiring
+        )
+    }
+
     private func makeAccount(
         accessTokenExpiresAt: Date?,
         refreshTokenExpiresAt: Date? = nil
