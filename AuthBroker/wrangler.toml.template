@@ -1,0 +1,21 @@
+name = "triage-auth-broker"
+main = "src/index.ts"
+compatibility_date = "2026-08-28"
+workers_dev = false
+send_metrics = false
+
+# Bind this Worker only to the production OAuth hostname.
+# routes = [
+#   { pattern = "oauth.example.com/*", zone_name = "example.com" }
+# ]
+
+# Set this to the one, exact callback URL registered on the GitHub OAuth App.
+[vars]
+ALLOWED_REDIRECT_URI = "triage://oauth-callback"
+
+# Do not put credentials in this file. Before deployment, create bindings:
+#   wrangler secret put GITHUB_OAUTH_CLIENT_ID
+#   wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+#
+# CORS is disabled unless this optional comma-separated allowlist is configured.
+# CORS_ALLOWED_ORIGINS = "https://example.com"
