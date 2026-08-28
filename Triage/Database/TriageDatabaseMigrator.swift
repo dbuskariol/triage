@@ -314,6 +314,50 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX timeline_events_subject_occurred
                 ON timeline_events (subject_node_id, occurred_at_ms DESC)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "006-discussions-and-projects",
+            checksum: "e4afdf87b0742673738d11b331717bce3f7defb4af12e81e09f56f3e58a9074f"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE discussions (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    category_name TEXT,
+                    answer_comment_node_id TEXT,
+                    comments_count INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE projects (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    UNIQUE (organization_id, number)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE project_items (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    project_node_id TEXT NOT NULL REFERENCES projects(github_node_id) ON DELETE CASCADE,
+                    content_node_id TEXT REFERENCES github_nodes(github_node_id) ON DELETE SET NULL,
+                    content_kind TEXT,
+                    updated_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE project_field_values (
+                    project_item_node_id TEXT NOT NULL REFERENCES project_items(github_node_id) ON DELETE CASCADE,
+                    field_name TEXT NOT NULL,
+                    display_value TEXT,
+                    date_value_ms INTEGER,
+                    actor_node_id TEXT,
+                    PRIMARY KEY (project_item_node_id, field_name)
+                )
+                """)
         }
     ]
 }
