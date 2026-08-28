@@ -3,12 +3,14 @@ import SwiftUI
 @main
 struct TriageApp: App {
     @StateObject private var navigation = AppNavigationModel()
+    @StateObject private var appModel = TriageAppModel()
     @StateObject private var preferences = AppPreferences()
     @StateObject private var softwareUpdates = SoftwareUpdateController()
 
     var body: some Scene {
         Window("Triage", id: "main") {
             RootView()
+                .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)

@@ -26,7 +26,7 @@ struct MenuBarView: View {
             Divider()
 
             Button("Open Triage") {
-                navigation.section = .overview
+                navigation.section = .inbox
                 openWindow(id: "main")
                 NSApp.activate(ignoringOtherApps: true)
             }
