@@ -21,7 +21,7 @@ actor PullRequestReviewRequestRepository {
         pullRequestNodeID: GitHubNodeID,
         observedAt: Date = .now
     ) async throws {
-        try await vault.write { database in
+        try await vault.writeTransaction { database in
             try Self.replace(
                 requestedReviewers,
                 pullRequestNodeID: pullRequestNodeID,
