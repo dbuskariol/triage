@@ -3,22 +3,33 @@ import Foundation
 enum OrganizationAccessEvaluator {
     static func state(
         statusCode: Int,
-        ssoHeader: GitHubSSOHeader?
+        ssoHeader: GitHubSSOHeader?,
+        accessRestriction: GitHubAccessRestriction? = nil
     ) -> OrganizationAccessState {
         switch ssoHeader {
         case .authorizationRequired:
-            .ssoAuthorizationRequired
+            return .ssoAuthorizationRequired
         case .partialResults:
-            .partialSSOAuthorization
+            return .partialSSOAuthorization
         case .malformed:
-            .unknown
+            return .unknown
         case nil:
+            switch accessRestriction {
+            case .organizationApprovalRequired:
+                return .organizationApprovalRequired
+            case .oauthApplicationApprovalRequired:
+                return .oauthApplicationApprovalRequired
+            case .organizationPolicyBlocked:
+                return .organizationPolicyBlocked
+            case nil:
+                break
+            }
             switch statusCode {
-            case 200...299: .available
-            case 401: .credentialExpired
-            case 403: .insufficientPermission
-            case 404: .inaccessible
-            default: .unknown
+            case 200...299: return .available
+            case 401: return .credentialExpired
+            case 403: return .insufficientPermission
+            case 404: return .inaccessible
+            default: return .unknown
             }
         }
     }
