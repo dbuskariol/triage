@@ -189,9 +189,9 @@ actor GitHubRepositoryTeamClient {
         do {
             page = try await client.getPage(type, request: initialRequest)
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
-            guard validators != nil else {
-                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
-            }
+            // Preserve the response metadata even for an unsolicited 304.
+            // The coordinating service owns cached-state authority, SSO
+            // precedence, and the single unconditional retry policy.
             return .notModified(ssoHeader: failure.ssoHeader)
         }
         var pages = [GitHubRepositoryTeamPage(page: page, endpoint: endpoint)]

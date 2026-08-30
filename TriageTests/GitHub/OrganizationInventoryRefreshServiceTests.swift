@@ -31,18 +31,16 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
                 body: fixture.repositoryPayload(),
                 headers: ["ETag": "\"repository-v1\""]
             ),
-            .http(statusCode: 304, body: Data()),
-            .http(
-                statusCode: 200,
-                body: fixture.repositoryPayload(),
-                headers: ["ETag": "\"repository-v1\""]
-            )
+            .http(statusCode: 304, body: Data())
         ])
 
         _ = try await fixture.service(session: session).refreshRepositories(
             account: fixture.account,
             organization: fixture.organization
         )
+        let snapshotsBefore = try await fixture.rawSnapshots()
+        let historyBefore = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
+        let coverageBefore = try await fixture.coverageRecords(feature: .repositories)
         let repositories = try await fixture.service(
             session: session,
             now: fixture.observedAt.addingTimeInterval(1)
@@ -53,9 +51,21 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
 
         XCTAssertEqual(repositories.map(\.name), ["repo"])
         let persistedRepositories = try await fixture.repositories()
+        let snapshotsAfter = try await fixture.rawSnapshots()
+        let historyAfter = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
+        let coverageAfter = try await fixture.coverageRecords(feature: .repositories)
         XCTAssertEqual(persistedRepositories.map(\.name), ["repo"])
+        XCTAssertEqual(snapshotsAfter, snapshotsBefore)
+        XCTAssertEqual(historyAfter, historyBefore)
+        XCTAssertTrue(coverageAfter.allSatisfy {
+            $0.status == .complete
+                && $0.lastSuccessfulAt == fixture.observedAt.addingTimeInterval(1)
+        })
+        XCTAssertTrue(coverageBefore.allSatisfy {
+            $0.lastSuccessfulAt == fixture.observedAt
+        })
         let sentValidators = await session.validators()
-        XCTAssertEqual(sentValidators, [nil, "\"repository-v1\"", nil])
+        XCTAssertEqual(sentValidators, [nil, "\"repository-v1\""])
     }
 
     func testRepositoryLastModifiedFallbackIsPersistedAndReused() async throws {
@@ -68,12 +78,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
                 body: fixture.repositoryPayload(),
                 headers: ["Last-Modified": lastModified]
             ),
-            .http(statusCode: 304, body: Data()),
-            .http(
-                statusCode: 200,
-                body: fixture.repositoryPayload(),
-                headers: ["Last-Modified": lastModified]
-            )
+            .http(statusCode: 304, body: Data())
         ])
 
         _ = try await fixture.service(session: session).refreshRepositories(
@@ -91,8 +96,8 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(repositories.map(\.name), ["repo"])
         let eTags = await session.validators()
         let lastModifiedValues = await session.lastModifiedValidators()
-        XCTAssertEqual(eTags, [nil, nil, nil])
-        XCTAssertEqual(lastModifiedValues, [nil, lastModified, nil])
+        XCTAssertEqual(eTags, [nil, nil])
+        XCTAssertEqual(lastModifiedValues, [nil, lastModified])
         let persisted = try await fixture.conditionalValidator(feature: .repositories)
         XCTAssertNil(persisted?.eTag)
         XCTAssertEqual(persisted?.lastModified, lastModified)
@@ -108,12 +113,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
                 body: fixture.repositoryPayload(),
                 headers: ["ETag": "\"repository-v1\"", "Last-Modified": lastModified]
             ),
-            .http(statusCode: 304, body: Data()),
-            .http(
-                statusCode: 200,
-                body: fixture.repositoryPayload(),
-                headers: ["ETag": "\"repository-v1\"", "Last-Modified": lastModified]
-            )
+            .http(statusCode: 304, body: Data())
         ])
 
         _ = try await fixture.service(session: session).refreshRepositories(
@@ -130,8 +130,8 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
 
         let eTags = await session.validators()
         let lastModifiedValues = await session.lastModifiedValidators()
-        XCTAssertEqual(eTags, [nil, "\"repository-v1\"", nil])
-        XCTAssertEqual(lastModifiedValues, [nil, nil, nil])
+        XCTAssertEqual(eTags, [nil, "\"repository-v1\""])
+        XCTAssertEqual(lastModifiedValues, [nil, nil])
         let persisted = try await fixture.conditionalValidator(feature: .repositories)
         XCTAssertEqual(persisted?.eTag, "\"repository-v1\"")
         XCTAssertEqual(persisted?.lastModified, lastModified)
@@ -147,6 +147,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
                 body: fixture.repositoryPayload(),
                 headers: ["Last-Modified": lastModified]
             ),
+            .http(statusCode: 304, body: Data()),
             .http(statusCode: 200, body: fixture.repositoryPayload())
         ])
 
@@ -166,9 +167,11 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let eTags = await session.validators()
         let lastModifiedValues = await session.lastModifiedValidators()
         let persisted = try await fixture.conditionalValidator(feature: .repositories)
-        XCTAssertEqual(eTags, [nil, nil])
-        XCTAssertEqual(lastModifiedValues, [nil, nil])
+        let receiptCount = try await fixture.receiptCount()
+        XCTAssertEqual(eTags, [nil, nil, nil])
+        XCTAssertEqual(lastModifiedValues, [nil, nil, nil])
         XCTAssertNil(persisted)
+        XCTAssertEqual(receiptCount, 0)
     }
 
     func testModifiedRepositoryInventoryPersistsExactRawAuthorityCoverageAndObservation() async throws {
@@ -220,6 +223,24 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(history[0].reason, .directResponse)
         XCTAssertEqual(history[0].authority, .incremental)
         XCTAssertEqual(history[0].confirmation, .confirmed)
+        let persistedReceipt = try await fixture.repositoryReceipt()
+        let receipt = try XCTUnwrap(persistedReceipt)
+        XCTAssertEqual(receipt.accountID, fixture.account.id.rawValue)
+        XCTAssertEqual(receipt.organizationID, fixture.organization.id.rawValue)
+        XCTAssertEqual(receipt.feature, CoverageFeature.repositories.rawValue)
+        XCTAssertEqual(receipt.streamID, fixture.repositoryInventoryStreamID.rawValue)
+        XCTAssertEqual(receipt.requestKey, "GET \(fixture.repositoryEndpoint)")
+        XCTAssertEqual(receipt.credentialRevision, "credential-1")
+        XCTAssertEqual(receipt.capabilityRevision, "capability-1")
+        XCTAssertEqual(receipt.eTag, "\"repository-v1\"")
+        XCTAssertEqual(receipt.lastModified, lastModified)
+        XCTAssertEqual(receipt.pageCount, 1)
+        let receiptPages = try await fixture.repositoryReceiptPages()
+        XCTAssertEqual(receiptPages.count, 1)
+        XCTAssertEqual(receiptPages[0].pageIndex, 1)
+        XCTAssertEqual(receiptPages[0].rawSnapshotID, snapshots[0].id.rawValue)
+        XCTAssertEqual(receiptPages[0].endpoint, fixture.repositoryEndpoint)
+        XCTAssertNil(receiptPages[0].nextEndpoint)
     }
 
     func testRepositoryOmissionRetainsTopologyAndRecordsUnknownAccessInOneAuthorityStream() async throws {
@@ -293,6 +314,14 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
             account: fixture.account,
             organization: fixture.organization
         )
+        let firstCoverage = try await fixture.coverage(feature: .repositories)
+        let firstValidator = try await fixture.conditionalValidator(feature: .repositories)
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM repository_inventory_replay_receipts WHERE account_id = ?",
+                arguments: [fixture.account.id.rawValue]
+            )
+        }
         do {
             _ = try await fixture.service(
                 session: session,
@@ -311,12 +340,16 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let snapshotCount = try await fixture.rawSnapshots().count
         let historyCount = try await fixture.repositoryAccessHistory(repositoryID: "R_1").count
         let coverageStatus = try await fixture.coverage(feature: .repositories).status
+        let preservedCoverage = try await fixture.coverage(feature: .repositories)
+        let preservedValidator = try await fixture.conditionalValidator(feature: .repositories)
         let sentValidators = await session.validators()
         XCTAssertEqual(repositoryRowCount, 1)
         XCTAssertEqual(accessState, .available)
         XCTAssertEqual(snapshotCount, 1)
         XCTAssertEqual(historyCount, 1)
         XCTAssertEqual(coverageStatus, .failed)
+        XCTAssertEqual(preservedCoverage.lastSuccessfulAt, firstCoverage.lastSuccessfulAt)
+        XCTAssertEqual(preservedValidator, firstValidator)
         XCTAssertEqual(sentValidators, [nil, "\"repository-v1\"", nil])
     }
 
@@ -367,8 +400,16 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
         let session = ScriptedInventorySession(responses: [
-            .http(statusCode: 200, body: fixture.repositoryPayload()),
-            .http(statusCode: 200, body: fixture.repositoryPayload())
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            )
         ])
         let service = try fixture.service(session: session)
 
@@ -384,11 +425,13 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let snapshotCount = try await fixture.rawSnapshots().count
         let history = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
         let coverage = try await fixture.coverageRecords(feature: .repositories)
+        let receiptCount = try await fixture.receiptCount()
         XCTAssertEqual(snapshotCount, 1)
         XCTAssertEqual(history.count, 1)
         XCTAssertEqual(history.first?.result, .accessible)
         XCTAssertEqual(coverage.count, 2)
         XCTAssertTrue(coverage.allSatisfy { $0.status == .complete })
+        XCTAssertEqual(receiptCount, 1)
     }
 
     func testDifferentRepositoryRevisionAtSameMillisecondFailsClosedAndPreservesFirstAuthority() async throws {
@@ -416,6 +459,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let firstSnapshots = try await fixture.rawSnapshots()
         let firstHistory = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
         let firstValidator = try await fixture.conditionalValidator(feature: .repositories)
+        let firstReceipt = try await fixture.repositoryReceipt()
 
         do {
             _ = try await service.refreshRepositories(
@@ -431,12 +475,14 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         let preservedSnapshots = try await fixture.rawSnapshots()
         let preservedHistory = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
         let preservedValidator = try await fixture.conditionalValidator(feature: .repositories)
+        let preservedReceipt = try await fixture.repositoryReceipt()
         let preservedAccess = try await fixture.repositoryAccessState(repositoryID: "R_1")
         XCTAssertEqual(firstRepositories, preservedRepositories)
         XCTAssertEqual(preservedRepositories.map(\.name), ["repo"])
         XCTAssertEqual(firstSnapshots, preservedSnapshots)
         XCTAssertEqual(firstHistory, preservedHistory)
         XCTAssertEqual(firstValidator, preservedValidator)
+        XCTAssertEqual(firstReceipt, preservedReceipt)
         XCTAssertEqual(preservedValidator?.eTag, "\"repository-v1\"")
         XCTAssertEqual(preservedAccess, .available)
     }
@@ -689,9 +735,12 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
             organization: fixture.organization
         )
         try await fixture.replaceCredentialRevision(with: "credential-2")
+        let rotatedScope = try await fixture.synchronizationScope()
         _ = try await service.refreshRepositories(
             account: fixture.account,
-            organization: fixture.organization
+            organization: fixture.organization,
+            synchronizationScope: rotatedScope,
+            reconciliationIntent: .incremental
         )
 
         let sentValidators = await session.validators()
@@ -714,6 +763,336 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(persisted.map(\.0), ["credential-2"])
         XCTAssertEqual(persisted.map(\.1), ["capability-1"])
         XCTAssertEqual(persisted.map(\.2), ["\"repository-v2\""])
+    }
+
+    func testBareRepositoryNotModifiedRetriesOnceAndSecondNotModifiedFailsExplicitly() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 304, body: Data()),
+            .http(statusCode: 304, body: Data())
+        ])
+
+        do {
+            _ = try await fixture.service(session: session).refreshRepositories(
+                account: fixture.account,
+                organization: fixture.organization
+            )
+            XCTFail("A second unconditional 304 must fail without fabricating cached state.")
+        } catch let error as GitHubRepositoryTeamClientError {
+            XCTAssertEqual(error, .notModifiedWithoutCachedState)
+        }
+
+        let validators = await session.validators()
+        let repositories = try await fixture.repositories()
+        let snapshots = try await fixture.rawSnapshots()
+        let receiptCount = try await fixture.receiptCount()
+        XCTAssertEqual(validators, [nil, nil])
+        XCTAssertTrue(repositories.isEmpty)
+        XCTAssertTrue(snapshots.isEmpty)
+        XCTAssertEqual(receiptCount, 0)
+    }
+
+    func testBareRepositoryNotModifiedProcessesMalformedSSOBeforeRetry() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "definitely-not-valid"]
+            )
+        ])
+
+        do {
+            _ = try await fixture.service(session: session).refreshRepositories(
+                account: fixture.account,
+                organization: fixture.organization
+            )
+            XCTFail("Malformed SSO must fail before an unconditional 304 retry.")
+        } catch let error as GitHubRepositoryTeamClientError {
+            XCTAssertEqual(error, .partialResults)
+        }
+
+        let validators = await session.validators()
+        let coverage = try await fixture.coverage(feature: .repositories)
+        XCTAssertEqual(validators, [nil])
+        XCTAssertEqual(coverage.status, .partial)
+    }
+
+    func testEmptyRepositoryInventoryReceiptReplays304AndAdvancesRootOnly() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: Data("[]".utf8),
+                headers: ["ETag": "\"repository-empty\""]
+            ),
+            .http(statusCode: 304, body: Data())
+        ])
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        let repositories = try await fixture.service(
+            session: session,
+            now: fixture.observedAt.addingTimeInterval(1)
+        ).refreshRepositories(account: fixture.account, organization: fixture.organization)
+
+        let coverage = try await fixture.coverageRecords(feature: .repositories)
+        let validators = await session.validators()
+        XCTAssertTrue(repositories.isEmpty)
+        XCTAssertEqual(coverage.count, 1)
+        XCTAssertNil(coverage[0].repositoryID)
+        XCTAssertEqual(coverage[0].status, .complete)
+        XCTAssertEqual(coverage[0].lastSuccessfulAt, fixture.observedAt.addingTimeInterval(1))
+        XCTAssertEqual(validators, [nil, "\"repository-empty\""])
+    }
+
+    func testMalformedSSOOnNotModifiedPrecedesReceiptReplayAndRetry() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "definitely-not-valid"]
+            )
+        ])
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        do {
+            _ = try await fixture.service(
+                session: session,
+                now: fixture.observedAt.addingTimeInterval(1)
+            ).refreshRepositories(account: fixture.account, organization: fixture.organization)
+            XCTFail("Malformed SSO must fail before cached receipt replay or retry.")
+        } catch let error as GitHubRepositoryTeamClientError {
+            XCTAssertEqual(error, .partialResults)
+        }
+
+        let validators = await session.validators()
+        let coverage = try await fixture.coverage(feature: .repositories)
+        XCTAssertEqual(validators, [nil, "\"repository-v1\""])
+        XCTAssertEqual(coverage.status, .partial)
+    }
+
+    func testCorruptReceiptFallsBackOnceAndAtomicallyReplacesAuthority() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(statusCode: 304, body: Data()),
+            .http(
+                statusCode: 200,
+                body: fixture.renamedRepositoryPayload(),
+                headers: ["ETag": "\"repository-v2\""]
+            )
+        ])
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE repository_inventory_replay_receipts SET normalized_digest = zeroblob(32)"
+            )
+        }
+
+        let repositories = try await fixture.service(
+            session: session,
+            now: fixture.observedAt.addingTimeInterval(1)
+        ).refreshRepositories(account: fixture.account, organization: fixture.organization)
+
+        let validators = await session.validators()
+        let persistedReceipt = try await fixture.repositoryReceipt()
+        let receipt = try XCTUnwrap(persistedReceipt)
+        let snapshotCount = try await fixture.rawSnapshots().count
+        let historyCount = try await fixture.repositoryAccessHistory(repositoryID: "R_1").count
+        XCTAssertEqual(repositories.map(\.name), ["renamed"])
+        XCTAssertEqual(validators, [nil, "\"repository-v1\"", nil])
+        XCTAssertEqual(receipt.eTag, "\"repository-v2\"")
+        XCTAssertEqual(snapshotCount, 2)
+        XCTAssertEqual(historyCount, 2)
+    }
+
+    func testFutureRepositoryValidatorIsNeverSentAndResponseReplacesIt() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v2\""]
+            )
+        ])
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE conditional_request_cache SET observed_at_ms = observed_at_ms + 600000"
+            )
+        }
+
+        _ = try await fixture.service(
+            session: session,
+            now: fixture.observedAt.addingTimeInterval(1)
+        ).refreshRepositories(account: fixture.account, organization: fixture.organization)
+
+        let validators = await session.validators()
+        let persisted = try await fixture.conditionalValidator(feature: .repositories)
+        XCTAssertEqual(validators, [nil, nil])
+        XCTAssertEqual(persisted?.eTag, "\"repository-v2\"")
+    }
+
+    func testReceiptInsertFailureRollsBackModifiedAuthorityBeforeFailureCoverage() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(
+                statusCode: 200,
+                body: fixture.renamedRepositoryPayload(),
+                headers: ["ETag": "\"repository-v2\""]
+            )
+        ])
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let firstReceipt = try await fixture.repositoryReceipt()
+        let firstSnapshots = try await fixture.rawSnapshots()
+        let firstHistory = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
+        let firstValidator = try await fixture.conditionalValidator(feature: .repositories)
+        let firstRoot = try await fixture.coverage(feature: .repositories)
+        try await fixture.vault.write { database in
+            try database.execute(sql: """
+                CREATE TRIGGER fail_repository_receipt_insert
+                BEFORE INSERT ON repository_inventory_replay_receipts
+                BEGIN SELECT RAISE(ABORT, 'receipt insertion failed'); END
+                """)
+        }
+
+        do {
+            _ = try await fixture.service(
+                session: session,
+                now: fixture.observedAt.addingTimeInterval(1)
+            ).refreshRepositories(account: fixture.account, organization: fixture.organization)
+            XCTFail("Receipt persistence must be part of the modified authority transaction.")
+        } catch {
+            XCTAssertFalse(error is CancellationError)
+        }
+
+        let preservedRoot = try await fixture.coverage(feature: .repositories)
+        let preservedRepositories = try await fixture.repositories()
+        let preservedReceipt = try await fixture.repositoryReceipt()
+        let preservedSnapshots = try await fixture.rawSnapshots()
+        let preservedHistory = try await fixture.repositoryAccessHistory(repositoryID: "R_1")
+        let preservedValidator = try await fixture.conditionalValidator(feature: .repositories)
+        XCTAssertEqual(preservedRepositories.map(\.name), ["repo"])
+        XCTAssertEqual(preservedReceipt, firstReceipt)
+        XCTAssertEqual(preservedSnapshots, firstSnapshots)
+        XCTAssertEqual(preservedHistory, firstHistory)
+        XCTAssertEqual(preservedValidator, firstValidator)
+        XCTAssertEqual(preservedRoot.status, .failed)
+        XCTAssertEqual(preservedRoot.lastSuccessfulAt, firstRoot.lastSuccessfulAt)
+    }
+
+    func testInFlightCredentialRotationCancelsWithoutPostGateAuthorityWrites() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let staleScope = try await fixture.synchronizationScope()
+        let session = ScriptedInventorySession(responses: [
+            .httpAfter(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                action: { try await fixture.replaceCredentialRevision(with: "credential-2") }
+            )
+        ])
+
+        do {
+            _ = try await fixture.service(session: session).refreshRepositories(
+                account: fixture.account,
+                organization: fixture.organization,
+                synchronizationScope: staleScope,
+                reconciliationIntent: .incremental
+            )
+            XCTFail("An in-flight credential rotation must cancel the stale refresh.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let repositories = try await fixture.repositories()
+        let snapshots = try await fixture.rawSnapshots()
+        let receiptCount = try await fixture.receiptCount()
+        let validatorCount = try await fixture.conditionalValidatorRowCount()
+        let coverage = try await fixture.coverage(feature: .repositories)
+        XCTAssertTrue(repositories.isEmpty)
+        XCTAssertTrue(snapshots.isEmpty)
+        XCTAssertEqual(receiptCount, 0)
+        XCTAssertEqual(validatorCount, 0)
+        XCTAssertEqual(coverage.status, .partial)
+    }
+
+    func testInFlightCapabilityRotationCancelsWithoutPostGateAuthorityWrites() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let staleScope = try await fixture.synchronizationScope()
+        let session = ScriptedInventorySession(responses: [
+            .httpAfter(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                action: { try await fixture.replaceCapabilityRevision(with: "capability-2") }
+            )
+        ])
+
+        do {
+            _ = try await fixture.service(session: session).refreshRepositories(
+                account: fixture.account,
+                organization: fixture.organization,
+                synchronizationScope: staleScope,
+                reconciliationIntent: .incremental
+            )
+            XCTFail("An in-flight capability rotation must cancel the stale refresh.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let repositories = try await fixture.repositories()
+        let snapshots = try await fixture.rawSnapshots()
+        let receiptCount = try await fixture.receiptCount()
+        let validatorCount = try await fixture.conditionalValidatorRowCount()
+        let coverage = try await fixture.coverage(feature: .repositories)
+        XCTAssertTrue(repositories.isEmpty)
+        XCTAssertTrue(snapshots.isEmpty)
+        XCTAssertEqual(receiptCount, 0)
+        XCTAssertEqual(validatorCount, 0)
+        XCTAssertEqual(coverage.status, .partial)
     }
 
     func testTeamNotModifiedUsesOnlyItsScopedValidatorAndPreservesMembership() async throws {
@@ -824,6 +1203,54 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(teamCoverage.status, .complete)
         let paths = await session.paths()
         XCTAssertEqual(paths, ["/orgs/acme/repos", "/orgs/acme/teams"])
+    }
+
+    func testValidatorlessTeamNotModifiedCannotFabricateCompleteCachedInventory() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: fixture.repositoryPayload()),
+            .http(statusCode: 304, body: Data())
+        ])
+
+        let result = try await fixture.service(session: session).refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(classification, coverage) = result.teams else {
+            return XCTFail("An unsolicited team 304 must not authorize cached or empty inventory.")
+        }
+        XCTAssertEqual(classification, .failed)
+        XCTAssertEqual(coverage.status, .failed)
+        let teams = try await fixture.teams()
+        XCTAssertTrue(teams.isEmpty)
+        let snapshotEndpoints = try await fixture.rawSnapshots().map(\.endpoint)
+        XCTAssertFalse(snapshotEndpoints.contains("/orgs/acme/teams?per_page=100"))
+    }
+
+    func testValidatorlessTeamNotModifiedProcessesMalformedSSOBeforeAuthorityFailure() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: fixture.repositoryPayload()),
+            .http(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "definitely-not-valid"]
+            )
+        ])
+
+        let result = try await fixture.service(session: session).refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(classification, coverage) = result.teams else {
+            return XCTFail("Malformed SSO must fail before validatorless team 304 authority handling.")
+        }
+        XCTAssertEqual(classification, .partial)
+        XCTAssertEqual(coverage.status, .partial)
     }
 
     func testRepositorySSOFailureReturnsScopedTransientRecoveryAndStillCommitsTeams() async throws {
@@ -950,7 +1377,21 @@ private extension OrganizationInventoryRefreshService {
         try await refreshRepositories(
             account: account,
             organization: organization,
+            synchronizationScope: Self.fixtureScope(account: account, organization: organization),
             reconciliationIntent: .incremental
+        )
+    }
+
+    func refreshRepositories(
+        account: GitHubAccount,
+        organization: GitHubOrganization,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) async throws -> [RepositorySummary] {
+        try await refreshRepositories(
+            account: account,
+            organization: organization,
+            synchronizationScope: Self.fixtureScope(account: account, organization: organization),
+            reconciliationIntent: reconciliationIntent
         )
     }
 
@@ -961,7 +1402,33 @@ private extension OrganizationInventoryRefreshService {
         try await refreshInventory(
             account: account,
             organization: organization,
+            synchronizationScope: Self.fixtureScope(account: account, organization: organization),
             reconciliationIntent: .incremental
+        )
+    }
+
+    func refreshInventory(
+        account: GitHubAccount,
+        organization: GitHubOrganization,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) async throws -> OrganizationInventoryRefreshResult {
+        try await refreshInventory(
+            account: account,
+            organization: organization,
+            synchronizationScope: Self.fixtureScope(account: account, organization: organization),
+            reconciliationIntent: reconciliationIntent
+        )
+    }
+
+    private static func fixtureScope(
+        account: GitHubAccount,
+        organization: GitHubOrganization
+    ) -> SynchronizationScope {
+        SynchronizationScope(
+            accountID: account.id,
+            organizationID: organization.id,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
         )
     }
 }
@@ -1071,6 +1538,16 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
         )
     }
 
+    func conditionalValidatorRowCount() async throws -> Int {
+        try await vault.read { database in
+            try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM conditional_request_cache WHERE account_id = ?",
+                arguments: [account.id.rawValue]
+            ) ?? 0
+        }
+    }
+
     func repositories() async throws -> [RepositorySummary] {
         try await RepositoryInventoryRepository(vault: vault).repositories(
             accountID: account.id,
@@ -1087,6 +1564,65 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
 
     func rawSnapshots() async throws -> [RawAPISnapshot] {
         try await RawAPISnapshotRepository(vault: vault).snapshots(for: account.id)
+    }
+
+    func receiptCount() async throws -> Int {
+        try await vault.read { database in
+            try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM repository_inventory_replay_receipts WHERE account_id = ?",
+                arguments: [account.id.rawValue]
+            ) ?? 0
+        }
+    }
+
+    func repositoryReceipt() async throws -> RepositoryReceiptEvidence? {
+        try await vault.read { database in
+            try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT account_id, organization_id, feature, stream_id, request_key,
+                           credential_revision, capability_revision, etag, last_modified,
+                           page_count
+                    FROM repository_inventory_replay_receipts
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [account.id.rawValue, organization.id.rawValue]
+            ).map { row in
+                RepositoryReceiptEvidence(
+                    accountID: row["account_id"],
+                    organizationID: row["organization_id"],
+                    feature: row["feature"],
+                    streamID: row["stream_id"],
+                    requestKey: row["request_key"],
+                    credentialRevision: row["credential_revision"],
+                    capabilityRevision: row["capability_revision"],
+                    eTag: row["etag"],
+                    lastModified: row["last_modified"],
+                    pageCount: row["page_count"]
+                )
+            }
+        }
+    }
+
+    func repositoryReceiptPages() async throws -> [RepositoryReceiptPageEvidence] {
+        try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT page_index, raw_snapshot_id, endpoint, next_endpoint
+                    FROM repository_inventory_replay_receipt_pages
+                    ORDER BY page_index
+                    """
+            ).map { row in
+                RepositoryReceiptPageEvidence(
+                    pageIndex: row["page_index"],
+                    rawSnapshotID: row["raw_snapshot_id"],
+                    endpoint: row["endpoint"],
+                    nextEndpoint: row["next_endpoint"]
+                )
+            }
+        }
     }
 
     func coverageRecords(feature: CoverageFeature) async throws -> [CoverageRecord] {
@@ -1197,6 +1733,20 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
         )
     }
 
+    func replaceCapabilityRevision(with rawValue: String) async throws {
+        try await AccountRepository(vault: vault).save(
+            organization,
+            access: OrganizationAccess(
+                accountID: account.id,
+                organizationID: organization.id,
+                state: .available,
+                capabilityRevision: CapabilityRevision(rawValue: rawValue)!,
+                capabilities: [],
+                checkedAt: observedAt
+            )
+        )
+    }
+
     func seedRawRepositorySnapshot(eTag: String) async throws {
         try await RawAPISnapshotRepository(vault: vault).save(
             RawAPISnapshot(
@@ -1264,6 +1814,26 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
     }
 }
 
+private struct RepositoryReceiptEvidence: Equatable, Sendable {
+    let accountID: String
+    let organizationID: String
+    let feature: String
+    let streamID: String
+    let requestKey: String
+    let credentialRevision: String
+    let capabilityRevision: String
+    let eTag: String?
+    let lastModified: String?
+    let pageCount: Int
+}
+
+private struct RepositoryReceiptPageEvidence: Equatable, Sendable {
+    let pageIndex: Int
+    let rawSnapshotID: String
+    let endpoint: String
+    let nextEndpoint: String?
+}
+
 private enum OrganizationInventoryFixtureError: Error {
     case missingCoverage
     case unsupportedFeature
@@ -1272,6 +1842,12 @@ private enum OrganizationInventoryFixtureError: Error {
 private actor ScriptedInventorySession: HTTPSession {
     enum Response: Sendable {
         case http(statusCode: Int, body: Data, headers: [String: String] = [:])
+        case httpAfter(
+            statusCode: Int,
+            body: Data,
+            headers: [String: String] = [:],
+            action: @Sendable () async throws -> Void
+        )
         case httpAndCancel(statusCode: Int, body: Data, headers: [String: String] = [:])
         case cancellation
     }
@@ -1296,6 +1872,17 @@ private actor ScriptedInventorySession: HTTPSession {
         }
         switch responses.removeFirst() {
         case let .http(statusCode, body, headers):
+            return (
+                body,
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: statusCode,
+                    httpVersion: nil,
+                    headerFields: headers
+                )!
+            )
+        case let .httpAfter(statusCode, body, headers, action):
+            try await action()
             return (
                 body,
                 HTTPURLResponse(

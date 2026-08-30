@@ -241,7 +241,7 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         )
     }
 
-    func testRepositoryFetchRejectsUnsolicitedNotModified() async throws {
+    func testRepositoryFetchPreservesUnsolicitedNotModifiedForCoordinatorDecision() async throws {
         let client = GitHubRepositoryTeamClient(
             client: GitHubRESTClient(
                 transport: try GitHubRESTTransport(
@@ -253,12 +253,37 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
             )
         )
 
-        do {
-            _ = try await client.fetchRepositories(in: "acme", validators: nil)
-            XCTFail("An unsolicited 304 has no cached-state authority.")
-        } catch let error as GitHubRepositoryTeamClientError {
-            XCTAssertEqual(error, .notModifiedWithoutCachedState)
+        let result = try await client.fetchRepositories(in: "acme", validators: nil)
+
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("The coordinator must decide whether an unsolicited 304 can be retried.")
         }
+        XCTAssertNil(ssoHeader)
+    }
+
+    func testUnconditionalRepositoryNotModifiedPreservesAuthorizationRequiredSSOHeader() async throws {
+        let recoveryURL = URL(string: "https://github.com/orgs/acme/sso")!
+        let client = GitHubRepositoryTeamClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(
+                    session: RepositoryTeamPagingSession(responses: [
+                        "/orgs/acme/repos?type=all&per_page=100": (
+                            Data(),
+                            ["X-GitHub-SSO": "required; url=\(recoveryURL.absoluteString)"],
+                            304
+                        )
+                    ])
+                ),
+                credential: SecretValue("token")
+            )
+        )
+
+        let result = try await client.fetchRepositories(in: "acme", validators: nil)
+
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("An unconditional 304 must preserve its SSO header for precedence handling.")
+        }
+        XCTAssertEqual(ssoHeader, GitHubSSOHeader.authorizationRequired(recoveryURL))
     }
 
     func testRepositoryNotModifiedPreservesAuthorizationRequiredSSOHeader() async throws {

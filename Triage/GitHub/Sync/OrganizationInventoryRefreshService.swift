@@ -85,22 +85,25 @@ actor OrganizationInventoryRefreshService {
     func refreshRepositories(
         account: GitHubAccount,
         organization: GitHubOrganization,
+        synchronizationScope: SynchronizationScope,
         rateLimitController: GitHubRateLimitController? = nil,
         requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
         reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> [RepositorySummary] {
-        let context = try await context(for: account, organization: organization)
+        let context = try await context(
+            for: account,
+            organization: organization,
+            synchronizationScope: synchronizationScope
+        )
         let observedAt = clock()
+        try await validateCurrentScope(context)
         let client = try await repositoryTeamClient(
             for: account,
             rateLimitController: rateLimitController,
             requestPriority: requestPriority
         )
+        try await validateCurrentScope(context)
         try Task.checkCancellation()
-        try await context.coverage.save(
-            partialCoverage(feature: .repositories, context: context, observedAt: observedAt),
-            attemptedAt: observedAt
-        )
         do {
             let result = try await reconcileRepositories(
                 with: client,
@@ -127,17 +130,24 @@ actor OrganizationInventoryRefreshService {
     func refreshInventory(
         account: GitHubAccount,
         organization: GitHubOrganization,
+        synchronizationScope: SynchronizationScope,
         rateLimitController: GitHubRateLimitController? = nil,
         requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
         reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> OrganizationInventoryRefreshResult {
-        let context = try await context(for: account, organization: organization)
+        let context = try await context(
+            for: account,
+            organization: organization,
+            synchronizationScope: synchronizationScope
+        )
         let observedAt = clock()
+        try await validateCurrentScope(context)
         let client = try await repositoryTeamClient(
             for: account,
             rateLimitController: rateLimitController,
             requestPriority: requestPriority
         )
+        try await validateCurrentScope(context)
         try Task.checkCancellation()
         let repositories = try await refreshRepositoriesOutcome(
             with: client,
@@ -161,10 +171,6 @@ actor OrganizationInventoryRefreshService {
         observedAt: Date,
         reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> OrganizationInventoryRefreshOutcome<RepositorySummary> {
-        try await context.coverage.save(
-            partialCoverage(feature: .repositories, context: context, observedAt: observedAt),
-            attemptedAt: observedAt
-        )
         do {
             let result = try await reconcileRepositories(
                 with: client,
@@ -196,8 +202,9 @@ actor OrganizationInventoryRefreshService {
         accountLogin: String,
         observedAt: Date
     ) async throws -> OrganizationInventoryRefreshOutcome<TeamInventorySummary> {
-        try await context.coverage.save(
+        try await saveCoverage(
             partialCoverage(feature: .teams, context: context, observedAt: observedAt),
+            context: context,
             attemptedAt: observedAt
         )
         do {
@@ -237,26 +244,82 @@ actor OrganizationInventoryRefreshService {
             context: context
         )
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
+        try await validateCurrentScope(context)
         let requestValidators: GitHubHTTPValidators? = switch reconciliationIntent {
         case .incremental:
             try currentHTTPValidators(from: validator, observedAt: observedAt)
         case .fullReconciliation:
             nil
         }
-        var fetched = try await client.fetchRepositories(
+        // A conditional attempt keeps the last completed coverage row intact
+        // because that row is part of the local 304 replay authority. The
+        // account/organization coordinator publishes `.refreshing` while the
+        // request is in flight. Unconditional work has no replay authority and
+        // records the incomplete attempt before leaving the vault.
+        if requestValidators == nil {
+            try await saveCoverage(
+                partialCoverage(feature: .repositories, context: context, observedAt: observedAt),
+                context: context,
+                attemptedAt: observedAt
+            )
+        }
+        var fetched = try await fetchRepositories(
+            with: client,
             in: context.organization.login,
             validators: requestValidators
         )
+        try await validateCurrentScope(context)
         try Task.checkCancellation()
         if case let .notModified(ssoHeader) = fetched {
             try throwForSSORequirement(
                 in: ssoHeader,
                 githubOrganizationID: context.organization.githubOrganizationID
             )
-            fetched = try await client.fetchRepositories(
+            if requestValidators != nil, let validator {
+                do {
+                    let replay = try await context.repositoryInventory.writeTransaction(
+                        accountID: context.account.id
+                    ) { database in
+                        try Self.validateCurrentScope(
+                            context.synchronizationScope,
+                            account: context.account,
+                            organization: context.organization,
+                            in: database
+                        )
+                        return try RepositoryInventoryReplayReceiptRepository
+                            .validatedNotModifiedReceipt(
+                                for: validator,
+                                organization: context.organization,
+                                validatedAt: observedAt,
+                                expectedAccountID: context.account.id,
+                                in: database
+                            )
+                    }
+                    if let replay {
+                        try await validateCurrentScope(context)
+                        return (replay.summaries, replay.coverage)
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch is RepositoryInventoryReplayReceiptRepositoryError {
+                    // The validator remains an HTTP optimization only. Missing or
+                    // invalid local replay authority requires one unconditional fetch.
+                }
+            }
+            try await validateCurrentScope(context)
+            if requestValidators != nil {
+                try await saveCoverage(
+                    partialCoverage(feature: .repositories, context: context, observedAt: observedAt),
+                    context: context,
+                    attemptedAt: observedAt
+                )
+            }
+            fetched = try await fetchRepositories(
+                with: client,
                 in: context.organization.login,
                 validators: nil
             )
+            try await validateCurrentScope(context)
             try Task.checkCancellation()
             if case let .notModified(ssoHeader) = fetched {
                 try throwForSSORequirement(
@@ -282,11 +345,23 @@ actor OrganizationInventoryRefreshService {
                 throw GitHubRepositoryTeamClientError.invalidRepository
             }
             let sourceRevision = Self.repositorySourceRevision(for: preparedPages)
+            let responseValidator = Self.conditionalValidator(
+                eTag: inventory.pages.first?.page.etag,
+                lastModified: inventory.pages.first?.page.lastModified,
+                identity: conditionalIdentity,
+                observedAt: observedAt
+            )
             try Task.checkCancellation()
             let summaries = try await context.repositoryInventory.writeTransaction(
                 accountID: context.account.id
             ) { database in
                 try Task.checkCancellation()
+                try Self.validateCurrentScope(
+                    context.synchronizationScope,
+                    account: context.account,
+                    organization: context.organization,
+                    in: database
+                )
                 try Self.validateRepositoryAggregateReplay(
                     preparedPages,
                     context: context,
@@ -414,12 +489,31 @@ actor OrganizationInventoryRefreshService {
                     expectedAccountID: context.account.id,
                     in: database
                 )
+                try RepositoryInventoryReplayReceiptRepository.replaceModifiedResponseReceipt(
+                    RepositoryInventoryReplayReceiptInput(
+                        identity: conditionalIdentity,
+                        validator: responseValidator,
+                        rawSourceRevision: sourceRevision,
+                        pages: preparedPages.map { page in
+                            RepositoryInventoryReplayReceiptPage(
+                                pageIndex: page.pageIndex,
+                                rawSnapshotID: page.snapshot.id,
+                                endpoint: page.endpoint,
+                                linkHeader: page.linkHeader,
+                                nextEndpoint: page.nextEndpoint
+                            )
+                        },
+                        normalizedCommittedAt: observedAt
+                    ),
+                    organization: context.organization,
+                    expectedAccountID: context.account.id,
+                    in: database
+                )
                 return reconciliation.summaries
             }
-            return (
-                summaries,
-                try await committedCoverage(coverage, context: context)
-            )
+            let committed = try await committedCoverage(coverage, context: context)
+            try await validateCurrentScope(context)
+            return (summaries, committed)
         case .notModified:
             throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
         }
@@ -437,11 +531,13 @@ actor OrganizationInventoryRefreshService {
             context: context
         )
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
+        try await validateCurrentScope(context)
         let requestValidators = try currentHTTPValidators(from: validator, observedAt: observedAt)
         let fetched = try await client.fetchTeams(
             in: context.organization.login,
             validators: requestValidators
         )
+        try await validateCurrentScope(context)
         try Task.checkCancellation()
         let updatedTeams: [GitHubTeamDTO]?
         let teamPages: [GitHubRepositoryTeamPage<GitHubTeamDTO>]
@@ -465,23 +561,29 @@ actor OrganizationInventoryRefreshService {
                 in: ssoHeader,
                 githubOrganizationID: context.organization.githubOrganizationID
             )
+            guard requestValidators != nil else {
+                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
+            }
             updatedTeams = nil
             teamPages = []
             let cachedTeams = try await context.teamInventory.teams(
                 accountID: context.account.id,
                 organization: context.organization
             )
+            try await validateCurrentScope(context)
             membershipTargets = cachedTeams.map { TeamMembershipTarget(id: $0.id, slug: $0.slug) }
         }
         var memberships = [TeamMembershipObservation]()
         var membershipSnapshots = [RawAPISnapshot]()
         for team in membershipTargets {
             try Task.checkCancellation()
+            try await validateCurrentScope(context)
             let membership = try await client.membership(
                 in: context.organization.login,
                 teamSlug: team.slug,
                 accountLogin: accountLogin
             )
+            try await validateCurrentScope(context)
             guard case .unknown = membership else {
                 if case let .member(response) = membership {
                     membershipSnapshots.append(
@@ -509,6 +611,12 @@ actor OrganizationInventoryRefreshService {
         let coverage = completeCoverage(feature: .teams, context: context, observedAt: observedAt)
         try Task.checkCancellation()
         let summaries = try await context.teamInventory.writeTransaction(accountID: context.account.id) { database in
+            try Self.validateCurrentScope(
+                context.synchronizationScope,
+                account: context.account,
+                organization: context.organization,
+                in: database
+            )
             for page in preparedTeamPages {
                 try RawAPISnapshotRepository.save(
                     RawAPISnapshot(
@@ -564,49 +672,122 @@ actor OrganizationInventoryRefreshService {
             }
             return summaries
         }
-        return (
-            summaries,
-            try await committedCoverage(coverage, context: context)
-        )
+        let committed = try await committedCoverage(coverage, context: context)
+        try await validateCurrentScope(context)
+        return (summaries, committed)
     }
 
     private func context(
         for account: GitHubAccount,
-        organization: GitHubOrganization
+        organization: GitHubOrganization,
+        synchronizationScope: SynchronizationScope
     ) async throws -> Context {
+        guard synchronizationScope.accountID == account.id else {
+            throw RepositoryInventoryRepositoryError.accountScopeMismatch
+        }
+        guard synchronizationScope.organizationID == organization.id else {
+            throw RepositoryInventoryRepositoryError.organizationScopeMismatch
+        }
         guard let vaultKey = try await vaultKeyReader(account.id) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
-        let accountRepository = AccountRepository(vault: vault)
-        guard (try await accountRepository.accounts()).contains(where: {
-            $0.id == account.id
-                && $0.githubUserID == account.githubUserID
-                && $0.nodeID == account.nodeID
-                && $0.login.caseInsensitiveCompare(account.login) == .orderedSame
-        }) else {
-            throw RepositoryInventoryRepositoryError.accountScopeMismatch
+        try await vault.read { database in
+            try Self.validateCurrentScope(
+                synchronizationScope,
+                account: account,
+                organization: organization,
+                in: database
+            )
         }
-        guard (try await accountRepository.organizations(for: account.id)).contains(where: {
-            $0.id == organization.id
-                && $0.githubOrganizationID == organization.githubOrganizationID
-                && $0.login.caseInsensitiveCompare(organization.login) == .orderedSame
-        }) else {
-            throw RepositoryInventoryRepositoryError.organizationScopeMismatch
-        }
-        let synchronizationScope = try await accountRepository.synchronizationScope(
-            for: account.id,
-            organizationID: organization.id
-        )
         return Context(
             account: account,
             organization: organization,
             synchronizationScope: synchronizationScope,
+            vault: vault,
             repositoryInventory: RepositoryInventoryRepository(vault: vault),
             teamInventory: TeamInventoryRepository(vault: vault),
             coverage: CoverageRepository(vault: vault),
             conditionalRequests: ConditionalRequestCacheRepository(vault: vault)
         )
+    }
+
+    private func validateCurrentScope(_ context: Context) async throws {
+        try await context.vault.read { database in
+            try Self.validateCurrentScope(
+                context.synchronizationScope,
+                account: context.account,
+                organization: context.organization,
+                in: database
+            )
+        }
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ synchronizationScope: SynchronizationScope,
+        account: GitHubAccount,
+        organization: GitHubOrganization,
+        in database: Database
+    ) throws {
+        guard synchronizationScope.accountID == account.id else {
+            throw RepositoryInventoryRepositoryError.accountScopeMismatch
+        }
+        guard synchronizationScope.organizationID == organization.id else {
+            throw RepositoryInventoryRepositoryError.organizationScopeMismatch
+        }
+        guard let row = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT accounts.github_user_id AS account_github_id,
+                       accounts.github_node_id AS account_node_id,
+                       accounts.login AS account_login,
+                       accounts.credential_revision,
+                       organizations.github_organization_id AS organization_github_id,
+                       organizations.github_node_id AS organization_node_id,
+                       organizations.login AS organization_login,
+                       account_organizations.capability_revision
+                FROM accounts
+                JOIN account_organizations
+                  ON account_organizations.account_id = accounts.id
+                JOIN organizations
+                  ON organizations.id = account_organizations.organization_id
+                WHERE accounts.id = ?
+                  AND account_organizations.organization_id = ?
+                  AND accounts.disabled_at_ms IS NULL
+                """,
+            arguments: [account.id.rawValue, organization.id.rawValue]
+        ) else {
+            throw CancellationError()
+        }
+        let accountGitHubIDValue = try row.decode(String.self, forColumn: "account_github_id")
+        let accountNodeID = try row.decode(String.self, forColumn: "account_node_id")
+        let accountLogin = try row.decode(String.self, forColumn: "account_login")
+        guard let accountGitHubID = UInt64(accountGitHubIDValue),
+              String(accountGitHubID) == accountGitHubIDValue,
+              accountGitHubID == account.githubUserID,
+              accountNodeID == account.nodeID.rawValue,
+              accountLogin.caseInsensitiveCompare(account.login) == .orderedSame
+        else {
+            throw RepositoryInventoryRepositoryError.accountScopeMismatch
+        }
+        let organizationGitHubIDValue = try row.decode(String.self, forColumn: "organization_github_id")
+        let organizationNodeID = try row.decode(String.self, forColumn: "organization_node_id")
+        let organizationLogin = try row.decode(String.self, forColumn: "organization_login")
+        guard let organizationGitHubID = UInt64(organizationGitHubIDValue),
+              String(organizationGitHubID) == organizationGitHubIDValue,
+              organizationGitHubID == organization.githubOrganizationID,
+              organizationNodeID == organization.nodeID.rawValue,
+              organizationLogin.caseInsensitiveCompare(organization.login) == .orderedSame
+        else {
+            throw RepositoryInventoryRepositoryError.organizationScopeMismatch
+        }
+        let credentialRevision = try row.decode(String.self, forColumn: "credential_revision")
+        let capabilityRevision = try row.decode(String.self, forColumn: "capability_revision")
+        guard credentialRevision == synchronizationScope.credentialRevision.rawValue,
+              capabilityRevision == synchronizationScope.capabilityRevision.rawValue
+        else {
+            throw CancellationError()
+        }
     }
 
     private func repositoryTeamClient(
@@ -615,6 +796,24 @@ actor OrganizationInventoryRefreshService {
         requestPriority: GitHubRequestPriority
     ) async throws -> GitHubRepositoryTeamClient {
         try await repositoryTeamClientFactory(account, rateLimitController, requestPriority)
+    }
+
+    private func fetchRepositories(
+        with client: GitHubRepositoryTeamClient,
+        in organization: String,
+        validators: GitHubHTTPValidators?
+    ) async throws -> GitHubRepositoryTeamFetch<GitHubRepositoryDTO> {
+        do {
+            return try await client.fetchRepositories(
+                in: organization,
+                validators: validators
+            )
+        } catch GitHubRepositoryTeamClientError.notModifiedWithoutCachedState {
+            // The REST inventory client rejects a 304 without a sent validator.
+            // At this coordination layer it is still the first response, so the
+            // protocol requires exactly one explicit unconditional retry.
+            return .notModified(ssoHeader: nil)
+        }
     }
 
     private func completeCoverage(
@@ -687,18 +886,43 @@ actor OrganizationInventoryRefreshService {
         context: Context,
         attemptedAt: Date
     ) async throws -> CoverageRecord {
-        try await context.coverage.save(coverage, attemptedAt: attemptedAt)
+        try await saveCoverage(coverage, context: context, attemptedAt: attemptedAt)
         return try await committedCoverage(coverage, context: context)
+    }
+
+    private func saveCoverage(
+        _ coverage: CoverageRecord,
+        context: Context,
+        attemptedAt: Date
+    ) async throws {
+        try await context.repositoryInventory.writeTransaction(
+            accountID: context.account.id
+        ) { database in
+            try Self.validateCurrentScope(
+                context.synchronizationScope,
+                account: context.account,
+                organization: context.organization,
+                in: database
+            )
+            try CoverageRepository.save(
+                coverage,
+                attemptedAt: attemptedAt,
+                expectedAccountID: context.account.id,
+                in: database
+            )
+        }
     }
 
     private func committedCoverage(
         _ coverage: CoverageRecord,
         context: Context
     ) async throws -> CoverageRecord {
-        guard let committed = try await context.coverage.records(
+        let records = try await context.coverage.records(
             for: context.account.id,
             organizationID: context.organization.id
-        ).filter({
+        )
+        try await validateCurrentScope(context)
+        guard let committed = records.filter({
             $0.feature == coverage.feature
                 && $0.streamID == coverage.streamID
                 && $0.credentialRevision == coverage.credentialRevision
@@ -786,9 +1010,7 @@ actor OrganizationInventoryRefreshService {
         observedAt: Date
     ) throws -> GitHubHTTPValidators? {
         guard let validator,
-              validator.observedAt >= observedAt.addingTimeInterval(
-                  -OrganizationInventoryRefreshCadence.fullReconciliationInterval
-              )
+              validator.observedAt <= observedAt
         else {
             return nil
         }
@@ -806,14 +1028,14 @@ actor OrganizationInventoryRefreshService {
         expectedAccountID: AccountID,
         in database: Database
     ) throws {
-        if eTag != nil || lastModified != nil {
+        if let validator = conditionalValidator(
+            eTag: eTag,
+            lastModified: lastModified,
+            identity: identity,
+            observedAt: observedAt
+        ) {
             try ConditionalRequestCacheRepository.save(
-                ConditionalRequestValidator(
-                    identity: identity,
-                    eTag: eTag,
-                    lastModified: lastModified,
-                    observedAt: observedAt
-                ),
+                validator,
                 expectedAccountID: expectedAccountID,
                 in: database
             )
@@ -824,6 +1046,21 @@ actor OrganizationInventoryRefreshService {
                 in: database
             )
         }
+    }
+
+    private nonisolated static func conditionalValidator(
+        eTag: String?,
+        lastModified: String?,
+        identity: ConditionalRequestIdentity,
+        observedAt: Date
+    ) -> ConditionalRequestValidator? {
+        guard eTag != nil || lastModified != nil else { return nil }
+        return ConditionalRequestValidator(
+            identity: identity,
+            eTag: eTag,
+            lastModified: lastModified,
+            observedAt: observedAt
+        )
     }
 
     private nonisolated static func prepareRepositoryPages(
@@ -1153,6 +1390,7 @@ actor OrganizationInventoryRefreshService {
         let account: GitHubAccount
         let organization: GitHubOrganization
         let synchronizationScope: SynchronizationScope
+        let vault: AccountVault
         let repositoryInventory: RepositoryInventoryRepository
         let teamInventory: TeamInventoryRepository
         let coverage: CoverageRepository
