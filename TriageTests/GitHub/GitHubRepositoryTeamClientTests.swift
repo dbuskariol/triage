@@ -247,6 +247,55 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         }
     }
 
+    func testRepositoryNotModifiedPreservesAuthorizationRequiredSSOHeader() async throws {
+        let recoveryURL = URL(string: "https://github.com/orgs/acme/sso")!
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": (
+                Data(),
+                ["X-GitHub-SSO": "required; url=\(recoveryURL.absoluteString)"],
+                304
+            )
+        ])
+        let client = try repositoryClient(session: session)
+
+        let result = try await client.fetchRepositories(
+            in: "acme",
+            validators: GitHubHTTPValidators(
+                eTag: "\"inventory-v1\"",
+                lastModified: nil
+            )
+        )
+
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("A conditional 304 must preserve its SSO header.")
+        }
+        XCTAssertEqual(ssoHeader, GitHubSSOHeader.authorizationRequired(recoveryURL))
+    }
+
+    func testTeamNotModifiedPreservesPartialResultsSSOHeader() async throws {
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (
+                Data(),
+                ["X-GitHub-SSO": "partial-results; organizations=1,2"],
+                304
+            )
+        ])
+        let client = try repositoryClient(session: session)
+
+        let result = try await client.fetchTeams(
+            in: "acme",
+            validators: GitHubHTTPValidators(
+                eTag: "\"teams-v1\"",
+                lastModified: nil
+            )
+        )
+
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("A conditional 304 must preserve its SSO header.")
+        }
+        XCTAssertEqual(ssoHeader, GitHubSSOHeader.partialResults(Set([1, 2])))
+    }
+
     private func repository(id: UInt64, nodeID: String, name: String) -> String {
         """
         {"id":\(id),"node_id":"\(nodeID)","name":"\(name)","private":true,"archived":false,

@@ -75,7 +75,7 @@ final class CoverageRequirementProfileTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(requirements.count, 35)
+        XCTAssertEqual(requirements.count, 37)
         XCTAssertTrue(AccountOrganizationCoverageManifest.missingFeatures(in: requirements).isEmpty)
         XCTAssertFalse(requirements.contains { $0.feature == .notifications })
         XCTAssertTrue(requirements.contains {
@@ -162,7 +162,7 @@ final class CoverageRequirementProfileTests: XCTestCase {
         let retainedRequirements = requirements.filter {
             $0.repositoryID == fixture.revokedRepositoryID
         }
-        XCTAssertEqual(retainedRequirements.count, 4)
+        XCTAssertEqual(retainedRequirements.count, 5)
 
         let evaluation = CoverageEvaluator().evaluate(
             requirements: retainedRequirements,
@@ -174,6 +174,38 @@ final class CoverageRequirementProfileTests: XCTestCase {
         )
         XCTAssertEqual(evaluation.missing, retainedRequirements)
         XCTAssertEqual(evaluation.freshness.status, .partial)
+
+        let rootRequirement = try XCTUnwrap(requirements.first {
+            $0.feature == .repositories
+                && $0.repositoryID == nil
+                && $0.streamID.rawValue == "inventory-repositories-profile-org"
+        })
+        let retainedAccessRequirement = try XCTUnwrap(requirements.first {
+            $0.feature == .repositories
+                && $0.repositoryID == fixture.revokedRepositoryID
+                && $0.streamID == rootRequirement.streamID
+        })
+        let rootCoverage = fixture.record(
+            feature: .repositories,
+            stream: rootRequirement.streamID.rawValue
+        )
+        let unknownRetainedCoverage = fixture.record(
+            feature: .repositories,
+            repositoryID: fixture.revokedRepositoryID,
+            stream: retainedAccessRequirement.streamID.rawValue,
+            status: .unknown
+        )
+        let rootAndUnknownLeaf = CoverageEvaluator().evaluate(
+            requirements: [rootRequirement, retainedAccessRequirement],
+            records: [rootCoverage, unknownRetainedCoverage],
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertFalse(rootAndUnknownLeaf.isComplete)
+        XCTAssertEqual(rootAndUnknownLeaf.missing, [retainedAccessRequirement])
+        XCTAssertEqual(rootAndUnknownLeaf.freshness.status, .partial)
 
         let completedVisibleTopology = requirements
             .filter { $0.repositoryID != fixture.revokedRepositoryID }

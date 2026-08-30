@@ -138,7 +138,7 @@ enum CoverageRequirementProfile {
             ))
         }
 
-        let maximumRepositoryCount = (maximumRequirementCount - requirements.count) / 4
+        let maximumRepositoryCount = (maximumRequirementCount - requirements.count) / 5
         let repositoryIDs = try knownRepositoryIDs(
             for: scope,
             maximumCount: maximumRepositoryCount,
@@ -146,6 +146,11 @@ enum CoverageRequirementProfile {
         )
         for repositoryID in repositoryIDs {
             for repositoryRequirement in [
+                requirement(
+                    .repositories,
+                    repositoryID: repositoryID,
+                    stream: "inventory-repositories-\(organization)"
+                ),
                 requirement(
                     .timelines,
                     repositoryID: repositoryID,

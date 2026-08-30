@@ -72,6 +72,29 @@ actor AccountOrganizationDurableStateRepository {
             } catch {
                 throw AccountOrganizationDurableStateRepositoryError.invalidPersistedData
             }
+            let persistedCoverage = try CoverageRepository.currentRecords(
+                for: scope,
+                in: database
+            )
+            let currentRequirements = try CoverageRequirementProfile.build(
+                for: scope,
+                coverage: persistedCoverage,
+                in: database
+            )
+            guard envelope.durableState.cachedState?.coverageRequirements == currentRequirements else {
+                try Self.remove(
+                    accountID: scope.accountID,
+                    organizationID: scope.organizationID,
+                    in: database
+                )
+                try OrganizationSchedulerStateRepository.remove(
+                    accountID: scope.accountID,
+                    organizationID: scope.organizationID,
+                    expectedAccountID: vault.accountID,
+                    in: database
+                )
+                return nil
+            }
             guard let schedule = try OrganizationSchedulerStateRepository.fetch(
                 accountID: scope.accountID,
                 organizationID: scope.organizationID,
