@@ -90,6 +90,24 @@ actor OrganizationSchedulerStateRepository {
         }
     }
 
+    /// Returns the current schedule for `initial`'s account-organization scope,
+    /// creating it only when no current-revision schedule has won initialization.
+    ///
+    /// The read, revision-authority check, and optional write share one vault
+    /// transaction so a later initializer cannot overwrite an existing current
+    /// schedule. A persisted schedule from an old credential or capability
+    /// revision is reset only after `initial` is proven current against the
+    /// account and organization authority records in that same transaction.
+    func createIfAbsent(_ initial: OrganizationSchedulerState) async throws -> OrganizationSchedulerState {
+        try await vault.writeTransaction { database in
+            try Self.createIfAbsent(
+                initial,
+                expectedAccountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
     func claim(
         _ state: OrganizationSchedulerState,
         replacingIdleGeneration expectedGeneration: UInt64
@@ -171,6 +189,41 @@ actor OrganizationSchedulerStateRepository {
             }
         }
         try upsert(state, in: database)
+    }
+
+    nonisolated static func createIfAbsent(
+        _ initial: OrganizationSchedulerState,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws -> OrganizationSchedulerState {
+        // This validates both the vault boundary and the candidate revisions
+        // against the current account/organization authority rows before an
+        // existing stale row is eligible for replacement.
+        try validate(initial, expectedAccountID: expectedAccountID, in: database)
+
+        guard let existing = try fetch(
+            accountID: initial.accountID,
+            organizationID: initial.organizationID,
+            in: database
+        ) else {
+            try upsert(initial, in: database)
+            return initial
+        }
+
+        guard existing.credentialRevision != initial.credentialRevision
+            || existing.capabilityRevision != initial.capabilityRevision
+        else {
+            // An initializer that reached this transaction second must retain
+            // the already-current schedule byte-for-byte, including attempt
+            // ownership, generation, deadlines, and backoff state.
+            return existing
+        }
+
+        // `initial` has already been proven current in this transaction;
+        // therefore this is a stale-revision reset, not an overwrite of a
+        // concurrently installed current schedule.
+        try upsert(initial, in: database)
+        return initial
     }
 
     func replace(

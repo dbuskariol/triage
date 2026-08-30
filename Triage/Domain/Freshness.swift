@@ -72,7 +72,7 @@ struct CoverageRecord: Codable, Equatable, Sendable {
     let failureDetail: String?
 }
 
-struct SynchronizationScope: Equatable, Sendable {
+struct SynchronizationScope: Hashable, Sendable {
     let accountID: AccountID
     let organizationID: OrganizationID
     let credentialRevision: CredentialRevision
