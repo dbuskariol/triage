@@ -300,6 +300,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         )
         let resumed = try await restartedOperation.request(at: 0)
         XCTAssertEqual(resumed.priority, .fullReconciliation)
+        XCTAssertEqual(resumed.reconciliationIntent, .fullReconciliation)
         await restartedOperation.finishAllCancelled()
     }
 
@@ -330,6 +331,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(schedule.activeAttemptID, fixture.attemptIDs.value(at: 0))
         XCTAssertEqual(schedule.generation, 8)
         XCTAssertEqual(request.priority, .activeApplication)
+        XCTAssertEqual(request.reconciliationIntent, .incremental)
         let replaceAttempts = await fixture.scheduleStore.replaceAttemptCount()
         XCTAssertEqual(replaceAttempts, 1)
         await fixture.operation.finishAllCancelled()
@@ -429,6 +431,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(request.priority, .fullReconciliation)
         XCTAssertEqual(request.requestPriority, .fullReconciliation)
+        XCTAssertEqual(request.reconciliationIntent, .fullReconciliation)
         await fixture.operation.succeed(
             request,
             with: fixture.completeCachedState(for: scope, at: 5)

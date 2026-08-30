@@ -23,7 +23,8 @@ actor OrganizationWorkRefreshService {
 
     func refresh(
         account: GitHubAccount,
-        organization: GitHubOrganization
+        organization: GitHubOrganization,
+        reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> [WorkItemID] {
         let token = try await credentialReader.accessToken(for: account)
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
@@ -114,7 +115,8 @@ actor OrganizationWorkRefreshService {
                 account: account,
                 organization: organization,
                 rateLimitController: rateLimitController,
-                requestPriority: requestPriority
+                requestPriority: requestPriority,
+                reconciliationIntent: reconciliationIntent
             )
             let inventory: [RepositorySummary]
             switch inventoryResult.repositories {
@@ -243,7 +245,7 @@ actor OrganizationWorkRefreshService {
             let contextOutcome = try await OrganizationContextRefreshService(
                 vault: vault,
                 graphQLClient: graphqlClient,
-                selectionPolicy: .policy(for: requestPriority)
+                selectionPolicy: .policy(for: reconciliationIntent)
             ).refresh(
                 scope: synchronizationScope,
                 organization: organization,

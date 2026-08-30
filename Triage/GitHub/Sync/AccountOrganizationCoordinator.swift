@@ -52,6 +52,7 @@ struct AccountOrganizationRefreshRequest: Sendable {
     let token: AccountOrganizationRequestToken
     let priority: AccountOrganizationRefreshPriority
     let requestPriority: GitHubRequestPriority
+    let reconciliationIntent: SynchronizationReconciliationIntent
 }
 
 enum AccountOrganizationCoverageManifest {
@@ -825,7 +826,8 @@ actor AccountOrganizationCoordinator {
                 scope: scope,
                 token: activeRefresh.token,
                 priority: activeRefresh.priority,
-                requestPriority: activeRefresh.priority.requestPriority
+                requestPriority: activeRefresh.priority.requestPriority,
+                reconciliationIntent: activeRefresh.trigger.reconciliationIntent
             )
             do {
                 let cachedState = try await operation.refresh(request)

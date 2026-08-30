@@ -19,7 +19,8 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
     typealias RefreshPipeline = @Sendable (
         GitHubAccount,
         GitHubOrganization,
-        GitHubRequestPriority
+        GitHubRequestPriority,
+        SynchronizationReconciliationIntent
     ) async throws -> Void
 
     private let vault: AccountVault
@@ -33,14 +34,18 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared
     ) {
         self.vault = vault
-        refreshPipeline = { account, organization, requestPriority in
+        refreshPipeline = { account, organization, requestPriority, reconciliationIntent in
             _ = try await OrganizationWorkRefreshService(
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
                 rateLimitControllers: rateLimitControllers,
                 requestPriority: requestPriority
-            ).refresh(account: account, organization: organization)
+            ).refresh(
+                account: account,
+                organization: organization,
+                reconciliationIntent: reconciliationIntent
+            )
         }
     }
 
@@ -66,7 +71,12 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
             for: request.synchronizationScope
         )
         try Task.checkCancellation()
-        try await refreshPipeline(account, organization, request.requestPriority)
+        try await refreshPipeline(
+            account,
+            organization,
+            request.requestPriority,
+            request.reconciliationIntent
+        )
         try Task.checkCancellation()
         return try await currentCachedState(for: request.synchronizationScope)
     }

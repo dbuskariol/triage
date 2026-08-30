@@ -85,7 +85,8 @@ actor OrganizationInventoryRefreshService {
         account: GitHubAccount,
         organization: GitHubOrganization,
         rateLimitController: GitHubRateLimitController? = nil,
-        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
+        reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> [RepositorySummary] {
         let context = try await context(for: account, organization: organization)
         let observedAt = clock()
@@ -103,7 +104,8 @@ actor OrganizationInventoryRefreshService {
             let result = try await reconcileRepositories(
                 with: client,
                 context: context,
-                observedAt: observedAt
+                observedAt: observedAt,
+                reconciliationIntent: reconciliationIntent
             )
             return result.summaries
         } catch is CancellationError {
@@ -125,7 +127,8 @@ actor OrganizationInventoryRefreshService {
         account: GitHubAccount,
         organization: GitHubOrganization,
         rateLimitController: GitHubRateLimitController? = nil,
-        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
+        reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> OrganizationInventoryRefreshResult {
         let context = try await context(for: account, organization: organization)
         let observedAt = clock()
@@ -138,7 +141,8 @@ actor OrganizationInventoryRefreshService {
         let repositories = try await refreshRepositoriesOutcome(
             with: client,
             context: context,
-            observedAt: observedAt
+            observedAt: observedAt,
+            reconciliationIntent: reconciliationIntent
         )
         try Task.checkCancellation()
         let teams = try await refreshTeamsOutcome(
@@ -153,7 +157,8 @@ actor OrganizationInventoryRefreshService {
     private func refreshRepositoriesOutcome(
         with client: GitHubRepositoryTeamClient,
         context: Context,
-        observedAt: Date
+        observedAt: Date,
+        reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> OrganizationInventoryRefreshOutcome<RepositorySummary> {
         try await context.coverage.save(
             partialCoverage(feature: .repositories, context: context, observedAt: observedAt),
@@ -163,7 +168,8 @@ actor OrganizationInventoryRefreshService {
             let result = try await reconcileRepositories(
                 with: client,
                 context: context,
-                observedAt: observedAt
+                observedAt: observedAt,
+                reconciliationIntent: reconciliationIntent
             )
             return .success(summaries: result.summaries, coverage: result.coverage)
         } catch is CancellationError {
@@ -221,7 +227,8 @@ actor OrganizationInventoryRefreshService {
     private func reconcileRepositories(
         with client: GitHubRepositoryTeamClient,
         context: Context,
-        observedAt: Date
+        observedAt: Date,
+        reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> (summaries: [RepositorySummary], coverage: CoverageRecord) {
         let conditionalIdentity = conditionalRequestIdentity(
             feature: .repositories,
@@ -229,7 +236,12 @@ actor OrganizationInventoryRefreshService {
             context: context
         )
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
-        let requestValidators = try currentHTTPValidators(from: validator, observedAt: observedAt)
+        let requestValidators: GitHubHTTPValidators? = switch reconciliationIntent {
+        case .incremental:
+            try currentHTTPValidators(from: validator, observedAt: observedAt)
+        case .fullReconciliation:
+            nil
+        }
         let fetched = try await client.fetchRepositories(
             in: context.organization.login,
             validators: requestValidators
