@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "034-role-search-page-replay-parser-identity")
+        XCTAssertEqual(migrations.last?.id, "035-source-access-observations")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "2cd58affc40f404812fdc6a4a32ee8ec50116fd0e813a8af3eddfee9b99a6170"
+            "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
         )
         try await registry.closeAll()
     }
@@ -101,7 +101,8 @@ final class AccountVaultTests: XCTestCase {
                         '031-raw-request-authority',
                         '032-timeline-replay-receipts',
                         '033-role-search-page-replay-v2',
-                        '034-role-search-page-replay-parser-identity'
+                        '034-role-search-page-replay-parser-identity',
+                        '035-source-access-observations'
                     )
                     ORDER BY id
                     """
@@ -265,6 +266,13 @@ final class AccountVaultTests: XCTestCase {
                         SELECT checksum FROM schema_migrations
                         WHERE id = '034-role-search-page-replay-parser-identity'
                         """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '035-source-access-observations'
+                        """
                 )
             )
         }
@@ -297,6 +305,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(
             migrated.10,
             "2cd58affc40f404812fdc6a4a32ee8ec50116fd0e813a8af3eddfee9b99a6170"
+        )
+        XCTAssertEqual(
+            migrated.11,
+            "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
         )
     }
 
@@ -458,6 +470,108 @@ final class AccountVaultTests: XCTestCase {
         try await registry.closeAll()
     }
 
+    func testMigration035BuildsStreamIndependentAccessEvidenceSchemaFrom034() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let fixtureRegistry = try VaultRegistry(rootDirectory: directory)
+        let fixtureVault = try await fixtureRegistry.open(accountID: accountID, vaultKey: key)
+        try await fixtureVault.write { database in
+            try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
+            try database.execute(
+                sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
+            )
+            try database.execute(sql: "DROP TABLE source_access_projections")
+            try database.execute(sql: "DROP TABLE source_access_observations")
+            try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
+            )
+        }
+        try await fixtureRegistry.closeAll()
+
+        let migratedRegistry = try VaultRegistry(rootDirectory: directory)
+        let migratedVault = try await migratedRegistry.open(accountID: accountID, vaultKey: key)
+        let schema = try await migratedVault.read { database in
+            let observationForeignKeys = try Row.fetchAll(
+                database,
+                sql: "SELECT * FROM pragma_foreign_key_list('source_access_observations')"
+            ).map { row in
+                "\(row["from"] as String):\(row["table"] as String):\(row["on_delete"] as String)"
+            }
+            let projectionForeignKeys = try Row.fetchAll(
+                database,
+                sql: "SELECT * FROM pragma_foreign_key_list('source_access_projections')"
+            ).map { row in
+                "\(row["from"] as String):\(row["table"] as String):\(row["on_delete"] as String)"
+            }
+            let projectionPrimaryKey = try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(source_access_projections)"
+            ).compactMap { row -> (Int, String)? in
+                let position: Int = row["pk"]
+                guard position > 0 else { return nil }
+                return (position, row["name"] as String)
+            }.sorted { $0.0 < $1.0 }.map(\.1)
+            return (
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '035-source-access-observations'
+                        """
+                ),
+                observationForeignKeys,
+                projectionForeignKeys,
+                projectionPrimaryKey,
+                try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'trigger'
+                          AND name IN (
+                              'source_access_protect_deletion_receipt',
+                              'source_access_protect_deletion_receipt_update'
+                          )
+                        ORDER BY name
+                        """
+                )
+            )
+        }
+
+        XCTAssertEqual(
+            schema.0,
+            "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
+        )
+        XCTAssertTrue(
+            schema.1.contains("raw_snapshot_id:raw_api_snapshots:SET NULL"),
+            "Observation foreign keys: \(schema.1)"
+        )
+        XCTAssertFalse(schema.1.contains { $0.hasPrefix("source_event_id:") })
+        XCTAssertFalse(schema.1.contains { $0.contains(":sync_streams:") })
+        XCTAssertTrue(
+            schema.2.contains("winning_observation_id:source_access_observations:CASCADE"),
+            "Projection foreign keys: \(schema.2)"
+        )
+        XCTAssertFalse(schema.2.contains { $0.contains(":sync_streams:") })
+        XCTAssertEqual(
+            schema.3,
+            [
+                "account_id", "organization_id", "feature", "stream_id",
+                "target_kind", "target_id"
+            ]
+        )
+        XCTAssertEqual(
+            schema.4,
+            [
+                "source_access_protect_deletion_receipt",
+                "source_access_protect_deletion_receipt_update"
+            ]
+        )
+        try await migratedRegistry.closeAll()
+    }
+
     func testTransactionRollsBackAllWritesWhenItsOperationFails() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -515,11 +629,20 @@ final class AccountVaultTests: XCTestCase {
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
         try await vault.write { database in
             try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
+            )
+            try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '033-role-search-page-replay-v2'"
             )
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '034-role-search-page-replay-parser-identity'"
             )
+            try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
+            try database.execute(
+                sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
+            )
+            try database.execute(sql: "DROP TABLE source_access_projections")
+            try database.execute(sql: "DROP TABLE source_access_observations")
             try database.execute(sql: "DROP TABLE role_search_page_replays")
             try database.execute(sql: """
                 CREATE TABLE role_search_page_replays (
@@ -629,8 +752,17 @@ final class AccountVaultTests: XCTestCase {
         )
         try await vault.write { database in
             try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
+            )
+            try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '034-role-search-page-replay-parser-identity'"
             )
+            try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
+            try database.execute(
+                sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
+            )
+            try database.execute(sql: "DROP TABLE source_access_projections")
+            try database.execute(sql: "DROP TABLE source_access_observations")
             try database.execute(sql: "DROP INDEX role_search_page_replays_snapshot")
             try database.execute(sql: "DROP TABLE role_search_page_replays")
             try database.execute(sql: """

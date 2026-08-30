@@ -14,6 +14,9 @@
 		AA2900010000000000000001 /* AccountOrganizationRefreshOperation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2900020000000000000002 /* AccountOrganizationRefreshOperation.swift */; };
 		AA2900030000000000000003 /* AccountOrganizationRefreshRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2900040000000000000004 /* AccountOrganizationRefreshRuntime.swift */; };
 		AA2900050000000000000005 /* AccountOrganizationRefreshRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2900060000000000000006 /* AccountOrganizationRefreshRuntimeTests.swift */; };
+		AA3500010000000000000001 /* SourceObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3500020000000000000002 /* SourceObservation.swift */; };
+		AA3500030000000000000003 /* SourceObservationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3500040000000000000004 /* SourceObservationRepository.swift */; };
+		AA3500050000000000000005 /* SourceObservationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */; };
 		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */; };
 		C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */; };
@@ -460,6 +463,9 @@
 		9F5D7DAD6B46469F34C657F2 /* GitHubCapabilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCapabilityProbe.swift; sourceTree = "<group>"; };
 		9FF49E3C266981BE31025729 /* PullRequestReviewReconciliationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewReconciliationTests.swift; sourceTree = "<group>"; };
 		AA3100040000000000000004 /* OrganizationContextRefreshServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationContextRefreshServiceTests.swift; sourceTree = "<group>"; };
+		AA3500020000000000000002 /* SourceObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceObservation.swift; sourceTree = "<group>"; };
+		AA3500040000000000000004 /* SourceObservationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceObservationRepository.swift; sourceTree = "<group>"; };
+		AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceObservationRepositoryTests.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
 		A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalRequestCacheRepository.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
@@ -834,6 +840,7 @@
 				B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */,
 				E1E4F30FD608369F336EF545 /* RepositoryInventoryRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
+				AA3500040000000000000004 /* SourceObservationRepository.swift */,
 				0FDF213EC999CB5B6B21F766 /* SyncShardRepository.swift */,
 				3CEF5E846C88656C14C00BB1 /* SyncStreamRepository.swift */,
 				A7915CEDA1CF7D4FCF3D2C6C /* TeamInventoryRepository.swift */,
@@ -862,6 +869,7 @@
 				D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */,
 				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
 				98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */,
+				AA3500020000000000000002 /* SourceObservation.swift */,
 				C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */,
 				C152D8C003D05F5BBFDA1917 /* SyncStream.swift */,
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
@@ -915,6 +923,7 @@
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
 				DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */,
 				BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */,
+				AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */,
 				BDA3EB791B073738499E0AFB /* TimelineCandidateRepositoryTests.swift */,
 				CF31120472BD37C2BC8E1429 /* TimelineEventRepositoryTests.swift */,
 				3D5AFFA9A1C3E8B876903D62 /* WorkItemGroupingDecisionRepositoryTests.swift */,
@@ -1257,6 +1266,7 @@
 				B275753FD7DE29E6FEF00C62 /* RoleDiscoveryPlanTests.swift in Sources */,
 				97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */,
 				84B1FA4D389DB3CD807B890A /* SearchRepositoryTests.swift in Sources */,
+				AA3500050000000000000005 /* SourceObservationRepositoryTests.swift in Sources */,
 				93DD907536CA9972630F4901 /* SearchShardExecutorTests.swift in Sources */,
 				85E33C26F274D28D5AB390B0 /* SearchShardPlannerTests.swift in Sources */,
 				8A6A452630E75583611AB009 /* SyncWatermarkTests.swift in Sources */,
@@ -1411,6 +1421,8 @@
 				9B077224AD72CFDBCEA499AC /* SSOAuthorizationCoordinator.swift in Sources */,
 				781F02110648028D0D26D3D7 /* SafeGitHubMarkdown.swift in Sources */,
 				4470E02F0C96112B0A73A2D2 /* SearchRepository.swift in Sources */,
+				AA3500010000000000000001 /* SourceObservation.swift in Sources */,
+				AA3500030000000000000003 /* SourceObservationRepository.swift in Sources */,
 				64A946EAADAB3C5A5956C038 /* SearchShardExecutor.swift in Sources */,
 				B282AD71D7C9C089A4AB8C8F /* SearchShardPlanner.swift in Sources */,
 				548E20C9F071D33CBABF5A45 /* SettingsView.swift in Sources */,
