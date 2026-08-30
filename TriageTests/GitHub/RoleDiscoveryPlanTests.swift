@@ -301,6 +301,57 @@ final class RoleDiscoveryPlanTests: XCTestCase {
         XCTAssertFalse(workItem.isVisibleInInbox(at: observedAt))
         let snapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
         XCTAssertEqual(snapshots.count, 1)
+
+        let malformedPayload = Data(#"{"token":"ghp_privateMalformedRoleSearch""#.utf8)
+        let malformedClient = GitHubIssueSearchClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: RoleSearchSession(body: malformedPayload)),
+                credential: SecretValue("token")
+            )
+        )
+        do {
+            _ = try await RoleDiscoverySynchronizer(
+                searchClient: malformedClient,
+                workItemRepository: WorkItemRepository(vault: vault),
+                shardRepository: SyncShardRepository(vault: vault),
+                clock: { observedAt.addingTimeInterval(1) }
+            ).synchronize(
+                plan: plan,
+                accountID: accountID,
+                organizationID: organizationID,
+                githubOrganizationID: organization.githubOrganizationID,
+                streamID: parentStreamID,
+                searchRange: range,
+                accessibleRepositoryNames: ["github/triage"],
+                repositoryID: { _ in repositoryID },
+                streams: [stream]
+            )
+            XCTFail("Expected malformed role-search JSON to fail without becoming an empty page.")
+        } catch is GitHubIssueSearchUndecodableResponseError {
+            // Expected after the raw payload and failed shard are committed together.
+        }
+        let retainedSnapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(
+            for: accountID
+        )
+        XCTAssertTrue(retainedSnapshots.contains { $0.payload == malformedPayload })
+        let failures = try await NormalizationFailureRepository(vault: vault).failures(
+            for: accountID
+        )
+        let malformedFailure = try XCTUnwrap(
+            failures.first { failure in
+                retainedSnapshots.contains {
+                    $0.id == failure.rawSnapshotID && $0.payload == malformedPayload
+                }
+            }
+        )
+        XCTAssertFalse(
+            malformedFailure.redactedDiagnostic.contains("ghp_privateMalformedRoleSearch")
+        )
+        let preservedItems = try await WorkItemRepository(vault: vault).fetch(
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        XCTAssertEqual(preservedItems.map(\.primaryNodeID), [GitHubNodeID(rawValue: "I_1")!])
     }
 }
 
@@ -352,15 +403,15 @@ private actor RoleSearchSession: HTTPSession {
 private actor RoleIsolationSearchClient: GitHubIssueSearchExecuting {
     private var relationships = [GitHubIssueSearchRelationship]()
 
-    func searchResponse(
+    func searchResult(
         _ query: GitHubIssueSearchQuery,
         page _: Int
-    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+    ) async throws -> GitHubIssueSearchResult {
         relationships.append(query.relationship)
         if case .assigned = query.relationship {
             throw GitHubFailure(kind: .notFound, statusCode: 404)
         }
-        return GitHubResponse(
+        return .response(GitHubResponse(
             value: GitHubIssueSearchPage(
                 totalCount: 0,
                 incompleteResults: false,
@@ -370,7 +421,7 @@ private actor RoleIsolationSearchClient: GitHubIssueSearchExecuting {
             etag: nil,
             lastModified: nil,
             ssoHeader: nil
-        )
+        ))
     }
 
     func requestedRelationships() -> [GitHubIssueSearchRelationship] {

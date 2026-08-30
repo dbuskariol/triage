@@ -72,6 +72,15 @@ actor RoleDiscoverySynchronizer {
                                 accountID: accountID,
                                 observedAt: observationClock()
                             )
+                        },
+                        prepareUndecodablePage: { response, boundedQuery, page in
+                            Self.prepareUndecodablePageWrite(
+                                response,
+                                query: boundedQuery,
+                                page: page,
+                                accountID: accountID,
+                                observedAt: observationClock()
+                            )
                         }
                     ) { [self] response, boundedQuery, page in
                         try await self.throwForSSORequirement(
@@ -247,6 +256,43 @@ actor RoleDiscoverySynchronizer {
         )
     }
 
+    private nonisolated static func prepareUndecodablePageWrite(
+        _ response: GitHubUndecodableResponse,
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        accountID: AccountID,
+        observedAt: Date
+    ) -> PreparedSearchShardPageWrite {
+        let endpoint = "/search/issues?q=\(query.value)&page=\(page)"
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: accountID,
+            githubNodeID: nil,
+            endpoint: endpoint,
+            eTag: response.etag,
+            parserVersion: 1,
+            observedAt: observedAt,
+            payload: response.payload
+        )
+        let failure = NormalizationFailure(
+            id: UUID(),
+            accountID: accountID,
+            rawSnapshotID: snapshot.id,
+            githubNodeID: nil,
+            endpoint: endpoint,
+            parserVersion: 1,
+            occurredAt: observedAt,
+            redactedDiagnostic: "GitHub search returned a response that could not be decoded."
+        )
+        return PreparedSearchShardPageWrite(
+            write: { database in
+                try RawAPISnapshotRepository.save(snapshot, in: database)
+                try NormalizationFailureRepository.record(failure, in: database)
+            },
+            didCommit: {}
+        )
+    }
+
     private func searchEndpoint(for item: GitHubIssueSearchItem) -> String {
         "/search/issues"
     }
@@ -298,6 +344,14 @@ actor RoleDiscoverySynchronizer {
             )
         }
         if case .ssoRequirement = error as? OrganizationRefreshError {
+            return RoleDiscoveryStreamOutcome(
+                kind: kind,
+                status: .requiresSSO,
+                failureDetail: "GitHub organization SSO authorization is required for this discovery stream."
+            )
+        }
+        if let failure = error as? GitHubIssueSearchUndecodableResponseError,
+           failure.ssoHeader?.scoped(to: githubOrganizationID) != nil {
             return RoleDiscoveryStreamOutcome(
                 kind: kind,
                 status: .requiresSSO,
@@ -359,6 +413,9 @@ actor RoleDiscoverySynchronizer {
     private nonisolated static func shouldDeferRemainingStreams(after error: any Error) -> Bool {
         if error is OrganizationRefreshError {
             return true
+        }
+        if let failure = error as? GitHubIssueSearchUndecodableResponseError {
+            return failure.ssoHeader != nil
         }
         guard let failure = error as? GitHubFailure else {
             return false

@@ -66,6 +66,19 @@ struct GitHubResponse<Value: Sendable>: Sendable {
     }
 }
 
+struct GitHubUndecodableResponse: Equatable, Sendable {
+    let payload: Data
+    let linkHeader: String?
+    let etag: String?
+    let lastModified: String?
+    let ssoHeader: GitHubSSOHeader?
+}
+
+enum GitHubResponseDecodingResult<Value: Sendable>: Sendable {
+    case response(GitHubResponse<Value>)
+    case undecodable(GitHubUndecodableResponse)
+}
+
 enum GitHubRESTClientError: Error, Equatable, Sendable {
     case invalidJSON
     case missingServerDate
@@ -100,22 +113,44 @@ actor GitHubRESTClient {
         _ type: Value.Type,
         request: GitHubRESTRequest
     ) async throws -> GitHubResponse<Value> {
+        switch try await getResponsePreservingUndecodablePayload(type, request: request) {
+        case let .response(response):
+            return response
+        case .undecodable:
+            throw GitHubRESTClientError.invalidJSON
+        }
+    }
+
+    func getResponsePreservingUndecodablePayload<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        request: GitHubRESTRequest
+    ) async throws -> GitHubResponseDecodingResult<Value> {
         let response = try await send(request)
         if let failure = GitHubFailureClassifier.classify(response) {
             GitHubDiagnostics.record(failure)
             throw failure
         }
         do {
-            return GitHubResponse(
-                value: try JSONDecoder.github.decode(Value.self, from: response.body),
-                payload: response.body,
-                linkHeader: response.header(named: "Link"),
-                etag: response.header(named: "ETag"),
-                lastModified: response.header(named: "Last-Modified"),
-                ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+            return .response(
+                GitHubResponse(
+                    value: try JSONDecoder.github.decode(Value.self, from: response.body),
+                    payload: response.body,
+                    linkHeader: response.header(named: "Link"),
+                    etag: response.header(named: "ETag"),
+                    lastModified: response.header(named: "Last-Modified"),
+                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+                )
             )
         } catch {
-            throw GitHubRESTClientError.invalidJSON
+            return .undecodable(
+                GitHubUndecodableResponse(
+                    payload: response.body,
+                    linkHeader: response.header(named: "Link"),
+                    etag: response.header(named: "ETag"),
+                    lastModified: response.header(named: "Last-Modified"),
+                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+                )
+            )
         }
     }
 

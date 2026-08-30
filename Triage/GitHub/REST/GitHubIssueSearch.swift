@@ -221,10 +221,29 @@ struct GitHubIssueSearchItem: Codable, Sendable {
 }
 
 protocol GitHubIssueSearchExecuting: Sendable {
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int
+    ) async throws -> GitHubIssueSearchResult
+}
+
+enum GitHubIssueSearchResult: Sendable {
+    case response(GitHubResponse<GitHubIssueSearchPage>)
+    case undecodable(GitHubUndecodableResponse)
+}
+
+extension GitHubIssueSearchExecuting {
     func searchResponse(
         _ query: GitHubIssueSearchQuery,
         page: Int
-    ) async throws -> GitHubResponse<GitHubIssueSearchPage>
+    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+        switch try await searchResult(query, page: page) {
+        case let .response(response):
+            return response
+        case .undecodable:
+            throw GitHubRESTClientError.invalidJSON
+        }
+    }
 }
 
 actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
@@ -249,7 +268,19 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
         _ query: GitHubIssueSearchQuery,
         page: Int = 1
     ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
-        try await client.getResponse(
+        switch try await searchResult(query, page: page) {
+        case let .response(response):
+            return response
+        case .undecodable:
+            throw GitHubRESTClientError.invalidJSON
+        }
+    }
+
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int = 1
+    ) async throws -> GitHubIssueSearchResult {
+        let result = try await client.getResponsePreservingUndecodablePayload(
             GitHubIssueSearchPage.self,
             request: GitHubRESTRequest(
                 path: "/search/issues",
@@ -262,5 +293,9 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
                 ]
             )
         )
+        return switch result {
+        case let .response(response): .response(response)
+        case let .undecodable(response): .undecodable(response)
+        }
     }
 }

@@ -315,6 +315,94 @@ final class SearchShardExecutorTests: XCTestCase {
         let didCommit = await recorder.didCommit()
         XCTAssertTrue(didCommit)
     }
+
+    func testUndecodableSearchPagePersistsRawFailureAndFailedShardAtomically() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let privatePayload = Data(#"{"token":"ghp_privateMalformedSearch""#.utf8)
+        let undecodable = GitHubUndecodableResponse(
+            payload: privatePayload,
+            linkHeader: nil,
+            etag: "malformed-search-etag",
+            lastModified: nil,
+            ssoHeader: nil
+        )
+        let executor = SearchShardExecutor(
+            client: SearchClient(undecodableResponse: undecodable),
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            clock: { fixture.date }
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?malformed&page=1",
+            eTag: undecodable.etag,
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: privatePayload
+        )
+        let failure = NormalizationFailure(
+            id: UUID(),
+            accountID: fixture.accountID,
+            rawSnapshotID: snapshot.id,
+            githubNodeID: nil,
+            endpoint: snapshot.endpoint,
+            parserVersion: 1,
+            occurredAt: fixture.date,
+            redactedDiagnostic: "GitHub search returned an undecodable response."
+        )
+
+        do {
+            try await executor.execute(
+                query: query,
+                range: SearchTimeRange(
+                    start: Date(timeIntervalSince1970: 0),
+                    end: Date(timeIntervalSince1970: 120)
+                ),
+                streamID: fixture.streamID,
+                accountID: fixture.accountID,
+                accessibleRepositoryNames: [],
+                prepareUndecodablePage: { response, _, page in
+                    XCTAssertEqual(response.payload, privatePayload)
+                    XCTAssertEqual(page, 1)
+                    return PreparedSearchShardPageWrite(
+                        write: { database in
+                            try RawAPISnapshotRepository.save(snapshot, in: database)
+                            try NormalizationFailureRepository.record(failure, in: database)
+                        },
+                        didCommit: {}
+                    )
+                },
+                preparePage: { _, _, _ in .empty }
+            )
+            XCTFail("Expected the undecodable search page to fail the shard.")
+        } catch let error as GitHubIssueSearchUndecodableResponseError {
+            XCTAssertNil(error.ssoHeader)
+        }
+
+        let snapshots = try await RawAPISnapshotRepository(vault: fixture.vault).snapshots(
+            for: fixture.accountID
+        )
+        let failures = try await NormalizationFailureRepository(vault: fixture.vault).failures(
+            for: fixture.accountID
+        )
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertEqual(snapshots.map(\.payload), [privatePayload])
+        XCTAssertEqual(failures.map(\.rawSnapshotID), [snapshot.id])
+        XCTAssertFalse(failures[0].redactedDiagnostic.contains("ghp_privateMalformedSearch"))
+        XCTAssertEqual(shards.map(\.state), [.failed])
+        XCTAssertNil(shards[0].pageCursor)
+    }
 }
 
 private enum TestPageWriteError: Error {
@@ -339,17 +427,27 @@ private actor SearchClient: GitHubIssueSearchExecuting {
         Int
     ) -> GitHubResponse<GitHubIssueSearchPage>
 
-    private let responseFactory: ResponseFactory
+    private let responseFactory: ResponseFactory?
+    private let undecodableResponse: GitHubUndecodableResponse?
 
     init(responseFactory: @escaping ResponseFactory) {
         self.responseFactory = responseFactory
+        undecodableResponse = nil
     }
 
-    func searchResponse(
+    init(undecodableResponse: GitHubUndecodableResponse) {
+        responseFactory = nil
+        self.undecodableResponse = undecodableResponse
+    }
+
+    func searchResult(
         _ query: GitHubIssueSearchQuery,
         page: Int
-    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
-        responseFactory(query, page)
+    ) async throws -> GitHubIssueSearchResult {
+        if let undecodableResponse {
+            return .undecodable(undecodableResponse)
+        }
+        return .response(try XCTUnwrap(responseFactory)(query, page))
     }
 }
 
