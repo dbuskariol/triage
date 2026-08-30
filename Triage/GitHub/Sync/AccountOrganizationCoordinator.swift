@@ -143,6 +143,28 @@ protocol AccountOrganizationRefreshFinalizing: Sendable {
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
     ) async throws -> Bool
+
+    /// Commits a terminal failed attempt after snapshotting the exact
+    /// revision-qualified coverage already written by its source streams.
+    /// A nil result means the scheduler CAS lost ownership and nothing changed.
+    func finalizeFailure(
+        _ state: AccountOrganizationDurableState,
+        schedule: OrganizationSchedulerState,
+        for scope: SynchronizationScope,
+        ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64
+    ) async throws -> AccountOrganizationDurableState?
+
+    /// Commits a cancelled attempt after snapshotting any exact
+    /// revision-qualified coverage written before cancellation completed.
+    /// A nil result means the scheduler CAS lost ownership and nothing changed.
+    func finalizeInterruption(
+        _ state: AccountOrganizationDurableState,
+        schedule: OrganizationSchedulerState,
+        for scope: SynchronizationScope,
+        ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64
+    ) async throws -> AccountOrganizationDurableState?
 }
 
 protocol AccountOrganizationRefreshOperating: Sendable {
@@ -776,8 +798,9 @@ actor AccountOrganizationCoordinator {
                 retaining: previous.freshness.lastSuccessfulSyncAt
             )
         )
+        let committedFailureState: AccountOrganizationDurableState
         do {
-            guard try await finalizer.finalize(
+            guard let committedState = try await finalizer.finalizeFailure(
                 failedState,
                 schedule: failedSchedule,
                 for: activeRefresh.synchronizationScope,
@@ -787,6 +810,7 @@ actor AccountOrganizationCoordinator {
                 await reconcileLostOwnership(activeRefresh)
                 return
             }
+            committedFailureState = committedState
         } catch {
             persistenceFailed(
                 error,
@@ -801,7 +825,7 @@ actor AccountOrganizationCoordinator {
         states[scope] = AccountOrganizationCoordinatorState(
             synchronizationScope: activeRefresh.synchronizationScope,
             phase: .idle,
-            durableState: failedState,
+            durableState: committedFailureState,
             schedulerState: failedSchedule
         )
     }
@@ -819,15 +843,22 @@ actor AccountOrganizationCoordinator {
         else {
             return
         }
+        let interruptedState = Self.interrupted(
+            states[scope]?.durableState ?? AccountOrganizationDurableState(cachedState: nil)
+        )
+        let committedState: AccountOrganizationDurableState
         do {
-            guard try await scheduleStore.replace(
-                cancelledSchedule,
+            guard let finalizedState = try await finalizer.finalizeInterruption(
+                interruptedState,
+                schedule: cancelledSchedule,
+                for: activeRefresh.synchronizationScope,
                 ifOwnedBy: activeRefresh.attemptID,
                 generation: activeRefresh.generation
             ) else {
                 await failLostScheduleOwnership(activeRefresh)
                 return
             }
+            committedState = finalizedState
         } catch {
             persistenceFailed(
                 error,
@@ -838,13 +869,11 @@ actor AccountOrganizationCoordinator {
             return
         }
         guard owns(activeRefresh) else { return }
-        let durableState = states[scope]?.durableState
-            ?? AccountOrganizationDurableState(cachedState: nil)
         clearRuntimeOwnership(of: activeRefresh)
         states[scope] = AccountOrganizationCoordinatorState(
             synchronizationScope: activeRefresh.synchronizationScope,
             phase: .idle,
-            durableState: durableState,
+            durableState: committedState,
             schedulerState: cancelledSchedule
         )
     }
@@ -854,7 +883,8 @@ actor AccountOrganizationCoordinator {
         publishIdleState: Bool
     ) async throws -> AccountOrganizationRequestToken {
         let cancellationToken = try nextToken(for: scope)
-        tasks.removeValue(forKey: scope)?.cancel()
+        let cancelledTask = tasks.removeValue(forKey: scope)
+        cancelledTask?.cancel()
         guard let activeRefresh = activeRefreshes.removeValue(forKey: scope) else {
             if publishIdleState,
                isCurrent(cancellationToken, for: scope),
@@ -868,6 +898,9 @@ actor AccountOrganizationCoordinator {
             }
             return cancellationToken
         }
+        guard isCurrent(cancellationToken, for: scope) else {
+            return cancellationToken
+        }
         guard let currentSchedule = states[scope]?.schedulerState,
               let cancelledSchedule = schedulingPolicy.cancel(
                   currentSchedule,
@@ -878,10 +911,14 @@ actor AccountOrganizationCoordinator {
         else {
             return cancellationToken
         }
-        let replaced: Bool
+        let priorState = states[scope]?.durableState
+            ?? AccountOrganizationDurableState(cachedState: nil)
+        let committedState: AccountOrganizationDurableState?
         do {
-            replaced = try await scheduleStore.replace(
-                cancelledSchedule,
+            committedState = try await finalizer.finalizeInterruption(
+                Self.interrupted(priorState),
+                schedule: cancelledSchedule,
+                for: activeRefresh.synchronizationScope,
                 ifOwnedBy: activeRefresh.attemptID,
                 generation: activeRefresh.generation
             )
@@ -895,7 +932,7 @@ actor AccountOrganizationCoordinator {
             }
             throw error
         }
-        guard replaced else {
+        guard let committedState else {
             externallyOwnedScheduleScopes.insert(activeRefresh.synchronizationScope)
             if isCurrent(cancellationToken, for: scope) {
                 persistenceFailed(
@@ -910,7 +947,7 @@ actor AccountOrganizationCoordinator {
             states[scope] = AccountOrganizationCoordinatorState(
                 synchronizationScope: state.synchronizationScope,
                 phase: publishIdleState ? .idle : state.phase,
-                durableState: state.durableState,
+                durableState: committedState,
                 schedulerState: cancelledSchedule
             )
         }
@@ -1176,7 +1213,7 @@ actor AccountOrganizationCoordinator {
         } else {
             freshness = FreshnessState(
                 status: .failed,
-                detail: "Synchronization failed: \(String(reflecting: type(of: error)))."
+                detail: "Organization synchronization did not complete."
             )
         }
         return FreshnessState(
@@ -1249,7 +1286,7 @@ actor AccountOrganizationCoordinator {
                 freshness: FreshnessState(
                     status: .failed,
                     lastSuccessfulSyncAt: previous.freshness.lastSuccessfulSyncAt,
-                    detail: "Synchronization state could not be stored: \(String(reflecting: type(of: error)))."
+                    detail: "Synchronization state could not be stored."
                 )
             ),
             schedulerState: schedulerState
@@ -1261,6 +1298,19 @@ actor AccountOrganizationCoordinator {
         guard owns(activeRefresh) else { return }
         tasks[scope] = nil
         activeRefreshes[scope] = nil
+    }
+
+    private nonisolated static func interrupted(
+        _ state: AccountOrganizationDurableState
+    ) -> AccountOrganizationDurableState {
+        AccountOrganizationDurableState(
+            cachedState: state.cachedState,
+            freshness: FreshnessState(
+                status: .stale,
+                lastSuccessfulSyncAt: state.freshness.lastSuccessfulSyncAt,
+                detail: "Synchronization was cancelled before completion. Cached data is retained."
+            )
+        )
     }
 
     private func recordExternalOwnershipIfActive(

@@ -1087,6 +1087,29 @@ enum TriageDatabaseMigrator {
                     account_id, blocked_reason, next_full_reconciliation_at_ms, organization_id
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "028-account-organization-durable-state",
+            checksum: "594034d7445efa2e5c4893fc2daff3687810fb9b5c04579a165627dd4c95b2b6"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE account_organization_durable_states (
+                    account_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    scheduler_generation INTEGER NOT NULL
+                        CHECK (scheduler_generation >= 0),
+                    format_version INTEGER NOT NULL CHECK (format_version = 1),
+                    state_payload BLOB NOT NULL
+                        CHECK (length(state_payload) <= 4194304),
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
         }
     ]
 }
