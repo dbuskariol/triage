@@ -831,7 +831,7 @@ actor OrganizationInventoryRefreshService {
         context: Context,
         observedAt: Date
     ) throws -> [PreparedRepositoryPage] {
-        try pages.map { page in
+        try pages.enumerated().map { offset, page in
             let repositoryIDs = try page.page.values.map { repository in
                 guard let repositoryID = RepositoryID(rawValue: repository.nodeID) else {
                     throw GitHubRepositoryTeamClientError.invalidRepository
@@ -847,7 +847,12 @@ actor OrganizationInventoryRefreshService {
                 requestKey: "GET \(page.endpoint)"
             )
             return PreparedRepositoryPage(
+                pageIndex: offset + 1,
                 endpoint: page.endpoint,
+                linkHeader: page.page.linkHeader,
+                nextEndpoint: page.page.nextPageURL.map {
+                    $0.path + ($0.query.map { "?\($0)" } ?? "")
+                },
                 repositoryIDs: repositoryIDs,
                 snapshot: RawAPISnapshot(
                     id: repositoryPageSnapshotID(
@@ -1160,7 +1165,10 @@ actor OrganizationInventoryRefreshService {
     }
 
     private struct PreparedRepositoryPage: Sendable {
+        let pageIndex: Int
         let endpoint: String
+        let linkHeader: String?
+        let nextEndpoint: String?
         let repositoryIDs: [RepositoryID]
         let snapshot: RawAPISnapshot
     }
