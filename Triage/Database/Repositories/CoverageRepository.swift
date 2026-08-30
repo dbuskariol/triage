@@ -153,6 +153,31 @@ actor CoverageRepository {
         )
     }
 
+    nonisolated static func currentRecords(
+        for scope: SynchronizationScope,
+        in database: Database
+    ) throws -> [CoverageRecord] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT account_id, organization_id, repository_id, feature, stream_id,
+                       interval_start_ms, interval_end_ms, credential_revision,
+                       capability_revision, status, last_successful_at_ms, failure_detail
+                FROM coverage_records
+                WHERE account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                ORDER BY feature, stream_id, repository_id,
+                         interval_start_ms, interval_end_ms, id
+                """,
+            arguments: [
+                scope.accountID.rawValue,
+                scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue,
+                scope.capabilityRevision.rawValue
+            ]
+        ).map(record(from:))
+    }
+
     private nonisolated static func validate(
         _ record: CoverageRecord,
         expectedAccountID: AccountID
@@ -242,7 +267,7 @@ actor CoverageRepository {
         )
     }
 
-    private nonisolated static func record(from row: Row) throws -> CoverageRecord {
+    nonisolated static func record(from row: Row) throws -> CoverageRecord {
         guard let accountID = AccountID(rawValue: row["account_id"]),
               let organizationID = OrganizationID(rawValue: row["organization_id"]),
               let feature = CoverageFeature(rawValue: row["feature"]),

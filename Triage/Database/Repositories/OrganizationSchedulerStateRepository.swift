@@ -380,7 +380,7 @@ actor OrganizationSchedulerStateRepository {
         }
     }
 
-    private nonisolated static func validateCurrentScope(
+    nonisolated static func validateCurrentScope(
         _ scope: SynchronizationScope,
         in database: Database
     ) throws {
@@ -454,7 +454,7 @@ actor OrganizationSchedulerStateRepository {
         )
     }
 
-    private nonisolated static func fetch(
+    nonisolated static func fetch(
         accountID: AccountID,
         organizationID: OrganizationID,
         in database: Database

@@ -84,7 +84,7 @@ actor OrganizationSyncCoordinator {
                     key: key,
                     generation: generation,
                     lastSuccessfulAt: self.lastSuccessfulAt(for: key),
-                    detail: String(describing: type(of: error))
+                    detail: "Organization synchronization did not complete."
                 )
             }
         }

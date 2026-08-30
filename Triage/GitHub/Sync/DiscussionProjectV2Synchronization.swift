@@ -196,5 +196,23 @@ private func mapped(_ error: Error) -> Error {
 }
 
 private func diagnostic(for error: Error) -> String {
-    String(describing: error).prefix(4_096).description
+    guard case let GitHubGraphQLError.requestFailed(failure) = error else {
+        return "GitHub discussion or project synchronization did not complete."
+    }
+    if failure.ssoHeader != nil {
+        return "GitHub organization SSO authorization is required for this resource."
+    }
+    if failure.accessRestriction != nil {
+        return "GitHub organization approval is required for this resource."
+    }
+    switch failure.kind {
+    case .unauthorized:
+        return "Reconnect the selected account to continue synchronization."
+    case .rateLimited, .secondaryRateLimited:
+        return "GitHub rate limiting left this resource incomplete."
+    case .forbidden, .notFound:
+        return "This resource is unavailable to the selected account."
+    case .serverFailure, .unexpectedResponse:
+        return "GitHub did not complete the resource request."
+    }
 }

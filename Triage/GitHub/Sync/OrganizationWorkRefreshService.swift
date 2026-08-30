@@ -364,7 +364,7 @@ actor OrganizationWorkRefreshService {
                         interval: searchRange,
                         status: .failed,
                         lastSuccessfulAt: nil,
-                        failureDetail: "Refresh failed: \(String(reflecting: type(of: error)))."
+                        failureDetail: "Organization work refresh did not complete."
                     ),
                     attemptedAt: attemptedAt
                 )
@@ -847,7 +847,7 @@ actor OrganizationWorkRefreshService {
                     interval: nil,
                     status: .failed,
                     lastSuccessfulAt: nil,
-                    failureDetail: "Pull request review refresh failed: \(String(reflecting: type(of: error))).",
+                    failureDetail: "Pull request review refresh did not complete.",
                     feature: .reviews
                 ),
                 attemptedAt: attemptedAt

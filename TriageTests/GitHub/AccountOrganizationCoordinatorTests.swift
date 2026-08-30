@@ -359,6 +359,28 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(cancelled.consecutiveTransientFailureCount, 2)
     }
 
+    func testExplicitCancellationNeverRepublishesPreviouslyFreshCacheAsFresh() async throws {
+        let scope = CoordinatorFixture.defaultScope
+        let prior = AccountOrganizationDurableState(
+            cachedState: Self.fixtureCachedState(for: scope, at: 1)
+        )
+        let fixture = CoordinatorFixture(cachedStates: [scope: prior])
+
+        try await fixture.coordinator.select(scope)
+        let request = try await fixture.operation.request(at: 0)
+        try await fixture.coordinator.cancelRefresh(
+            for: fixture.accountOrganizationScope(scope)
+        )
+        try await fixture.operation.awaitCancellation(of: request)
+
+        let inMemory = await fixture.coordinator.state(for: scope)
+        let persisted = await fixture.stateStore.state(for: scope)
+        XCTAssertEqual(inMemory?.freshness.status, .stale)
+        XCTAssertEqual(persisted?.freshness.status, .stale)
+        XCTAssertEqual(inMemory?.durableState.cachedState, prior.cachedState)
+        XCTAssertEqual(persisted?.cachedState, prior.cachedState)
+    }
+
     func testFullReconciliationRunsWhenItsDeadlineAloneIsDue() async throws {
         let fixture = CoordinatorFixture()
         let scope = fixture.scope()
@@ -1388,6 +1410,44 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
             ifOwnedBy: expectedAttemptID,
             generation: expectedGeneration
         )
+    }
+
+    func finalizeFailure(
+        _ state: AccountOrganizationDurableState,
+        schedule: OrganizationSchedulerState,
+        for scope: SynchronizationScope,
+        ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64
+    ) async throws -> AccountOrganizationDurableState? {
+        guard try await finalize(
+            state,
+            schedule: schedule,
+            for: scope,
+            ifOwnedBy: expectedAttemptID,
+            generation: expectedGeneration
+        ) else {
+            return nil
+        }
+        return state
+    }
+
+    func finalizeInterruption(
+        _ state: AccountOrganizationDurableState,
+        schedule: OrganizationSchedulerState,
+        for scope: SynchronizationScope,
+        ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64
+    ) async throws -> AccountOrganizationDurableState? {
+        guard try await finalize(
+            state,
+            schedule: schedule,
+            for: scope,
+            ifOwnedBy: expectedAttemptID,
+            generation: expectedGeneration
+        ) else {
+            return nil
+        }
+        return state
     }
 }
 

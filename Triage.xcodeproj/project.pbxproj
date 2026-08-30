@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		79DF0167B41F46E19A195AF3 /* OrganizationSchedulerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */; };
 		5D33C2CA6A6243CC93ABACA9 /* OrganizationSchedulerStateRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */; };
+		AA2800010000000000000001 /* AccountOrganizationDurableStateRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2800020000000000000002 /* AccountOrganizationDurableStateRepository.swift */; };
+		AA2800030000000000000003 /* AccountOrganizationDurableStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2800040000000000000004 /* AccountOrganizationDurableStateRepositoryTests.swift */; };
 		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */; };
 		C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */; };
@@ -282,6 +284,8 @@
 /* Begin PBXFileReference section */
 		D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerState.swift; sourceTree = "<group>"; };
 		435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepository.swift; sourceTree = "<group>"; };
+		AA2800020000000000000002 /* AccountOrganizationDurableStateRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountOrganizationDurableStateRepository.swift; sourceTree = "<group>"; };
+		AA2800040000000000000004 /* AccountOrganizationDurableStateRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountOrganizationDurableStateRepositoryTests.swift; sourceTree = "<group>"; };
 		6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepositoryTests.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationRefreshSchedulingPolicy.swift; sourceTree = "<group>"; };
 		D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationRefreshSchedulingPolicyTests.swift; sourceTree = "<group>"; };
@@ -790,6 +794,7 @@
 		A81DF1DCBF03F99BFD882782 /* Repositories */ = {
 			isa = PBXGroup;
 			children = (
+				AA2800020000000000000002 /* AccountOrganizationDurableStateRepository.swift */,
 				C80EB94E267D82037DB5FBBC /* AccountRepository.swift */,
 				B4B796E37BE5237752BBBBF6 /* ActorRepository.swift */,
 				94553205E702E9C6A6418EAD /* AttentionReasonRepository.swift */,
@@ -876,6 +881,7 @@
 		AE860E185EC8801A0A64F686 /* Database */ = {
 			isa = PBXGroup;
 			children = (
+				AA2800040000000000000004 /* AccountOrganizationDurableStateRepositoryTests.swift */,
 				77D57D8E1F9651E692028E4F /* AccountRepositoryTests.swift */,
 				E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */,
 				252317BBE7F6931FB5BC8E1D /* CoverageRepositoryTests.swift */,
@@ -1214,6 +1220,7 @@
 				C7F90585CF06BB8C7840CA04 /* OrganizationInventoryRefreshServiceTests.swift in Sources */,
 				F1B233E72F3E02889F3B3F4F /* PersonalAccessTokenTests.swift in Sources */,
 					C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */,
+					AA2800030000000000000003 /* AccountOrganizationDurableStateRepositoryTests.swift in Sources */,
 					A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */,
 					C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */,
 				578CC1E89C6D6601B9599CEF /* ProgressAttentionRuleTests.swift in Sources */,
@@ -1336,6 +1343,7 @@
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
 					F48CFD7952CFEDEADF3C6879 /* NormalizationFailure.swift in Sources */,
 					79DF0167B41F46E19A195AF3 /* OrganizationSchedulerState.swift in Sources */,
+					AA2800010000000000000001 /* AccountOrganizationDurableStateRepository.swift in Sources */,
 					5D33C2CA6A6243CC93ABACA9 /* OrganizationSchedulerStateRepository.swift in Sources */,
 				639B7E593417AF6E3A71451E /* NormalizationFailureRepository.swift in Sources */,
 				2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */,
