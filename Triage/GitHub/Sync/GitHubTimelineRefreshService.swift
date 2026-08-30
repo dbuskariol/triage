@@ -552,12 +552,29 @@ actor GitHubTimelineRefreshService {
             conditionalMutation = .remove(conditionalIdentity)
         }
         try Task.checkCancellation()
+        let relationReconciliation: TimelineRelationReconciliation
+        let observedAtMilliseconds = Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())
+        if saved.pageProvenances.allSatisfy({ provenance in
+            Int64((provenance.observedAt.timeIntervalSince1970 * 1_000).rounded()) == observedAtMilliseconds
+        }) {
+            relationReconciliation = .complete(
+                scope: scope,
+                pageProvenances: saved.pageProvenances,
+                eventPageProvenances: saved.eventPageProvenances
+            )
+        } else {
+            // A resumed traversal contains raw pages from an earlier attempt.
+            // It may complete normalized timeline state, but cannot assert one
+            // timestamp-matched relation authority for those prior pages.
+            relationReconciliation = .unavailable
+        }
         try await eventRepository.replaceAndComplete(
             normalized,
             candidate: candidate,
             accountID: accountID,
             organizationID: organizationID,
             observedAt: observedAt,
+            relationReconciliation: relationReconciliation,
             conditionalRequestCacheMutation: conditionalMutation,
             replayReceipt: persistedValidator.map {
                 TimelineReplayReceiptInput(
@@ -842,7 +859,9 @@ actor GitHubTimelineRefreshService {
                 rawPage: TimelineRawPageProvenance(
                     snapshotID: rawSnapshotID,
                     endpoint: Self.timelineEndpoint(for: candidate),
-                    parserVersion: 1
+                    requestKey: Self.requestKey(for: candidate),
+                    parserVersion: 1,
+                    observedAt: observedAt
                 ),
                 candidate: candidate,
                 accountID: accountID,

@@ -15,7 +15,9 @@ enum TimelineEventRepositoryError: Error, Equatable, Sendable {
 struct TimelineRawPageProvenance: Equatable, Sendable {
     let snapshotID: RawAPISnapshotID
     let endpoint: String
+    let requestKey: String
     let parserVersion: Int
+    let observedAt: Date
 }
 
 struct TimelineSavedPageInventory: Sendable {
@@ -24,7 +26,20 @@ struct TimelineSavedPageInventory: Sendable {
     let firstPageETag: String?
     let firstPageLastModified: String?
     let pageProvenances: [TimelineRawPageProvenance]
+    let eventPageProvenances: [GitHubEventID: TimelineRawPageProvenance]
     let latestPageProvenance: TimelineRawPageProvenance
+}
+
+/// Relations are only reconciled when every persisted page belongs to this
+/// completion. A resumed mixed-age traversal intentionally makes no relation
+/// mutation instead of claiming current page authority.
+enum TimelineRelationReconciliation: Sendable {
+    case unavailable
+    case complete(
+        scope: SynchronizationScope,
+        pageProvenances: [TimelineRawPageProvenance],
+        eventPageProvenances: [GitHubEventID: TimelineRawPageProvenance]
+    )
 }
 
 struct TimelineReplayReceiptInput: Sendable {
@@ -73,6 +88,7 @@ actor TimelineEventRepository {
                 candidate: candidate,
                 requestKey: requestKey
             ),
+            observedAt: observedAt,
             payload: page.payload
         )
         try await vault.write { database in
@@ -137,6 +153,7 @@ actor TimelineEventRepository {
                 candidate: candidate,
                 requestKey: requestKey
             ),
+            observedAt: observedAt,
             payload: page.payload
         )
         try await vault.writeTransaction { database in
@@ -204,36 +221,76 @@ actor TimelineEventRepository {
                 organizationID: organizationID,
                 in: database
             )
+            let streamID = SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!
+            // A staged traversal is private download state. Prefer it while it
+            // exists, but never blend it with the last atomically published
+            // membership.
+            let stagedCount = try Int.fetchOne(
+                database,
+                sql: """
+                    SELECT COUNT(*) FROM timeline_staged_pages
+                    WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                      AND feature = ? AND stream_id = ?
+                    """,
+                arguments: [
+                    accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                    CoverageFeature.timelines.rawValue, streamID.rawValue
+                ]
+            ) ?? 0
+            let membershipTable = stagedCount > 0 ? "timeline_staged_pages" : "timeline_current_pages"
             let snapshots = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
-                           authority_organization_id, authority_feature, authority_stream_id,
-                           authority_request_key, authority_credential_revision,
-                           authority_capability_revision, parser_version, observed_at_ms, payload
-                    FROM raw_api_snapshots
-                    WHERE account_id = ? AND github_node_id = ? AND endpoint LIKE ?
+                    SELECT raw_api_snapshots.id, raw_api_snapshots.account_id,
+                           raw_api_snapshots.github_node_id, raw_api_snapshots.endpoint,
+                           raw_api_snapshots.etag, raw_api_snapshots.last_modified,
+                           raw_api_snapshots.authority_organization_id,
+                           raw_api_snapshots.authority_feature,
+                           raw_api_snapshots.authority_stream_id,
+                           raw_api_snapshots.authority_request_key,
+                           raw_api_snapshots.authority_credential_revision,
+                           raw_api_snapshots.authority_capability_revision,
+                           raw_api_snapshots.parser_version,
+                           raw_api_snapshots.observed_at_ms, raw_api_snapshots.payload,
+                           \(membershipTable).page_index AS current_page_index,
+                           \(membershipTable).request_key AS current_request_key,
+                           \(membershipTable).observed_at_ms AS current_observed_at_ms,
+                           \(membershipTable).is_terminal AS current_is_terminal
+                    FROM \(membershipTable)
+                    JOIN raw_api_snapshots
+                      ON raw_api_snapshots.id = \(membershipTable).raw_snapshot_id
+                    WHERE \(membershipTable).account_id = ?
+                      AND \(membershipTable).organization_id = ?
+                      AND \(membershipTable).github_node_id = ?
+                      AND \(membershipTable).feature = ?
+                      AND \(membershipTable).stream_id = ?
+                      AND \(membershipTable).credential_revision = ?
+                      AND \(membershipTable).capability_revision = ?
+                      AND \(membershipTable).source_revision = ?
                       AND NOT EXISTS (
                           SELECT 1
                           FROM normalization_failures
                           WHERE normalization_failures.raw_snapshot_id = raw_api_snapshots.id
                       )
-                    ORDER BY endpoint ASC
+                    ORDER BY \(membershipTable).page_index ASC
                     """,
                 arguments: [
-                    accountID.rawValue,
-                    candidate.nodeID.rawValue,
-                    Self.snapshotEndpointPrefix(for: candidate) + "%"
+                    accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                    CoverageFeature.timelines.rawValue, streamID.rawValue,
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                    candidate.sourceRevision
                 ]
             )
-            let prefix = Self.snapshotEndpointPrefix(for: candidate)
-            let matching = try snapshots.compactMap { row -> RawAPISnapshot? in
+            let matching = try snapshots.map { row -> (RawAPISnapshot, Int, String, Int64, Int) in
                 let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
-                guard snapshot.endpoint.hasPrefix(prefix) else {
-                    return nil
+                guard let pageIndex: Int = row["current_page_index"],
+                      let requestKey: String = row["current_request_key"],
+                      let observedAtMilliseconds: Int64 = row["current_observed_at_ms"],
+                      let isTerminal: Int = row["current_is_terminal"]
+                else {
+                    throw TimelineEventRepositoryError.invalidPersistedPage(nil)
                 }
-                let pageIndex = snapshot.endpoint.dropFirst(prefix.count)
-                return pageIndex.count == 3 && Int(pageIndex) != nil ? snapshot : nil
+                return (snapshot, pageIndex, requestKey, observedAtMilliseconds, isTerminal)
             }
             guard !matching.isEmpty, matching.count <= 100 else {
                 throw TimelineEventRepositoryError.invalidPersistedPage(nil)
@@ -241,12 +298,16 @@ actor TimelineEventRepository {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let persistedPages = try matching.enumerated().map {
-                offset, snapshot -> (TimelineRawPageProvenance, Data) in
-                let pageIndex = offset + 1
-                guard snapshot.endpoint == Self.committedSnapshotEndpoint(
+                offset, membership -> (TimelineRawPageProvenance, Data) in
+                let (snapshot, pageIndex, requestKey, observedAtMilliseconds, isTerminal) = membership
+                guard snapshot.endpoint == Self.snapshotEndpoint(
                     for: candidate,
                     pageIndex: pageIndex
                 ),
+                      pageIndex == offset + 1,
+                      requestKey == snapshot.requestIdentity?.requestKey,
+                      observedAtMilliseconds == Self.milliseconds(snapshot.observedAt),
+                      (offset < matching.count - 1 ? isTerminal == 0 : (isTerminal == 0 || isTerminal == 1)),
                       snapshot.parserVersion == 1,
                       snapshot.payload.count <= Self.maximumRawPageBytes,
                       snapshot.requestIdentity == Self.requestIdentity(
@@ -266,14 +327,26 @@ actor TimelineEventRepository {
                     TimelineRawPageProvenance(
                         snapshotID: snapshot.id,
                         endpoint: snapshot.endpoint,
-                        parserVersion: snapshot.parserVersion
+                        requestKey: requestKey,
+                        parserVersion: snapshot.parserVersion,
+                        observedAt: snapshot.observedAt
                     ),
                     snapshot.payload
                 )
             }
+            var eventPageProvenances = [GitHubEventID: TimelineRawPageProvenance]()
             let events = try persistedPages.flatMap { provenance, payload in
                 do {
-                    return try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+                    let pageEvents = try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+                    for event in pageEvents {
+                        // Normalization remains responsible for rejecting
+                        // malformed or duplicate IDs. This map retains the
+                        // exact raw page for IDs that can be addressed.
+                        if let rawID = event.id, let eventID = GitHubEventID(rawValue: rawID) {
+                            eventPageProvenances[eventID] = provenance
+                        }
+                    }
+                    return pageEvents
                 } catch is DecodingError {
                     throw TimelineEventRepositoryError.invalidPersistedPage(provenance)
                 }
@@ -281,9 +354,10 @@ actor TimelineEventRepository {
             return TimelineSavedPageInventory(
                 events: events,
                 pageCount: matching.count,
-                firstPageETag: matching.first?.eTag,
-                firstPageLastModified: matching.first?.lastModified,
+                firstPageETag: matching.first?.0.eTag,
+                firstPageLastModified: matching.first?.0.lastModified,
                 pageProvenances: persistedPages.map(\.0),
+                eventPageProvenances: eventPageProvenances,
                 latestPageProvenance: persistedPages[persistedPages.count - 1].0
             )
         }
@@ -336,7 +410,7 @@ actor TimelineEventRepository {
             }
             let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
             guard snapshot.githubNodeID == candidate.nodeID,
-                  snapshot.endpoint == Self.pendingSnapshotEndpoint(
+                  snapshot.endpoint == Self.snapshotEndpoint(
                     for: candidate,
                     pageIndex: pageIndex
                   ),
@@ -349,42 +423,6 @@ actor TimelineEventRepository {
             else {
                 throw TimelineEventRepositoryError.invalidPersistedPage(nil)
             }
-            try database.execute(
-                sql: """
-                    DELETE FROM raw_api_snapshots
-                    WHERE account_id = ?
-                      AND github_node_id = ?
-                      AND endpoint = ?
-                      AND id <> ?
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM normalization_failures
-                          WHERE normalization_failures.raw_snapshot_id = raw_api_snapshots.id
-                      )
-                    """,
-                arguments: [
-                    accountID.rawValue,
-                    candidate.nodeID.rawValue,
-                    Self.committedSnapshotEndpoint(for: candidate, pageIndex: pageIndex),
-                    snapshotID.rawValue
-                ]
-            )
-            try database.execute(
-                sql: """
-                    UPDATE raw_api_snapshots
-                    SET endpoint = ?
-                    WHERE id = ? AND account_id = ? AND endpoint = ?
-                    """,
-                arguments: [
-                    Self.committedSnapshotEndpoint(for: candidate, pageIndex: pageIndex),
-                    snapshotID.rawValue,
-                    accountID.rawValue,
-                    Self.pendingSnapshotEndpoint(for: candidate, pageIndex: pageIndex)
-                ]
-            )
-            guard database.changesCount == 1 else {
-                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
-            }
             try TimelineCandidateRepository.saveDownloadedPageCheckpoint(
                 for: candidate,
                 nextPageURL: nextPageURL,
@@ -393,6 +431,84 @@ actor TimelineEventRepository {
                 attemptedAt: attemptedAt,
                 in: database
             )
+            let streamID = SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!
+            if pageIndex == 1 {
+                // A fresh traversal replaces only unpublished staging. The
+                // prior current membership, coverage, validator, and receipt
+                // remain one coherent published generation until completion.
+                try database.execute(
+                    sql: """
+                        DELETE FROM timeline_staged_pages
+                        WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                          AND feature = ? AND stream_id = ?
+                        """,
+                    arguments: [
+                        accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                        CoverageFeature.timelines.rawValue, streamID.rawValue
+                    ]
+                )
+            } else {
+                let predecessorCount = try Int.fetchOne(
+                    database,
+                    sql: """
+                        SELECT COUNT(*) FROM timeline_staged_pages
+                        WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                          AND feature = ? AND stream_id = ?
+                          AND credential_revision = ? AND capability_revision = ?
+                          AND source_revision = ? AND page_index = ? AND is_terminal = 0
+                        """,
+                    arguments: [
+                        accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                        CoverageFeature.timelines.rawValue, streamID.rawValue,
+                        scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                        candidate.sourceRevision, pageIndex - 1
+                    ]
+                ) ?? 0
+                guard predecessorCount == 1 else {
+                    throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+                }
+            }
+            try database.execute(
+                sql: """
+                    INSERT INTO timeline_staged_pages (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, page_index,
+                        raw_snapshot_id, request_key, observed_at_ms, is_terminal
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, page_index
+                    ) DO NOTHING
+                    """,
+                arguments: [
+                    accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                    CoverageFeature.timelines.rawValue, streamID.rawValue,
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                    candidate.sourceRevision, pageIndex, snapshotID.rawValue, requestKey,
+                    Self.milliseconds(snapshot.observedAt), nextPageURL == nil ? 1 : 0
+                ]
+            )
+            let stagedMatchCount = try Int.fetchOne(
+                database,
+                sql: """
+                    SELECT COUNT(*) FROM timeline_staged_pages
+                    WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                      AND feature = ? AND stream_id = ? AND credential_revision = ?
+                      AND capability_revision = ? AND source_revision = ? AND page_index = ?
+                      AND raw_snapshot_id = ? AND request_key = ? AND observed_at_ms = ?
+                      AND is_terminal = ?
+                    """,
+                arguments: [
+                    accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                    CoverageFeature.timelines.rawValue, streamID.rawValue,
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                    candidate.sourceRevision, pageIndex, snapshotID.rawValue, requestKey,
+                    Self.milliseconds(snapshot.observedAt), nextPageURL == nil ? 1 : 0
+                ]
+            ) ?? 0
+            guard stagedMatchCount == 1 else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
         }
     }
 
@@ -428,6 +544,7 @@ actor TimelineEventRepository {
         accountID: AccountID,
         organizationID: OrganizationID,
         observedAt: Date,
+        relationReconciliation: TimelineRelationReconciliation,
         conditionalRequestCacheMutation: ConditionalRequestCacheMutation? = nil,
         replayReceipt: TimelineReplayReceiptInput? = nil
     ) async throws {
@@ -437,9 +554,19 @@ actor TimelineEventRepository {
         guard candidate.sourceRevision.count <= 500 else {
             throw TimelineEventRepositoryError.candidateScopeMismatch
         }
+        if case let .complete(scope, _, _) = relationReconciliation,
+           (scope.accountID != accountID || scope.organizationID != organizationID) {
+            throw TimelineEventRepositoryError.candidateScopeMismatch
+        }
         try Self.validate(events)
         try await vault.writeTransaction { database in
             try Task.checkCancellation()
+            let publishedPages = try Self.publishStagedMembership(
+                candidate: candidate,
+                accountID: accountID,
+                organizationID: organizationID,
+                in: database
+            )
             try Self.replace(
                 events,
                 candidate: candidate,
@@ -455,6 +582,57 @@ actor TimelineEventRepository {
                 completedAt: observedAt,
                 in: database
             )
+            switch relationReconciliation {
+            case .unavailable:
+                break
+            case let .complete(scope, pageProvenances, eventPageProvenances):
+                guard pageProvenances == publishedPages,
+                      Set(eventPageProvenances.values.map(\.snapshotID))
+                        .isSubset(of: Set(publishedPages.map(\.snapshotID)))
+                else {
+                    throw WorkRelationRepositoryError.rawSnapshotScopeMismatch
+                }
+                let streamID = SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!
+                try CoverageRepository.save(
+                    CoverageRecord(
+                        accountID: accountID,
+                        organizationID: organizationID,
+                        repositoryID: candidate.repositoryID,
+                        feature: .timelines,
+                        streamID: streamID,
+                        intervalStart: nil,
+                        intervalEnd: nil,
+                        credentialRevision: scope.credentialRevision,
+                        capabilityRevision: scope.capabilityRevision,
+                        status: .complete,
+                        lastSuccessfulAt: observedAt,
+                        failureDetail: nil
+                    ),
+                    attemptedAt: observedAt,
+                    expectedAccountID: accountID,
+                    in: database
+                )
+                let replacements = try Self.pageBoundRelationReplacements(
+                    from: events,
+                    candidate: candidate,
+                    scope: scope,
+                    pageProvenances: pageProvenances,
+                    eventPageProvenances: eventPageProvenances
+                )
+                try WorkRelationRepository.replaceCompletePages(
+                    replacements,
+                    accountID: accountID,
+                    subjectNodeID: candidate.nodeID,
+                    scope: scope,
+                    source: .restTimeline,
+                    feature: .timelines,
+                    streamID: streamID,
+                    repositoryID: candidate.repositoryID,
+                    sourceRevision: candidate.sourceRevision,
+                    observedAt: observedAt,
+                    in: database
+                )
+            }
             try Task.checkCancellation()
             switch conditionalRequestCacheMutation {
             case let .save(validator):
@@ -689,6 +867,137 @@ actor TimelineEventRepository {
         }
     }
 
+    /// Makes a complete staged traversal visible as the one current page set.
+    /// The caller's surrounding database write also contains normalized rows,
+    /// coverage, relation reconciliation, cursor completion, and replay state.
+    private nonisolated static func publishStagedMembership(
+        candidate: TimelineCandidate,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        in database: Database
+    ) throws -> [TimelineRawPageProvenance] {
+        let streamID = SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!
+        let stagedCount = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*) FROM timeline_staged_pages
+                WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                  AND feature = ? AND stream_id = ?
+                """,
+            arguments: [
+                accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                CoverageFeature.timelines.rawValue, streamID.rawValue
+            ]
+        ) ?? 0
+        let source = stagedCount > 0 ? "timeline_staged_pages" : "timeline_current_pages"
+        let rows = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT raw_api_snapshots.id, raw_api_snapshots.account_id, raw_api_snapshots.github_node_id,
+                       raw_api_snapshots.endpoint, raw_api_snapshots.etag, raw_api_snapshots.last_modified,
+                       raw_api_snapshots.authority_organization_id, raw_api_snapshots.authority_feature,
+                       raw_api_snapshots.authority_stream_id, raw_api_snapshots.authority_request_key,
+                       raw_api_snapshots.authority_credential_revision,
+                       raw_api_snapshots.authority_capability_revision, raw_api_snapshots.parser_version,
+                       raw_api_snapshots.observed_at_ms, raw_api_snapshots.payload,
+                       \(source).page_index AS page_index, \(source).request_key AS request_key,
+                       \(source).credential_revision AS membership_credential_revision,
+                       \(source).capability_revision AS membership_capability_revision,
+                       \(source).observed_at_ms AS membership_observed_at_ms,
+                       \(source).is_terminal AS is_terminal
+                FROM \(source)
+                JOIN raw_api_snapshots ON raw_api_snapshots.id = \(source).raw_snapshot_id
+                WHERE \(source).account_id = ? AND \(source).organization_id = ?
+                  AND \(source).github_node_id = ? AND \(source).feature = ?
+                  AND \(source).stream_id = ? AND \(source).source_revision = ?
+                ORDER BY \(source).page_index
+                """,
+            arguments: [
+                accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                CoverageFeature.timelines.rawValue, streamID.rawValue, candidate.sourceRevision
+            ]
+        )
+        guard !rows.isEmpty, rows.count <= 100 else {
+            throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+        }
+        var provenances = [TimelineRawPageProvenance]()
+        provenances.reserveCapacity(rows.count)
+        for (offset, row) in rows.enumerated() {
+            try Task.checkCancellation()
+            let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
+            guard let pageIndex: Int = row["page_index"],
+                  let requestKey: String = row["request_key"],
+                  let membershipCredentialRevision: String = row["membership_credential_revision"],
+                  let membershipCapabilityRevision: String = row["membership_capability_revision"],
+                  let membershipObservedAt: Int64 = row["membership_observed_at_ms"],
+                  let terminal: Int = row["is_terminal"],
+                  let identity = snapshot.requestIdentity,
+                  pageIndex == offset + 1,
+                  terminal == (offset == rows.count - 1 ? 1 : 0),
+                  snapshot.githubNodeID == candidate.nodeID,
+                  snapshot.endpoint == snapshotEndpoint(for: candidate, pageIndex: pageIndex),
+                  snapshot.parserVersion == 1,
+                  snapshot.payload.count <= maximumRawPageBytes,
+                  membershipObservedAt == milliseconds(snapshot.observedAt),
+                  identity.scope.accountID == accountID,
+                  identity.scope.organizationID == organizationID,
+                  identity.scope.credentialRevision.rawValue == membershipCredentialRevision,
+                  identity.scope.capabilityRevision.rawValue == membershipCapabilityRevision,
+                  identity == requestIdentity(scope: identity.scope, candidate: candidate, requestKey: requestKey),
+                  isValidRequestKey(requestKey, candidate: candidate, pageIndex: pageIndex)
+            else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
+            let failureCount = try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM normalization_failures WHERE raw_snapshot_id = ?",
+                arguments: [snapshot.id.rawValue]
+            ) ?? 0
+            guard failureCount == 0 else { throw TimelineEventRepositoryError.invalidPersistedPage(nil) }
+            provenances.append(.init(
+                snapshotID: snapshot.id, endpoint: snapshot.endpoint, requestKey: requestKey,
+                parserVersion: snapshot.parserVersion, observedAt: snapshot.observedAt
+            ))
+        }
+        guard source == "timeline_staged_pages" else { return provenances }
+        try database.execute(
+            sql: """
+                DELETE FROM timeline_current_pages
+                WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                  AND feature = ? AND stream_id = ?
+                """,
+            arguments: [accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                        CoverageFeature.timelines.rawValue, streamID.rawValue]
+        )
+        try database.execute(sql: """
+            INSERT INTO timeline_current_pages (
+                account_id, organization_id, github_node_id, feature, stream_id,
+                credential_revision, capability_revision, source_revision, page_index,
+                raw_snapshot_id, request_key, observed_at_ms, is_terminal
+            )
+            SELECT account_id, organization_id, github_node_id, feature, stream_id,
+                   credential_revision, capability_revision, source_revision, page_index,
+                   raw_snapshot_id, request_key, observed_at_ms, is_terminal
+            FROM timeline_staged_pages
+            WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+              AND feature = ? AND stream_id = ? AND source_revision = ?
+            """, arguments: [accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                               CoverageFeature.timelines.rawValue, streamID.rawValue, candidate.sourceRevision])
+        guard database.changesCount == rows.count else {
+            throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+        }
+        try database.execute(
+            sql: """
+                DELETE FROM timeline_staged_pages
+                WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                  AND feature = ? AND stream_id = ?
+                """,
+            arguments: [accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                        CoverageFeature.timelines.rawValue, streamID.rawValue]
+        )
+        return provenances
+    }
+
     private nonisolated static func saveReplayReceipt(
         _ input: TimelineReplayReceiptInput,
         candidate: TimelineCandidate,
@@ -708,7 +1017,7 @@ actor TimelineEventRepository {
               input.pages.count <= 100,
               input.pages.enumerated().allSatisfy({ offset, page in
                   page.parserVersion == 1
-                      && page.endpoint == committedSnapshotEndpoint(
+                      && page.endpoint == snapshotEndpoint(
                         for: candidate,
                         pageIndex: offset + 1
                       )
@@ -813,32 +1122,48 @@ actor TimelineEventRepository {
         else {
             return false
         }
-        let prefix = snapshotEndpointPrefix(
-            nodeID: candidate.nodeID,
-            sourceRevision: rawSourceRevision,
-            repository: candidate.repository,
-            number: candidate.number
-        )
         let rows = try Row.fetchAll(
             database,
             sql: """
-                SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
-                       authority_organization_id, authority_feature, authority_stream_id,
-                       authority_request_key, authority_credential_revision,
-                       authority_capability_revision, parser_version, observed_at_ms, payload
-                FROM raw_api_snapshots
-                WHERE account_id = ? AND github_node_id = ? AND endpoint LIKE ?
+                SELECT raw_api_snapshots.id, raw_api_snapshots.account_id,
+                       raw_api_snapshots.github_node_id, raw_api_snapshots.endpoint,
+                       raw_api_snapshots.etag, raw_api_snapshots.last_modified,
+                       raw_api_snapshots.authority_organization_id,
+                       raw_api_snapshots.authority_feature,
+                       raw_api_snapshots.authority_stream_id,
+                       raw_api_snapshots.authority_request_key,
+                       raw_api_snapshots.authority_credential_revision,
+                       raw_api_snapshots.authority_capability_revision,
+                       raw_api_snapshots.parser_version,
+                       raw_api_snapshots.observed_at_ms, raw_api_snapshots.payload
+                       , timeline_current_pages.page_index AS page_index,
+                         timeline_current_pages.is_terminal AS is_terminal
+                FROM timeline_current_pages
+                JOIN raw_api_snapshots
+                  ON raw_api_snapshots.id = timeline_current_pages.raw_snapshot_id
+                WHERE timeline_current_pages.account_id = ?
+                  AND timeline_current_pages.organization_id = ?
+                  AND timeline_current_pages.github_node_id = ?
+                  AND timeline_current_pages.feature = ?
+                  AND timeline_current_pages.stream_id = ?
+                  AND timeline_current_pages.credential_revision = ?
+                  AND timeline_current_pages.capability_revision = ?
+                  AND timeline_current_pages.source_revision = ?
                   AND NOT EXISTS (
                       SELECT 1
                       FROM normalization_failures
                       WHERE normalization_failures.raw_snapshot_id = raw_api_snapshots.id
                   )
-                ORDER BY endpoint
+                ORDER BY timeline_current_pages.page_index
                 """,
             arguments: [
                 validator.identity.scope.accountID.rawValue,
-                candidate.nodeID.rawValue,
-                prefix + "%"
+                validator.identity.scope.organizationID.rawValue,
+                candidate.nodeID.rawValue, CoverageFeature.timelines.rawValue,
+                validator.identity.streamID.rawValue,
+                validator.identity.scope.credentialRevision.rawValue,
+                validator.identity.scope.capabilityRevision.rawValue,
+                rawSourceRevision
             ]
         )
         var decoded = [RawAPISnapshot]()
@@ -851,18 +1176,19 @@ actor TimelineEventRepository {
         } catch is RawAPISnapshotRepositoryError {
             return false
         }
-        let committed = decoded.filter { snapshot in
-            guard snapshot.endpoint.hasPrefix(prefix) else { return false }
-            let suffix = snapshot.endpoint.dropFirst(prefix.count)
-            return suffix.count == 3 && suffix.allSatisfy(\.isNumber)
-        }
-        guard committed.count == expectedSnapshotIDs.count else { return false }
-        for (offset, snapshot) in committed.enumerated() {
+        guard decoded.count == expectedSnapshotIDs.count else { return false }
+        let prefix = snapshotEndpointPrefix(
+            nodeID: candidate.nodeID, sourceRevision: rawSourceRevision,
+            repository: candidate.repository, number: candidate.number
+        )
+        for (offset, snapshot) in decoded.enumerated() {
             try Task.checkCancellation()
             let pageIndex = offset + 1
-            guard snapshot.id == expectedSnapshotIDs[offset],
+            guard (rows[offset]["page_index"] as Int?) == pageIndex,
+                  (rows[offset]["is_terminal"] as Int?) == (offset == decoded.count - 1 ? 1 : 0),
+                  snapshot.id == expectedSnapshotIDs[offset],
                   snapshot.githubNodeID == candidate.nodeID,
-                  snapshot.endpoint == prefix + String(format: "%03d", pageIndex),
+                  snapshot.endpoint == prefix + "pending:" + String(format: "%03d", pageIndex),
                   snapshot.parserVersion == 1,
                   snapshot.payload.count <= maximumRawPageBytes,
                   snapshot.requestIdentity == requestIdentity(
@@ -1043,6 +1369,107 @@ actor TimelineEventRepository {
         }
     }
 
+    private nonisolated static func pageBoundRelationReplacements(
+        from events: [NormalizedGitHubTimelineEvent],
+        candidate: TimelineCandidate,
+        scope: SynchronizationScope,
+        pageProvenances: [TimelineRawPageProvenance],
+        eventPageProvenances: [GitHubEventID: TimelineRawPageProvenance]
+    ) throws -> [PageBoundRelationReplacement] {
+        typealias RelationDraft = (kind: WorkRelationKind, objectNodeID: GitHubNodeID, evidence: [EvidenceReference], observedAt: Date)
+        var drafts = [RawAPISnapshotID: (provenance: TimelineRawPageProvenance, relations: [String: RelationDraft])]()
+        let streamID = SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!
+        guard !pageProvenances.isEmpty,
+              Set(pageProvenances.map(\.snapshotID)).count == pageProvenances.count,
+              Set(pageProvenances.map(\.requestKey)).count == pageProvenances.count
+        else {
+            throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+        }
+        for provenance in pageProvenances {
+            drafts[provenance.snapshotID] = (provenance, [:])
+        }
+
+        for event in events {
+            let relationKind: WorkRelationKind
+            switch event.kind {
+            case .commented:
+                relationKind = .commented
+            case .reviewed:
+                relationKind = .reviewed
+            default:
+                // The timeline event actor is not necessarily an assignee,
+                // mentioned user, or requested reviewer. Do not infer those
+                // relationships from an event that does not name its target.
+                continue
+            }
+            guard let actor = event.actor,
+                  let provenance = eventPageProvenances[event.id],
+                  drafts[provenance.snapshotID] != nil
+            else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
+            let evidence = EvidenceReference(
+                id: EvidenceID(rawValue: "timeline-\(event.id.rawValue)")!,
+                source: .restTimeline,
+                locator: .query(provenance.requestKey),
+                authority: .github(scope: scope, feature: .timelines, streamID: streamID),
+                nodeID: candidate.nodeID,
+                eventID: event.id,
+                sourceRevision: candidate.sourceRevision,
+                rawSnapshotID: provenance.snapshotID,
+                confidence: .confirmed,
+                confirmation: .confirmed,
+                observedAt: event.occurredAt
+            )
+            let key = relationKind.rawValue + "\u{0}" + actor.nodeID.rawValue
+            var pageDrafts = drafts[provenance.snapshotID] ?? (provenance, [:])
+            if var draft = pageDrafts.relations[key] {
+                draft.evidence.append(evidence)
+                draft.observedAt = max(draft.observedAt, event.occurredAt)
+                pageDrafts.relations[key] = draft
+            } else {
+                pageDrafts.relations[key] = (relationKind, actor.nodeID, [evidence], event.occurredAt)
+            }
+            drafts[provenance.snapshotID] = pageDrafts
+        }
+
+        return drafts.values
+            .sorted { lhs, rhs in lhs.provenance.requestKey < rhs.provenance.requestKey }
+            .map { group in
+                PageBoundRelationReplacement(
+                    relations: group.relations.values
+                        .map { draft in
+                            WorkRelation(
+                                kind: draft.kind,
+                                subjectNodeID: candidate.nodeID,
+                                objectNodeID: draft.objectNodeID,
+                                confidence: .confirmed,
+                                evidence: draft.evidence.sorted { $0.id.rawValue < $1.id.rawValue },
+                                observedAt: draft.observedAt
+                            )
+                        }
+                        .sorted { lhs, rhs in
+                            let lhsKey = lhs.kind.rawValue + "\u{0}" + (lhs.objectNodeID?.rawValue ?? "")
+                            let rhsKey = rhs.kind.rawValue + "\u{0}" + (rhs.objectNodeID?.rawValue ?? "")
+                            return lhsKey < rhsKey
+                        }
+                    ,
+                    authority: RelationReplacementAuthority(
+                        source: .restTimeline,
+                        locator: .query(group.provenance.requestKey),
+                        scope: scope,
+                        feature: .timelines,
+                        streamID: streamID,
+                        repositoryID: candidate.repositoryID,
+                        sourceRevision: candidate.sourceRevision,
+                        rawSnapshotID: group.provenance.snapshotID,
+                        observedAt: group.provenance.observedAt,
+                        mode: .completeReconciliation
+                    )
+                )
+            }
+    }
+
     private nonisolated static func validate(_ events: [NormalizedGitHubTimelineEvent]) throws {
         var eventIDs = Set<GitHubEventID>()
         for event in events {
@@ -1099,6 +1526,7 @@ actor TimelineEventRepository {
         for candidate: TimelineCandidate,
         pageIndex: Int,
         requestIdentity: ConditionalRequestIdentity,
+        observedAt: Date,
         payload: Data
     ) -> RawAPISnapshotID {
         let payloadDigest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
@@ -1109,6 +1537,7 @@ actor TimelineEventRepository {
             requestIdentity.scope.credentialRevision.rawValue,
             requestIdentity.scope.capabilityRevision.rawValue,
             requestIdentity.requestKey,
+            String(milliseconds(observedAt)),
             payloadDigest
         ].joined(separator: "\u{1F}")
         let digest = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()

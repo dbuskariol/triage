@@ -73,11 +73,23 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "038-relation-evidence-authority-provisional")
+        XCTAssertEqual(migrations.last?.id, "039-timeline-current-page-membership")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "c5904a2808b9f2133c456a65b5a512af8eb14be282dfdd19c5ce3f02c5b33a76"
+            "498de3f54c04aa6d9c271a9f18a235859ae1fdbbe1d806b566038ed6115f64b7"
         )
+        let timelineMembershipSchema = try await vault.read { database in
+            (
+                try database.tableExists("timeline_current_pages"),
+                try database.tableExists("timeline_staged_pages"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_current_pages"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_staged_pages")
+            )
+        }
+        XCTAssertTrue(timelineMembershipSchema.0)
+        XCTAssertTrue(timelineMembershipSchema.1)
+        XCTAssertEqual(timelineMembershipSchema.2, 0)
+        XCTAssertEqual(timelineMembershipSchema.3, 0)
         try await registry.closeAll()
     }
 
