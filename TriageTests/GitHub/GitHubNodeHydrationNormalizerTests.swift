@@ -2,6 +2,122 @@ import XCTest
 @testable import Triage
 
 final class GitHubNodeHydrationNormalizerTests: XCTestCase {
+    func testHydrationPartialResponseRetainsRawProvenanceWithRedactedDiagnostic() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hydration-provenance-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountID = AccountID.make()
+        let observedAt = Date(timeIntervalSince1970: 2_000)
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        try await AccountRepository(vault: vault).save(
+            GitHubAccount(
+                id: accountID,
+                githubUserID: 1,
+                nodeID: GitHubNodeID(rawValue: "U_1")!,
+                login: "octocat",
+                authenticationKind: .oauth,
+                credentialID: CredentialID.make(),
+                credentialStatus: .active,
+                createdAt: observedAt
+            ),
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!
+        )
+        let secret = "ghp_hydrationPartialSecret"
+        let service = GitHubNodeHydrationService(
+            client: GitHubGraphQLClient(
+                session: HydrationGraphQLSession(
+                    body: Data("{\"data\":null,\"errors\":[{\"message\":\"\(secret)\"}]}".utf8)
+                ),
+                credential: SecretValue("token")
+            ),
+            detailsRepository: GitHubNodeDetailsRepository(vault: vault),
+            rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+            batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault),
+            clock: { observedAt }
+        )
+
+        do {
+            try await service.hydrate(
+                nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
+                accountID: accountID,
+                organizationID: OrganizationID(rawValue: "org-1")!,
+                repositoryID: { _ in nil }
+            )
+            XCTFail("Expected the partial GraphQL response to remain non-authoritative.")
+        } catch {
+            XCTAssertEqual(error as? GitHubGraphQLError, .partialResponse)
+        }
+
+        let snapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
+        let snapshot = try XCTUnwrap(snapshots.only)
+        XCTAssertTrue(snapshot.payload.contains(Data(secret.utf8)))
+        let failures = try await NormalizationFailureRepository(vault: vault).failures(for: accountID)
+        let failure = try XCTUnwrap(failures.only)
+        XCTAssertEqual(failure.rawSnapshotID, snapshot.id)
+        XCTAssertEqual(failure.endpoint, "graphql:TriageHydrateNodes")
+        XCTAssertFalse(failure.redactedDiagnostic.contains(secret))
+        XCTAssertFalse(failure.redactedDiagnostic.contains("ghp_"))
+    }
+
+    func testHydrationCancellationAfterResponseDoesNotPublishRawOrFailureState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hydration-cancellation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountID = AccountID.make()
+        let observedAt = Date(timeIntervalSince1970: 2_000)
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        try await AccountRepository(vault: vault).save(
+            GitHubAccount(
+                id: accountID,
+                githubUserID: 1,
+                nodeID: GitHubNodeID(rawValue: "U_1")!,
+                login: "octocat",
+                authenticationKind: .oauth,
+                credentialID: CredentialID.make(),
+                credentialStatus: .active,
+                createdAt: observedAt
+            ),
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!
+        )
+        let service = GitHubNodeHydrationService(
+            client: GitHubGraphQLClient(
+                session: HydrationGraphQLSession(
+                    body: Data(#"{"data":null,"errors":[{"message":"partial"}]}"#.utf8),
+                    cancelBeforeReturn: true
+                ),
+                credential: SecretValue("token")
+            ),
+            detailsRepository: GitHubNodeDetailsRepository(vault: vault),
+            rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+            batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault),
+            clock: { observedAt }
+        )
+
+        do {
+            try await service.hydrate(
+                nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
+                accountID: accountID,
+                organizationID: OrganizationID(rawValue: "org-1")!,
+                repositoryID: { _ in nil }
+            )
+            XCTFail("Expected cancellation.")
+        } catch is CancellationError {
+        }
+
+        let snapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
+        let failures = try await NormalizationFailureRepository(vault: vault).failures(for: accountID)
+        XCTAssertTrue(snapshots.isEmpty)
+        XCTAssertTrue(failures.isEmpty)
+    }
+
     func testNormalizesMergedPullRequestWithAuthoritativeFields() throws {
         let createdAt = Date(timeIntervalSince1970: 1_000)
         let updatedAt = Date(timeIntervalSince1970: 2_000)
@@ -83,7 +199,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 
     func testRejectsIncompleteClosingIssues() throws {
         let original = pullRequest()
-        let node = .init(
+        let node = GitHubNodeHydrationPayload.Node(
             typeName: original.typeName,
             id: original.id,
             databaseId: original.databaseId,
@@ -176,5 +292,30 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 private extension Array {
     var only: Element? {
         count == 1 ? first : nil
+    }
+}
+
+private actor HydrationGraphQLSession: HTTPSession {
+    let body: Data
+    let cancelBeforeReturn: Bool
+
+    init(body: Data, cancelBeforeReturn: Bool = false) {
+        self.body = body
+        self.cancelBeforeReturn = cancelBeforeReturn
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if cancelBeforeReturn {
+            withUnsafeCurrentTask { $0?.cancel() }
+        }
+        return (
+            body,
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )
     }
 }

@@ -97,7 +97,9 @@ struct ProgressAttentionRule: Sendable {
       return action.evidence
     }
 
-    let sourceIssueEvidence = input.sourceIssueEvidence.map { [$0] } ?? []
+    let linkedIssueEvidence = linkedPullRequestEvidence.isEmpty
+      ? []
+      : linkedPullRequestEvidence + (input.sourceIssueEvidence.map { [$0] } ?? [])
     let definitions: [(ProgressAttentionRuleID, Int, String, String, [EvidenceReference])] = [
       (
         .overdueDueActions,
@@ -111,7 +113,7 @@ struct ProgressAttentionRule: Sendable {
         700,
         "Issue needs an update",
         "A linked pull request started without a later source issue update.",
-        linkedPullRequestEvidence + sourceIssueEvidence
+        linkedIssueEvidence
       ),
       (
         .ownedWorkStale,

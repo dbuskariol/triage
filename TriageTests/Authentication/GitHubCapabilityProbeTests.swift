@@ -15,7 +15,7 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             _ = try await GitHubCapabilityProbe(
                 identityClient: GitHubIdentityClient(client: client)
-            ).probe(organization: organization())
+            ).probe(organization: self.organization())
         } verify: { error in
             XCTAssertEqual(error as? GitHubCapabilityProbeError, .organizationIdentityMismatch)
         }

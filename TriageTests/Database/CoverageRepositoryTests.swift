@@ -2,6 +2,56 @@ import XCTest
 @testable import Triage
 
 final class CoverageRepositoryTests: XCTestCase {
+    func testTransactionScopedCoverageSaveRollsBackSiblingSourceWritesOnValidationFailure() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let sourceSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/orgs/acme/repos?type=all&per_page=100",
+            eTag: "inventory-v1",
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: Data("[]".utf8)
+        )
+        let valid = fixture.record(status: .complete, lastSuccessfulAt: fixture.date, failureDetail: nil)
+        let invalid = CoverageRecord(
+            accountID: AccountID.make(),
+            organizationID: valid.organizationID,
+            repositoryID: valid.repositoryID,
+            feature: valid.feature,
+            streamID: valid.streamID,
+            intervalStart: valid.intervalStart,
+            intervalEnd: valid.intervalEnd,
+            credentialRevision: valid.credentialRevision,
+            capabilityRevision: valid.capabilityRevision,
+            status: valid.status,
+            lastSuccessfulAt: valid.lastSuccessfulAt,
+            failureDetail: valid.failureDetail
+        )
+
+        do {
+            try await fixture.vault.writeTransaction { database in
+                try RawAPISnapshotRepository.save(sourceSnapshot, in: database)
+                try CoverageRepository.save(
+                    invalid,
+                    attemptedAt: fixture.date,
+                    expectedAccountID: fixture.accountID,
+                    in: database
+                )
+            }
+            XCTFail("Expected atomic coverage validation to fail.")
+        } catch {
+            XCTAssertEqual(error as? CoverageRepositoryError, .accountScopeMismatch)
+        }
+
+        let rawCount = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")
+        }
+        XCTAssertEqual(rawCount, 0)
+    }
+
     func testSaveReplacesCoverageStateAndRestoresItFromTheVault() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -13,10 +63,11 @@ final class CoverageRepositoryTests: XCTestCase {
         try await repository.save(partial, attemptedAt: fixture.date)
         try await repository.save(complete, attemptedAt: fixture.date.addingTimeInterval(1))
 
-        XCTAssertEqual(
-            try await repository.records(for: fixture.accountID, organizationID: fixture.organizationID),
-            [complete]
+        let records = try await repository.records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
         )
+        XCTAssertEqual(records, [complete])
         let count = try await fixture.vault.read { database in
             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records")
         }
@@ -87,10 +138,11 @@ final class CoverageRepositoryTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CoverageRepositoryError, .streamScopeMismatch)
         }
-        XCTAssertEqual(
-            try await repository.records(for: fixture.accountID, organizationID: fixture.organizationID),
-            [record]
+        let records = try await repository.records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
         )
+        XCTAssertEqual(records, [record])
     }
 
     func testFailedCoveragePreservesPriorSuccessfulWatermark() async throws {
@@ -139,11 +191,11 @@ final class CoverageRepositoryTests: XCTestCase {
         let record = try XCTUnwrap(records.first)
         XCTAssertEqual(record.status, .failed)
         XCTAssertEqual(record.lastSuccessfulAt, intervalEnd)
-        let stream = try XCTUnwrap(try await SyncStreamRepository(vault: fixture.vault).stream(
+        let storedStream = try await SyncStreamRepository(vault: fixture.vault).stream(
             withID: fixture.streamID,
             accountID: fixture.accountID
         )
-        )
+        let stream = try XCTUnwrap(storedStream)
         XCTAssertEqual(stream.highWater, intervalEnd)
         XCTAssertEqual(stream.lastSuccessfulAt, intervalEnd)
         XCTAssertEqual(stream.status, .failed)

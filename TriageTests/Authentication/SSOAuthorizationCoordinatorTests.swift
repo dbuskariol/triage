@@ -1,6 +1,7 @@
 import XCTest
 @testable import Triage
 
+@MainActor
 final class SSOAuthorizationCoordinatorTests: XCTestCase {
     func testOnlyRequiredAuthorizationHeadersAreEligibleForBrowserRecovery() {
         let coordinator = SSOAuthorizationCoordinator()

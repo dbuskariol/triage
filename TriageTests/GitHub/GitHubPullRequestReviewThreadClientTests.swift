@@ -49,7 +49,8 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
         XCTAssertEqual(inventory.rawPages.count, 5)
         XCTAssertEqual(inventory.metrics.pageCount, 5)
         XCTAssertTrue(inventory.rawPages.allSatisfy { !$0.payload.isEmpty })
-        XCTAssertEqual(await session.commentRequestAfters(), [nil, "comment-1", nil])
+        let commentRequestAfters = await session.commentRequestAfters()
+        XCTAssertEqual(commentRequestAfters, [nil, "comment-1", nil])
     }
 
     func testRejectsRepeatedThreadCursor() async throws {
@@ -75,6 +76,92 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
             _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
         } verify: { error in
             XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .paginationLoop)
+        }
+    }
+
+    func testRejectsAggregateQueryCostAcrossThreadAndCommentPages() async throws {
+        let session = ReviewThreadPagingSession(responses: [
+            "TriagePullRequestReviewThreads": [
+                response(
+                    node: """
+                    {"id":"PR_1","reviewThreads":{"nodes":[{"id":"T_1","isResolved":false,"isOutdated":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+                    """,
+                    cost: 500
+                )
+            ],
+            "TriagePullRequestReviewThreadComments": [
+                response(
+                    node: """
+                    {"id":"T_1","comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+                    """,
+                    cost: 1
+                )
+            ]
+        ])
+        let client = GitHubPullRequestReviewThreadClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .queryCostExceeded)
+        }
+    }
+
+    func testRejectsAggregateResponseBytesAcrossThreadAndCommentPages() async throws {
+        let session = ReviewThreadPagingSession(responses: [
+            "TriagePullRequestReviewThreads": [
+                response(
+                    node: """
+                    {"id":"PR_1","reviewThreads":{"nodes":[{"id":"T_1","isResolved":false,"isOutdated":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+                    """,
+                    paddingBytes: 2 * 1_024 * 1_024
+                )
+            ],
+            "TriagePullRequestReviewThreadComments": [
+                response(
+                    node: """
+                    {"id":"T_1","comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+                    """,
+                    paddingBytes: 2 * 1_024 * 1_024
+                )
+            ]
+        ])
+        let client = GitHubPullRequestReviewThreadClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .responseByteBudgetExceeded)
+        }
+    }
+
+    func testCancellationAfterResponseDecodeDoesNotReturnInventory() async throws {
+        let session = SuspendedReviewThreadPagingSession()
+        let client = GitHubPullRequestReviewThreadClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+        let task = Task {
+            try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
+        }
+
+        await session.waitForRequest()
+        task.cancel()
+        await session.resume(
+            with: response(
+                node: """
+                {"id":"PR_1","reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+                """
+            )
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await task.value
+        } verify: { error in
+            XCTAssertTrue(error is CancellationError)
         }
     }
 
@@ -127,13 +214,18 @@ private func comment(id: String, author: String) -> String {
     """
 }
 
-private func response(node: String) -> Data {
-    Data(#"{"data":{"node":\#(node),"rateLimit":{"cost":1,"remaining":4999,"resetAt":"2026-01-01T00:00:00Z"}}}"#.utf8)
+private func response(node: String, cost: Int = 1, paddingBytes: Int = 0) -> Data {
+    let padding = String(repeating: "x", count: paddingBytes)
+    return Data(
+        """
+        {"data":{"node":\(node),"rateLimit":{"cost":\(cost),"remaining":4999,"resetAt":"2026-01-01T00:00:00Z"},"padding":"\(padding)"}}
+        """.utf8
+    )
 }
 
 private actor ReviewThreadPagingSession: HTTPSession {
     private var responses: [String: [Data]]
-    private var commentRequestAfters = [String?]()
+    private var recordedCommentRequestAfters = [String?]()
 
     init(responses: [String: [Data]]) {
         self.responses = responses
@@ -143,7 +235,7 @@ private actor ReviewThreadPagingSession: HTTPSession {
         let requestBody = try XCTUnwrap(request.httpBody)
         let operation = try JSONDecoder().decode(Operation.self, from: requestBody)
         if operation.operationName == "TriagePullRequestReviewThreadComments" {
-            commentRequestAfters.append(operation.variables.after)
+            recordedCommentRequestAfters.append(operation.variables.after)
         }
         guard var pages = responses[operation.operationName], !pages.isEmpty else {
             throw URLError(.resourceUnavailable)
@@ -171,7 +263,46 @@ private actor ReviewThreadPagingSession: HTTPSession {
     }
 
     func commentRequestAfters() -> [String?] {
-        commentRequestAfters
+        recordedCommentRequestAfters
+    }
+}
+
+private actor SuspendedReviewThreadPagingSession: HTTPSession {
+    private var responseContinuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var requestWaiters = [CheckedContinuation<Void, Never>]()
+    private var responseURL: URL?
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        responseURL = request.url
+        return try await withCheckedThrowingContinuation { continuation in
+            responseContinuation = continuation
+            let waiters = requestWaiters
+            requestWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitForRequest() async {
+        guard responseContinuation == nil else { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters.append(continuation)
+        }
+    }
+
+    func resume(with payload: Data) {
+        guard let responseContinuation, let responseURL else { return }
+        self.responseContinuation = nil
+        responseContinuation.resume(
+            returning: (
+                payload,
+                HTTPURLResponse(
+                    url: responseURL,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        )
     }
 }
 

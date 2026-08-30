@@ -86,6 +86,7 @@ actor GitHubRateLimitController {
         let priority: GitHubRequestPriority
         let sequence: UInt64
         let continuation: CheckedContinuation<Void, Error>
+        var bypassCount = 0
     }
 
     private let accountID: AccountID?
@@ -102,6 +103,7 @@ actor GitHubRateLimitController {
     private var activeRequests = 0
     private var waiters: [Waiter] = []
     private var nextSequence: UInt64 = 0
+    private let maximumPriorityBypasses = 8
 
     init(
         accountID: AccountID? = nil,
@@ -241,9 +243,6 @@ actor GitHubRateLimitController {
                         continuation: continuation
                     )
                 )
-                waiters.sort {
-                    $0.priority == $1.priority ? $0.sequence < $1.sequence : $0.priority < $1.priority
-                }
             }
 
         } onCancel: {
@@ -260,8 +259,27 @@ actor GitHubRateLimitController {
             activeRequests -= 1
             return
         }
-        let next = waiters.removeFirst()
+        let nextIndex = nextWaiterIndex()
+        for index in waiters.indices where index != nextIndex {
+            waiters[index].bypassCount += 1
+        }
+        let next = waiters.remove(at: nextIndex)
         next.continuation.resume()
+    }
+
+    private func nextWaiterIndex() -> Int {
+        if let starvedIndex = waiters.indices
+            .filter({ waiters[$0].bypassCount >= maximumPriorityBypasses })
+            .min(by: { waiters[$0].sequence < waiters[$1].sequence }) {
+            return starvedIndex
+        }
+        return waiters.indices.min {
+            let lhs = waiters[$0]
+            let rhs = waiters[$1]
+            return lhs.priority == rhs.priority
+                ? lhs.sequence < rhs.sequence
+                : lhs.priority < rhs.priority
+        }!
     }
 
     private func cancelWaiter(id: UUID) {

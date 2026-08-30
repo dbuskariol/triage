@@ -89,6 +89,28 @@ final class GitHubRESTClientTests: XCTestCase {
             XCTAssertEqual(error, .invalidJSON)
         }
     }
+
+    func testProvenancePageAPIPreservesMalformedPayloadWithoutExposingItAsAnError() async throws {
+        let payload = Data(#"{"token":"ghp_privateMalformedPayload""#.utf8)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: StubSession(
+                body: payload,
+                headers: ["ETag": "malformed-etag"]
+            )),
+            credential: SecretValue("token")
+        )
+
+        let result = try await client.getPagePreservingUndecodablePayload(
+            OrganizationDTO.self,
+            request: GitHubRESTRequest(path: "/user/orgs")
+        )
+
+        guard case let .undecodable(page) = result else {
+            return XCTFail("Malformed JSON must remain distinguishable from an authoritative empty page.")
+        }
+        XCTAssertEqual(page.payload, payload)
+        XCTAssertEqual(page.etag, "malformed-etag")
+    }
 }
 
 private struct OrganizationDTO: Codable, Equatable, Sendable {

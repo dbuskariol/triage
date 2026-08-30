@@ -112,7 +112,7 @@ final class GitHubIssueSearchTests: XCTestCase {
 
         let response = try await GitHubIssueSearchClient(client: client).searchResponse(query)
 
-        XCTAssertEqual(response.value.items, [])
+        XCTAssertTrue(response.value.items.isEmpty)
         XCTAssertEqual(response.ssoHeader, .partialResults(Set([1])))
     }
 

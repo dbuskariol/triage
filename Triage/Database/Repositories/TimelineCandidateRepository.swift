@@ -91,15 +91,24 @@ actor TimelineCandidateRepository {
                       ON completed_timeline.stream_id = 'timeline:' || hydrated_candidates.github_node_id
                      AND completed_timeline.query_kind = 'timeline:' || hydrated_candidates.source_revision
                      AND completed_timeline.state = ?
+                    LEFT JOIN sync_streams AS timeline_attempt
+                      ON timeline_attempt.id = 'timeline:' || hydrated_candidates.github_node_id
+                     AND timeline_attempt.account_id = ?
+                     AND timeline_attempt.organization_id = ?
+                     AND timeline_attempt.feature = ?
                     WHERE completed_timeline.id IS NULL
-                    ORDER BY hydrated_candidates.last_observed_at_ms ASC,
+                    ORDER BY timeline_attempt.last_attempt_at_ms IS NOT NULL ASC,
+                             timeline_attempt.last_attempt_at_ms ASC,
+                             hydrated_candidates.last_observed_at_ms ASC,
                              hydrated_candidates.github_node_id ASC
                     LIMIT ?
                     """,
                 arguments: [
                     accountID.rawValue, organizationID.rawValue, GitHubNodeAccessibility.accessible.rawValue,
                     accountID.rawValue, organizationID.rawValue, GitHubNodeAccessibility.accessible.rawValue,
-                    SyncShardState.completed.rawValue, limit + 1
+                    SyncShardState.completed.rawValue,
+                    accountID.rawValue, organizationID.rawValue, CoverageFeature.timelines.rawValue,
+                    limit + 1
                 ]
             )
             let candidates = try rows.prefix(limit).map(Self.candidate)
@@ -202,30 +211,105 @@ actor TimelineCandidateRepository {
             throw TimelineCandidateRepositoryError.invalidCheckpoint
         }
         try await vault.write { database in
-            try Self.requireCandidate(candidate, accountID: accountID, organizationID: organizationID, in: database)
-            try Self.ensureStream(for: candidate, accountID: accountID, organizationID: organizationID, in: database)
-            try SyncShardRepository.save(
-                SyncShard(
-                    id: Self.shardID(for: candidate),
-                    streamID: Self.streamID(for: candidate),
-                    queryKind: Self.queryKind(for: candidate),
-                    intervalStart: nil,
-                    intervalEnd: nil,
-                    pageCursor: nextPageURL.absoluteString,
-                    state: .running,
-                    completedAt: nil
-                ),
-                accountID: accountID,
-                in: database
-            )
-            try Self.updateStream(
+            try Self.saveDownloadedPageCheckpoint(
                 for: candidate,
-                state: .partial,
-                successfulAt: nil,
+                nextPageURL: nextPageURL,
+                accountID: accountID,
+                organizationID: organizationID,
                 attemptedAt: Date.now,
                 in: database
             )
         }
+    }
+
+    nonisolated static func saveDownloadedPageCheckpoint(
+        for candidate: TimelineCandidate,
+        nextPageURL: URL?,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        attemptedAt: Date,
+        in database: Database
+    ) throws {
+        if let nextPageURL {
+            guard validTimelineURL(nextPageURL.absoluteString, candidate: candidate) != nil else {
+                throw TimelineCandidateRepositoryError.invalidCheckpoint
+            }
+        }
+        try requireCandidate(
+            candidate,
+            accountID: accountID,
+            organizationID: organizationID,
+            in: database
+        )
+        try ensureStream(
+            for: candidate,
+            accountID: accountID,
+            organizationID: organizationID,
+            in: database
+        )
+        try SyncShardRepository.save(
+            SyncShard(
+                id: shardID(for: candidate),
+                streamID: streamID(for: candidate),
+                queryKind: queryKind(for: candidate),
+                intervalStart: nil,
+                intervalEnd: nil,
+                pageCursor: nextPageURL?.absoluteString,
+                state: .running,
+                completedAt: nil
+            ),
+            accountID: accountID,
+            in: database
+        )
+        try updateStream(
+            for: candidate,
+            state: .partial,
+            successfulAt: nil,
+            attemptedAt: attemptedAt,
+            in: database
+        )
+    }
+
+    nonisolated static func completeDownloadedTimeline(
+        for candidate: TimelineCandidate,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        completedAt: Date,
+        in database: Database
+    ) throws {
+        try requireCandidate(
+            candidate,
+            accountID: accountID,
+            organizationID: organizationID,
+            in: database
+        )
+        try ensureStream(
+            for: candidate,
+            accountID: accountID,
+            organizationID: organizationID,
+            in: database
+        )
+        try SyncShardRepository.save(
+            SyncShard(
+                id: shardID(for: candidate),
+                streamID: streamID(for: candidate),
+                queryKind: queryKind(for: candidate),
+                intervalStart: nil,
+                intervalEnd: nil,
+                pageCursor: nil,
+                state: .completed,
+                completedAt: completedAt
+            ),
+            accountID: accountID,
+            in: database
+        )
+        try updateStream(
+            for: candidate,
+            state: .complete,
+            successfulAt: completedAt,
+            attemptedAt: completedAt,
+            in: database
+        )
     }
 
     func complete(

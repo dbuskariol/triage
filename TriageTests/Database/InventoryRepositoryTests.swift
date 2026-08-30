@@ -251,7 +251,7 @@ private final class InventoryFixture: @unchecked Sendable {
 
     init() async throws {
         let observedAt = Date(timeIntervalSinceReferenceDate: 1_000)
-        root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".triage-inventory-test-\(UUID().uuidString)", isDirectory: true)
         date = observedAt
         let accountID = AccountID.make()

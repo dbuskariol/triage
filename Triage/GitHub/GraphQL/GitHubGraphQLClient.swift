@@ -28,15 +28,64 @@ struct GitHubGraphQLQuery: Sendable {
     }
 }
 
+enum GitHubGraphQLErrorPathComponent: Codable, Equatable, Sendable {
+    case field(String)
+    case index(Int)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let index = try? container.decode(Int.self) {
+            self = .index(index)
+        } else {
+            self = .field(try container.decode(String.self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case let .field(value):
+            try container.encode(value)
+        case let .index(value):
+            try container.encode(value)
+        }
+    }
+}
+
 struct GitHubGraphQLPartialError: Codable, Equatable, Sendable {
     let message: String
-    let path: [String]?
+    let path: [GitHubGraphQLErrorPathComponent]?
+    let type: String?
+    let extensions: Extensions?
+
+    struct Extensions: Codable, Equatable, Sendable {
+        let code: String?
+        let type: String?
+    }
+}
+
+struct GitHubGraphQLResponseMetadata: Equatable, Sendable {
+    let requestID: String?
+    let retryAfter: TimeInterval?
+    let ssoHeader: GitHubSSOHeader?
 }
 
 struct GitHubGraphQLResponse<Value: Decodable & Sendable>: Sendable {
     let data: Value?
     let errors: [GitHubGraphQLPartialError]
     let payload: Data
+    let metadata: GitHubGraphQLResponseMetadata
+}
+
+struct GitHubGraphQLUndecodableResponse: Equatable, Sendable {
+    let payload: Data
+    let errors: [GitHubGraphQLPartialError]
+    let metadata: GitHubGraphQLResponseMetadata
+}
+
+enum GitHubGraphQLDecodingResult<Value: Decodable & Sendable>: Sendable {
+    case response(GitHubGraphQLResponse<Value>)
+    case undecodable(GitHubGraphQLUndecodableResponse)
 }
 
 actor GitHubGraphQLClient {
@@ -45,15 +94,18 @@ actor GitHubGraphQLClient {
     private let session: any HTTPSession
     private let credential: SecretValue
     private let rateLimitController: GitHubRateLimitController?
+    private let requestPriority: GitHubRequestPriority
 
     init(
         session: any HTTPSession = URLSessionHTTPSession(),
         credential: SecretValue,
-        rateLimitController: GitHubRateLimitController? = nil
+        rateLimitController: GitHubRateLimitController? = nil,
+        requestPriority: GitHubRequestPriority = .inboxCandidateHydration
     ) {
         self.session = session
         self.credential = credential
         self.rateLimitController = rateLimitController
+        self.requestPriority = requestPriority
     }
 
     func execute<Value: Decodable & Sendable, Variables: Encodable & Sendable>(
@@ -61,6 +113,26 @@ actor GitHubGraphQLClient {
         variables: Variables,
         as type: Value.Type
     ) async throws -> GitHubGraphQLResponse<Value> {
+        switch try await executePreservingUndecodableResponse(
+            query,
+            variables: variables,
+            as: type
+        ) {
+        case let .response(response):
+            return response
+        case .undecodable:
+            throw GitHubGraphQLError.invalidResponse
+        }
+    }
+
+    func executePreservingUndecodableResponse<
+        Value: Decodable & Sendable,
+        Variables: Encodable & Sendable
+    >(
+        _ query: GitHubGraphQLQuery,
+        variables: Variables,
+        as type: Value.Type
+    ) async throws -> GitHubGraphQLDecodingResult<Value> {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(credential.rawValue)", forHTTPHeaderField: "Authorization")
@@ -71,6 +143,7 @@ actor GitHubGraphQLClient {
             GraphQLRequest(query: query.document, operationName: query.operationName, variables: variables)
         )
         let (body, response) = try await send(request)
+        try Task.checkCancellation()
         guard body.count <= Self.maximumResponseBodyBytes else {
             throw GitHubGraphQLError.responseTooLarge
         }
@@ -83,13 +156,32 @@ actor GitHubGraphQLClient {
         if let failure = GitHubFailureClassifier.classify(metadata) {
             throw GitHubGraphQLError.requestFailed(failure)
         }
+        let responseMetadata = GitHubGraphQLResponseMetadata(
+            requestID: metadata.header(named: "X-GitHub-Request-Id"),
+            retryAfter: metadata.header(named: "Retry-After").flatMap(TimeInterval.init),
+            ssoHeader: GitHubSSOHeader(value: metadata.header(named: "X-GitHub-SSO"))
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
         do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
             let decoded = try decoder.decode(GraphQLPayload<Value>.self, from: body)
-            return GitHubGraphQLResponse(data: decoded.data, errors: decoded.errors ?? [], payload: body)
+            return .response(
+                GitHubGraphQLResponse(
+                    data: decoded.data,
+                    errors: decoded.errors ?? [],
+                    payload: body,
+                    metadata: responseMetadata
+                )
+            )
         } catch {
-            throw GitHubGraphQLError.invalidResponse
+            let errors = (try? decoder.decode(GraphQLErrorEnvelope.self, from: body).errors) ?? []
+            return .undecodable(
+                GitHubGraphQLUndecodableResponse(
+                    payload: body,
+                    errors: errors,
+                    metadata: responseMetadata
+                )
+            )
         }
     }
 
@@ -117,7 +209,7 @@ actor GitHubGraphQLClient {
         }
         return try await rateLimitController.execute(
             resource: .graphql,
-            priority: .inboxCandidateHydration
+            priority: requestPriority
         ) {
             let result = try await self.boundedData(for: request)
             let metadata = GitHubRESTResponse(
@@ -166,4 +258,8 @@ private struct GraphQLRequest<Variables: Encodable>: Encodable {
 private struct GraphQLPayload<Value: Decodable>: Decodable {
     let data: Value?
     let errors: [GitHubGraphQLPartialError]?
+}
+
+private struct GraphQLErrorEnvelope: Decodable {
+    let errors: [GitHubGraphQLPartialError]
 }

@@ -5,6 +5,13 @@ enum GitHubNodeDetailsRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
     case nodeScopeMismatch
     case nodeKindMismatch
+    case invalidHydrationCandidate
+}
+
+struct GitHubHydrationCandidate: Equatable, Sendable {
+    let nodeID: GitHubNodeID
+    let repositoryID: RepositoryID
+    let kind: GitHubContentKind
 }
 
 actor GitHubNodeDetailsRepository {
@@ -36,6 +43,54 @@ actor GitHubNodeDetailsRepository {
             throw GitHubNodeDetailsRepositoryError.accountScopeMismatch
         }
         return try await vault.writeTransaction(operation)
+    }
+
+    func hydrationCandidates(
+        nodeIDs: Set<GitHubNodeID>,
+        accountID: AccountID,
+        organizationID: OrganizationID
+    ) async throws -> [GitHubHydrationCandidate] {
+        guard accountID == vault.accountID else {
+            throw GitHubNodeDetailsRepositoryError.accountScopeMismatch
+        }
+        guard !nodeIDs.isEmpty else { return [] }
+        return try await vault.read { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT github_node_id, repository_id, kind
+                    FROM github_nodes
+                    WHERE account_id = ? AND organization_id = ?
+                      AND github_node_id IN (\(databaseQuestionMarks(count: nodeIDs.count)))
+                    ORDER BY github_node_id
+                    """,
+                arguments: StatementArguments(
+                    [accountID.rawValue, organizationID.rawValue]
+                        + nodeIDs.map(\.rawValue).sorted()
+                )
+            )
+            let candidates = try rows.map { row -> GitHubHydrationCandidate in
+                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                      let repositoryID = RepositoryID(rawValue: row["repository_id"]),
+                      let kindValue: String = row["kind"],
+                      let kind = GitHubContentKind(rawValue: kindValue),
+                      kind == .issue || kind == .pullRequest
+                else {
+                    throw GitHubNodeDetailsRepositoryError.invalidHydrationCandidate
+                }
+                return GitHubHydrationCandidate(
+                    nodeID: nodeID,
+                    repositoryID: repositoryID,
+                    kind: kind
+                )
+            }
+            guard candidates.count == nodeIDs.count,
+                  Set(candidates.map(\.nodeID)) == nodeIDs
+            else {
+                throw GitHubNodeDetailsRepositoryError.invalidHydrationCandidate
+            }
+            return candidates
+        }
     }
 
     nonisolated static func save(
@@ -137,4 +192,8 @@ actor GitHubNodeDetailsRepository {
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
+}
+
+private func databaseQuestionMarks(count: Int) -> String {
+    Array(repeating: "?", count: count).joined(separator: ", ")
 }

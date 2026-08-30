@@ -64,11 +64,27 @@ actor GitHubNodeHydrationService {
                 batchSize = reducedBatchSize
                 continue
             }
+            try Task.checkCancellation()
+            let observedAt = clock()
+            let snapshot = RawAPISnapshot(
+                id: RawAPISnapshotID.make(),
+                accountID: accountID,
+                githubNodeID: nil,
+                endpoint: "graphql:TriageHydrateNodes",
+                eTag: nil,
+                parserVersion: 2,
+                observedAt: observedAt,
+                payload: response.payload
+            )
             guard let payload = response.data else {
+                try await recordRejectedResponse(
+                    snapshot,
+                    accountID: accountID,
+                    observedAt: observedAt,
+                    diagnostic: "Hydration response omitted its data payload."
+                )
                 throw GitHubGraphQLError.partialResponse
             }
-
-            let observedAt = clock()
             try await batchMetricRepository.record(
                 GitHubHydrationBatchMetric(
                     accountID: accountID,
@@ -80,10 +96,19 @@ actor GitHubNodeHydrationService {
                     observedAt: observedAt
                 )
             )
+            try Task.checkCancellation()
             guard response.errors.isEmpty else {
+                try await recordRejectedResponse(
+                    snapshot,
+                    accountID: accountID,
+                    observedAt: observedAt,
+                    diagnostic: "Hydration response contained partial GraphQL errors."
+                )
                 throw GitHubGraphQLError.partialResponse
             }
             guard payload.rateLimit.cost <= GitHubHydrationBatchPlanner.maximumQueryCost else {
+                try await rawSnapshotRepository.save(snapshot)
+                try Task.checkCancellation()
                 guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
                     for: batch.count
                 ) else {
@@ -92,17 +117,6 @@ actor GitHubNodeHydrationService {
                 batchSize = reducedBatchSize
                 continue
             }
-
-            let snapshot = RawAPISnapshot(
-                id: RawAPISnapshotID.make(),
-                accountID: accountID,
-                githubNodeID: nil,
-                endpoint: "graphql:TriageHydrateNodes",
-                eTag: nil,
-                parserVersion: 2,
-                observedAt: observedAt,
-                payload: response.payload
-            )
             let normalized: [HydratedGitHubNode]
             do {
                 normalized = try GitHubNodeHydrationNormalizer.normalizeHydrated(
@@ -133,6 +147,7 @@ actor GitHubNodeHydrationService {
                 }
                 throw error
             }
+            try Task.checkCancellation()
             let payloadActors = Self.actors(in: payload)
             do {
                 try await detailsRepository.writeTransaction(accountID: accountID) { database in
@@ -157,6 +172,7 @@ actor GitHubNodeHydrationService {
                 try await rawSnapshotRepository.save(snapshot)
                 throw error
             }
+            try Task.checkCancellation()
             batchSize = GitHubHydrationBatchPlanner.nextBatchSize(
                 after: batchSize,
                 queryCost: payload.rateLimit.cost,
@@ -164,6 +180,32 @@ actor GitHubNodeHydrationService {
             )
             nextIndex = endIndex
         }
+    }
+
+    private func recordRejectedResponse(
+        _ snapshot: RawAPISnapshot,
+        accountID: AccountID,
+        observedAt: Date,
+        diagnostic: String
+    ) async throws {
+        try Task.checkCancellation()
+        try await detailsRepository.writeTransaction(accountID: accountID) { database in
+            try RawAPISnapshotRepository.save(snapshot, in: database)
+            try NormalizationFailureRepository.record(
+                NormalizationFailure(
+                    id: UUID(),
+                    accountID: accountID,
+                    rawSnapshotID: snapshot.id,
+                    githubNodeID: nil,
+                    endpoint: snapshot.endpoint,
+                    parserVersion: snapshot.parserVersion,
+                    occurredAt: observedAt,
+                    redactedDiagnostic: diagnostic
+                ),
+                in: database
+            )
+        }
+        try Task.checkCancellation()
     }
 
     private struct Variables: Encodable, Sendable {

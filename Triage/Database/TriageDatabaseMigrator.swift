@@ -27,35 +27,35 @@ enum TriageDatabaseMigrator {
 
         for migration in migrations {
             try databasePool.write { database in
-                try database.inTransaction {
-                    let storedChecksum = try String.fetchOne(
-                        database,
-                        sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                        arguments: [migration.id]
-                    )
-                    if let storedChecksum {
-                        guard storedChecksum == migration.checksum else {
-                            throw TriageDatabaseMigrationError.checksumMismatch(
-                                migrationID: migration.id
-                            )
-                        }
-                        return .commit
+                // DatabasePool.write already wraps this closure in a transaction.
+                // Keeping the migration body and checksum record in that transaction
+                // preserves atomicity without attempting an unsupported nested BEGIN.
+                let storedChecksum = try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                    arguments: [migration.id]
+                )
+                if let storedChecksum {
+                    guard storedChecksum == migration.checksum else {
+                        throw TriageDatabaseMigrationError.checksumMismatch(
+                            migrationID: migration.id
+                        )
                     }
-
-                    try migration.apply(database)
-                    try database.execute(
-                        sql: """
-                            INSERT INTO schema_migrations (id, checksum, applied_at_ms)
-                            VALUES (?, ?, ?)
-                            """,
-                        arguments: [
-                            migration.id,
-                            migration.checksum,
-                            Int64(Date().timeIntervalSince1970 * 1_000)
-                        ]
-                    )
-                    return .commit
+                    return
                 }
+
+                try migration.apply(database)
+                try database.execute(
+                    sql: """
+                        INSERT INTO schema_migrations (id, checksum, applied_at_ms)
+                        VALUES (?, ?, ?)
+                        """,
+                    arguments: [
+                        migration.id,
+                        migration.checksum,
+                        Int64(Date().timeIntervalSince1970 * 1_000)
+                    ]
+                )
             }
         }
     }

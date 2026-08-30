@@ -7,7 +7,7 @@ final class GitHubIdentityClientTests: XCTestCase {
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(
                 session: PagingSession(responses: [
-                    "/user/orgs": (
+                    "/user/orgs?per_page=100": (
                         Data(#"[{"id":1,"node_id":"O_1","login":"first"}]"#.utf8),
                         [
                             "Link": "<\(secondPage.absoluteString)>; rel=\"next\"",
@@ -35,7 +35,7 @@ final class GitHubIdentityClientTests: XCTestCase {
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(
                 session: PagingSession(responses: [
-                    "/user/orgs": (
+                    "/user/orgs?per_page=100": (
                         Data(#"[{"id":1,"node_id":"O_1","login":"first"}]"#.utf8),
                         ["Link": "<\(loopURL.absoluteString)>; rel=\"next\""]
                     ),

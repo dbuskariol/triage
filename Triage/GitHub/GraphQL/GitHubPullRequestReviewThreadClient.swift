@@ -2,6 +2,7 @@ import Foundation
 
 enum GitHubPullRequestReviewThreadClientError: Error, Equatable, Sendable {
     case queryCostExceeded
+    case responseByteBudgetExceeded
     case paginationLoop
     case paginationLimitExceeded
     case incompleteConnection
@@ -57,6 +58,7 @@ struct GitHubPullRequestReviewThreadInventory: Sendable {
 actor GitHubPullRequestReviewThreadClient {
     private static let maximumPages = 100
     private static let maximumQueryCost = 500
+    private static let maximumResponseBytes = 4 * 1_024 * 1_024
 
     private let client: GitHubGraphQLClient
 
@@ -71,7 +73,7 @@ actor GitHubPullRequestReviewThreadClient {
         let threadsQuery = try GitHubGraphQLQueries.pullRequestReviewThreads()
         let commentsQuery = try GitHubGraphQLQueries.pullRequestReviewThreadComments()
         var rawPages = [GitHubPullRequestReviewThreadRawPage]()
-        var totalCost = 0
+        var budget = AggregateBudget()
         var threadPages = 0
         var after: String?
         var visitedCursors = Set<String>()
@@ -87,14 +89,17 @@ actor GitHubPullRequestReviewThreadClient {
                 variables: CursorVariables(pullRequestID: pullRequestNodeID.rawValue, after: after),
                 as: GitHubPullRequestReviewThreadPayload.self
             )
-            rawPages.append(
-                .init(
-                    endpoint: "graphql:TriagePullRequestReviewThreads/page=\(threadPages + 1)",
-                    payload: response.payload
-                )
+            try Task.checkCancellation()
+            let rawPage = GitHubPullRequestReviewThreadRawPage(
+                endpoint: "graphql:TriagePullRequestReviewThreads/page=\(threadPages + 1)",
+                payload: response.payload
             )
             let payload = try Self.complete(response)
-            totalCost += try Self.validatedCost(payload.rateLimit.cost)
+            try budget.consume(
+                cost: try Self.validatedCost(payload.rateLimit.cost),
+                responseBytes: rawPage.payload.count
+            )
+            rawPages.append(rawPage)
             guard let pullRequest = payload.node, pullRequest.id == pullRequestNodeID.rawValue else {
                 throw GitHubPullRequestReviewThreadClientError.missingRequestedPullRequest
             }
@@ -112,8 +117,10 @@ actor GitHubPullRequestReviewThreadClient {
             after = cursor
         }
 
+        try Task.checkCancellation()
         let threadIDs = try Self.validThreadIDs(in: threads)
         for index in threads.indices {
+            try Task.checkCancellation()
             var thread = threads[index]
             var comments = [GitHubPullRequestReviewThreadPayload.Comment?]()
             var commentPages = 0
@@ -132,14 +139,17 @@ actor GitHubPullRequestReviewThreadClient {
                     ),
                     as: GitHubPullRequestReviewThreadCommentPagePayload.self
                 )
-                rawPages.append(
-                    .init(
-                        endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadIDs[index].rawValue)/page=\(commentPages + 1)",
-                        payload: response.payload
-                    )
+                try Task.checkCancellation()
+                let rawPage = GitHubPullRequestReviewThreadRawPage(
+                    endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadIDs[index].rawValue)/page=\(commentPages + 1)",
+                    payload: response.payload
                 )
                 let payload = try Self.complete(response)
-                totalCost += try Self.validatedCost(payload.rateLimit.cost)
+                try budget.consume(
+                    cost: try Self.validatedCost(payload.rateLimit.cost),
+                    responseBytes: rawPage.payload.count
+                )
+                rawPages.append(rawPage)
                 guard let returnedThread = payload.node,
                       returnedThread.id == threadIDs[index].rawValue
                 else {
@@ -162,14 +172,16 @@ actor GitHubPullRequestReviewThreadClient {
             threads[index] = thread
         }
 
+        try Task.checkCancellation()
         let records = try GitHubPullRequestReviewThreadNormalizer.normalize(threads, observedAt: observedAt)
+        try Task.checkCancellation()
         return GitHubPullRequestReviewThreadInventory(
             records: records,
             rawPages: rawPages,
             metrics: .init(
                 pageCount: rawPages.count,
-                responseBytes: rawPages.reduce(0) { $0 + $1.payload.count },
-                queryCost: totalCost
+                responseBytes: budget.responseBytes,
+                queryCost: budget.queryCost
             )
         )
     }
@@ -202,6 +214,24 @@ actor GitHubPullRequestReviewThreadClient {
             throw GitHubPullRequestReviewThreadClientError.duplicateThread
         }
         return identifiers
+    }
+
+    private struct AggregateBudget {
+        private(set) var queryCost = 0
+        private(set) var responseBytes = 0
+
+        mutating func consume(cost: Int, responseBytes nextResponseBytes: Int) throws {
+            guard queryCost <= GitHubPullRequestReviewThreadClient.maximumQueryCost - cost else {
+                throw GitHubPullRequestReviewThreadClientError.queryCostExceeded
+            }
+            guard nextResponseBytes <= GitHubPullRequestReviewThreadClient.maximumResponseBytes,
+                  responseBytes <= GitHubPullRequestReviewThreadClient.maximumResponseBytes - nextResponseBytes
+            else {
+                throw GitHubPullRequestReviewThreadClientError.responseByteBudgetExceeded
+            }
+            queryCost += cost
+            responseBytes += nextResponseBytes
+        }
     }
 
     private struct CursorVariables: Encodable, Sendable {

@@ -160,7 +160,8 @@ final class AccountRepositoryTests: XCTestCase {
         try await repository.save(account, credentialRevision: CredentialRevision(rawValue: "cred-1")!)
         try await repository.save(snapshot)
 
-        XCTAssertEqual(try await repository.accountCapabilities(for: accountID), snapshot)
+        let restoredSnapshot = try await repository.accountCapabilities(for: accountID)
+        XCTAssertEqual(restoredSnapshot, snapshot)
         let count = try await vault.read { database in
             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM account_capabilities")!
         }
@@ -200,6 +201,7 @@ final class AccountRepositoryTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? AccountRepositoryError, .accountScopeMismatch)
         }
-        XCTAssertTrue(try await repository.accounts().isEmpty)
+        let accounts = try await repository.accounts()
+        XCTAssertTrue(accounts.isEmpty)
     }
 }

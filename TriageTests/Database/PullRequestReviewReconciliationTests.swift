@@ -20,12 +20,84 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         )
 
         let persistedNodeIDs = try await fixture.vault.read { database in
-            try String.fetchAll(
-                database,
-                sql: "SELECT github_node_id FROM reviews ORDER BY github_node_id"
+            (
+                try String.fetchAll(
+                    database,
+                    sql: "SELECT github_node_id FROM reviews ORDER BY github_node_id"
+                ),
+                try String.fetchAll(
+                    database,
+                    sql: "SELECT github_node_id FROM github_nodes WHERE kind = ? ORDER BY github_node_id",
+                    arguments: [GitHubContentKind.pullRequestReview.rawValue]
+                )
             )
         }
-        XCTAssertEqual(persistedNodeIDs, ["MDM6UmV2aWV3Mg=="])
+        XCTAssertEqual(persistedNodeIDs.0, ["MDM6UmV2aWV3Mg=="])
+        XCTAssertEqual(persistedNodeIDs.1, ["MDM6UmV2aWV3Mg=="])
+    }
+
+    func testReviewNodeCannotBeReboundToAnotherPullRequest() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = PullRequestReviewRepository(vault: fixture.vault)
+        let review = review(nodeID: "R_shared", state: "APPROVED")
+        try await repository.replace(
+            reviews: [review],
+            pullRequestNodeID: fixture.pullRequest.nodeID,
+            observedAt: fixture.date
+        )
+        let secondPullRequest = fixture.pullRequest(
+            nodeID: GitHubNodeID(rawValue: "PR_2")!,
+            number: 2,
+            title: "Another pull request"
+        )
+        try await GitHubNodeDetailsRepository(vault: fixture.vault).save(
+            HydratedGitHubNode(
+                node: secondPullRequest,
+                details: .pullRequest(
+                    isDraft: false,
+                    mergeableState: nil,
+                    headRef: "other",
+                    baseRef: "main",
+                    reviewDecision: nil,
+                    assigneeNodeIDs: [],
+                    labelNodeIDs: [],
+                    labelNames: []
+                )
+            ),
+            accountID: fixture.accountID,
+            observedAt: fixture.date
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                reviews: [review],
+                pullRequestNodeID: secondPullRequest.nodeID,
+                observedAt: fixture.date.addingTimeInterval(1)
+            )
+        } verify: { error in
+            XCTAssertEqual(
+                error as? PullRequestReviewRepositoryError,
+                .reviewNodeScopeMismatch
+            )
+        }
+
+        let persisted = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT pull_request_node_id FROM reviews WHERE github_node_id = ?",
+                    arguments: [review.nodeID]
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT repository_id FROM github_nodes WHERE github_node_id = ?",
+                    arguments: [review.nodeID]
+                )
+            )
+        }
+        XCTAssertEqual(persisted.0, fixture.pullRequest.nodeID.rawValue)
+        XCTAssertEqual(persisted.1, fixture.repositoryID.rawValue)
     }
 
     func testInvalidRequestedReviewerDoesNotEraseExistingRequests() async throws {
@@ -310,6 +382,9 @@ private final class Fixture: @unchecked Sendable {
             ),
             selectedAt: date
         )
+        let fixtureRepositoryID = repositoryID
+        let fixtureOrganizationID = organizationID
+        let fixtureDate = date
         try await vault.write { database in
             try database.execute(
                 sql: """
@@ -319,14 +394,14 @@ private final class Fixture: @unchecked Sendable {
                     ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?, NULL)
                     """,
                 arguments: [
-                    repositoryID.rawValue,
-                    organizationID.rawValue,
+                    fixtureRepositoryID.rawValue,
+                    fixtureOrganizationID.rawValue,
                     "1",
                     "MDEwOlJlcG9zaXRvcnkx",
                     "github",
                     "triage",
                     "https://github.com/github/triage",
-                    Int64((date.timeIntervalSince1970 * 1_000).rounded())
+                    Int64((fixtureDate.timeIntervalSince1970 * 1_000).rounded())
                 ]
             )
         }
@@ -395,6 +470,34 @@ private final class Fixture: @unchecked Sendable {
             sourceRevision: pullRequest.sourceRevision,
             observedAt: pullRequest.observedAt,
             accessibility: pullRequest.accessibility
+        )
+    }
+
+    func pullRequest(
+        nodeID: GitHubNodeID,
+        number: Int,
+        title: String
+    ) -> NormalizedGitHubNode {
+        NormalizedGitHubNode(
+            nodeID: nodeID,
+            accountID: pullRequest.accountID,
+            organizationID: pullRequest.organizationID,
+            repositoryID: pullRequest.repositoryID,
+            kind: .pullRequest,
+            numericID: String(number),
+            number: number,
+            title: title,
+            state: .open,
+            url: URL(string: "https://github.com/github/triage/pull/\(number)")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: date,
+            updatedAt: date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "revision-\(number)",
+            observedAt: date,
+            accessibility: .accessible
         )
     }
 }

@@ -178,15 +178,16 @@ final class SearchRepositoryTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
+        let accountID = AccountID.make()
         let vault = try await VaultRegistry(rootDirectory: directory).open(
-            accountID: AccountID.make(),
+            accountID: accountID,
             vaultKey: try VaultKey.generate()
         )
         let repository = SearchRepository(vault: vault)
 
         let results = try await repository.search(
             "OR NEAR \"",
-            accountID: AccountID.make(),
+            accountID: accountID,
             organizationID: OrganizationID(rawValue: "github")!
         )
 

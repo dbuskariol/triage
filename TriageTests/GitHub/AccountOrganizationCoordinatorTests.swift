@@ -13,11 +13,10 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         let second = scope(account: "account-b", organization: "organization-b")
 
         try await coordinator.select(first)
-        await waitForRequestCount(1, operation: operation)
-        let firstToken = (await operation.requests())[0].token
+        let firstToken = (await operation.request(at: 0)).token
 
         try await coordinator.select(second)
-        await waitForRequestCount(2, operation: operation)
+        let secondToken = (await operation.request(at: 1)).token
         await waitUntil {
             await operation.cancelledTokens().contains(firstToken)
         }
@@ -31,8 +30,6 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(firstState?.phase, .idle)
         XCTAssertEqual(secondState?.phase, .refreshing)
 
-        await operation.succeed(token: firstToken, with: cachedState(at: 1))
-        let secondToken = (await operation.requests())[1].token
         await operation.succeed(token: secondToken, with: cachedState(at: 2))
     }
 
@@ -46,11 +43,9 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         let selected = scope(account: "account", organization: "organization")
 
         try await coordinator.select(selected)
-        await waitForRequestCount(1, operation: operation)
-        let staleToken = (await operation.requests())[0].token
+        let staleToken = (await operation.request(at: 0)).token
         try await coordinator.refresh(selected, priority: .manual)
-        await waitForRequestCount(2, operation: operation)
-        let currentToken = (await operation.requests())[1].token
+        let currentToken = (await operation.request(at: 1)).token
 
         await operation.succeed(token: currentToken, with: cachedState(at: 2))
         await waitUntil {
@@ -91,10 +86,9 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         }
 
         try await coordinator.select(selected)
-        await waitForRequestCount(1, operation: operation)
 
+        let token = (await operation.request(at: 0)).token
         let eventValues = await events.values()
-        let token = (await operation.requests())[0].token
         XCTAssertEqual(eventValues, ["cached", "refresh"])
         await operation.succeed(token: token, with: cachedState(at: 2))
     }
@@ -110,8 +104,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         let accessible = scope(account: "account-b", organization: "organization-b")
 
         try await coordinator.select(inaccessible)
-        await waitForRequestCount(1, operation: operation)
-        let inaccessibleToken = (await operation.requests())[0].token
+        let inaccessibleToken = (await operation.request(at: 0)).token
         await operation.fail(
             token: inaccessibleToken,
             error: AccountOrganizationRefreshFailure.ssoRequired(detail: "Authorize this organization.")
@@ -121,8 +114,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         }
 
         try await coordinator.select(accessible)
-        await waitForRequestCount(2, operation: operation)
-        let accessibleToken = (await operation.requests())[1].token
+        let accessibleToken = (await operation.request(at: 1)).token
         await operation.succeed(token: accessibleToken, with: completeCachedState(for: accessible, at: 2))
         await waitUntil {
             await coordinator.state(for: accessible)?.freshness.status == .fresh
@@ -144,12 +136,10 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         let selected = scope(account: "account", organization: "organization")
 
         try await coordinator.refresh(selected, priority: .inactiveAccount)
-        await waitForRequestCount(1, operation: operation)
-        let inactiveRequest = (await operation.requests())[0]
+        let inactiveRequest = await operation.request(at: 0)
 
         try await coordinator.select(selected)
-        await waitForRequestCount(2, operation: operation)
-        let selectedRequest = (await operation.requests())[1]
+        let selectedRequest = await operation.request(at: 1)
 
         XCTAssertEqual(inactiveRequest.priority, .inactiveAccount)
         XCTAssertEqual(inactiveRequest.requestPriority, .inactiveAccountRefresh)
@@ -214,18 +204,6 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTFail("Condition was not satisfied.", file: file, line: line)
     }
 
-    private func waitForRequestCount(
-        _ expectedCount: Int,
-        operation: ControlledRefreshOperation,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async {
-        await waitUntil(
-            { await operation.requests().count >= expectedCount },
-            file: file,
-            line: line
-        )
-    }
 }
 
 private actor TestStateStore: AccountOrganizationCachedStateStoring {
@@ -250,16 +228,27 @@ private actor TestStateStore: AccountOrganizationCachedStateStoring {
 
 private actor ControlledRefreshOperation: AccountOrganizationRefreshOperating {
     private var storedRequests: [AccountOrganizationRefreshRequest] = []
+    private var requestContinuations: [Int: [CheckedContinuation<AccountOrganizationRefreshRequest, Never>]] = [:]
     private var continuations: [AccountOrganizationRequestToken: CheckedContinuation<AccountOrganizationCachedState, Error>] = [:]
+    private var terminalResults: [AccountOrganizationRequestToken: Result<AccountOrganizationCachedState, Error>] = [:]
     private var storedCancelledTokens: [AccountOrganizationRequestToken] = []
+    private var cancelledRequestTokens: Set<AccountOrganizationRequestToken> = []
     private var onRefresh: (@Sendable () async -> Void)?
 
     func refresh(_ request: AccountOrganizationRefreshRequest) async throws -> AccountOrganizationCachedState {
         storedRequests.append(request)
+        let requestIndex = storedRequests.count - 1
+        for continuation in requestContinuations.removeValue(forKey: requestIndex) ?? [] {
+            continuation.resume(returning: request)
+        }
         await onRefresh?()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                continuations[request.token] = continuation
+                if let result = terminalResults.removeValue(forKey: request.token) {
+                    continuation.resume(with: result)
+                } else {
+                    continuations[request.token] = continuation
+                }
             }
         } onCancel: {
             Task {
@@ -268,8 +257,15 @@ private actor ControlledRefreshOperation: AccountOrganizationRefreshOperating {
         }
     }
 
-    func requests() -> [AccountOrganizationRefreshRequest] {
-        storedRequests
+    func request(at index: Int) async -> AccountOrganizationRefreshRequest {
+        precondition(index >= 0)
+        if storedRequests.indices.contains(index) {
+            let request = storedRequests[index]
+            return request
+        }
+        return await withCheckedContinuation { continuation in
+            requestContinuations[index, default: []].append(continuation)
+        }
     }
 
     func cancelledTokens() -> [AccountOrganizationRequestToken] {
@@ -281,15 +277,29 @@ private actor ControlledRefreshOperation: AccountOrganizationRefreshOperating {
     }
 
     func succeed(token: AccountOrganizationRequestToken, with state: AccountOrganizationCachedState) {
-        continuations.removeValue(forKey: token)?.resume(returning: state)
+        resolve(token: token, with: .success(state))
     }
 
     func fail(token: AccountOrganizationRequestToken, error: Error) {
-        continuations.removeValue(forKey: token)?.resume(throwing: error)
+        resolve(token: token, with: .failure(error))
     }
 
     private func recordCancellation(for token: AccountOrganizationRequestToken) {
-        storedCancelledTokens.append(token)
+        if cancelledRequestTokens.insert(token).inserted {
+            storedCancelledTokens.append(token)
+        }
+        resolve(token: token, with: .failure(CancellationError()))
+    }
+
+    private func resolve(
+        token: AccountOrganizationRequestToken,
+        with result: Result<AccountOrganizationCachedState, Error>
+    ) {
+        if let continuation = continuations.removeValue(forKey: token) {
+            continuation.resume(with: result)
+        } else {
+            terminalResults[token] = result
+        }
     }
 }
 
