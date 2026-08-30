@@ -55,12 +55,140 @@ final class OrganizationSchedulerStateRepositoryTests: XCTestCase {
             credentialRevision: CredentialRevision(rawValue: "credential-current")!,
             capabilityRevision: fixture.capabilityRevision
         )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE accounts SET credential_revision = ? WHERE id = ?",
+                arguments: [
+                    currentScope.credentialRevision.rawValue,
+                    fixture.accountID.rawValue
+                ]
+            )
+        }
+
+        do {
+            _ = try await repository.state(
+                for: fixture.scope(organizationID: fixture.firstOrganizationID)
+            )
+            XCTFail("A stale scope must not inspect or invalidate current scheduler state.")
+        } catch {
+            XCTAssertEqual(
+                error as? OrganizationSchedulerStateRepositoryError,
+                .staleSynchronizationScope
+            )
+        }
 
         let state = try await repository.state(for: currentScope)
         let remainingStates = try await repository.states(for: fixture.accountID)
 
         XCTAssertNil(state)
         XCTAssertTrue(remainingStates.isEmpty)
+    }
+
+    func testStaleScopeCannotOverwriteOrCompleteCurrentRevisionState() async throws {
+        let fixture = try await SchedulerFixture()
+        defer { fixture.remove() }
+        let repository = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let currentCredential = CredentialRevision(rawValue: "credential-current")!
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE accounts SET credential_revision = ? WHERE id = ?",
+                arguments: [currentCredential.rawValue, fixture.accountID.rawValue]
+            )
+        }
+        let currentAttemptID = UUID()
+        let current = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            credentialRevision: currentCredential,
+            failureCount: 0,
+            nextIncrementalOffset: 0,
+            activeAttemptID: currentAttemptID,
+            generation: 2
+        )
+        try await repository.save(current)
+        let stale = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 4,
+            nextIncrementalOffset: 3_600,
+            generation: 3
+        )
+
+        do {
+            try await repository.save(stale)
+            XCTFail("An old credential revision must not overwrite the current schedule.")
+        } catch {
+            XCTAssertEqual(
+                error as? OrganizationSchedulerStateRepositoryError,
+                .staleSynchronizationScope
+            )
+        }
+        do {
+            _ = try await repository.replace(
+                stale,
+                ifOwnedBy: currentAttemptID,
+                generation: stale.generation
+            )
+            XCTFail("An old credential revision must not complete the current attempt.")
+        } catch {
+            XCTAssertEqual(
+                error as? OrganizationSchedulerStateRepositoryError,
+                .staleSynchronizationScope
+            )
+        }
+
+        let retained = try await repository.state(
+            for: SynchronizationScope(
+                accountID: fixture.accountID,
+                organizationID: fixture.firstOrganizationID,
+                credentialRevision: currentCredential,
+                capabilityRevision: fixture.capabilityRevision
+            )
+        )
+        XCTAssertEqual(retained, current)
+    }
+
+    func testClaimAtomicallyRequiresIdleExpectedGeneration() async throws {
+        let fixture = try await SchedulerFixture()
+        defer { fixture.remove() }
+        let repository = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let idle = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 0,
+            nextIncrementalOffset: 0,
+            generation: 4
+        )
+        try await repository.save(idle)
+        let firstAttemptID = UUID()
+        let claimed = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 0,
+            nextIncrementalOffset: 0,
+            activeAttemptID: firstAttemptID,
+            generation: 5,
+            lastAttemptAt: fixture.now
+        )
+
+        let didClaim = try await repository.claim(
+            claimed,
+            replacingIdleGeneration: 4
+        )
+        XCTAssertTrue(didClaim)
+        let competing = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 0,
+            nextIncrementalOffset: 0,
+            activeAttemptID: UUID(),
+            generation: 5,
+            lastAttemptAt: fixture.now
+        )
+        let didCompete = try await repository.claim(
+            competing,
+            replacingIdleGeneration: 4
+        )
+        XCTAssertFalse(didCompete)
+        let retained = try await repository.state(
+            for: fixture.scope(organizationID: fixture.firstOrganizationID)
+        )
+        XCTAssertEqual(retained, claimed)
     }
 
     func testAttemptOwnershipRejectsStaleCompletion() async throws {
@@ -349,6 +477,8 @@ private final class SchedulerFixture: @unchecked Sendable {
     func state(
         accountID: AccountID? = nil,
         organizationID: OrganizationID,
+        credentialRevision: CredentialRevision? = nil,
+        capabilityRevision: CapabilityRevision? = nil,
         failureCount: Int,
         nextIncrementalOffset: TimeInterval,
         rateLimitedUntil: Date? = nil,
@@ -362,8 +492,8 @@ private final class SchedulerFixture: @unchecked Sendable {
         OrganizationSchedulerState(
             accountID: accountID ?? self.accountID,
             organizationID: organizationID,
-            credentialRevision: credentialRevision,
-            capabilityRevision: capabilityRevision,
+            credentialRevision: credentialRevision ?? self.credentialRevision,
+            capabilityRevision: capabilityRevision ?? self.capabilityRevision,
             nextIncrementalRefreshAt: now.addingTimeInterval(nextIncrementalOffset),
             nextFullReconciliationAt: now.addingTimeInterval(24 * 60 * 60),
             rateLimitedUntil: rateLimitedUntil,

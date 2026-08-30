@@ -4,6 +4,7 @@ import GRDB
 enum OrganizationSchedulerStateRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
     case organizationScopeMismatch
+    case staleSynchronizationScope
     case invalidFailureCount
     case invalidGeneration
     case invalidTimestampOrder
@@ -26,6 +27,7 @@ actor OrganizationSchedulerStateRepository {
             throw OrganizationSchedulerStateRepositoryError.accountScopeMismatch
         }
         return try await vault.write { database in
+            try Self.validateCurrentScope(scope, in: database)
             guard let state = try Self.fetch(
                 accountID: scope.accountID,
                 organizationID: scope.organizationID,
@@ -56,15 +58,26 @@ actor OrganizationSchedulerStateRepository {
             try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT account_id, organization_id, credential_revision,
-                           capability_revision, next_incremental_refresh_at_ms,
-                           next_full_reconciliation_at_ms, rate_limited_until_ms,
-                           blocked_reason, consecutive_transient_failure_count,
-                           active_attempt_id, last_attempt_at_ms, last_completed_at_ms,
-                           generation, updated_at_ms
-                    FROM organization_scheduler_states
-                    WHERE account_id = ?
-                    ORDER BY next_incremental_refresh_at_ms, organization_id
+                    SELECT scheduler.account_id, scheduler.organization_id,
+                           scheduler.credential_revision, scheduler.capability_revision,
+                           scheduler.next_incremental_refresh_at_ms,
+                           scheduler.next_full_reconciliation_at_ms,
+                           scheduler.rate_limited_until_ms, scheduler.blocked_reason,
+                           scheduler.consecutive_transient_failure_count,
+                           scheduler.active_attempt_id, scheduler.last_attempt_at_ms,
+                           scheduler.last_completed_at_ms, scheduler.generation,
+                           scheduler.updated_at_ms
+                    FROM organization_scheduler_states AS scheduler
+                    JOIN accounts
+                      ON accounts.id = scheduler.account_id
+                     AND accounts.credential_revision = scheduler.credential_revision
+                    JOIN account_organizations
+                      ON account_organizations.account_id = scheduler.account_id
+                     AND account_organizations.organization_id = scheduler.organization_id
+                     AND account_organizations.capability_revision = scheduler.capability_revision
+                    WHERE scheduler.account_id = ?
+                    ORDER BY scheduler.next_incremental_refresh_at_ms,
+                             scheduler.organization_id
                     """,
                 arguments: [accountID.rawValue]
             ).map(Self.state(from:))
@@ -75,6 +88,67 @@ actor OrganizationSchedulerStateRepository {
         try await vault.write { database in
             try Self.save(state, expectedAccountID: vault.accountID, in: database)
         }
+    }
+
+    func claim(
+        _ state: OrganizationSchedulerState,
+        replacingIdleGeneration expectedGeneration: UInt64
+    ) async throws -> Bool {
+        try await vault.write { database in
+            try Self.claim(
+                state,
+                replacingIdleGeneration: expectedGeneration,
+                expectedAccountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
+    nonisolated static func claim(
+        _ state: OrganizationSchedulerState,
+        replacingIdleGeneration expectedGeneration: UInt64,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws -> Bool {
+        try validate(state, expectedAccountID: expectedAccountID, in: database)
+        let (expectedNextGeneration, overflow) = expectedGeneration.addingReportingOverflow(1)
+        guard !overflow,
+              state.generation == expectedNextGeneration,
+              state.activeAttemptID != nil
+        else {
+            throw OrganizationSchedulerStateRepositoryError.staleGeneration
+        }
+        try database.execute(
+            sql: """
+                UPDATE organization_scheduler_states SET
+                    next_incremental_refresh_at_ms = ?,
+                    next_full_reconciliation_at_ms = ?, rate_limited_until_ms = ?,
+                    blocked_reason = ?, consecutive_transient_failure_count = ?,
+                    active_attempt_id = ?, last_attempt_at_ms = ?, last_completed_at_ms = ?,
+                    generation = ?, updated_at_ms = ?
+                WHERE account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND active_attempt_id IS NULL AND generation = ?
+                """,
+            arguments: [
+                try milliseconds(state.nextIncrementalRefreshAt),
+                try milliseconds(state.nextFullReconciliationAt),
+                try state.rateLimitedUntil.map(milliseconds),
+                state.blockedReason?.rawValue,
+                state.consecutiveTransientFailureCount,
+                state.activeAttemptID?.uuidString.lowercased(),
+                try state.lastAttemptAt.map(milliseconds),
+                try state.lastCompletedAt.map(milliseconds),
+                try persistedGeneration(state.generation),
+                try milliseconds(state.updatedAt),
+                state.accountID.rawValue,
+                state.organizationID.rawValue,
+                state.credentialRevision.rawValue,
+                state.capabilityRevision.rawValue,
+                try persistedGeneration(expectedGeneration)
+            ]
+        )
+        return database.changesCount == 1
     }
 
     nonisolated static func save(
@@ -136,6 +210,7 @@ actor OrganizationSchedulerStateRepository {
                     active_attempt_id = ?, last_attempt_at_ms = ?, last_completed_at_ms = ?,
                     generation = ?, updated_at_ms = ?
                 WHERE account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
                   AND active_attempt_id = ? AND generation = ?
                 """,
             arguments: [
@@ -153,6 +228,8 @@ actor OrganizationSchedulerStateRepository {
                 try milliseconds(state.updatedAt),
                 state.accountID.rawValue,
                 state.organizationID.rawValue,
+                state.credentialRevision.rawValue,
+                state.capabilityRevision.rawValue,
                 expectedAttemptID.uuidString.lowercased(),
                 try persistedGeneration(expectedGeneration)
             ]
@@ -200,6 +277,15 @@ actor OrganizationSchedulerStateRepository {
         guard state.accountID == expectedAccountID else {
             throw OrganizationSchedulerStateRepositoryError.accountScopeMismatch
         }
+        try validateCurrentScope(
+            SynchronizationScope(
+                accountID: state.accountID,
+                organizationID: state.organizationID,
+                credentialRevision: state.credentialRevision,
+                capabilityRevision: state.capabilityRevision
+            ),
+            in: database
+        )
         guard (0...maximumConsecutiveFailureCount).contains(
             state.consecutiveTransientFailureCount
         ) else {
@@ -238,6 +324,33 @@ actor OrganizationSchedulerStateRepository {
         ) ?? false
         guard hasOrganizationScope else {
             throw OrganizationSchedulerStateRepositoryError.organizationScopeMismatch
+        }
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        guard let row = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT accounts.credential_revision,
+                       account_organizations.capability_revision
+                FROM accounts
+                JOIN account_organizations
+                  ON account_organizations.account_id = accounts.id
+                WHERE accounts.id = ? AND account_organizations.organization_id = ?
+                """,
+            arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+        ) else {
+            throw OrganizationSchedulerStateRepositoryError.organizationScopeMismatch
+        }
+        let credentialRevision: String = row["credential_revision"]
+        let capabilityRevision: String = row["capability_revision"]
+        guard credentialRevision == scope.credentialRevision.rawValue,
+              capabilityRevision == scope.capabilityRevision.rawValue
+        else {
+            throw OrganizationSchedulerStateRepositoryError.staleSynchronizationScope
         }
     }
 
@@ -387,3 +500,5 @@ actor OrganizationSchedulerStateRepository {
         milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
     }
 }
+
+extension OrganizationSchedulerStateRepository: OrganizationSchedulerStateStoring {}
