@@ -76,6 +76,7 @@ struct RootView: View {
             hasSSOAuthorizationHeader: appModel.ssoAuthorizationHeader != nil,
             isRefreshing: appModel.isRefreshing,
             refreshError: appModel.refreshError,
+            workspaceFreshness: appModel.selectedOrganizationFreshness,
             now: Date()
         )
     }

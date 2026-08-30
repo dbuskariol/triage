@@ -1,7 +1,31 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
+    private weak var appModel: TriageAppModel?
+    private var terminationTask: Task<Void, Never>?
+
+    func install(appModel: TriageAppModel) {
+        self.appModel = appModel
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationTask == nil, let appModel else {
+            return terminationTask == nil ? .terminateNow : .terminateLater
+        }
+        terminationTask = Task { [weak self, weak sender] in
+            await appModel.shutdown()
+            sender?.reply(toApplicationShouldTerminate: true)
+            self?.terminationTask = nil
+        }
+        return .terminateLater
+    }
+}
 
 @main
 struct TriageApp: App {
+    @NSApplicationDelegateAdaptor(TriageApplicationDelegate.self) private var appDelegate
     @StateObject private var navigation = AppNavigationModel()
     @StateObject private var appModel = TriageAppModel()
     @StateObject private var preferences = AppPreferences()
@@ -17,6 +41,7 @@ struct TriageApp: App {
                 .environmentObject(softwareUpdates)
                 .frame(minWidth: 940, minHeight: 680)
                 .task {
+                    appDelegate.install(appModel: appModel)
                     await appModel.restoreAccounts()
                     await appModel.startAutomaticRefreshes()
                     await appModel.refreshSelectedOrganizationAfterAccessCheck()

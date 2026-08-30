@@ -54,12 +54,48 @@ struct AccountOrganizationRefreshRequest: Sendable {
     let requestPriority: GitHubRequestPriority
 }
 
+enum AccountOrganizationCoverageManifest {
+    static let requiredFeatures: Set<CoverageFeature> = [
+        .repositories,
+        .teams,
+        .issues,
+        .pullRequests,
+        .reviews,
+        .reviewThreads,
+        .timelines,
+        .discussions,
+        .projects,
+        .projectItems,
+        .roleDiscovery
+    ]
+
+    static func missingFeatures(in coverage: [CoverageRecord]) -> Set<CoverageFeature> {
+        requiredFeatures.subtracting(Set(coverage.map(\.feature)))
+    }
+
+    static func missingFeatures(
+        in requirements: [CoverageRequirement]
+    ) -> Set<CoverageFeature> {
+        requiredFeatures.subtracting(Set(requirements.map(\.feature)))
+    }
+}
+
 struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
     let coverage: [CoverageRecord]
+    /// The authoritative coverage topology planned for this refresh. A nil
+    /// manifest represents a legacy or not-yet-integrated producer and must
+    /// never be treated as complete merely because every present record is
+    /// complete.
+    let coverageRequirements: [CoverageRequirement]?
     let lastSuccessfulSyncAt: Date?
 
-    init(coverage: [CoverageRecord], lastSuccessfulSyncAt: Date?) {
+    init(
+        coverage: [CoverageRecord],
+        coverageRequirements: [CoverageRequirement]? = nil,
+        lastSuccessfulSyncAt: Date?
+    ) {
         self.coverage = coverage
+        self.coverageRequirements = coverageRequirements
         self.lastSuccessfulSyncAt = lastSuccessfulSyncAt
     }
 
@@ -107,6 +143,53 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
                 status: .stale,
                 lastSuccessfulSyncAt: latestSuccess,
                 detail: "Synchronization coverage is not yet known."
+            )
+        }
+        guard let coverageRequirements,
+              !coverageRequirements.isEmpty
+        else {
+            return FreshnessState(
+                status: .partial,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: "The required GitHub coverage manifest is not available yet."
+            )
+        }
+        guard AccountOrganizationCoverageManifest.missingFeatures(
+            in: coverageRequirements
+        ).isEmpty else {
+            return FreshnessState(
+                status: .partial,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: "Some required GitHub feature coverage is not available yet."
+            )
+        }
+        guard let first = coverage.first,
+              coverage.allSatisfy({ record in
+                  record.accountID == first.accountID
+                      && record.organizationID == first.organizationID
+                      && record.credentialRevision == first.credentialRevision
+                      && record.capabilityRevision == first.capabilityRevision
+              })
+        else {
+            return FreshnessState(
+                status: .partial,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: "Synchronization coverage spans more than one authority revision."
+            )
+        }
+        let evaluation = CoverageEvaluator().evaluate(
+            requirements: coverageRequirements,
+            records: coverage,
+            accountID: first.accountID,
+            organizationID: first.organizationID,
+            credentialRevision: first.credentialRevision,
+            capabilityRevision: first.capabilityRevision
+        )
+        guard evaluation.isComplete else {
+            return FreshnessState(
+                status: evaluation.freshness.status,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: evaluation.freshness.detail
             )
         }
         return FreshnessState(status: .fresh, lastSuccessfulSyncAt: latestSuccess)
@@ -311,6 +394,11 @@ actor AccountOrganizationCoordinator {
         }
     }
 
+    private struct RefreshCompletionWaiter {
+        let token: AccountOrganizationRequestToken
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private let stateStore: any AccountOrganizationCachedStateStoring
     private let scheduleStore: any OrganizationSchedulerStateStoring
     private let finalizer: any AccountOrganizationRefreshFinalizing
@@ -324,6 +412,9 @@ actor AccountOrganizationCoordinator {
     private var states: [AccountOrganizationScope: AccountOrganizationCoordinatorState] = [:]
     private var tasks: [AccountOrganizationScope: Task<Void, Never>] = [:]
     private var activeRefreshes: [AccountOrganizationScope: ActiveRefresh] = [:]
+    private var completionWaiters: [
+        AccountOrganizationScope: [UUID: RefreshCompletionWaiter]
+    ] = [:]
     private var runtimeGenerations: [AccountOrganizationScope: UInt64] = [:]
     private var externallyOwnedScheduleScopes: Set<SynchronizationScope> = []
     private var selectionGeneration: UInt64 = 0
@@ -432,6 +523,44 @@ actor AccountOrganizationCoordinator {
             durableState: durableState,
             expectedToken: refreshToken
         )
+    }
+
+    /// Suspends until the refresh currently owned by `synchronizationScope`
+    /// reaches a terminal state. A caller whose request was superseded receives
+    /// cancellation rather than observing the replacement request as its own.
+    func waitForRefreshCompletion(
+        for synchronizationScope: SynchronizationScope
+    ) async throws -> AccountOrganizationCoordinatorState? {
+        let scope = Self.accountOrganizationScope(synchronizationScope)
+        guard let token = activeRefreshes[scope]?.token else {
+            try Task.checkCancellation()
+            return state(for: synchronizationScope)
+        }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled,
+                      activeRefreshes[scope]?.token == token,
+                      isCurrent(token, for: scope)
+                else {
+                    continuation.resume()
+                    return
+                }
+                completionWaiters[scope, default: [:]][waiterID] = RefreshCompletionWaiter(
+                    token: token,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelCompletionWaiter(waiterID, for: scope)
+            }
+        }
+        try Task.checkCancellation()
+        if !isCurrent(token, for: scope) {
+            throw CancellationError()
+        }
+        return state(for: synchronizationScope)
     }
 
     func cancelRefresh(for scope: AccountOrganizationScope) async throws {
@@ -883,6 +1012,12 @@ actor AccountOrganizationCoordinator {
         publishIdleState: Bool
     ) async throws -> AccountOrganizationRequestToken {
         let cancellationToken = try nextToken(for: scope)
+        defer {
+            resumeCompletionWaiters(
+                for: scope,
+                supersededBy: cancellationToken
+            )
+        }
         let cancelledTask = tasks.removeValue(forKey: scope)
         cancelledTask?.cancel()
         guard let activeRefresh = activeRefreshes.removeValue(forKey: scope) else {
@@ -1298,6 +1433,53 @@ actor AccountOrganizationCoordinator {
         guard owns(activeRefresh) else { return }
         tasks[scope] = nil
         activeRefreshes[scope] = nil
+        resumeCompletionWaiters(for: scope, matching: activeRefresh.token)
+    }
+
+    private func cancelCompletionWaiter(
+        _ waiterID: UUID,
+        for scope: AccountOrganizationScope
+    ) {
+        guard let waiter = completionWaiters[scope]?.removeValue(forKey: waiterID) else {
+            return
+        }
+        if completionWaiters[scope]?.isEmpty == true {
+            completionWaiters[scope] = nil
+        }
+        waiter.continuation.resume()
+    }
+
+    private func resumeCompletionWaiters(
+        for scope: AccountOrganizationScope,
+        matching token: AccountOrganizationRequestToken
+    ) {
+        resumeCompletionWaiters(for: scope) { $0.token == token }
+    }
+
+    private func resumeCompletionWaiters(
+        for scope: AccountOrganizationScope,
+        supersededBy token: AccountOrganizationRequestToken
+    ) {
+        resumeCompletionWaiters(for: scope) { $0.token.rawValue < token.rawValue }
+    }
+
+    private func resumeCompletionWaiters(
+        for scope: AccountOrganizationScope,
+        where shouldResume: (RefreshCompletionWaiter) -> Bool
+    ) {
+        guard var waiters = completionWaiters[scope] else { return }
+        let resumed = waiters.filter { shouldResume($0.value) }
+        for waiterID in resumed.keys {
+            waiters[waiterID] = nil
+        }
+        if waiters.isEmpty {
+            completionWaiters[scope] = nil
+        } else {
+            completionWaiters[scope] = waiters
+        }
+        for waiter in resumed.values {
+            waiter.continuation.resume()
+        }
     }
 
     private nonisolated static func interrupted(

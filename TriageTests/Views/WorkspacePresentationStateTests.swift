@@ -78,9 +78,68 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationDetail, "Network connection is unavailable.")
     }
 
+    func testPartialWorkspaceFreshnessCannotRenderFreshCachedItemsAsUpToDate() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            workspaceFreshness: FreshnessState(
+                status: .partial,
+                detail: "Review-thread coverage is incomplete."
+            )
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(state.synchronizationDetail, "Review-thread coverage is incomplete.")
+    }
+
+    func testSSOWorkspaceFreshnessCannotRenderFreshCachedItemsAsUpToDate() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            workspaceFreshness: FreshnessState(
+                status: .ssoRequired,
+                detail: "GitHub organization SSO authorization is required."
+            )
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .ssoRequired)
+        XCTAssertNotEqual(state.synchronizationStatus, .upToDate)
+    }
+
+    func testStaleWorkspaceFreshnessCannotRenderFreshCachedItemsAsUpToDate() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            workspaceFreshness: FreshnessState(
+                status: .stale,
+                detail: "No current-revision coverage is available."
+            )
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertNotEqual(state.synchronizationStatus, .upToDate)
+    }
+
+    func testFreshWorkspaceFreshnessRendersUpToDate() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "cached", freshness: .partial)],
+            workspaceFreshness: FreshnessState(status: .fresh)
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .upToDate)
+    }
+
+    func testExplicitOrganizationAccessTakesPrecedenceOverWorkspaceFreshness() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            access: organizationAccess(state: .organizationApprovalRequired),
+            workspaceFreshness: FreshnessState(status: .fresh)
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .approvalRequired)
+    }
+
     private func makeState(
         workItems: [WorkItem],
-        access: OrganizationAccess? = nil
+        access: OrganizationAccess? = nil,
+        workspaceFreshness: FreshnessState? = nil
     ) -> WorkspacePresentationState {
         WorkspacePresentationState(
             workItems: workItems,
@@ -90,6 +149,7 @@ final class WorkspacePresentationStateTests: XCTestCase {
             hasSSOAuthorizationHeader: false,
             isRefreshing: false,
             refreshError: nil,
+            workspaceFreshness: workspaceFreshness,
             now: now
         )
     }

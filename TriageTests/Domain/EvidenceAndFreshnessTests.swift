@@ -84,6 +84,105 @@ final class EvidenceAndFreshnessTests: XCTestCase {
         assertUnknownCaseRejected(FreshnessStatus.self)
     }
 
+    func testMissingRequiredOrganizationCoverageCannotReportFresh() {
+        let coverage = organizationCoverage(feature: .roleDiscovery)
+
+        let freshness = AccountOrganizationCachedState(
+            coverage: [coverage],
+            coverageRequirements: [requirement(for: coverage)],
+            lastSuccessfulSyncAt: coverage.lastSuccessfulAt
+        ).freshness
+
+        XCTAssertEqual(freshness.status, .partial)
+        XCTAssertEqual(freshness.lastSuccessfulSyncAt, coverage.lastSuccessfulAt)
+        XCTAssertEqual(
+            AccountOrganizationCoverageManifest.missingFeatures(in: [coverage]),
+            AccountOrganizationCoverageManifest.requiredFeatures.subtracting([.roleDiscovery])
+        )
+    }
+
+    func testEveryRequiredOrganizationFeatureMustHaveExplicitCoverageBeforeFresh() {
+        let coverage = AccountOrganizationCoverageManifest.requiredFeatures.map(
+            organizationCoverage(feature:)
+        )
+
+        let freshness = AccountOrganizationCachedState(
+            coverage: coverage,
+            coverageRequirements: coverage.map(requirement(for:)),
+            lastSuccessfulSyncAt: coverage.compactMap(\.lastSuccessfulAt).max()
+        ).freshness
+
+        XCTAssertTrue(AccountOrganizationCoverageManifest.missingFeatures(in: coverage).isEmpty)
+        XCTAssertEqual(freshness.status, .fresh)
+    }
+
+    func testMissingRequiredRepositoryStreamCannotReportFresh() {
+        let organizationCoverage = AccountOrganizationCoverageManifest.requiredFeatures.map(
+            organizationCoverage(feature:)
+        )
+        let coveredRepository = RepositoryID(rawValue: "covered-repository")!
+        let missingRepository = RepositoryID(rawValue: "missing-repository")!
+        let repositoryRecord = CoverageRecord(
+            accountID: organizationCoverage[0].accountID,
+            organizationID: organizationCoverage[0].organizationID,
+            repositoryID: coveredRepository,
+            feature: .issues,
+            streamID: SyncStreamID(rawValue: "issues-by-repository")!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: organizationCoverage[0].credentialRevision,
+            capabilityRevision: organizationCoverage[0].capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: organizationCoverage[0].lastSuccessfulAt,
+            failureDetail: nil
+        )
+        let requirements = organizationCoverage.map(requirement(for:)) + [
+            requirement(for: repositoryRecord),
+            CoverageRequirement(
+                feature: .issues,
+                repositoryID: missingRepository,
+                streamID: repositoryRecord.streamID
+            )
+        ]
+
+        let freshness = AccountOrganizationCachedState(
+            coverage: organizationCoverage + [repositoryRecord],
+            coverageRequirements: requirements,
+            lastSuccessfulSyncAt: organizationCoverage[0].lastSuccessfulAt
+        ).freshness
+
+        XCTAssertEqual(freshness.status, .partial)
+        XCTAssertEqual(freshness.detail, "1 coverage requirement(s) incomplete.")
+    }
+
+    private func organizationCoverage(feature: CoverageFeature) -> CoverageRecord {
+        let successfulAt = Date(timeIntervalSinceReferenceDate: 500)
+        return CoverageRecord(
+            accountID: AccountID(rawValue: "manifest-account")!,
+            organizationID: OrganizationID(rawValue: "manifest-organization")!,
+            repositoryID: nil,
+            feature: feature,
+            streamID: SyncStreamID(rawValue: "manifest-\(feature.rawValue)")!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: CredentialRevision(rawValue: "manifest-credential")!,
+            capabilityRevision: CapabilityRevision(rawValue: "manifest-capability")!,
+            status: .complete,
+            lastSuccessfulAt: successfulAt,
+            failureDetail: nil
+        )
+    }
+
+    private func requirement(for coverage: CoverageRecord) -> CoverageRequirement {
+        CoverageRequirement(
+            feature: coverage.feature,
+            repositoryID: coverage.repositoryID,
+            streamID: coverage.streamID,
+            intervalStart: coverage.intervalStart,
+            intervalEnd: coverage.intervalEnd
+        )
+    }
+
     private func assertUnknownCaseRejected<T: Decodable>(
         _ type: T.Type,
         file: StaticString = #filePath,

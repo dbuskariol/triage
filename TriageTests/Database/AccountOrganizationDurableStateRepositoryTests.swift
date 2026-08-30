@@ -1015,13 +1015,23 @@ private final class DurableStateFixture: @unchecked Sendable {
             lastSuccessfulAt: successfulAt,
             failureDetail: nil
         )
+        let cachedState = AccountOrganizationCachedState(
+            coverage: [coverage],
+            coverageRequirements: [
+                CoverageRequirement(
+                    feature: coverage.feature,
+                    repositoryID: coverage.repositoryID,
+                    streamID: coverage.streamID,
+                    intervalStart: coverage.intervalStart,
+                    intervalEnd: coverage.intervalEnd
+                )
+            ],
+            lastSuccessfulSyncAt: successfulAt
+        )
         return AccountOrganizationDurableState(
-            cachedState: AccountOrganizationCachedState(
-                coverage: [coverage],
-                lastSuccessfulSyncAt: successfulAt
-            ),
+            cachedState: cachedState,
             freshness: FreshnessState(
-                status: .fresh,
+                status: cachedState.freshness.status,
                 lastSuccessfulSyncAt: successfulAt,
                 detail: detail
             )
