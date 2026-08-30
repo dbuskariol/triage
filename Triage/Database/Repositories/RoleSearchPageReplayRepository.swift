@@ -197,6 +197,53 @@ actor RoleSearchPageReplayRepository {
         )
     }
 
+    func removeStaleRevisions(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision
+    ) async throws {
+        guard accountID == vault.accountID else {
+            throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
+        }
+        try await vault.write { database in
+            try Self.removeStaleRevisions(
+                accountID: accountID,
+                organizationID: organizationID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                expectedAccountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
+    nonisolated static func removeStaleRevisions(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws {
+        guard accountID == expectedAccountID else {
+            throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
+        }
+        try database.execute(
+            sql: """
+                DELETE FROM role_search_page_replays
+                WHERE account_id = ? AND organization_id = ?
+                  AND (credential_revision <> ? OR capability_revision <> ?)
+                """,
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue
+            ]
+        )
+    }
+
     private nonisolated static func validate(_ replay: RoleSearchPageReplay) throws {
         guard isValidRequestKey(replay.requestKey) else {
             throw RoleSearchPageReplayRepositoryError.invalidRequestKey
@@ -288,5 +335,82 @@ actor RoleSearchPageReplayRepository {
 
     private nonisolated static func date(_ milliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
+    }
+}
+
+actor RoleSearchPageReplayCache {
+    private let repository: RoleSearchPageReplayRepository
+    let scope: SynchronizationScope
+    private var didRemoveStaleRevisions = false
+
+    init(repository: RoleSearchPageReplayRepository, scope: SynchronizationScope) {
+        self.repository = repository
+        self.scope = scope
+    }
+
+    func entry(
+        for query: GitHubIssueSearchQuery,
+        page: Int
+    ) async throws -> RoleSearchPageReplayEntry? {
+        if !didRemoveStaleRevisions {
+            try await repository.removeStaleRevisions(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision
+            )
+            didRemoveStaleRevisions = true
+        }
+        let identity = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: page,
+            scope: scope
+        )
+        let entry: RoleSearchPageReplayEntry?
+        do {
+            entry = try await repository.entry(
+                requestKey: identity.requestKey,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision
+            )
+        } catch RoleSearchPageReplayRepositoryError.invalidPersistedData {
+            try await invalidate(identity)
+            return nil
+        }
+        guard let entry else {
+            return nil
+        }
+        guard entry.replay.requestKey == identity.requestKey,
+              entry.replay.queryValue == identity.queryValue,
+              entry.replay.page == identity.page,
+              entry.replay.endpoint == identity.endpoint,
+              entry.replay.accountID == scope.accountID,
+              entry.replay.organizationID == scope.organizationID,
+              entry.replay.credentialRevision == scope.credentialRevision,
+              entry.replay.capabilityRevision == scope.capabilityRevision
+        else {
+            try await invalidate(identity)
+            return nil
+        }
+        return entry
+    }
+
+    func invalidate(
+        query: GitHubIssueSearchQuery,
+        page: Int
+    ) async throws {
+        try await invalidate(
+            GitHubIssueSearchRequestIdentity(query: query, page: page, scope: scope)
+        )
+    }
+
+    private func invalidate(_ identity: GitHubIssueSearchRequestIdentity) async throws {
+        try await repository.remove(
+            requestKey: identity.requestKey,
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
     }
 }

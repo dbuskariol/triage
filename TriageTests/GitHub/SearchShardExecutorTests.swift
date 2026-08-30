@@ -134,6 +134,474 @@ final class SearchShardExecutorTests: XCTestCase {
         XCTAssertTrue(didCommit)
     }
 
+    func testCachedPageOneAndLaterPageReplayWithoutCreatingRawDuplicates() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let range = SearchTimeRange(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 120)
+        )
+        let boundedQuery = try query.bounded(to: range)
+        let firstETag = "\"page-1\""
+        let secondETag = "\"page-2\""
+        let payload = Data(
+            #"{"total_count":200,"incomplete_results":false,"items":[]}"#.utf8
+        )
+        let firstSnapshot = try await fixture.seedReplay(
+            query: boundedQuery,
+            page: 1,
+            payload: payload,
+            eTag: firstETag
+        )
+        let secondSnapshot = try await fixture.seedReplay(
+            query: boundedQuery,
+            page: 2,
+            payload: payload,
+            eTag: secondETag
+        )
+        let client = ConditionalSearchClient { _, _, validator in
+            guard validator == firstETag || validator == secondETag else {
+                throw TestPageWriteError.unexpectedRequest
+            }
+            return .notModified(ssoHeader: nil)
+        }
+        let recorder = ReplayPageRecorder()
+        let executor = SearchShardExecutor(
+            client: client,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            replayCache: RoleSearchPageReplayCache(
+                repository: RoleSearchPageReplayRepository(vault: fixture.vault),
+                scope: fixture.scope
+            ),
+            clock: { fixture.date.addingTimeInterval(1) }
+        )
+
+        try await executor.execute(
+            query: query,
+            range: range,
+            streamID: fixture.streamID,
+            accountID: fixture.accountID,
+            accessibleRepositoryNames: [],
+            preparePage: { response, _, page in
+                PreparedSearchShardPageWrite(
+                    write: { _ in },
+                    didCommit: {
+                        await recorder.record(page: page, source: response.source)
+                    }
+                )
+            }
+        )
+
+        let requests = await client.requests()
+        XCTAssertEqual(
+            requests,
+            [
+                ConditionalSearchRequest(page: 1, validator: firstETag),
+                ConditionalSearchRequest(page: 2, validator: secondETag)
+            ]
+        )
+        let replayedPages = await recorder.pages()
+        XCTAssertEqual(replayedPages.map(\.page), [1, 2])
+        XCTAssertEqual(
+            replayedPages.map(\.source),
+            [.replay(firstSnapshot.id), .replay(secondSnapshot.id)]
+        )
+        let snapshots = try await RawAPISnapshotRepository(vault: fixture.vault).snapshots(
+            for: fixture.accountID
+        )
+        XCTAssertEqual(Set(snapshots.map(\.id)), Set([firstSnapshot.id, secondSnapshot.id]))
+    }
+
+    func testCachedIncompleteControlPageIsReplayedOnlyToRepartition() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let range = SearchTimeRange(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 120)
+        )
+        let boundedQuery = try query.bounded(to: range)
+        let eTag = "\"incomplete-control\""
+        let snapshot = try await fixture.seedReplay(
+            query: boundedQuery,
+            page: 1,
+            payload: Data(
+                #"{"total_count":1,"incomplete_results":true,"items":[]}"#.utf8
+            ),
+            eTag: eTag
+        )
+        let completePayload = Data(
+            #"{"total_count":0,"incomplete_results":false,"items":[]}"#.utf8
+        )
+        let client = ConditionalSearchClient { _, _, validator in
+            if validator == eTag {
+                return .notModified(ssoHeader: nil)
+            }
+            return .response(
+                GitHubResponse(
+                    value: GitHubIssueSearchPage(
+                        totalCount: 0,
+                        incompleteResults: false,
+                        items: []
+                    ),
+                    payload: completePayload,
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            )
+        }
+        let controlRecorder = ReplayPageRecorder()
+        let candidateRecorder = ReplayPageRecorder()
+        let executor = SearchShardExecutor(
+            client: client,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            replayCache: RoleSearchPageReplayCache(
+                repository: RoleSearchPageReplayRepository(vault: fixture.vault),
+                scope: fixture.scope
+            ),
+            clock: { fixture.date.addingTimeInterval(1) }
+        )
+
+        try await executor.execute(
+            query: query,
+            range: range,
+            streamID: fixture.streamID,
+            accountID: fixture.accountID,
+            accessibleRepositoryNames: [],
+            prepareControlPage: { response, _, page in
+                PreparedSearchShardPageWrite(
+                    write: { _ in },
+                    didCommit: {
+                        await controlRecorder.record(page: page, source: response.source)
+                    }
+                )
+            },
+            preparePage: { response, _, page in
+                PreparedSearchShardPageWrite(
+                    write: { _ in },
+                    didCommit: {
+                        await candidateRecorder.record(page: page, source: response.source)
+                    }
+                )
+            }
+        )
+
+        let controls = await controlRecorder.pages()
+        XCTAssertEqual(controls, [.init(page: 1, source: .replay(snapshot.id))])
+        let candidates = await candidateRecorder.pages()
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertTrue(candidates.allSatisfy { $0.source == .network })
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertEqual(shards.count, 3)
+        XCTAssertTrue(shards.allSatisfy { $0.state == .completed })
+    }
+
+    func testFailedCursorReplaysCommittedPagesBeforeResumingLaterPage() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let range = SearchTimeRange(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 120)
+        )
+        let boundedQuery = try query.bounded(to: range)
+        let pagePayload = Data(
+            #"{"total_count":200,"incomplete_results":false,"items":[]}"#.utf8
+        )
+        let pageOneETag = "\"resume-page-1\""
+        let firstClient = ConditionalSearchClient { _, page, _ in
+            if page == 1 {
+                return .response(
+                    GitHubResponse(
+                        value: GitHubIssueSearchPage(
+                            totalCount: 200,
+                            incompleteResults: false,
+                            items: []
+                        ),
+                        payload: pagePayload,
+                        etag: pageOneETag,
+                        lastModified: nil,
+                        ssoHeader: nil
+                    )
+                )
+            }
+            return .undecodable(
+                GitHubUndecodableResponse(
+                    payload: Data("malformed".utf8),
+                    linkHeader: nil,
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            )
+        }
+        let firstExecutor = SearchShardExecutor(
+            client: firstClient,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            clock: { fixture.date }
+        )
+        let pageOneSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: try GitHubIssueSearchRequestIdentity(
+                query: boundedQuery,
+                page: 1,
+                scope: fixture.scope
+            ).endpoint,
+            eTag: pageOneETag,
+            parserVersion: 1,
+            observedAt: fixture.date,
+            payload: pagePayload
+        )
+        let pageOneIdentity = try GitHubIssueSearchRequestIdentity(
+            query: boundedQuery,
+            page: 1,
+            scope: fixture.scope
+        )
+        let pageOneReplay = fixture.replay(
+            identity: pageOneIdentity,
+            snapshot: pageOneSnapshot
+        )
+
+        do {
+            try await firstExecutor.execute(
+                query: query,
+                range: range,
+                streamID: fixture.streamID,
+                accountID: fixture.accountID,
+                accessibleRepositoryNames: [],
+                prepareUndecodablePage: { _, _, _ in .empty },
+                preparePage: { _, _, page in
+                    XCTAssertEqual(page, 1)
+                    return PreparedSearchShardPageWrite(
+                        write: { database in
+                            try RawAPISnapshotRepository.save(pageOneSnapshot, in: database)
+                            try RoleSearchPageReplayRepository.save(
+                                pageOneReplay,
+                                expectedAccountID: fixture.accountID,
+                                in: database
+                            )
+                        },
+                        didCommit: {}
+                    )
+                }
+            )
+            XCTFail("Expected the later malformed page to leave a resumable failed shard.")
+        } catch is GitHubIssueSearchUndecodableResponseError {
+            // Expected after page one and its cursor were committed.
+        }
+
+        let recorder = ReplayPageRecorder()
+        let secondClient = ConditionalSearchClient { _, page, validator in
+            if page == 1 {
+                XCTAssertEqual(validator, pageOneETag)
+                return .notModified(ssoHeader: nil)
+            }
+            XCTAssertNil(validator)
+            return .response(
+                GitHubResponse(
+                    value: GitHubIssueSearchPage(
+                        totalCount: 200,
+                        incompleteResults: false,
+                        items: []
+                    ),
+                    payload: pagePayload,
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            )
+        }
+        let secondExecutor = SearchShardExecutor(
+            client: secondClient,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            replayCache: RoleSearchPageReplayCache(
+                repository: RoleSearchPageReplayRepository(vault: fixture.vault),
+                scope: fixture.scope
+            ),
+            clock: { fixture.date.addingTimeInterval(1) }
+        )
+
+        try await secondExecutor.execute(
+            query: query,
+            range: range,
+            streamID: fixture.streamID,
+            accountID: fixture.accountID,
+            accessibleRepositoryNames: [],
+            preparePage: { response, _, page in
+                PreparedSearchShardPageWrite(
+                    write: { _ in },
+                    didCommit: {
+                        await recorder.record(page: page, source: response.source)
+                    }
+                )
+            }
+        )
+
+        let replayedPages = await recorder.pages()
+        XCTAssertEqual(replayedPages.map(\.page), [1, 2])
+        XCTAssertEqual(replayedPages.first?.source, .replay(pageOneSnapshot.id))
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertEqual(shards.map(\.state), [.completed])
+        XCTAssertEqual(shards.first?.pageCursor, "2")
+    }
+
+    func testCorruptMappedPayloadRetriesExactlyOnceWithoutValidator() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let range = SearchTimeRange(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 120)
+        )
+        let boundedQuery = try query.bounded(to: range)
+        let eTag = "\"corrupt-page\""
+        _ = try await fixture.seedReplay(
+            query: boundedQuery,
+            page: 1,
+            payload: Data("not-json".utf8),
+            eTag: eTag
+        )
+        let client = ConditionalSearchClient { _, _, validator in
+            if validator != nil {
+                return .notModified(ssoHeader: nil)
+            }
+            return .response(
+                GitHubResponse(
+                    value: GitHubIssueSearchPage(
+                        totalCount: 0,
+                        incompleteResults: false,
+                        items: []
+                    ),
+                    payload: Data(
+                        #"{"total_count":0,"incomplete_results":false,"items":[]}"#.utf8
+                    ),
+                    etag: nil,
+                    lastModified: nil,
+                    ssoHeader: nil
+                )
+            )
+        }
+        let executor = SearchShardExecutor(
+            client: client,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            replayCache: RoleSearchPageReplayCache(
+                repository: RoleSearchPageReplayRepository(vault: fixture.vault),
+                scope: fixture.scope
+            ),
+            clock: { fixture.date }
+        )
+
+        try await executor.execute(
+            query: query,
+            range: range,
+            streamID: fixture.streamID,
+            accountID: fixture.accountID,
+            accessibleRepositoryNames: [],
+            preparePage: { _, _, _ in .empty }
+        )
+
+        let requests = await client.requests()
+        XCTAssertEqual(
+            requests,
+            [
+                ConditionalSearchRequest(page: 1, validator: eTag),
+                ConditionalSearchRequest(page: 1, validator: nil)
+            ]
+        )
+        let identity = try GitHubIssueSearchRequestIdentity(
+            query: boundedQuery,
+            page: 1,
+            scope: fixture.scope
+        )
+        let removed = try await RoleSearchPageReplayRepository(vault: fixture.vault).entry(
+            requestKey: identity.requestKey,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertNil(removed)
+    }
+
+    func testNotModifiedWithoutMappingFailsClosedAndDoesNotCreateEmptySuccess() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let client = ConditionalSearchClient { _, _, _ in
+            .notModified(ssoHeader: nil)
+        }
+        let executor = SearchShardExecutor(
+            client: client,
+            shardRepository: SyncShardRepository(vault: fixture.vault),
+            replayCache: RoleSearchPageReplayCache(
+                repository: RoleSearchPageReplayRepository(vault: fixture.vault),
+                scope: fixture.scope
+            ),
+            clock: { fixture.date }
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+
+        do {
+            try await executor.execute(
+                query: query,
+                range: SearchTimeRange(
+                    start: Date(timeIntervalSince1970: 0),
+                    end: Date(timeIntervalSince1970: 120)
+                ),
+                streamID: fixture.streamID,
+                accountID: fixture.accountID,
+                accessibleRepositoryNames: [],
+                preparePage: { _, _, _ in .empty }
+            )
+            XCTFail("A 304 without exact replay content must not become an empty page.")
+        } catch let error as SearchShardExecutorError {
+            XCTAssertEqual(error, .notModifiedWithoutReplay)
+        }
+
+        let requests = await client.requests()
+        XCTAssertEqual(requests, [ConditionalSearchRequest(page: 1, validator: nil)])
+        let shards = try await SyncShardRepository(vault: fixture.vault).shards(
+            for: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertEqual(shards.map(\.state), [.failed])
+        XCTAssertNil(shards.first?.pageCursor)
+    }
+
     func testFailedPreparedPageWriteRollsBackSnapshotAndCursor() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -143,10 +611,24 @@ final class SearchShardExecutorTests: XCTestCase {
             accountID: fixture.accountID,
             githubNodeID: nil,
             endpoint: "/search/issues?q=test&page=1",
-            eTag: nil,
+            eTag: "\"rollback\"",
             parserVersion: 1,
             observedAt: fixture.date,
             payload: Data("response".utf8)
+        )
+        let replay = RoleSearchPageReplay(
+            requestKey: "role-search:rollback",
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            queryValue: "org:github is:open involves:octocat",
+            page: 1,
+            endpoint: snapshot.endpoint,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision,
+            rawSnapshotID: snapshot.id,
+            eTag: "\"rollback\"",
+            parserVersion: 1,
+            lastValidatedAt: fixture.date
         )
         let executor = SearchShardExecutor(
             client: SearchClient { _, _ in
@@ -186,6 +668,11 @@ final class SearchShardExecutorTests: XCTestCase {
                     PreparedSearchShardPageWrite(
                         write: { database in
                             try RawAPISnapshotRepository.save(snapshot, in: database)
+                            try RoleSearchPageReplayRepository.save(
+                                replay,
+                                expectedAccountID: fixture.accountID,
+                                in: database
+                            )
                             throw TestPageWriteError.persistenceFailed
                         },
                         didCommit: {
@@ -207,6 +694,14 @@ final class SearchShardExecutorTests: XCTestCase {
             accountID: fixture.accountID
         )
         XCTAssertTrue(snapshots.isEmpty)
+        let replayEntry = try await RoleSearchPageReplayRepository(vault: fixture.vault).entry(
+            requestKey: replay.requestKey,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertNil(replayEntry)
         XCTAssertEqual(shards.count, 1)
         XCTAssertEqual(shards[0].pageCursor, nil)
         XCTAssertEqual(shards[0].state, .failed)
@@ -407,6 +902,7 @@ final class SearchShardExecutorTests: XCTestCase {
 
 private enum TestPageWriteError: Error {
     case persistenceFailed
+    case unexpectedRequest
 }
 
 private actor CommitRecorder {
@@ -418,6 +914,65 @@ private actor CommitRecorder {
 
     func didCommit() -> Bool {
         committed
+    }
+}
+
+private struct ConditionalSearchRequest: Equatable, Sendable {
+    let page: Int
+    let validator: String?
+}
+
+private actor ConditionalSearchClient: GitHubIssueSearchExecuting {
+    typealias ResultFactory = @Sendable (
+        GitHubIssueSearchQuery,
+        Int,
+        String?
+    ) throws -> GitHubIssueSearchResult
+
+    private let resultFactory: ResultFactory
+    private var recordedRequests = [ConditionalSearchRequest]()
+
+    init(resultFactory: @escaping ResultFactory) {
+        self.resultFactory = resultFactory
+    }
+
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int
+    ) async throws -> GitHubIssueSearchResult {
+        try await searchResult(query, page: page, ifNoneMatch: nil)
+    }
+
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int,
+        ifNoneMatch: String?
+    ) async throws -> GitHubIssueSearchResult {
+        recordedRequests.append(
+            ConditionalSearchRequest(page: page, validator: ifNoneMatch)
+        )
+        return try resultFactory(query, page, ifNoneMatch)
+    }
+
+    func requests() -> [ConditionalSearchRequest] {
+        recordedRequests
+    }
+}
+
+private actor ReplayPageRecorder {
+    struct Page: Equatable, Sendable {
+        let page: Int
+        let source: GitHubResponseSource
+    }
+
+    private var recordedPages = [Page]()
+
+    func record(page: Int, source: GitHubResponseSource) {
+        recordedPages.append(Page(page: page, source: source))
+    }
+
+    func pages() -> [Page] {
+        recordedPages
     }
 }
 
@@ -460,6 +1015,15 @@ private final class Fixture: @unchecked Sendable {
     let capabilityRevision = CapabilityRevision(rawValue: "capability-1")!
     let date = Date(timeIntervalSinceReferenceDate: 1_000)
     let vault: AccountVault
+
+    var scope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision
+        )
+    }
 
     init() async throws {
         directory = FileManager.default.temporaryDirectory
@@ -512,6 +1076,54 @@ private final class Fixture: @unchecked Sendable {
                 failureDetail: nil
             ),
             attemptedAt: date
+        )
+    }
+
+    func seedReplay(
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        payload: Data,
+        eTag: String
+    ) async throws -> RawAPISnapshot {
+        let identity = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: page,
+            scope: scope
+        )
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: accountID,
+            githubNodeID: nil,
+            endpoint: identity.endpoint,
+            eTag: eTag,
+            parserVersion: 1,
+            observedAt: date,
+            payload: payload
+        )
+        try await RawAPISnapshotRepository(vault: vault).save(snapshot)
+        try await RoleSearchPageReplayRepository(vault: vault).save(
+            replay(identity: identity, snapshot: snapshot)
+        )
+        return snapshot
+    }
+
+    func replay(
+        identity: GitHubIssueSearchRequestIdentity,
+        snapshot: RawAPISnapshot
+    ) -> RoleSearchPageReplay {
+        RoleSearchPageReplay(
+            requestKey: identity.requestKey,
+            accountID: accountID,
+            organizationID: organizationID,
+            queryValue: identity.queryValue,
+            page: identity.page,
+            endpoint: identity.endpoint,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision,
+            rawSnapshotID: snapshot.id,
+            eTag: snapshot.eTag!,
+            parserVersion: 1,
+            lastValidatedAt: date
         )
     }
 

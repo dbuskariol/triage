@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum GitHubIssueSearchError: Error, Equatable, Sendable {
@@ -5,6 +6,8 @@ enum GitHubIssueSearchError: Error, Equatable, Sendable {
     case invalidUserLogin
     case invalidQualifier
     case conflictingUpdatedConstraints
+    case invalidPage
+    case unexpectedNotModified
 }
 
 enum GitHubIssueSearchState: String, Sendable {
@@ -220,19 +223,76 @@ struct GitHubIssueSearchItem: Codable, Sendable {
     }
 }
 
+struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
+    let requestKey: String
+    let endpoint: String
+    let queryValue: String
+    let page: Int
+
+    init(
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        scope: SynchronizationScope
+    ) throws {
+        guard (1...100).contains(page) else {
+            throw GitHubIssueSearchError.invalidPage
+        }
+        let request = try GitHubIssueSearchClient.request(
+            query,
+            page: page,
+            ifNoneMatch: nil
+        )
+        let url = try request.resolvedURL(baseURL: URL(string: "https://api.github.com")!)
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw GitHubTransportError.invalidURL
+        }
+        let endpoint = components.percentEncodedQuery.map {
+            "\(components.percentEncodedPath)?\($0)"
+        } ?? components.percentEncodedPath
+        let material = [
+            "triage-role-search-v1",
+            scope.accountID.rawValue,
+            scope.organizationID.rawValue,
+            scope.credentialRevision.rawValue,
+            scope.capabilityRevision.rawValue,
+            endpoint
+        ].joined(separator: "\u{1F}")
+        let digest = SHA256.hash(data: Data(material.utf8))
+        requestKey = "role-search:" + digest.map { String(format: "%02x", $0) }.joined()
+        self.endpoint = endpoint
+        queryValue = query.value
+        self.page = page
+    }
+}
+
 protocol GitHubIssueSearchExecuting: Sendable {
     func searchResult(
         _ query: GitHubIssueSearchQuery,
         page: Int
+    ) async throws -> GitHubIssueSearchResult
+
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int,
+        ifNoneMatch: String?
     ) async throws -> GitHubIssueSearchResult
 }
 
 enum GitHubIssueSearchResult: Sendable {
     case response(GitHubResponse<GitHubIssueSearchPage>)
     case undecodable(GitHubUndecodableResponse)
+    case notModified(ssoHeader: GitHubSSOHeader?)
 }
 
 extension GitHubIssueSearchExecuting {
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int,
+        ifNoneMatch _: String?
+    ) async throws -> GitHubIssueSearchResult {
+        try await searchResult(query, page: page)
+    }
+
     func searchResponse(
         _ query: GitHubIssueSearchQuery,
         page: Int
@@ -242,6 +302,8 @@ extension GitHubIssueSearchExecuting {
             return response
         case .undecodable:
             throw GitHubRESTClientError.invalidJSON
+        case .notModified:
+            throw GitHubIssueSearchError.unexpectedNotModified
         }
     }
 }
@@ -273,6 +335,8 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
             return response
         case .undecodable:
             throw GitHubRESTClientError.invalidJSON
+        case .notModified:
+            throw GitHubIssueSearchError.unexpectedNotModified
         }
     }
 
@@ -280,22 +344,52 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
         _ query: GitHubIssueSearchQuery,
         page: Int = 1
     ) async throws -> GitHubIssueSearchResult {
-        let result = try await client.getResponsePreservingUndecodablePayload(
-            GitHubIssueSearchPage.self,
-            request: GitHubRESTRequest(
-                path: "/search/issues",
-                query: [
-                    URLQueryItem(name: "q", value: query.value),
-                    URLQueryItem(name: "sort", value: "updated"),
-                    URLQueryItem(name: "order", value: "desc"),
-                    URLQueryItem(name: "per_page", value: "100"),
-                    URLQueryItem(name: "page", value: String(max(page, 1)))
-                ]
+        try await searchResult(query, page: page, ifNoneMatch: nil)
+    }
+
+    func searchResult(
+        _ query: GitHubIssueSearchQuery,
+        page: Int,
+        ifNoneMatch: String?
+    ) async throws -> GitHubIssueSearchResult {
+        do {
+            let result = try await client.getResponsePreservingUndecodablePayload(
+                GitHubIssueSearchPage.self,
+                request: try Self.request(query, page: page, ifNoneMatch: ifNoneMatch)
             )
-        )
-        return switch result {
-        case let .response(response): .response(response)
-        case let .undecodable(response): .undecodable(response)
+            return switch result {
+            case let .response(response): .response(response)
+            case let .undecodable(response): .undecodable(response)
+            }
+        } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            return .notModified(ssoHeader: failure.ssoHeader)
         }
+    }
+
+    nonisolated static func request(
+        _ query: GitHubIssueSearchQuery,
+        page: Int,
+        ifNoneMatch: String?
+    ) throws -> GitHubRESTRequest {
+        guard (1...100).contains(page) else {
+            throw GitHubIssueSearchError.invalidPage
+        }
+        return try GitHubRESTRequest(
+            path: "/search/issues",
+            query: [
+                URLQueryItem(name: "q", value: query.value),
+                URLQueryItem(name: "sort", value: "updated"),
+                URLQueryItem(name: "order", value: "desc"),
+                URLQueryItem(name: "per_page", value: "100"),
+                URLQueryItem(name: "page", value: String(page))
+            ],
+            headers: ifNoneMatch.map { ["If-None-Match": $0] } ?? [:]
+        )
+    }
+
+    nonisolated static func decodeReplayPayload(_ payload: Data) throws -> GitHubIssueSearchPage {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(GitHubIssueSearchPage.self, from: payload)
     }
 }

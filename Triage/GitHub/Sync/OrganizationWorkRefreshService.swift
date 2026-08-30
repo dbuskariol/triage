@@ -181,11 +181,11 @@ actor OrganizationWorkRefreshService {
             let discoveryResult = try await RoleDiscoverySynchronizer(
                 searchClient: searchClient,
                 workItemRepository: WorkItemRepository(vault: vault),
-                shardRepository: SyncShardRepository(vault: vault)
+                shardRepository: SyncShardRepository(vault: vault),
+                replayRepository: RoleSearchPageReplayRepository(vault: vault)
             ).synchronize(
                 plan: plan,
-                accountID: account.id,
-                organizationID: organization.id,
+                scope: synchronizationScope,
                 githubOrganizationID: organization.githubOrganizationID,
                 streamID: streamID,
                 searchRange: range,
