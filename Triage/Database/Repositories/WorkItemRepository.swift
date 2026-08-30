@@ -335,9 +335,13 @@ actor WorkItemRepository {
             return EvidenceReference(
                 id: id,
                 source: source,
+                locator: .legacyUnverified,
+                authority: .legacyUnverified,
                 nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
                 eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
                 sourceRevision: row["source_revision"],
+                confidence: .provisional,
+                confirmation: .provisional,
                 observedAt: observedAt,
                 excerpt: row["excerpt"]
             )
@@ -476,11 +480,16 @@ actor WorkItemRepository {
             else {
                 throw WorkItemRepositoryError.invalidPersistedData
             }
+            let objectNodeValue: String? = row["object_node_id"]
+            guard objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)) != nil
+                    || objectNodeValue == nil else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
             let relationID: String = row["id"]
             return WorkRelation(
                 kind: kind,
                 subjectNodeID: subjectNodeID,
-                objectNodeID: (row["object_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                objectNodeID: objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)),
                 confidence: confidence,
                 evidence: try relationEvidence(in: database, relationID: relationID),
                 observedAt: observedAt
@@ -496,28 +505,167 @@ actor WorkItemRepository {
             database,
             sql: """
                 SELECT evidence_id, source, source_node_id, source_event_id,
-                       source_revision, observed_at_ms, excerpt
+                       source_revision, source_locator_kind, source_locator,
+                       authority_kind, authority_account_id, authority_organization_id,
+                       authority_feature, authority_stream_id,
+                       authority_credential_revision, authority_capability_revision,
+                       raw_snapshot_id, confidence, confirmation, observed_at_ms, excerpt
                 FROM relation_evidence
                 WHERE relation_id = ?
-                ORDER BY evidence_id
+                ORDER BY observed_at_ms, source, source_locator_kind, source_locator, evidence_id
                 """,
             arguments: [relationID]
         ).map { row in
-            guard let id = EvidenceID(rawValue: row["evidence_id"]),
-                  let source = EvidenceSource(rawValue: row["source"]),
-                  let observedAt = date(milliseconds: row["observed_at_ms"])
+            let values: RelationEvidenceValues
+            do {
+                values = try RelationEvidenceValues(row: row)
+            } catch {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            guard let id = EvidenceID(rawValue: values.id),
+                  let source = EvidenceSource(rawValue: values.source),
+                  let locator = EvidenceLocator(kind: values.locatorKind, value: values.locatorValue),
+                  let confidence = RelationConfidence(rawValue: values.confidence),
+                  let confirmation = EvidenceConfirmation(rawValue: values.confirmation),
+                  let observedAt = date(milliseconds: values.observedAtMilliseconds),
+                  let authority = evidenceAuthority(kind: values.authorityKind, values: values),
+                  isValidRelationEvidence(source: source, locator: locator, authority: authority)
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            guard values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)) != nil
+                    || values.sourceNodeID == nil,
+                  values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)) != nil
+                    || values.sourceEventID == nil,
+                  values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)) != nil
+                    || values.rawSnapshotID == nil
             else {
                 throw WorkItemRepositoryError.invalidPersistedData
             }
             return EvidenceReference(
                 id: id,
                 source: source,
-                nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
-                eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
-                sourceRevision: row["source_revision"],
+                locator: locator,
+                authority: authority,
+                nodeID: values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)),
+                eventID: values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)),
+                sourceRevision: values.sourceRevision,
+                rawSnapshotID: values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)),
+                confidence: confidence,
+                confirmation: confirmation,
                 observedAt: observedAt,
-                excerpt: row["excerpt"]
+                excerpt: values.excerpt
             )
+        }
+    }
+
+    private struct RelationEvidenceValues {
+        let id: String
+        let source: String
+        let sourceNodeID: String?
+        let sourceEventID: String?
+        let sourceRevision: String?
+        let locatorKind: String
+        let locatorValue: String
+        let authorityKind: String
+        let authorityAccountID: String?
+        let authorityOrganizationID: String?
+        let authorityFeature: String?
+        let authorityStreamID: String?
+        let authorityCredentialRevision: String?
+        let authorityCapabilityRevision: String?
+        let rawSnapshotID: String?
+        let confidence: String
+        let confirmation: String
+        let observedAtMilliseconds: Int64
+        let excerpt: String?
+
+        init(row: Row) throws {
+            id = try row.decode(String.self, forColumn: "evidence_id")
+            source = try row.decode(String.self, forColumn: "source")
+            sourceNodeID = try row.decode(String?.self, forColumn: "source_node_id")
+            sourceEventID = try row.decode(String?.self, forColumn: "source_event_id")
+            sourceRevision = try row.decode(String?.self, forColumn: "source_revision")
+            locatorKind = try row.decode(String.self, forColumn: "source_locator_kind")
+            locatorValue = try row.decode(String.self, forColumn: "source_locator")
+            authorityKind = try row.decode(String.self, forColumn: "authority_kind")
+            authorityAccountID = try row.decode(String?.self, forColumn: "authority_account_id")
+            authorityOrganizationID = try row.decode(String?.self, forColumn: "authority_organization_id")
+            authorityFeature = try row.decode(String?.self, forColumn: "authority_feature")
+            authorityStreamID = try row.decode(String?.self, forColumn: "authority_stream_id")
+            authorityCredentialRevision = try row.decode(String?.self, forColumn: "authority_credential_revision")
+            authorityCapabilityRevision = try row.decode(String?.self, forColumn: "authority_capability_revision")
+            rawSnapshotID = try row.decode(String?.self, forColumn: "raw_snapshot_id")
+            confidence = try row.decode(String.self, forColumn: "confidence")
+            confirmation = try row.decode(String.self, forColumn: "confirmation")
+            observedAtMilliseconds = try row.decode(Int64.self, forColumn: "observed_at_ms")
+            excerpt = try row.decode(String?.self, forColumn: "excerpt")
+        }
+    }
+
+    private nonisolated static func evidenceAuthority(
+        kind: String,
+        values: RelationEvidenceValues
+    ) -> EvidenceAuthority? {
+        switch kind {
+        case "github":
+            guard let accountValue = values.authorityAccountID,
+                  let organizationValue = values.authorityOrganizationID,
+                  let featureValue = values.authorityFeature,
+                  let streamValue = values.authorityStreamID,
+                  let credentialValue = values.authorityCredentialRevision,
+                  let capabilityValue = values.authorityCapabilityRevision,
+                  let accountID = AccountID(rawValue: accountValue),
+                  let organizationID = OrganizationID(rawValue: organizationValue),
+                  let feature = CoverageFeature(rawValue: featureValue),
+                  let streamID = SyncStreamID(rawValue: streamValue),
+                  let credentialRevision = CredentialRevision(rawValue: credentialValue),
+                  let capabilityRevision = CapabilityRevision(rawValue: capabilityValue)
+            else { return nil }
+            return .github(
+                scope: SynchronizationScope(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    credentialRevision: credentialRevision,
+                    capabilityRevision: capabilityRevision
+                ),
+                feature: feature,
+                streamID: streamID
+            )
+        case "localWorkflow":
+            guard let accountValue = values.authorityAccountID,
+                  let organizationValue = values.authorityOrganizationID,
+                  let accountID = AccountID(rawValue: accountValue),
+                  let organizationID = OrganizationID(rawValue: organizationValue)
+            else { return nil }
+            return .localWorkflow(accountID: accountID, organizationID: organizationID)
+        case "legacyUnverified":
+            return .legacyUnverified
+        default:
+            return nil
+        }
+    }
+
+    private nonisolated static func isValidRelationEvidence(
+        source: EvidenceSource,
+        locator: EvidenceLocator,
+        authority: EvidenceAuthority
+    ) -> Bool {
+        switch (source, locator, authority) {
+        case (.localWorkflow, .localWorkflow, .localWorkflow):
+            true
+        case (.localWorkflow, _, _):
+            false
+        case (.legacyUnverified, .legacyUnverified, .legacyUnverified):
+            true
+        case (.legacyUnverified, _, _):
+            false
+        case (_, .endpoint, .github), (_, .query, .github):
+            true
+        case (_, .legacyUnverified, .legacyUnverified):
+            true
+        default:
+            false
         }
     }
 

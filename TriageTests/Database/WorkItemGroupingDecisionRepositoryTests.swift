@@ -121,8 +121,12 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
                     EvidenceReference(
                         id: EvidenceID(rawValue: "link-evidence")!,
                         source: .restTimeline,
+                        locator: .legacyUnverified,
+                        authority: .legacyUnverified,
                         nodeID: firstNode.nodeID,
                         sourceRevision: "revision-1",
+                        confidence: .provisional,
+                        confirmation: .provisional,
                         observedAt: date,
                         excerpt: "Linked pull request closes this issue."
                     )

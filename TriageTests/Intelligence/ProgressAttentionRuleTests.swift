@@ -147,6 +147,13 @@ final class ProgressAttentionRuleTests: XCTestCase {
     EvidenceReference(
       id: EvidenceID(rawValue: id)!,
       source: .localWorkflow,
+      locator: .localWorkflow("test-progress-state"),
+      authority: .localWorkflow(
+        accountID: AccountID(rawValue: "account-1")!,
+        organizationID: OrganizationID(rawValue: "organization-1")!
+      ),
+      confidence: .confirmed,
+      confirmation: .confirmed,
       observedAt: now
     )
   }

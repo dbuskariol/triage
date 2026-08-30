@@ -1737,6 +1737,185 @@ enum TriageDatabaseMigrator {
                     SELECT RAISE(ABORT, 'repository inventory replay receipt is immutable');
                 END
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "038-relation-evidence-authority-provisional",
+            checksum: "c5904a2808b9f2133c456a65b5a512af8eb14be282dfdd19c5ce3f02c5b33a76"
+        ) { database in
+            // Migration 009 evidence had no source scope, locator, revision
+            // authority, raw binding, or reconciliation confirmation. Preserve
+            // it for explainability, but make it explicitly legacy and
+            // provisional rather than inventing GitHub authority.
+            // Synthetic legacy fixtures may intentionally begin after the
+            // work-graph migration without materializing its empty child
+            // table. Create that exact empty 009 shape before rebuilding.
+            try database.execute(sql: """
+                CREATE TABLE IF NOT EXISTS relation_evidence (
+                    relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_node_id TEXT,
+                    source_event_id TEXT,
+                    source_revision TEXT,
+                    observed_at_ms INTEGER NOT NULL,
+                    excerpt TEXT,
+                    PRIMARY KEY (relation_id, evidence_id)
+                )
+                """)
+            try database.execute(sql: "ALTER TABLE relation_evidence RENAME TO relation_evidence_009")
+            try database.execute(sql: """
+                CREATE TABLE relation_evidence (
+                    relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL CHECK (length(evidence_id) BETWEEN 1 AND 512),
+                    source TEXT NOT NULL CHECK (
+                        source IN (
+                            'restSearch', 'restTimeline', 'restReview', 'restNotification',
+                            'graphQL', 'localWorkflow', 'copilot', 'legacyUnverified'
+                        )
+                    ),
+                    source_locator_kind TEXT NOT NULL CHECK (
+                        source_locator_kind IN ('endpoint', 'query', 'localWorkflow', 'legacyUnverified')
+                    ),
+                    source_locator TEXT NOT NULL CHECK (length(source_locator) BETWEEN 1 AND 2048),
+                    authority_kind TEXT NOT NULL CHECK (
+                        authority_kind IN ('github', 'localWorkflow', 'legacyUnverified')
+                    ),
+                    authority_account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+                    authority_organization_id TEXT REFERENCES organizations(id) ON DELETE CASCADE,
+                    authority_feature TEXT,
+                    authority_stream_id TEXT REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    authority_credential_revision TEXT,
+                    authority_capability_revision TEXT,
+                    source_node_id TEXT,
+                    source_event_id TEXT,
+                    source_revision TEXT,
+                    raw_snapshot_id TEXT REFERENCES raw_api_snapshots(id) ON DELETE SET NULL,
+                    confidence TEXT NOT NULL CHECK (confidence IN ('provisional', 'confirmed')),
+                    confirmation TEXT NOT NULL CHECK (confirmation IN ('provisional', 'confirmed')),
+                    observed_at_ms INTEGER NOT NULL,
+                    excerpt TEXT,
+                    PRIMARY KEY (relation_id, evidence_id),
+                    CHECK (
+                        (
+                            authority_kind = 'github'
+                            AND authority_account_id IS NOT NULL
+                            AND authority_organization_id IS NOT NULL
+                            AND authority_feature IS NOT NULL
+                            AND authority_stream_id IS NOT NULL
+                            AND authority_credential_revision IS NOT NULL
+                            AND authority_capability_revision IS NOT NULL
+                            AND source_locator_kind IN ('endpoint', 'query')
+                            AND source != 'localWorkflow'
+                            AND source != 'legacyUnverified'
+                        )
+                        OR (
+                            authority_kind = 'localWorkflow'
+                            AND source = 'localWorkflow'
+                            AND authority_account_id IS NOT NULL
+                            AND authority_organization_id IS NOT NULL
+                            AND authority_feature IS NULL
+                            AND authority_stream_id IS NULL
+                            AND authority_credential_revision IS NULL
+                            AND authority_capability_revision IS NULL
+                            AND source_locator_kind = 'localWorkflow'
+                        )
+                        OR (
+                            authority_kind = 'legacyUnverified'
+                            AND authority_account_id IS NOT NULL
+                            AND authority_organization_id IS NOT NULL
+                            AND authority_feature IS NULL
+                            AND authority_stream_id IS NULL
+                            AND authority_credential_revision IS NULL
+                            AND authority_capability_revision IS NULL
+                            AND source_locator_kind = 'legacyUnverified'
+                            AND source != 'localWorkflow'
+                            AND confirmation = 'provisional'
+                        )
+                    )
+                )
+                """)
+            let hasWorkGraph = try Bool.fetchOne(
+                database,
+                sql: "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'relations')"
+            ) ?? false
+            if hasWorkGraph {
+                try database.execute(sql: """
+                    INSERT INTO relation_evidence (
+                    relation_id, evidence_id, source, source_locator_kind, source_locator,
+                    authority_kind, authority_account_id, authority_organization_id,
+                    authority_feature, authority_stream_id, authority_credential_revision,
+                    authority_capability_revision, source_node_id, source_event_id,
+                    source_revision, raw_snapshot_id, confidence, confirmation,
+                    observed_at_ms, excerpt
+                )
+                SELECT
+                    relation_evidence_009.relation_id,
+                    relation_evidence_009.evidence_id,
+                    CASE relation_evidence_009.source
+                        WHEN 'localWorkflow' THEN 'legacyUnverified'
+                        ELSE relation_evidence_009.source
+                    END,
+                    'legacyUnverified',
+                    'legacy-unverified',
+                    'legacyUnverified',
+                    relations.account_id,
+                    github_nodes.organization_id,
+                    NULL, NULL, NULL, NULL,
+                    relation_evidence_009.source_node_id,
+                    relation_evidence_009.source_event_id,
+                    relation_evidence_009.source_revision,
+                    NULL,
+                    'provisional',
+                    'provisional',
+                    relation_evidence_009.observed_at_ms,
+                    relation_evidence_009.excerpt
+                FROM relation_evidence_009
+                JOIN relations ON relations.id = relation_evidence_009.relation_id
+                JOIN github_nodes ON github_nodes.github_node_id = relations.subject_node_id
+                """)
+                // A relation without legacy evidence must not silently look
+                // supported. Retain it as one explicit unverified migration row.
+                try database.execute(sql: """
+                INSERT INTO relation_evidence (
+                    relation_id, evidence_id, source, source_locator_kind, source_locator,
+                    authority_kind, authority_account_id, authority_organization_id,
+                    authority_feature, authority_stream_id, authority_credential_revision,
+                    authority_capability_revision, source_node_id, source_event_id,
+                    source_revision, raw_snapshot_id, confidence, confirmation,
+                    observed_at_ms, excerpt
+                )
+                SELECT
+                    relations.id, 'legacy-' || relations.id, 'legacyUnverified',
+                    'legacyUnverified', 'legacy-unverified', 'legacyUnverified',
+                    relations.account_id, github_nodes.organization_id,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    relations.confidence, 'provisional', relations.observed_at_ms, NULL
+                FROM relations
+                JOIN github_nodes ON github_nodes.github_node_id = relations.subject_node_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM relation_evidence_009
+                    WHERE relation_evidence_009.relation_id = relations.id
+                )
+                """)
+                // All migration-009 relation strength was inseparable from
+                // unscoped evidence. Do not let it continue to drive derived
+                // intelligence as confirmed GitHub fact.
+                try database.execute(sql: "UPDATE relations SET confidence = 'provisional'")
+            }
+            try database.execute(sql: "DROP TABLE relation_evidence_009")
+            try database.execute(sql: """
+                CREATE INDEX relation_evidence_exact_authority
+                ON relation_evidence (
+                    authority_account_id, authority_organization_id, authority_feature,
+                    authority_stream_id, authority_credential_revision,
+                    authority_capability_revision, source, source_locator_kind,
+                    source_locator, source_revision, relation_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX relation_evidence_raw_snapshot
+                ON relation_evidence (raw_snapshot_id)
+                """)
         }
     ]
 }

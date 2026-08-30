@@ -177,7 +177,11 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                     EvidenceReference(
                         id: EvidenceID(rawValue: "evidence-\(reasonID)")!,
                         source: .restReview,
+                        locator: .legacyUnverified,
+                        authority: .legacyUnverified,
                         nodeID: nodeID,
+                        confidence: .provisional,
+                        confirmation: .provisional,
                         observedAt: date
                     )
                 ],

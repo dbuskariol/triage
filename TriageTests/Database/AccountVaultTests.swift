@@ -73,11 +73,136 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "037-repository-inventory-replay-snapshot-idempotency")
+        XCTAssertEqual(migrations.last?.id, "038-relation-evidence-authority-provisional")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "49c98f3a558dda06ff7205416691c1cb02cc002c0752f8c4ed36a2d58a5db4fb"
+            "c5904a2808b9f2133c456a65b5a512af8eb14be282dfdd19c5ce3f02c5b33a76"
         )
+        try await registry.closeAll()
+    }
+
+    func testMigration038RetainsLegacyRelationEvidenceAsProvisionalUnverified() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "github")!
+        let date = Date(timeIntervalSinceReferenceDate: 100)
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        let account = GitHubAccount(
+            id: accountID,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!,
+            login: "octocat",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: date,
+            lastValidatedAt: date
+        )
+        let organization = GitHubOrganization(
+            id: organizationID,
+            githubOrganizationID: 2,
+            nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjE=")!,
+            login: "github"
+        )
+        try await AccountRepository(vault: vault).save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!
+        )
+        try await AccountRepository(vault: vault).save(
+            organization,
+            access: OrganizationAccess(
+                accountID: accountID,
+                organizationID: organizationID,
+                state: .available,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!,
+                capabilities: [],
+                checkedAt: date
+            ),
+            selectedAt: date
+        )
+        let node = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "MDU6SXNzdWUx")!,
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: nil,
+            kind: .issue,
+            numericID: "1",
+            number: 1,
+            title: "Legacy relation",
+            state: .open,
+            url: URL(string: "https://github.com/github/triage/issues/1")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: date,
+            updatedAt: date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "legacy-revision",
+            observedAt: date,
+            accessibility: .accessible
+        )
+        try await GitHubNodeRepository(vault: vault).save(node)
+        try await vault.write { database in
+            try Self.removeMigration038Schema(from: database)
+            try database.execute(
+                sql: """
+                    INSERT INTO relations (
+                        id, account_id, subject_node_id, object_node_id, kind, confidence, observed_at_ms
+                    ) VALUES ('legacy-relation', ?, ?, NULL, 'assigned', 'confirmed', ?)
+                    """,
+                arguments: [accountID.rawValue, node.nodeID.rawValue, 100_000]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO relation_evidence (
+                        relation_id, evidence_id, source, source_node_id, source_event_id,
+                        source_revision, observed_at_ms, excerpt
+                    ) VALUES ('legacy-relation', 'legacy-evidence', 'restTimeline', ?, 'event-1', 'legacy-revision', ?, 'legacy')
+                    """,
+                arguments: [node.nodeID.rawValue, 100_000]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO relation_evidence (
+                        relation_id, evidence_id, source, source_node_id, source_event_id,
+                        source_revision, observed_at_ms, excerpt
+                    ) VALUES ('legacy-relation', 'legacy-local-workflow', 'localWorkflow', ?, NULL, 'legacy-workflow', ?, 'legacy local')
+                    """,
+                arguments: [node.nodeID.rawValue, 100_001]
+            )
+        }
+        try await vault.applyMigrations()
+        let migrated = try await vault.read { database -> (String, String, String, String, String?, String?, String?) in
+            let row = try XCTUnwrap(Row.fetchOne(
+                database,
+                sql: """
+                    SELECT authority_kind, source_locator_kind, confirmation, confidence,
+                           authority_feature, authority_credential_revision, raw_snapshot_id
+                    FROM relation_evidence WHERE evidence_id = 'legacy-evidence'
+                    """
+            ))
+            return (
+                row["authority_kind"], row["source_locator_kind"], row["confirmation"], row["confidence"],
+                row["authority_feature"], row["authority_credential_revision"], row["raw_snapshot_id"]
+            )
+        }
+        XCTAssertEqual(migrated.0, "legacyUnverified")
+        XCTAssertEqual(migrated.1, "legacyUnverified")
+        XCTAssertEqual(migrated.2, "provisional")
+        XCTAssertEqual(migrated.3, "provisional")
+        XCTAssertNil(migrated.4)
+        XCTAssertNil(migrated.5)
+        XCTAssertNil(migrated.6)
+        let migratedLocalSource = try await vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT source FROM relation_evidence WHERE evidence_id = 'legacy-local-workflow'"
+            )
+        }
+        XCTAssertEqual(migratedLocalSource, "legacyUnverified")
         try await registry.closeAll()
     }
 
@@ -104,7 +229,8 @@ final class AccountVaultTests: XCTestCase {
                         '034-role-search-page-replay-parser-identity',
                         '035-source-access-observations',
                         '036-repository-inventory-replay-receipts',
-                        '037-repository-inventory-replay-snapshot-idempotency'
+                        '037-repository-inventory-replay-snapshot-idempotency',
+                        '038-relation-evidence-authority-provisional'
                     )
                     ORDER BY id
                     """
@@ -499,7 +625,7 @@ final class AccountVaultTests: XCTestCase {
         let fixtureRegistry = try VaultRegistry(rootDirectory: directory)
         let fixtureVault = try await fixtureRegistry.open(accountID: accountID, vaultKey: key)
         try await fixtureVault.write { database in
-            try Self.removeMigration036And037Schema(from: database)
+            try Self.removeMigration036Through038Schema(from: database)
             try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
             try database.execute(
                 sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
@@ -682,7 +808,7 @@ final class AccountVaultTests: XCTestCase {
             )
         )
         try await fixtureVault.write { database in
-            try Self.removeMigration036And037Schema(from: database)
+            try Self.removeMigration036Through038Schema(from: database)
         }
         try await fixtureRegistry.closeAll()
 
@@ -1047,7 +1173,7 @@ final class AccountVaultTests: XCTestCase {
         let registry = try VaultRegistry(rootDirectory: directory)
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
         try await vault.write { database in
-            try Self.removeMigration036And037Schema(from: database)
+            try Self.removeMigration036Through038Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -1171,7 +1297,7 @@ final class AccountVaultTests: XCTestCase {
             )
         )
         try await vault.write { database in
-            try Self.removeMigration036And037Schema(from: database)
+            try Self.removeMigration036Through038Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -1248,7 +1374,8 @@ final class AccountVaultTests: XCTestCase {
         )
     }
 
-    private nonisolated static func removeMigration036And037Schema(from database: Database) throws {
+    private nonisolated static func removeMigration036Through038Schema(from database: Database) throws {
+        try removeMigration038Schema(from: database)
         try database.execute(
             sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_update"
         )
@@ -1270,6 +1397,39 @@ final class AccountVaultTests: XCTestCase {
                 DELETE FROM schema_migrations
                 WHERE id = '036-repository-inventory-replay-receipts'
                 """
+        )
+    }
+
+    private nonisolated static func removeMigration038Schema(from database: Database) throws {
+        try database.execute(sql: "DROP INDEX IF EXISTS relation_evidence_exact_authority")
+        try database.execute(sql: "DROP INDEX IF EXISTS relation_evidence_raw_snapshot")
+        try database.execute(sql: "ALTER TABLE relation_evidence RENAME TO relation_evidence_038")
+        try database.execute(sql: """
+            CREATE TABLE relation_evidence (
+                relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+                evidence_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_node_id TEXT,
+                source_event_id TEXT,
+                source_revision TEXT,
+                observed_at_ms INTEGER NOT NULL,
+                excerpt TEXT,
+                PRIMARY KEY (relation_id, evidence_id)
+            )
+            """)
+        try database.execute(sql: """
+            INSERT INTO relation_evidence (
+                relation_id, evidence_id, source, source_node_id, source_event_id,
+                source_revision, observed_at_ms, excerpt
+            )
+            SELECT relation_id, evidence_id, source, source_node_id, source_event_id,
+                   source_revision, observed_at_ms, excerpt
+            FROM relation_evidence_038
+            WHERE source != 'legacyUnverified'
+            """)
+        try database.execute(sql: "DROP TABLE relation_evidence_038")
+        try database.execute(
+            sql: "DELETE FROM schema_migrations WHERE id = '038-relation-evidence-authority-provisional'"
         )
     }
 

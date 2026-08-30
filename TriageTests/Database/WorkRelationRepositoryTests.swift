@@ -15,7 +15,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         try await repository.replace(
             [relation],
             accountID: fixture.accountID,
-            subjectNodeID: fixture.node.nodeID
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
         )
 
         let persisted = try await workItemRepository.fetch(
@@ -29,7 +30,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         try await repository.replace(
             [],
             accountID: fixture.accountID,
-            subjectNodeID: fixture.node.nodeID
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
         )
         let relationCount = try await fixture.vault.read { database in
             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relations")
@@ -49,12 +51,295 @@ final class WorkRelationRepositoryTests: XCTestCase {
             try await WorkRelationRepository(vault: fixture.vault).replace(
                 [fixture.relation],
                 accountID: AccountID.make(),
-                subjectNodeID: fixture.node.nodeID
+                subjectNodeID: fixture.node.nodeID,
+                authority: fixture.authority
             )
             XCTFail("Expected an account scope mismatch.")
         } catch {
             XCTAssertEqual(error as? WorkRelationRepositoryError, .accountScopeMismatch)
         }
+    }
+
+    func testIncrementalEmptyAndOtherSourceOrRevisionCannotDeleteEvidence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = WorkRelationRepository(vault: fixture.vault)
+
+        try await repository.replace(
+            [fixture.relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+        let incremental = fixture.replacementAuthority(revision: "revision-1", mode: .incremental)
+        try await repository.replace(
+            [],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: incremental
+        )
+        let otherSource = fixture.replacementAuthority(
+            source: .restSearch,
+            revision: "revision-1",
+            mode: .completeReconciliation
+        )
+        try await repository.replace(
+            [],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: otherSource
+        )
+        let otherRevision = fixture.replacementAuthority(revision: "revision-2", mode: .completeReconciliation)
+        try await repository.replace(
+            [],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: otherRevision
+        )
+
+        let countBeforeExactReplacement = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relation_evidence")
+        }
+        XCTAssertEqual(countBeforeExactReplacement, 1)
+
+        try await repository.replace(
+            [],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+        let countAfterExactReplacement = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relations")
+        }
+        XCTAssertEqual(countAfterExactReplacement, 0)
+    }
+
+    func testRejectsRawSnapshotAndObjectNodeOutsideExactAuthorityWithoutMutating() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = WorkRelationRepository(vault: fixture.vault)
+        let wrongSnapshotAuthority = RelationReplacementAuthority(
+            source: fixture.authority.source,
+            locator: fixture.authority.locator,
+            scope: fixture.scope,
+            feature: fixture.authority.feature,
+            streamID: fixture.authority.streamID,
+            repositoryID: nil,
+            sourceRevision: fixture.authority.sourceRevision,
+            rawSnapshotID: RawAPISnapshotID.make(),
+            observedAt: fixture.date,
+            mode: .completeReconciliation
+        )
+        do {
+            try await repository.replace(
+                [fixture.relation],
+                accountID: fixture.accountID,
+                subjectNodeID: fixture.node.nodeID,
+                authority: wrongSnapshotAuthority
+            )
+            XCTFail("Expected raw snapshot scope validation.")
+        } catch {
+            XCTAssertEqual(error as? WorkRelationRepositoryError, .rawSnapshotScopeMismatch)
+        }
+        let count = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relations")
+        }
+        XCTAssertEqual(count, 0)
+    }
+
+    func testExactIncrementalEvidenceReplayIsIdempotent() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let authority = fixture.replacementAuthority(revision: "revision-1", mode: .incremental)
+        let relation = fixture.makeRelation(for: authority)
+        let repository = WorkRelationRepository(vault: fixture.vault)
+        try await repository.replace(
+            [relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: authority
+        )
+        try await repository.replace(
+            [relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: authority
+        )
+        let count = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relation_evidence")
+        }
+        XCTAssertEqual(count, 1)
+    }
+
+    func testWorkItemDecodingRejectsCorruptRelationEvidenceAuthority() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        _ = try await WorkItemRepository(vault: fixture.vault).ensureWorkItem(for: fixture.node)
+        try await WorkRelationRepository(vault: fixture.vault).replace(
+            [fixture.relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+        try await fixture.vault.write { database in
+            try database.execute(sql: "PRAGMA ignore_check_constraints = ON")
+            try database.execute(
+                sql: "UPDATE relation_evidence SET authority_kind = 'legacyUnverified'"
+            )
+            try database.execute(sql: "PRAGMA ignore_check_constraints = OFF")
+        }
+        do {
+            _ = try await WorkItemRepository(vault: fixture.vault).fetch(
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID
+            )
+            XCTFail("Expected corrupt evidence to fail closed.")
+        } catch {
+            XCTAssertEqual(error as? WorkItemRepositoryError, .invalidPersistedData)
+        }
+    }
+
+    func testObjectScopeAcceptsSelectedAccountGlobalActorAndSameOrganizationTeam() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let actorNodeID = GitHubNodeID(rawValue: "MDQ6VXNlcjI=")!
+        let teamNodeID = GitHubNodeID(rawValue: "MDQ6VGVhbTE=")!
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO actors (
+                        id, github_node_id, github_actor_id, login, display_name,
+                        avatar_url, kind, updated_at_ms
+                    ) VALUES ('actor-2', ?, '2', 'hubot', NULL, NULL, 'user', ?)
+                    """,
+                arguments: [actorNodeID.rawValue, 100_000]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO teams (
+                        id, organization_id, github_node_id, slug, name, privacy, updated_at_ms
+                    ) VALUES ('team-1', ?, ?, 'platform', 'Platform', 'closed', ?)
+                    """,
+                arguments: [fixture.organizationID.rawValue, teamNodeID.rawValue, 100_000]
+            )
+        }
+        let relations = [
+            fixture.makeRelation(
+                for: fixture.authority,
+                objectNodeID: fixture.accountNodeID,
+                kind: .authored,
+                evidenceID: "account-object"
+            ),
+            fixture.makeRelation(
+                for: fixture.authority,
+                objectNodeID: actorNodeID,
+                kind: .assigned,
+                evidenceID: "actor-object"
+            ),
+            fixture.makeRelation(
+                for: fixture.authority,
+                objectNodeID: teamNodeID,
+                kind: .teamMentioned,
+                evidenceID: "team-object"
+            )
+        ]
+
+        try await WorkRelationRepository(vault: fixture.vault).replace(
+            relations,
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+
+        let count = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relations")
+        }
+        XCTAssertEqual(count, 3)
+    }
+
+    func testObjectScopeRejectsCrossOrganizationContentAndTeamWithoutMutation() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let otherOrganizationID = OrganizationID(rawValue: "other")!
+        let otherOrganization = GitHubOrganization(
+            id: otherOrganizationID,
+            githubOrganizationID: 3,
+            nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjI=")!,
+            login: "other"
+        )
+        try await AccountRepository(vault: fixture.vault).save(
+            otherOrganization,
+            access: OrganizationAccess(
+                accountID: fixture.accountID,
+                organizationID: otherOrganizationID,
+                state: .available,
+                capabilityRevision: CapabilityRevision(rawValue: "other-capability")!,
+                capabilities: [],
+                checkedAt: fixture.date
+            ),
+            selectedAt: nil
+        )
+        let otherContentNodeID = GitHubNodeID(rawValue: "MDU6SXNzdWUy")!
+        try await GitHubNodeRepository(vault: fixture.vault).save(
+            NormalizedGitHubNode(
+                nodeID: otherContentNodeID,
+                accountID: fixture.accountID,
+                organizationID: otherOrganizationID,
+                repositoryID: nil,
+                kind: .issue,
+                numericID: "2",
+                number: 2,
+                title: "Other organization",
+                state: .open,
+                url: URL(string: "https://github.com/other/repo/issues/2")!,
+                bodyMarkdown: nil,
+                authorID: nil,
+                createdAt: fixture.date,
+                updatedAt: fixture.date,
+                closedAt: nil,
+                mergedAt: nil,
+                sourceRevision: "other-revision",
+                observedAt: fixture.date,
+                accessibility: .accessible
+            )
+        )
+        let otherTeamNodeID = GitHubNodeID(rawValue: "MDQ6VGVhbTI=")!
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO teams (
+                        id, organization_id, github_node_id, slug, name, privacy, updated_at_ms
+                    ) VALUES ('other-team', ?, ?, 'other', 'Other', 'closed', ?)
+                    """,
+                arguments: [otherOrganizationID.rawValue, otherTeamNodeID.rawValue, 100_000]
+            )
+        }
+        let repository = WorkRelationRepository(vault: fixture.vault)
+        for (nodeID, evidenceID) in [
+            (otherContentNodeID, "cross-org-content"),
+            (otherTeamNodeID, "cross-org-team")
+        ] {
+            do {
+                try await repository.replace(
+                    [fixture.makeRelation(
+                        for: fixture.authority,
+                        objectNodeID: nodeID,
+                        kind: .assigned,
+                        evidenceID: evidenceID
+                    )],
+                    accountID: fixture.accountID,
+                    subjectNodeID: fixture.node.nodeID,
+                    authority: fixture.authority
+                )
+                XCTFail("Expected cross-organization object rejection.")
+            } catch {
+                XCTAssertEqual(error as? WorkRelationRepositoryError, .objectNodeScopeMismatch)
+            }
+        }
+        let count = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relations")
+        }
+        XCTAssertEqual(count, 0)
     }
 
     func testHydratedNodeDetailsPersistIssueAndPullRequestFields() async throws {
@@ -177,7 +462,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
             try await WorkRelationRepository(vault: fixture.vault).replace(
                 [],
                 accountID: fixture.accountID,
-                subjectNodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!
+                subjectNodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!,
+                authority: fixture.authority
             )
             XCTFail("Expected a source node scope mismatch.")
         } catch {
@@ -203,7 +489,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         try await repository.save(snapshot)
 
         let snapshots = try await repository.snapshots(for: fixture.accountID)
-        XCTAssertEqual(snapshots, [snapshot])
+        XCTAssertTrue(snapshots.contains(snapshot))
+        XCTAssertTrue(snapshots.contains { $0.id == fixture.rawSnapshotID })
 
         do {
             try await repository.save(
@@ -282,7 +569,10 @@ final class WorkRelationRepositoryTests: XCTestCase {
         )
         XCTAssertEqual(compactedCount, 1)
         let snapshots = try await repository.snapshots(for: fixture.accountID)
-        XCTAssertEqual(snapshots, [newest, failedSnapshot])
+        XCTAssertTrue(snapshots.contains(newest))
+        XCTAssertTrue(snapshots.contains(failedSnapshot))
+        XCTAssertTrue(snapshots.contains { $0.id == fixture.rawSnapshotID })
+        XCTAssertEqual(snapshots.count, 3)
     }
 
     func testNormalizationFailuresRetainAccountScopedSnapshotProvenance() async throws {
@@ -750,6 +1040,10 @@ final class WorkRelationRepositoryTests: XCTestCase {
         let vault: AccountVault
         let node: NormalizedGitHubNode
         let relation: WorkRelation
+        let accountNodeID: GitHubNodeID
+        let scope: SynchronizationScope
+        let authority: RelationReplacementAuthority
+        let rawSnapshotID: RawAPISnapshotID
 
         init() async throws {
             directory = FileManager.default.temporaryDirectory
@@ -758,7 +1052,7 @@ final class WorkRelationRepositoryTests: XCTestCase {
                 accountID: accountID,
                 vaultKey: try VaultKey.generate()
             )
-            let accountNodeID = GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!
+            accountNodeID = GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!
             let account = GitHubAccount(
                 id: accountID,
                 githubUserID: 1,
@@ -791,6 +1085,13 @@ final class WorkRelationRepositoryTests: XCTestCase {
             )
             try await accountRepository.save(organization, access: access, selectedAt: date)
 
+            scope = SynchronizationScope(
+                accountID: accountID,
+                organizationID: organizationID,
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+            )
+
             node = NormalizedGitHubNode(
                 nodeID: GitHubNodeID(rawValue: "MDU6SXNzdWUx")!,
                 accountID: accountID,
@@ -813,6 +1114,55 @@ final class WorkRelationRepositoryTests: XCTestCase {
                 accessibility: .accessible
             )
             try await GitHubNodeRepository(vault: vault).save(node)
+            let streamID = SyncStreamID(rawValue: "relations-issue-1")!
+            let endpoint = "/repos/github/triage/issues/1/timeline?per_page=100&page=1"
+            let rawSnapshot = RawAPISnapshot(
+                id: RawAPISnapshotID.make(),
+                accountID: accountID,
+                githubNodeID: node.nodeID,
+                endpoint: endpoint,
+                eTag: "\"relations-1\"",
+                parserVersion: 1,
+                observedAt: date,
+                payload: Data("[]".utf8),
+                requestIdentity: ConditionalRequestIdentity(
+                    scope: scope,
+                    feature: .timelines,
+                    streamID: streamID,
+                    requestKey: "GET \(endpoint)"
+                )
+            )
+            rawSnapshotID = rawSnapshot.id
+            try await RawAPISnapshotRepository(vault: vault).save(rawSnapshot)
+            try await CoverageRepository(vault: vault).save(
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: nil,
+                    feature: .timelines,
+                    streamID: streamID,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: .complete,
+                    lastSuccessfulAt: date,
+                    failureDetail: nil
+                ),
+                attemptedAt: date
+            )
+            authority = RelationReplacementAuthority(
+                source: .restTimeline,
+                locator: .endpoint(endpoint),
+                scope: scope,
+                feature: .timelines,
+                streamID: streamID,
+                repositoryID: nil,
+                sourceRevision: "revision-1",
+                rawSnapshotID: rawSnapshot.id,
+                observedAt: date,
+                mode: .completeReconciliation
+            )
             relation = WorkRelation(
                 kind: .assigned,
                 subjectNodeID: node.nodeID,
@@ -821,9 +1171,18 @@ final class WorkRelationRepositoryTests: XCTestCase {
                 evidence: [
                     EvidenceReference(
                         id: EvidenceID(rawValue: "assignment-1")!,
-                        source: .restSearch,
+                        source: .restTimeline,
+                        locator: .endpoint(endpoint),
+                        authority: .github(
+                            scope: scope,
+                            feature: .timelines,
+                            streamID: streamID
+                        ),
                         nodeID: node.nodeID,
                         sourceRevision: node.sourceRevision,
+                        rawSnapshotID: rawSnapshot.id,
+                        confidence: .confirmed,
+                        confirmation: .confirmed,
                         observedAt: date,
                         excerpt: "assignee:octocat"
                     )
@@ -834,6 +1193,59 @@ final class WorkRelationRepositoryTests: XCTestCase {
 
         func remove() {
             try? FileManager.default.removeItem(at: directory)
+        }
+
+        func replacementAuthority(
+            source: EvidenceSource = .restTimeline,
+            revision: String,
+            mode: RelationReplacementMode
+        ) -> RelationReplacementAuthority {
+            RelationReplacementAuthority(
+                source: source,
+                locator: authority.locator,
+                scope: scope,
+                feature: authority.feature,
+                streamID: authority.streamID,
+                repositoryID: authority.repositoryID,
+                sourceRevision: revision,
+                rawSnapshotID: rawSnapshotID,
+                observedAt: date,
+                mode: mode
+            )
+        }
+
+        func makeRelation(
+            for authority: RelationReplacementAuthority,
+            objectNodeID: GitHubNodeID? = nil,
+            kind: WorkRelationKind? = nil,
+            evidenceID: String? = nil
+        ) -> WorkRelation {
+            WorkRelation(
+                kind: kind ?? relation.kind,
+                subjectNodeID: relation.subjectNodeID,
+                objectNodeID: objectNodeID ?? relation.objectNodeID,
+                confidence: relation.confidence,
+                evidence: [
+                    EvidenceReference(
+                        id: evidenceID.flatMap(EvidenceID.init(rawValue:)) ?? relation.evidence[0].id,
+                        source: authority.source,
+                        locator: authority.locator,
+                        authority: .github(
+                            scope: authority.scope,
+                            feature: authority.feature,
+                            streamID: authority.streamID
+                        ),
+                        nodeID: relation.subjectNodeID,
+                        sourceRevision: authority.sourceRevision,
+                        rawSnapshotID: authority.rawSnapshotID,
+                        confidence: authority.mode == .completeReconciliation ? .confirmed : .provisional,
+                        confirmation: authority.mode == .completeReconciliation ? .confirmed : .provisional,
+                        observedAt: authority.observedAt,
+                        excerpt: relation.evidence[0].excerpt
+                    )
+                ],
+                observedAt: relation.observedAt
+            )
         }
     }
 }

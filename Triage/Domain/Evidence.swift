@@ -8,17 +8,111 @@ enum EvidenceSource: String, Codable, Sendable {
     case graphQL
     case localWorkflow
     case copilot
+    /// Evidence imported from the pre-authority work-graph schema. It is
+    /// deliberately not a source a synchronizer may produce.
+    case legacyUnverified
+}
+
+enum EvidenceLocator: Codable, Equatable, Sendable {
+    case endpoint(String)
+    case query(String)
+    case localWorkflow(String)
+    case legacyUnverified
+
+    var kind: String {
+        switch self {
+        case .endpoint: "endpoint"
+        case .query: "query"
+        case .localWorkflow: "localWorkflow"
+        case .legacyUnverified: "legacyUnverified"
+        }
+    }
+
+    var value: String {
+        switch self {
+        case let .endpoint(value), let .query(value), let .localWorkflow(value): value
+        case .legacyUnverified: "legacy-unverified"
+        }
+    }
+
+    init?(kind: String, value: String) {
+        switch kind {
+        case "endpoint": self = .endpoint(value)
+        case "query": self = .query(value)
+        case "localWorkflow": self = .localWorkflow(value)
+        case "legacyUnverified" where value == "legacy-unverified": self = .legacyUnverified
+        default: return nil
+        }
+    }
+}
+
+/// The authority which produced an evidence item. GitHub authority is exact
+/// and revision-bound; local workflow evidence is explicitly local rather
+/// than impersonating a GitHub source. The legacy case is migration-only.
+enum EvidenceAuthority: Codable, Equatable, Sendable {
+    case github(
+        scope: SynchronizationScope,
+        feature: CoverageFeature,
+        streamID: SyncStreamID
+    )
+    case localWorkflow(accountID: AccountID, organizationID: OrganizationID)
+    case legacyUnverified
+}
+
+enum EvidenceConfirmation: String, Codable, Sendable {
+    case provisional
+    case confirmed
 }
 
 struct EvidenceReference: Codable, Equatable, Sendable, Identifiable {
     let id: EvidenceID
     let source: EvidenceSource
+    let locator: EvidenceLocator
+    let authority: EvidenceAuthority
     let nodeID: GitHubNodeID?
     let eventID: GitHubEventID?
     let sourceRevision: String?
+    let rawSnapshotID: RawAPISnapshotID?
+    /// Relation strength is independent of whether this observation was
+    /// fully reconciled and confirmed.
+    let confidence: RelationConfidence
+    let confirmation: EvidenceConfirmation
     let observedAt: Date
     let excerpt: String?
 
+    init(
+        id: EvidenceID,
+        source: EvidenceSource,
+        locator: EvidenceLocator,
+        authority: EvidenceAuthority,
+        nodeID: GitHubNodeID? = nil,
+        eventID: GitHubEventID? = nil,
+        sourceRevision: String? = nil,
+        rawSnapshotID: RawAPISnapshotID? = nil,
+        confidence: RelationConfidence,
+        confirmation: EvidenceConfirmation,
+        observedAt: Date,
+        excerpt: String? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.locator = locator
+        self.authority = authority
+        self.nodeID = nodeID
+        self.eventID = eventID
+        self.sourceRevision = sourceRevision
+        self.rawSnapshotID = rawSnapshotID
+        self.confidence = confidence
+        self.confirmation = confirmation
+        self.observedAt = observedAt
+        self.excerpt = excerpt
+    }
+
+    /// Compatibility for non-persisted rule fixtures that predate durable
+    /// provenance. New persisted relation evidence must use the designated
+    /// initializer above; this deliberately labels the missing authority as
+    /// unverified instead of guessing a GitHub endpoint or local workflow.
+    @available(*, deprecated, message: "Provide explicit evidence locator, authority, confidence, and confirmation.")
     init(
         id: EvidenceID,
         source: EvidenceSource,
@@ -28,13 +122,20 @@ struct EvidenceReference: Codable, Equatable, Sendable, Identifiable {
         observedAt: Date,
         excerpt: String? = nil
     ) {
-        self.id = id
-        self.source = source
-        self.nodeID = nodeID
-        self.eventID = eventID
-        self.sourceRevision = sourceRevision
-        self.observedAt = observedAt
-        self.excerpt = excerpt
+        self.init(
+            id: id,
+            source: source,
+            locator: .legacyUnverified,
+            authority: .legacyUnverified,
+            nodeID: nodeID,
+            eventID: eventID,
+            sourceRevision: sourceRevision,
+            rawSnapshotID: nil,
+            confidence: .provisional,
+            confirmation: .provisional,
+            observedAt: observedAt,
+            excerpt: excerpt
+        )
     }
 }
 
