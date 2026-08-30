@@ -5,6 +5,7 @@ enum GitHubRepositoryTeamClientError: Error, Equatable, Sendable {
     case invalidAccountLogin
     case paginationLoop
     case paginationLimitExceeded
+    case invalidPaginationLink
     case pageObjectLimitExceeded
     case notModifiedWithoutCachedState
     case ambiguousMembershipVisibility
@@ -94,6 +95,7 @@ actor GitHubRepositoryTeamClient {
                 URLQueryItem(name: "per_page", value: "100")
             ],
             validators: validators,
+            repositoryPaginationOrganization: organization,
             validator: { try Self.validate($0, organization: organization) }
         )
         guard case let .modified(inventory) = result else {
@@ -169,6 +171,7 @@ actor GitHubRepositoryTeamClient {
         path: String,
         query: [URLQueryItem],
         validators: GitHubHTTPValidators?,
+        repositoryPaginationOrganization: String? = nil,
         validator: (Value) throws -> Void
     ) async throws -> GitHubRepositoryTeamFetch<Value> {
         var endpoint = Self.endpoint(path: path, query: query)
@@ -190,9 +193,25 @@ actor GitHubRepositoryTeamClient {
         var values = [Value]()
         var ssoHeaders = [page.ssoHeader].compactMap { $0 }
         var visitedPageURLs = Set<String>()
+        var currentPageNumber = 1
 
         try append(page.values, to: &values, validator: validator)
-        while let nextPageURL = page.nextPageURL {
+        while true {
+            let nextPageURL: URL?
+            let nextPageNumber: Int?
+            if let repositoryPaginationOrganization {
+                nextPageNumber = try Self.validateRepositoryPaginationLink(
+                    page.nextPageURL,
+                    rawLinkHeader: page.linkHeader,
+                    organization: repositoryPaginationOrganization,
+                    currentPageNumber: currentPageNumber
+                )
+                nextPageURL = page.nextPageURL
+            } else {
+                nextPageNumber = nil
+                nextPageURL = page.nextPageURL
+            }
+            guard let nextPageURL else { break }
             try Task.checkCancellation()
             guard nextPageURL.path == path,
                   nextPageURL.scheme == "https",
@@ -214,6 +233,9 @@ actor GitHubRepositoryTeamClient {
             try append(page.values, to: &values, validator: validator)
             if let ssoHeader = page.ssoHeader {
                 ssoHeaders.append(ssoHeader)
+            }
+            if let nextPageNumber {
+                currentPageNumber = nextPageNumber
             }
         }
         return .modified(
@@ -282,6 +304,60 @@ actor GitHubRepositoryTeamClient {
         else {
             throw GitHubRepositoryTeamClientError.invalidMembership
         }
+    }
+
+    private nonisolated static func validateRepositoryPaginationLink(
+        _ url: URL?,
+        rawLinkHeader: String?,
+        organization: String,
+        currentPageNumber: Int
+    ) throws -> Int? {
+        if let rawLinkHeader,
+           !rawLinkHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let parsed = GitHubLinkHeader(rawLinkHeader),
+                  parsed.isWellFormed,
+                  parsed.nextPageURL == url
+            else {
+                throw GitHubRepositoryTeamClientError.invalidPaginationLink
+            }
+        }
+        guard let url else { return nil }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.caseInsensitiveCompare("https") == .orderedSame,
+              components.host?.caseInsensitiveCompare("api.github.com") == .orderedSame,
+              components.port == nil,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              components.percentEncodedPath == "/orgs/\(organization)/repos"
+        else {
+            throw GitHubRepositoryTeamClientError.invalidPaginationLink
+        }
+
+        let items = components.queryItems ?? []
+        let typeValues = items.filter { $0.name == "type" }.map(\.value)
+        let perPageValues = items.filter { $0.name == "per_page" }.map(\.value)
+        let pageValues = items.filter { $0.name == "page" }.map(\.value)
+        guard items.count == 3,
+              typeValues == ["all"],
+              perPageValues == ["100"],
+              pageValues.count == 1,
+              let pageValue = pageValues[0],
+              !pageValue.isEmpty,
+              pageValue.unicodeScalars.allSatisfy({ $0.isASCII && $0.properties.numericType != nil }),
+              let pageNumber = Int(pageValue),
+              pageNumber > 0,
+              String(pageNumber) == pageValue
+        else {
+            throw GitHubRepositoryTeamClientError.invalidPaginationLink
+        }
+        guard pageNumber <= maximumPages else {
+            throw GitHubRepositoryTeamClientError.paginationLimitExceeded
+        }
+        guard pageNumber > currentPageNumber else {
+            throw GitHubRepositoryTeamClientError.paginationLoop
+        }
+        return pageNumber
     }
 
     private nonisolated static func isGitHubLogin(_ value: String) -> Bool {
