@@ -944,6 +944,69 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX role_search_page_replays_snapshot
                 ON role_search_page_replays (raw_snapshot_id)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "026-organization-refresh-schedules",
+            checksum: "b3fef9ead04a411d230992182a61efae48f7c5b6b7d4575cc87ab51d1803d5f4"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE organization_scheduler_states (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    next_incremental_refresh_at_ms INTEGER NOT NULL,
+                    next_full_reconciliation_at_ms INTEGER NOT NULL,
+                    rate_limited_until_ms INTEGER,
+                    blocked_reason TEXT CHECK (
+                        blocked_reason IS NULL OR blocked_reason IN (
+                            'authenticationRequired', 'ssoRequired', 'approvalRequired'
+                        )
+                    ),
+                    consecutive_transient_failure_count INTEGER NOT NULL
+                        CHECK (consecutive_transient_failure_count BETWEEN 0 AND 20),
+                    active_attempt_id TEXT,
+                    last_attempt_at_ms INTEGER,
+                    last_completed_at_ms INTEGER,
+                    generation INTEGER NOT NULL CHECK (generation >= 0),
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (
+                        active_attempt_id IS NULL OR last_attempt_at_ms IS NOT NULL
+                    ),
+                    CHECK (
+                        last_attempt_at_ms IS NULL OR last_completed_at_ms IS NULL
+                        OR (
+                            active_attempt_id IS NULL
+                            AND last_completed_at_ms >= last_attempt_at_ms
+                        ) OR (
+                            active_attempt_id IS NOT NULL
+                            AND last_completed_at_ms <= last_attempt_at_ms
+                        )
+                    ),
+                    CHECK (
+                        last_attempt_at_ms IS NULL OR updated_at_ms >= last_attempt_at_ms
+                    ),
+                    CHECK (
+                        last_completed_at_ms IS NULL OR updated_at_ms >= last_completed_at_ms
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX organization_scheduler_states_due
+                ON organization_scheduler_states (
+                    account_id, blocked_reason, next_incremental_refresh_at_ms, organization_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX organization_scheduler_states_reconciliation_due
+                ON organization_scheduler_states (
+                    account_id, blocked_reason, next_full_reconciliation_at_ms, organization_id
+                )
+                """)
         }
     ]
 }

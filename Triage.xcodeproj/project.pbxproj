@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		79DF0167B41F46E19A195AF3 /* OrganizationSchedulerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */; };
+		5D33C2CA6A6243CC93ABACA9 /* OrganizationSchedulerStateRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */; };
+		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
 		36C5F1202883423CA707AA0C /* RoleSearchPageReplayRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */; };
 		C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */; };
 		D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */; };
@@ -275,6 +278,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerState.swift; sourceTree = "<group>"; };
+		435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepository.swift; sourceTree = "<group>"; };
+		6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepositoryTests.swift; sourceTree = "<group>"; };
 		98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplay.swift; sourceTree = "<group>"; };
 		B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepository.swift; sourceTree = "<group>"; };
 		DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepositoryTests.swift; sourceTree = "<group>"; };
@@ -791,6 +797,7 @@
 				9D434939CDFD99464F574C92 /* GitHubNodeDetailsRepository.swift */,
 				8B56A27D21986CB411E76670 /* GitHubNodeRepository.swift */,
 				B8F2641C3F31509040AED734 /* NormalizationFailureRepository.swift */,
+				435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */,
 				C6316D9FB2A97229AC7C08FF /* ProjectV2Repository.swift */,
 				00DC9364CC1A9762B4B26A08 /* PullRequestReviewCandidateRepository.swift */,
 				2FD9CFC561D743ADBE0282C7 /* PullRequestReviewRepository.swift */,
@@ -826,6 +833,7 @@
 				229FFB66C8C6F0E9A2D08077 /* GitHubContent.swift */,
 				D988495C37A78AEED9B566A4 /* Identifiers.swift */,
 				84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */,
+				D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */,
 				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
 				98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */,
 				C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */,
@@ -871,6 +879,7 @@
 				3BE9DBEC755D5052BFDFB278 /* InventoryRepositoryTests.swift */,
 				4860F112B9407577673C7913 /* KeychainSecretStoreTests.swift */,
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
+				6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */,
 				9FF49E3C266981BE31025729 /* PullRequestReviewReconciliationTests.swift */,
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
 				DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */,
@@ -1198,7 +1207,8 @@
 				FEE2A59033AEF4AA0869951E /* OrganizationAccessEvaluatorTests.swift in Sources */,
 				C7F90585CF06BB8C7840CA04 /* OrganizationInventoryRefreshServiceTests.swift in Sources */,
 				F1B233E72F3E02889F3B3F4F /* PersonalAccessTokenTests.swift in Sources */,
-				C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */,
+					C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */,
+					A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */,
 				578CC1E89C6D6601B9599CEF /* ProgressAttentionRuleTests.swift in Sources */,
 				9828F7BEBE9B27EF47A8E6C6 /* PullRequestAttentionRuleTests.swift in Sources */,
 				366338D600898F8D3783779C /* PullRequestReviewReconciliationTests.swift in Sources */,
@@ -1317,7 +1327,9 @@
 				76317CC46221754AE0839CB1 /* InboxEligibilityRule.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
-				F48CFD7952CFEDEADF3C6879 /* NormalizationFailure.swift in Sources */,
+					F48CFD7952CFEDEADF3C6879 /* NormalizationFailure.swift in Sources */,
+					79DF0167B41F46E19A195AF3 /* OrganizationSchedulerState.swift in Sources */,
+					5D33C2CA6A6243CC93ABACA9 /* OrganizationSchedulerStateRepository.swift in Sources */,
 				639B7E593417AF6E3A71451E /* NormalizationFailureRepository.swift in Sources */,
 				2B5F0D587054DAD48A4E4289 /* NotificationActions.swift in Sources */,
 				082DECABB717AFA793F8E555 /* NotificationDeliveryLedger.swift in Sources */,
