@@ -224,6 +224,8 @@ struct GitHubIssueSearchItem: Codable, Sendable {
 }
 
 struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
+    static let parserVersion = 2
+
     let requestKey: String
     let endpoint: String
     let queryValue: String
@@ -232,7 +234,8 @@ struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
     init(
         query: GitHubIssueSearchQuery,
         page: Int,
-        scope: SynchronizationScope
+        scope: SynchronizationScope,
+        streamID: SyncStreamID
     ) throws {
         guard (1...100).contains(page) else {
             throw GitHubIssueSearchError.invalidPage
@@ -240,7 +243,7 @@ struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
         let request = try GitHubIssueSearchClient.request(
             query,
             page: page,
-            ifNoneMatch: nil
+            validators: nil
         )
         let url = try request.resolvedURL(baseURL: URL(string: "https://api.github.com")!)
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
@@ -250,11 +253,15 @@ struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
             "\(components.percentEncodedPath)?\($0)"
         } ?? components.percentEncodedPath
         let material = [
-            "triage-role-search-v1",
+            "triage-role-search-v2",
             scope.accountID.rawValue,
             scope.organizationID.rawValue,
+            CoverageFeature.roleDiscovery.rawValue,
+            streamID.rawValue,
+            "GET",
             scope.credentialRevision.rawValue,
             scope.capabilityRevision.rawValue,
+            String(Self.parserVersion),
             endpoint
         ].joined(separator: "\u{1F}")
         let digest = SHA256.hash(data: Data(material.utf8))
@@ -268,13 +275,8 @@ struct GitHubIssueSearchRequestIdentity: Equatable, Sendable {
 protocol GitHubIssueSearchExecuting: Sendable {
     func searchResult(
         _ query: GitHubIssueSearchQuery,
-        page: Int
-    ) async throws -> GitHubIssueSearchResult
-
-    func searchResult(
-        _ query: GitHubIssueSearchQuery,
         page: Int,
-        ifNoneMatch: String?
+        validators: GitHubHTTPValidators?
     ) async throws -> GitHubIssueSearchResult
 }
 
@@ -287,10 +289,9 @@ enum GitHubIssueSearchResult: Sendable {
 extension GitHubIssueSearchExecuting {
     func searchResult(
         _ query: GitHubIssueSearchQuery,
-        page: Int,
-        ifNoneMatch _: String?
+        page: Int
     ) async throws -> GitHubIssueSearchResult {
-        try await searchResult(query, page: page)
+        try await searchResult(query, page: page, validators: nil)
     }
 
     func searchResponse(
@@ -344,18 +345,18 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
         _ query: GitHubIssueSearchQuery,
         page: Int = 1
     ) async throws -> GitHubIssueSearchResult {
-        try await searchResult(query, page: page, ifNoneMatch: nil)
+        try await searchResult(query, page: page, validators: nil)
     }
 
     func searchResult(
         _ query: GitHubIssueSearchQuery,
         page: Int,
-        ifNoneMatch: String?
+        validators: GitHubHTTPValidators?
     ) async throws -> GitHubIssueSearchResult {
         do {
             let result = try await client.getResponsePreservingUndecodablePayload(
                 GitHubIssueSearchPage.self,
-                request: try Self.request(query, page: page, ifNoneMatch: ifNoneMatch)
+                request: try Self.request(query, page: page, validators: validators)
             )
             return switch result {
             case let .response(response): .response(response)
@@ -369,13 +370,10 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
     nonisolated static func request(
         _ query: GitHubIssueSearchQuery,
         page: Int,
-        ifNoneMatch: String?
+        validators: GitHubHTTPValidators?
     ) throws -> GitHubRESTRequest {
         guard (1...100).contains(page) else {
             throw GitHubIssueSearchError.invalidPage
-        }
-        let validators = try ifNoneMatch.map {
-            try GitHubHTTPValidators(eTag: $0, lastModified: nil)
         }
         return try GitHubRESTRequest(
             path: "/search/issues",
