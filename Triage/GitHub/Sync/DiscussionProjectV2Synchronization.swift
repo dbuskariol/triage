@@ -1,7 +1,7 @@
 import Foundation
 
 enum DiscussionProjectV2SynchronizationError: Error, Equatable, Sendable {
-    case requiresSSO
+    case requiresSSO(GitHubSSOHeader)
     case requiresApproval
 }
 
@@ -45,7 +45,10 @@ actor DiscussionSynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
-            let inventory = try await client.allDiscussions(repositoryNodeID: repositoryNodeID)
+            let inventory = try await client.allDiscussions(
+                repositoryNodeID: repositoryNodeID,
+                githubOrganizationID: organization.githubOrganizationID
+            )
             try Task.checkCancellation()
             let result = recordCoverage(.complete, detail: nil)
             let comments = unavailableCoverage(
@@ -75,16 +78,21 @@ actor DiscussionSynchronizationService {
             )
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
-            let failure = recordCoverage(status(for: error), detail: diagnostic(for: error))
+            let failure = recordCoverage(
+                status(for: error, githubOrganizationID: organization.githubOrganizationID),
+                detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID)
+            )
             try await repository.recordFailure(
                 pages: discussionRawPages(for: error),
                 accountID: scope.accountID,
                 observedAt: observedAt,
-                diagnostic: diagnostic(for: error),
+                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
                 coverageRecord: failure
             )
-            throw mapped(error)
+            throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
         func unavailableCoverage(
@@ -139,7 +147,10 @@ actor ProjectV2SynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
-            let inventory = try await client.allProjects(organizationNodeID: organization.nodeID)
+            let inventory = try await client.allProjects(
+                organizationNodeID: organization.nodeID,
+                githubOrganizationID: organization.githubOrganizationID
+            )
             try Task.checkCancellation()
             let projectCoverage = makeCoverage(feature: .projects, streamID: streamID, repositoryID: nil, status: .complete,
                                                detail: nil, success: observedAt)
@@ -154,14 +165,24 @@ actor ProjectV2SynchronizationService {
             return .init(projects: inventory.projects, projectCoverage: projectCoverage, itemCoverages: [:])
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
-            let failed = makeCoverage(feature: .projects, streamID: streamID, repositoryID: nil, status: status(for: error),
-                                      detail: diagnostic(for: error), success: nil)
+            let failed = makeCoverage(
+                feature: .projects,
+                streamID: streamID,
+                repositoryID: nil,
+                status: status(for: error, githubOrganizationID: organization.githubOrganizationID),
+                detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                success: nil
+            )
             try await repository.recordFailure(
                 pages: projectRawPages(for: error), accountID: scope.accountID,
-                observedAt: observedAt, diagnostic: diagnostic(for: error), coverageRecord: failed
+                observedAt: observedAt,
+                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                coverageRecord: failed
             )
-            throw mapped(error)
+            throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
         func makeCoverage(feature: CoverageFeature, streamID: SyncStreamID, repositoryID: RepositoryID?, status: CoverageStatus,
@@ -181,7 +202,10 @@ actor ProjectV2SynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
-            let inventory = try await client.allItems(projectNodeID: project.nodeID)
+            let inventory = try await client.allItems(
+                projectNodeID: project.nodeID,
+                githubOrganizationID: organization.githubOrganizationID
+            )
             try Task.checkCancellation()
             let status: CoverageStatus = inventory.items.contains(where: { !$0.fieldValuesComplete }) ? .partial : .complete
             let result = coverageRecord(status: status, detail: status == .partial ? "one or more field unions were incomplete" : nil,
@@ -198,13 +222,21 @@ actor ProjectV2SynchronizationService {
             return result
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
-            let failed = coverageRecord(status: status(for: error), detail: diagnostic(for: error), success: nil)
+            let failed = coverageRecord(
+                status: status(for: error, githubOrganizationID: organization.githubOrganizationID),
+                detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                success: nil
+            )
             try await repository.recordFailure(
                 pages: projectRawPages(for: error), accountID: scope.accountID,
-                observedAt: observedAt, diagnostic: diagnostic(for: error), coverageRecord: failed
+                observedAt: observedAt,
+                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                coverageRecord: failed
             )
-            throw mapped(error)
+            throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
         func coverageRecord(status: CoverageStatus, detail: String?, success: Date?) -> CoverageRecord {
@@ -226,6 +258,7 @@ private func discussionRawPages(for error: Error) -> [GitHubDiscussionRawPage] {
          let GitHubDiscussionClientError.missingData(pages),
          let GitHubDiscussionClientError.undecodableResponse(pages),
          let GitHubDiscussionClientError.partialResponse(pages),
+         let GitHubDiscussionClientError.ssoResponse(pages, _),
          let GitHubDiscussionClientError.normalizationFailed(pages),
          let GitHubDiscussionClientError.aggregateLimitExceeded(pages): pages
     default: []
@@ -242,6 +275,7 @@ private func projectRawPages(for error: Error) -> [GitHubProjectV2RawPage] {
          let GitHubProjectV2ClientError.missingData(pages),
          let GitHubProjectV2ClientError.undecodableResponse(pages),
          let GitHubProjectV2ClientError.partialResponse(pages),
+         let GitHubProjectV2ClientError.ssoResponse(pages, _),
          let GitHubProjectV2ClientError.normalizationFailed(pages),
          let GitHubProjectV2ClientError.duplicateItem(pages),
          let GitHubProjectV2ClientError.aggregateLimitExceeded(pages): pages
@@ -249,26 +283,64 @@ private func projectRawPages(for error: Error) -> [GitHubProjectV2RawPage] {
     }
 }
 
-private func status(for error: Error) -> CoverageStatus {
+private func status(for error: Error, githubOrganizationID: UInt64) -> CoverageStatus {
+    if let header = sourceSSOHeader(from: error) {
+        return switch header {
+        case .authorizationRequired: .requiresSSO
+        case .partialResults, .malformed: .partial
+        }
+    }
     guard case let GitHubGraphQLError.requestFailed(failure) = error else { return .partial }
-    if failure.ssoHeader != nil { return .requiresSSO }
+    if let header = failure.ssoHeader?.scoped(to: githubOrganizationID) {
+        return switch header {
+        case .authorizationRequired: .requiresSSO
+        case .partialResults, .malformed: .partial
+        }
+    }
     if failure.accessRestriction != nil { return .requiresApproval }
-    return .failed
+    switch failure.kind {
+    case .forbidden, .notFound: return .unavailable
+    case .rateLimited, .secondaryRateLimited: return .partial
+    case .unauthorized, .serverFailure, .unexpectedResponse: return .failed
+    }
 }
 
-private func mapped(_ error: Error) -> Error {
+private func mapped(_ error: Error, githubOrganizationID: UInt64) -> Error {
+    if let header = sourceSSOHeader(from: error), case .authorizationRequired = header {
+        return DiscussionProjectV2SynchronizationError.requiresSSO(header)
+    }
     guard case let GitHubGraphQLError.requestFailed(failure) = error else { return error }
-    if failure.ssoHeader != nil { return DiscussionProjectV2SynchronizationError.requiresSSO }
+    if let ssoHeader = failure.ssoHeader?.scoped(to: githubOrganizationID),
+       case .authorizationRequired = ssoHeader {
+        return DiscussionProjectV2SynchronizationError.requiresSSO(ssoHeader)
+    }
     if failure.accessRestriction != nil { return DiscussionProjectV2SynchronizationError.requiresApproval }
     return error
 }
 
-private func diagnostic(for error: Error) -> String {
+private func diagnostic(for error: Error, githubOrganizationID: UInt64) -> String {
+    if let header = sourceSSOHeader(from: error) {
+        return switch header {
+        case .authorizationRequired:
+            "GitHub organization SSO authorization is required for this resource."
+        case .partialResults:
+            "GitHub reported partial results for this organization; this resource remains incomplete."
+        case .malformed:
+            "GitHub returned malformed organization SSO metadata; this resource remains incomplete."
+        }
+    }
     guard case let GitHubGraphQLError.requestFailed(failure) = error else {
         return "GitHub discussion or project synchronization did not complete."
     }
-    if failure.ssoHeader != nil {
-        return "GitHub organization SSO authorization is required for this resource."
+    if let header = failure.ssoHeader?.scoped(to: githubOrganizationID) {
+        return switch header {
+        case .authorizationRequired:
+            "GitHub organization SSO authorization is required for this resource."
+        case .partialResults:
+            "GitHub reported partial results for this organization; this resource remains incomplete."
+        case .malformed:
+            "GitHub returned malformed organization SSO metadata; this resource remains incomplete."
+        }
     }
     if failure.accessRestriction != nil {
         return "GitHub organization approval is required for this resource."
@@ -282,5 +354,15 @@ private func diagnostic(for error: Error) -> String {
         return "This resource is unavailable to the selected account."
     case .serverFailure, .unexpectedResponse:
         return "GitHub did not complete the resource request."
+    }
+}
+
+private func sourceSSOHeader(from error: Error) -> GitHubSSOHeader? {
+    switch error {
+    case let GitHubDiscussionClientError.ssoResponse(_, header),
+         let GitHubProjectV2ClientError.ssoResponse(_, header):
+        header
+    default:
+        nil
     }
 }

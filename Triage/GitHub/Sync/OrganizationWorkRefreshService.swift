@@ -50,6 +50,7 @@ actor OrganizationWorkRefreshService {
         let searchClient = GitHubIssueSearchClient(client: restClient)
         var searchRange: SearchTimeRange?
         var deferredSSORequirement: GitHubSSOHeader?
+        var contextRecovery = OrganizationContextRecovery()
         var roleDiscoveryCompleted = false
         let refreshedWorkItemIDs: [WorkItemID]
         do {
@@ -239,6 +240,21 @@ actor OrganizationWorkRefreshService {
                     repositoryIDsByNodeID[repository.id]
                 }
             )
+            let contextOutcome = try await OrganizationContextRefreshService(
+                vault: vault,
+                graphQLClient: graphqlClient,
+                selectionPolicy: .policy(for: requestPriority)
+            ).refresh(
+                scope: synchronizationScope,
+                organization: organization,
+                repositories: inventory,
+                observedAt: serverObservedAt
+            )
+            contextRecovery = contextOutcome.recovery
+            deferredSSORequirement = GitHubSSOHeader.combined([
+                deferredSSORequirement,
+                contextRecovery.ssoRequirement?.scoped(to: organization.githubOrganizationID)
+            ])
             let timelineSSORequirement = try await refreshTimelines(
                 restClient: restClient,
                 vault: vault,
@@ -373,6 +389,32 @@ actor OrganizationWorkRefreshService {
         }
         if let deferredSSORequirement {
             throw OrganizationRefreshError.ssoRequirement(deferredSSORequirement)
+        }
+        if contextRecovery.approvalRequired {
+            throw AccountOrganizationRefreshFailure.approvalRequired(
+                detail: "GitHub organization approval is required for Discussion or Projects V2 context."
+            )
+        }
+        if contextRecovery.authenticationRequired {
+            throw AccountOrganizationRefreshFailure.authenticationRequired(
+                detail: "Reconnect the selected account to refresh Discussion or Projects V2 context."
+            )
+        }
+        if contextRecovery.offline {
+            throw AccountOrganizationRefreshFailure.offline(
+                detail: "A network connection is required to refresh Discussion or Projects V2 context."
+            )
+        }
+        if contextRecovery.rateLimited {
+            throw AccountOrganizationRefreshFailure.rateLimited(
+                retryAt: contextRecovery.rateLimitRetryAt,
+                detail: "GitHub rate limiting left Discussion or Projects V2 context incomplete."
+            )
+        }
+        if contextRecovery.failed {
+            throw AccountOrganizationRefreshFailure.failed(
+                detail: "GitHub did not complete one or more Discussion or Projects V2 context streams."
+            )
         }
         return refreshedWorkItemIDs
     }

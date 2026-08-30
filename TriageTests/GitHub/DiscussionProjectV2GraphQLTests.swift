@@ -24,7 +24,10 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         ])
         let client = GitHubDiscussionClient(client: GitHubGraphQLClient(session: session, credential: SecretValue("token")))
         do {
-            _ = try await client.allDiscussions(repositoryNodeID: GitHubNodeID(rawValue: "R_1")!)
+            _ = try await client.allDiscussions(
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                githubOrganizationID: 1
+            )
             XCTFail("Expected cursor loop rejection.")
         } catch let error as GitHubDiscussionClientError {
             guard case let .paginationLoop(pages) = error else {
@@ -41,7 +44,10 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         ])
         let client = GitHubDiscussionClient(client: GitHubGraphQLClient(session: session, credential: SecretValue("token")))
         do {
-            _ = try await client.allDiscussions(repositoryNodeID: GitHubNodeID(rawValue: "R_1")!)
+            _ = try await client.allDiscussions(
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                githubOrganizationID: 1
+            )
             XCTFail("Expected aggregate budget rejection.")
         } catch let error as GitHubDiscussionClientError {
             guard case let .aggregateLimitExceeded(pages) = error else {
@@ -49,6 +55,48 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
             }
             XCTAssertEqual(pages.count, 2)
         }
+    }
+
+    func testDiscussionClientPreservesScopedPartialResultsWithoutNormalizingThem() async throws {
+        let header = "partial-results; organizations=1"
+        let session = DiscussionProjectSession(
+            responses: [discussionResponse(id: "D_1", hasNextPage: false, cursor: nil)],
+            headers: [["X-GitHub-SSO": header]]
+        )
+        let client = GitHubDiscussionClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allDiscussions(
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                githubOrganizationID: 1
+            )
+            XCTFail("Expected scoped partial-result rejection.")
+        } catch let error as GitHubDiscussionClientError {
+            guard case let .ssoResponse(pages, parsedHeader) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(parsedHeader, GitHubSSOHeader(value: header))
+            XCTAssertEqual(pages.count, 1)
+        }
+    }
+
+    func testDiscussionClientIgnoresPartialResultsForAnotherOrganization() async throws {
+        let session = DiscussionProjectSession(
+            responses: [discussionResponse(id: "D_1", hasNextPage: false, cursor: nil)],
+            headers: [["X-GitHub-SSO": "partial-results; organizations=2"]]
+        )
+        let client = GitHubDiscussionClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        let inventory = try await client.allDiscussions(
+            repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+            githubOrganizationID: 1
+        )
+
+        XCTAssertEqual(inventory.discussions.map(\.nodeID.rawValue), ["D_1"])
     }
 
     func testDiscussionNormalizerRejectsMalformedDiscussion() {
@@ -112,10 +160,14 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         )
 
         let projects = try await client.allProjects(
-            organizationNodeID: GitHubNodeID(rawValue: "O_1")!
+            organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
+            githubOrganizationID: 1
         )
         XCTAssertEqual(projects.projects.map(\.nodeID.rawValue), ["P_1"])
-        let items = try await client.allItems(projectNodeID: GitHubNodeID(rawValue: "P_1")!)
+        let items = try await client.allItems(
+            projectNodeID: GitHubNodeID(rawValue: "P_1")!,
+            githubOrganizationID: 1
+        )
         XCTAssertEqual(items.items.map(\.nodeID.rawValue), ["PVTI_1"])
 
         let bodies = await session.requestBodies()
@@ -124,6 +176,31 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertEqual(try variableKeys(in: bodies[1]), ["projectID"])
         XCTAssertEqual(try variableKeys(in: bodies[2]), ["itemID"])
         XCTAssertFalse(bodies.contains { String(decoding: $0, as: UTF8.self).contains("\"nodeID\"") })
+    }
+
+    func testProjectClientPreservesScopedPartialResultsWithoutNormalizingThem() async throws {
+        let header = "partial-results; organizations=1"
+        let session = DiscussionProjectSession(
+            responses: [projectInventoryResponse()],
+            headers: [["X-GitHub-SSO": header]]
+        )
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allProjects(
+                organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
+                githubOrganizationID: 1
+            )
+            XCTFail("Expected scoped partial-result rejection.")
+        } catch let error as GitHubProjectV2ClientError {
+            guard case let .ssoResponse(pages, parsedHeader) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(parsedHeader, GitHubSSOHeader(value: header))
+            XCTAssertEqual(pages.count, 1)
+        }
     }
 
     func testProjectMissingRequestedNodeCarriesItsRawPage() async throws {
@@ -138,7 +215,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
 
         do {
             _ = try await client.allProjects(
-                organizationNodeID: GitHubNodeID(rawValue: "O_missing")!
+                organizationNodeID: GitHubNodeID(rawValue: "O_missing")!,
+                githubOrganizationID: 1
             )
             XCTFail("Expected a missing-node failure.")
         } catch let error as GitHubProjectV2ClientError {
@@ -160,7 +238,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
 
         do {
             _ = try await client.allProjects(
-                organizationNodeID: GitHubNodeID(rawValue: "O_1")!
+                organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
+                githubOrganizationID: 1
             )
             XCTFail("Expected an undecodable-response failure.")
         } catch let error as GitHubProjectV2ClientError {
@@ -214,12 +293,25 @@ private func projectFieldValuesResponse() -> Data {
 
 private actor DiscussionProjectSession: HTTPSession {
     private var responses: [Data]
+    private var headers: [[String: String]]
     private var bodies = [Data]()
-    init(responses: [Data]) { self.responses = responses }
+    init(responses: [Data], headers: [[String: String]] = []) {
+        self.responses = responses
+        self.headers = headers
+    }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         guard !responses.isEmpty else { throw URLError(.resourceUnavailable) }
         bodies.append(try XCTUnwrap(request.httpBody))
-        return (responses.removeFirst(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        let responseHeaders = headers.isEmpty ? nil : headers.removeFirst()
+        return (
+            responses.removeFirst(),
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: responseHeaders
+            )!
+        )
     }
 
     func requestBodies() -> [Data] { bodies }

@@ -9,6 +9,7 @@ enum GitHubDiscussionClientError: Error, Equatable, Sendable {
     case missingData([GitHubDiscussionRawPage])
     case undecodableResponse([GitHubDiscussionRawPage])
     case partialResponse([GitHubDiscussionRawPage])
+    case ssoResponse([GitHubDiscussionRawPage], GitHubSSOHeader)
     case normalizationFailed([GitHubDiscussionRawPage])
     case aggregateLimitExceeded([GitHubDiscussionRawPage])
 }
@@ -34,7 +35,8 @@ actor GitHubDiscussionClient {
     }
 
     func allDiscussions(
-        repositoryNodeID: GitHubNodeID
+        repositoryNodeID: GitHubNodeID,
+        githubOrganizationID: UInt64
     ) async throws -> GitHubDiscussionInventory {
         try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.repositoryDiscussions()
@@ -64,12 +66,18 @@ actor GitHubDiscussionClient {
                     endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
                     payload: undecodable.payload
                 )
+                if let header = undecodable.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
+                    throw GitHubDiscussionClientError.ssoResponse(pages + [rawPage], header)
+                }
                 throw GitHubDiscussionClientError.undecodableResponse(pages + [rawPage])
             }
             let rawPage = GitHubDiscussionRawPage(
                 endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
                 payload: response.payload
             )
+            if let header = response.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
+                throw GitHubDiscussionClientError.ssoResponse(pages + [rawPage], header)
+            }
             guard response.errors.isEmpty else {
                 throw GitHubDiscussionClientError.partialResponse(pages + [rawPage])
             }

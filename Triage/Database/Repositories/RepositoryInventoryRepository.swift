@@ -87,6 +87,7 @@ actor RepositoryInventoryRepository {
                     JOIN account_repository_access
                       ON account_repository_access.repository_id = repositories.id
                     WHERE account_repository_access.account_id = ?
+                      AND account_repository_access.access_state = 'available'
                       AND repositories.organization_id = ?
                     ORDER BY repositories.owner_login, repositories.name, repositories.id
                     """,
