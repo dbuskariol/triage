@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		36C5F1202883423CA707AA0C /* RoleSearchPageReplayRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */; };
+		C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */; };
+		D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */; };
 		0157261AEB2710C728B4A609 /* WorkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA6952357B8ECC6AF45D0D1 /* WorkDetailView.swift */; };
 		03EB63E47F6B7F9A679B64AE /* GitHubIdentityClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 326A309D86A0DA32F49BD907 /* GitHubIdentityClient.swift */; };
 		045B7390CA22D6FA51470E8A /* GitHubSearchNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BCA90EAF4A677B2A3CC810D /* GitHubSearchNormalizerTests.swift */; };
@@ -272,6 +275,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplay.swift; sourceTree = "<group>"; };
+		B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepository.swift; sourceTree = "<group>"; };
+		DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepositoryTests.swift; sourceTree = "<group>"; };
 		00DC9364CC1A9762B4B26A08 /* PullRequestReviewCandidateRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewCandidateRepository.swift; sourceTree = "<group>"; };
 		0135657C4BEC95CD6D4719D8 /* PullRequestAttentionRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestAttentionRule.swift; sourceTree = "<group>"; };
 		015DD7C686A476CA68CA38BC /* OrganizationSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSyncCoordinator.swift; sourceTree = "<group>"; };
@@ -792,6 +798,7 @@
 				738A7187EF795179516FEBB9 /* PullRequestReviewThreadRepository.swift */,
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
 				4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */,
+				B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */,
 				E1E4F30FD608369F336EF545 /* RepositoryInventoryRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
 				0FDF213EC999CB5B6B21F766 /* SyncShardRepository.swift */,
@@ -820,6 +827,7 @@
 				D988495C37A78AEED9B566A4 /* Identifiers.swift */,
 				84ACECB6F84B6FA9D7308684 /* NormalizationFailure.swift */,
 				685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */,
+				98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */,
 				C1AA6A705CFAFF34E03F42E9 /* SyncShard.swift */,
 				C152D8C003D05F5BBFDA1917 /* SyncStream.swift */,
 				F79F1622FE7D729E3464C27C /* Workflow.swift */,
@@ -865,6 +873,7 @@
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
 				9FF49E3C266981BE31025729 /* PullRequestReviewReconciliationTests.swift */,
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
+				DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */,
 				BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */,
 				BDA3EB791B073738499E0AFB /* TimelineCandidateRepositoryTests.swift */,
 				CF31120472BD37C2BC8E1429 /* TimelineEventRepositoryTests.swift */,
@@ -1196,6 +1205,7 @@
 				B199953B049F078EB07FCC7E /* PullRequestReviewThreadRefreshServiceTests.swift in Sources */,
 				16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */,
 				9F09C8BB8D28AA90F9543606 /* RepositoryAccountScopeTests.swift in Sources */,
+				36C5F1202883423CA707AA0C /* RoleSearchPageReplayRepositoryTests.swift in Sources */,
 				B275753FD7DE29E6FEF00C62 /* RoleDiscoveryPlanTests.swift in Sources */,
 				97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */,
 				84B1FA4D389DB3CD807B890A /* SearchRepositoryTests.swift in Sources */,
@@ -1334,6 +1344,8 @@
 				3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */,
 				DF26F1B11AE871C9C1CD0D1C /* RawAPISnapshot.swift in Sources */,
 				D6BD3ECF42418E448DD9E462 /* RawAPISnapshotRepository.swift in Sources */,
+				C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */,
+				D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */,
 				20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */,
 				73A98E6C8B750A0E1D258A1E /* RepositoryInventoryRepository.swift in Sources */,
 				B3FDE6FE018FC2B4DD87C517 /* RoleDiscoveryPlan.swift in Sources */,

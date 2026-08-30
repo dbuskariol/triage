@@ -908,6 +908,42 @@ enum TriageDatabaseMigrator {
             try database.execute(sql: "ALTER TABLE project_field_values ADD COLUMN value_kind TEXT NOT NULL DEFAULT 'legacy'")
             try database.execute(sql: "ALTER TABLE project_field_values ADD COLUMN context TEXT NOT NULL DEFAULT 'legacy'")
             try database.execute(sql: "ALTER TABLE project_items ADD COLUMN content_node_reference TEXT")
+        },
+        TriageDatabaseMigration(
+            id: "025-role-search-page-replay",
+            checksum: "8821992560f9890caca36a34f7a56f5189483068e9253c08768d45964d2458d0"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL,
+                    query_value TEXT NOT NULL,
+                    page INTEGER NOT NULL CHECK (page BETWEEN 1 AND 100),
+                    endpoint TEXT NOT NULL,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    etag TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, request_key),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE UNIQUE INDEX role_search_page_replays_scope
+                ON role_search_page_replays (
+                    account_id, organization_id, credential_revision, capability_revision,
+                    query_value, page
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON role_search_page_replays (raw_snapshot_id)
+                """)
         }
     ]
 }
