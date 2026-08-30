@@ -1394,6 +1394,180 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX role_search_page_replays_snapshot
                 ON role_search_page_replays (raw_snapshot_id)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "035-source-access-observations",
+            checksum: "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE source_access_observations (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 128),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+                        CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+                        CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL
+                        CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL
+                        CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (length(feature) BETWEEN 1 AND 128),
+                    stream_id TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    target_kind TEXT NOT NULL CHECK (
+                        target_kind IN ('repository', 'githubNode', 'team')
+                    ),
+                    target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 512),
+                    source_locator_kind TEXT NOT NULL CHECK (
+                        source_locator_kind IN ('endpoint', 'query')
+                    ),
+                    source_locator TEXT NOT NULL
+                        CHECK (length(source_locator) BETWEEN 1 AND 2048),
+                    source_node_id TEXT CHECK (
+                        source_node_id IS NULL OR length(source_node_id) BETWEEN 1 AND 512
+                    ),
+                    source_event_id TEXT CHECK (
+                        source_event_id IS NULL OR length(source_event_id) BETWEEN 1 AND 512
+                    ),
+                    source_revision TEXT NOT NULL
+                        CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    raw_snapshot_id TEXT REFERENCES raw_api_snapshots(id)
+                        ON DELETE SET NULL CHECK (
+                            raw_snapshot_id IS NULL
+                                OR length(raw_snapshot_id) BETWEEN 1 AND 512
+                        ),
+                    result TEXT NOT NULL CHECK (
+                        result IN (
+                            'accessible', 'inaccessible', 'unknown', 'authoritativelyDeleted'
+                        )
+                    ),
+                    reason TEXT NOT NULL CHECK (
+                        reason IN (
+                            'directResponse', 'privateNotFound', 'forbidden', 'ssoRequired',
+                            'approvalRequired', 'inventoryOmission', 'authoritativeOmission',
+                            'immutableIdentityReplacement'
+                        )
+                    ),
+                    authority TEXT NOT NULL CHECK (
+                        authority IN ('incremental', 'directProbe', 'fullReconciliation')
+                    ),
+                    confirmation TEXT NOT NULL CHECK (
+                        confirmation IN ('provisional', 'confirmed')
+                    ),
+                    observed_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (
+                        (result = 'accessible' AND reason = 'directResponse')
+                        OR (
+                            result = 'inaccessible'
+                            AND reason IN (
+                                'privateNotFound', 'forbidden', 'ssoRequired', 'approvalRequired'
+                            )
+                        )
+                        OR (
+                            result = 'unknown'
+                            AND reason = 'inventoryOmission'
+                            AND confirmation = 'provisional'
+                        )
+                        OR (
+                            result = 'authoritativelyDeleted'
+                            AND reason IN (
+                                'authoritativeOmission', 'immutableIdentityReplacement'
+                            )
+                            AND authority = 'fullReconciliation'
+                            AND confirmation = 'confirmed'
+                        )
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX source_access_observations_history
+                ON source_access_observations (
+                    account_id, organization_id, feature, stream_id,
+                    target_kind, target_id, credential_revision, capability_revision,
+                    observed_at_ms DESC, id DESC
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX source_access_observations_authority
+                ON source_access_observations (
+                    account_id, organization_id, feature, stream_id,
+                    credential_revision, capability_revision, observed_at_ms, id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX source_access_observations_raw_snapshot
+                ON source_access_observations (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER source_access_protect_deletion_receipt
+                BEFORE DELETE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM source_access_observations
+                    WHERE raw_snapshot_id = OLD.id
+                      AND result = 'authoritativelyDeleted'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM accounts WHERE id = OLD.account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'authoritative deletion receipt is durable');
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER source_access_protect_deletion_receipt_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM source_access_observations
+                    WHERE raw_snapshot_id = OLD.id
+                      AND result = 'authoritativelyDeleted'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM accounts WHERE id = OLD.account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'authoritative deletion receipt is immutable');
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TABLE source_access_projections (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+                        CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+                        CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL
+                        CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL
+                        CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (length(feature) BETWEEN 1 AND 128),
+                    stream_id TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    target_kind TEXT NOT NULL CHECK (
+                        target_kind IN ('repository', 'githubNode', 'team')
+                    ),
+                    target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 512),
+                    result TEXT NOT NULL CHECK (
+                        result IN (
+                            'accessible', 'inaccessible', 'unknown', 'authoritativelyDeleted'
+                        )
+                    ),
+                    winning_observation_id TEXT NOT NULL UNIQUE
+                        REFERENCES source_access_observations(id) ON DELETE CASCADE,
+                    observed_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id, target_kind, target_id
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX source_access_projections_current_revision
+                ON source_access_projections (
+                    account_id, organization_id, credential_revision,
+                    capability_revision, feature, stream_id, target_kind, target_id
+                )
+                """)
         }
     ]
 }

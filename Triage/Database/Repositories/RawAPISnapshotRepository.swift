@@ -203,6 +203,12 @@ actor RawAPISnapshotRepository {
                           FROM timeline_replay_receipt_pages
                           WHERE timeline_replay_receipt_pages.raw_snapshot_id = raw_api_snapshots.id
                       )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM source_access_observations
+                          WHERE source_access_observations.raw_snapshot_id = raw_api_snapshots.id
+                            AND source_access_observations.result = 'authoritativelyDeleted'
+                      )
                     """,
                 arguments: [
                     accountID.rawValue,
