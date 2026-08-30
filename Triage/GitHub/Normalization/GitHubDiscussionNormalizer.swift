@@ -86,7 +86,9 @@ enum GitHubDiscussionNormalizer {
                 throw GitHubDiscussionNormalizationError.invalidDiscussion
             }
             let answerID = discussion.answer.flatMap { GitHubNodeID(rawValue: $0.id) }
-            guard discussion.answer == nil || answerID != nil else {
+            guard (discussion.answer == nil || answerID != nil),
+                  discussion.isAnswered == (answerID != nil)
+            else {
                 throw GitHubDiscussionNormalizationError.invalidDiscussion
             }
             return GitHubDiscussionRecord(

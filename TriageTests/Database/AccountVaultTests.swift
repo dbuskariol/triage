@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "028-account-organization-durable-state")
+        XCTAssertEqual(migrations.last?.id, "029-repository-discussion-capability-provenance")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "594034d7445efa2e5c4893fc2daff3687810fb9b5c04579a165627dd4c95b2b6"
+            "c994cb4855836e571bc45a4baeedf4b154959027e67c397ed1ff7b0875288544"
         )
         try await registry.closeAll()
     }

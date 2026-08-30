@@ -1110,6 +1110,16 @@ enum TriageDatabaseMigrator {
                         ON DELETE CASCADE
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "029-repository-discussion-capability-provenance",
+            checksum: "c994cb4855836e571bc45a4baeedf4b154959027e67c397ed1ff7b0875288544"
+        ) { database in
+            try database.execute(sql: """
+                ALTER TABLE repositories
+                ADD COLUMN has_discussions_known INTEGER NOT NULL DEFAULT 0
+                    CHECK (has_discussions_known IN (0, 1))
+                """)
         }
     ]
 }

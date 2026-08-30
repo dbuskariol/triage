@@ -1,15 +1,17 @@
 import Foundation
 
 enum GitHubProjectV2ClientError: Error, Equatable, Sendable {
-    case paginationLoop
-    case paginationLimitExceeded
-    case queryCostExceeded
-    case missingRequestedNode
-    case incompleteConnection
-    case partialResponse(GitHubProjectV2RawPage)
+    case paginationLoop([GitHubProjectV2RawPage])
+    case paginationLimitExceeded([GitHubProjectV2RawPage])
+    case queryCostExceeded([GitHubProjectV2RawPage])
+    case missingRequestedNode([GitHubProjectV2RawPage])
+    case incompleteConnection([GitHubProjectV2RawPage])
+    case missingData([GitHubProjectV2RawPage])
+    case undecodableResponse([GitHubProjectV2RawPage])
+    case partialResponse([GitHubProjectV2RawPage])
     case normalizationFailed([GitHubProjectV2RawPage])
     case aggregateLimitExceeded([GitHubProjectV2RawPage])
-    case duplicateItem
+    case duplicateItem([GitHubProjectV2RawPage])
 }
 
 struct GitHubProjectV2RawPage: Equatable, Sendable {
@@ -37,6 +39,7 @@ actor GitHubProjectV2Client {
     }
 
     func allProjects(organizationNodeID: GitHubNodeID) async throws -> GitHubProjectV2Inventory {
+        try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.organizationProjectsV2()
         var pages = [GitHubProjectV2RawPage]()
         var projects = [GitHubProjectV2InventoryPayload.Project]()
@@ -45,18 +48,25 @@ actor GitHubProjectV2Client {
         var budget = AggregateBudget()
         while true {
             let response = try await execute(
-                query, variables: CursorVariables(nodeID: organizationNodeID.rawValue, after: after),
+                query,
+                variables: OrganizationProjectsVariables(
+                    organizationID: organizationNodeID.rawValue,
+                    after: after
+                ),
                 endpoint: "graphql:TriageOrganizationProjectsV2/organization=\(organizationNodeID.rawValue)",
-                page: pages.count + 1, as: GitHubProjectV2InventoryPayload.self
+                page: pages.count + 1,
+                priorPages: pages,
+                as: GitHubProjectV2InventoryPayload.self
             )
-            let payload: GitHubProjectV2InventoryPayload = try completed(response)
+            try Task.checkCancellation()
+            let payload: GitHubProjectV2InventoryPayload = try completed(response, priorPages: pages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: pages)
             pages.append(response.raw)
             guard let organization = payload.node, organization.id == organizationNodeID.rawValue else {
-                throw GitHubProjectV2ClientError.missingRequestedNode
+                throw GitHubProjectV2ClientError.missingRequestedNode(pages)
             }
             guard !organization.projectsV2.nodes.contains(where: { $0 == nil }) else {
-                throw GitHubProjectV2ClientError.incompleteConnection
+                throw GitHubProjectV2ClientError.incompleteConnection(pages)
             }
             projects.append(contentsOf: organization.projectsV2.nodes.compactMap { $0 })
             guard organization.projectsV2.pageInfo.hasNextPage else { break }
@@ -65,8 +75,8 @@ actor GitHubProjectV2Client {
                   cursors.insert(cursor).inserted
             else {
                 throw pages.count >= Self.maximumPages
-                    ? GitHubProjectV2ClientError.paginationLimitExceeded
-                    : GitHubProjectV2ClientError.paginationLoop
+                    ? GitHubProjectV2ClientError.paginationLimitExceeded(pages)
+                    : GitHubProjectV2ClientError.paginationLoop(pages)
             }
             after = cursor
         }
@@ -78,6 +88,7 @@ actor GitHubProjectV2Client {
     }
 
     func allItems(projectNodeID: GitHubNodeID) async throws -> GitHubProjectV2Items {
+        try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.projectV2Items()
         var rawPages = [GitHubProjectV2RawPage]()
         var items = [GitHubProjectV2ItemPayload.Item]()
@@ -86,18 +97,25 @@ actor GitHubProjectV2Client {
         var budget = AggregateBudget()
         while true {
             let response = try await execute(
-                query, variables: CursorVariables(nodeID: projectNodeID.rawValue, after: after),
-                endpoint: "graphql:TriageProjectV2Items/project=\(projectNodeID.rawValue)", page: rawPages.count + 1,
+                query,
+                variables: ProjectItemsVariables(
+                    projectID: projectNodeID.rawValue,
+                    after: after
+                ),
+                endpoint: "graphql:TriageProjectV2Items/project=\(projectNodeID.rawValue)",
+                page: rawPages.count + 1,
+                priorPages: rawPages,
                 as: GitHubProjectV2ItemPayload.self
             )
-            let payload: GitHubProjectV2ItemPayload = try completed(response)
+            try Task.checkCancellation()
+            let payload: GitHubProjectV2ItemPayload = try completed(response, priorPages: rawPages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: rawPages)
             rawPages.append(response.raw)
             guard let project = payload.node, project.id == projectNodeID.rawValue else {
-                throw GitHubProjectV2ClientError.missingRequestedNode
+                throw GitHubProjectV2ClientError.missingRequestedNode(rawPages)
             }
             guard !project.items.nodes.contains(where: { $0 == nil }) else {
-                throw GitHubProjectV2ClientError.incompleteConnection
+                throw GitHubProjectV2ClientError.incompleteConnection(rawPages)
             }
             items.append(contentsOf: project.items.nodes.compactMap { $0 })
             guard project.items.pageInfo.hasNextPage else { break }
@@ -106,14 +124,15 @@ actor GitHubProjectV2Client {
                   cursors.insert(cursor).inserted
             else {
                 throw rawPages.count >= Self.maximumPages
-                    ? GitHubProjectV2ClientError.paginationLimitExceeded
-                    : GitHubProjectV2ClientError.paginationLoop
+                    ? GitHubProjectV2ClientError.paginationLimitExceeded(rawPages)
+                    : GitHubProjectV2ClientError.paginationLoop(rawPages)
             }
             after = cursor
         }
-        let itemIDs = try uniqueItemIDs(items)
+        let itemIDs = try uniqueItemIDs(items, rawPages: rawPages)
         var normalized = [GitHubProjectV2ItemRecord]()
         for (item, itemID) in zip(items, itemIDs) {
+            try Task.checkCancellation()
             let values = try await allFieldValues(itemNodeID: itemID, rawPages: &rawPages, budget: &budget)
             do {
                 normalized.append(try GitHubProjectV2Normalizer.item(item, projectNodeID: projectNodeID, fieldValues: values))
@@ -136,18 +155,25 @@ actor GitHubProjectV2Client {
         var pageCount = 0
         while true {
             let response = try await execute(
-                query, variables: CursorVariables(nodeID: itemNodeID.rawValue, after: after),
-                endpoint: "graphql:TriageProjectV2ItemFieldValues/item=\(itemNodeID.rawValue)", page: pageCount + 1,
+                query,
+                variables: ProjectItemFieldValuesVariables(
+                    itemID: itemNodeID.rawValue,
+                    after: after
+                ),
+                endpoint: "graphql:TriageProjectV2ItemFieldValues/item=\(itemNodeID.rawValue)",
+                page: pageCount + 1,
+                priorPages: rawPages,
                 as: GitHubProjectV2FieldValuePayload.self
             )
-            let payload: GitHubProjectV2FieldValuePayload = try completed(response)
+            try Task.checkCancellation()
+            let payload: GitHubProjectV2FieldValuePayload = try completed(response, priorPages: rawPages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: rawPages)
             rawPages.append(response.raw)
             guard let item = payload.node, item.id == itemNodeID.rawValue else {
-                throw GitHubProjectV2ClientError.missingRequestedNode
+                throw GitHubProjectV2ClientError.missingRequestedNode(rawPages)
             }
             guard !item.fieldValues.nodes.contains(where: { $0 == nil }) else {
-                throw GitHubProjectV2ClientError.incompleteConnection
+                throw GitHubProjectV2ClientError.incompleteConnection(rawPages)
             }
             values.append(contentsOf: item.fieldValues.nodes.compactMap { $0 })
             pageCount += 1
@@ -157,37 +183,58 @@ actor GitHubProjectV2Client {
                   cursors.insert(cursor).inserted
             else {
                 throw pageCount >= Self.maximumPages
-                    ? GitHubProjectV2ClientError.paginationLimitExceeded
-                    : GitHubProjectV2ClientError.paginationLoop
+                    ? GitHubProjectV2ClientError.paginationLimitExceeded(rawPages)
+                    : GitHubProjectV2ClientError.paginationLoop(rawPages)
             }
             after = cursor
         }
         return values
     }
 
-    private func execute<Value: Decodable & Sendable>(
+    private func execute<Value: Decodable & Sendable, Variables: Encodable & Sendable>(
         _ query: GitHubGraphQLQuery,
-        variables: CursorVariables,
+        variables: Variables,
         endpoint: String,
         page: Int,
+        priorPages: [GitHubProjectV2RawPage],
         as type: Value.Type
     ) async throws -> (response: GitHubGraphQLResponse<Value>, raw: GitHubProjectV2RawPage) {
-        let response = try await client.execute(query, variables: variables, as: type)
-        return (response, .init(endpoint: "\(endpoint)/page=\(page)", payload: response.payload))
+        let decodingResult = try await client.executePreservingUndecodableResponse(
+            query,
+            variables: variables,
+            as: type
+        )
+        switch decodingResult {
+        case let .response(response):
+            return (response, .init(endpoint: "\(endpoint)/page=\(page)", payload: response.payload))
+        case let .undecodable(undecodable):
+            let rawPage = GitHubProjectV2RawPage(
+                endpoint: "\(endpoint)/page=\(page)",
+                payload: undecodable.payload
+            )
+            throw GitHubProjectV2ClientError.undecodableResponse(priorPages + [rawPage])
+        }
     }
 
-    private func completed<Value>(_ result: (response: GitHubGraphQLResponse<Value>, raw: GitHubProjectV2RawPage)) throws -> Value {
-        guard result.response.errors.isEmpty else { throw GitHubProjectV2ClientError.partialResponse(result.raw) }
-        guard let data = result.response.data else { throw GitHubGraphQLError.missingData }
+    private func completed<Value>(
+        _ result: (response: GitHubGraphQLResponse<Value>, raw: GitHubProjectV2RawPage),
+        priorPages: [GitHubProjectV2RawPage]
+    ) throws -> Value {
+        let pages = priorPages + [result.raw]
+        guard result.response.errors.isEmpty else { throw GitHubProjectV2ClientError.partialResponse(pages) }
+        guard let data = result.response.data else { throw GitHubProjectV2ClientError.missingData(pages) }
         guard let cost = (data as? GitHubProjectV2InventoryPayload)?.rateLimit.cost
                 ?? (data as? GitHubProjectV2ItemPayload)?.rateLimit.cost
                 ?? (data as? GitHubProjectV2FieldValuePayload)?.rateLimit.cost,
               cost >= 0, cost <= Self.maximumQueryCost
-        else { throw GitHubProjectV2ClientError.queryCostExceeded }
+        else { throw GitHubProjectV2ClientError.queryCostExceeded(pages) }
         return data
     }
 
-    private func uniqueItemIDs(_ items: [GitHubProjectV2ItemPayload.Item]) throws -> [GitHubNodeID] {
+    private func uniqueItemIDs(
+        _ items: [GitHubProjectV2ItemPayload.Item],
+        rawPages: [GitHubProjectV2RawPage]
+    ) throws -> [GitHubNodeID] {
         let identifiers = try items.map {
             guard let id = GitHubNodeID(rawValue: $0.id) else {
                 throw GitHubProjectV2NormalizationError.missingItemID
@@ -195,13 +242,23 @@ actor GitHubProjectV2Client {
             return id
         }
         guard Set(identifiers).count == identifiers.count else {
-            throw GitHubProjectV2ClientError.duplicateItem
+            throw GitHubProjectV2ClientError.duplicateItem(rawPages)
         }
         return identifiers
     }
 
-    private struct CursorVariables: Encodable, Sendable {
-        let nodeID: String
+    private struct OrganizationProjectsVariables: Encodable, Sendable {
+        let organizationID: String
+        let after: String?
+    }
+
+    private struct ProjectItemsVariables: Encodable, Sendable {
+        let projectID: String
+        let after: String?
+    }
+
+    private struct ProjectItemFieldValuesVariables: Encodable, Sendable {
+        let itemID: String
         let after: String?
     }
 

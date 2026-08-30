@@ -215,6 +215,36 @@ final class InventoryRepositoryTests: XCTestCase {
         XCTAssertEqual(existingRepositories.map(\.name), ["retained"])
     }
 
+    func testOmittedDiscussionCapabilityRemainsExplicitlyUnknown() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let value = fixture.repository(id: 1, nodeID: "R_1", name: "unknown")
+        let omitted = GitHubRepositoryDTO(
+            id: value.id,
+            nodeID: value.nodeID,
+            name: value.name,
+            isPrivate: value.isPrivate,
+            isArchived: value.isArchived,
+            hasDiscussions: nil,
+            htmlURL: value.htmlURL,
+            updatedAt: value.updatedAt,
+            owner: value.owner
+        )
+
+        let summaries = try await repository.replace(
+            [omitted], accountID: fixture.account.id,
+            organization: fixture.organization, observedAt: fixture.date
+        )
+
+        XCTAssertEqual(summaries.first?.hasDiscussions, false)
+        XCTAssertEqual(summaries.first?.hasDiscussionsKnown, false)
+        let known = try await fixture.vault.read { database in
+            try Bool.fetchOne(database, sql: "SELECT has_discussions_known FROM repositories")
+        }
+        XCTAssertEqual(known, false)
+    }
+
     func testRepositoryReplacementRejectsOrganizationOutsideAccountScope() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }

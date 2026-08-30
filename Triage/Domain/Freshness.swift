@@ -10,6 +10,8 @@ enum CoverageFeature: String, CaseIterable, Codable, Sendable {
     case timelines
     case notifications
     case discussions
+    case discussionComments
+    case discussionReplies
     case projects
     case projectItems
     case roleDiscovery

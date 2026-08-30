@@ -21,7 +21,8 @@ actor DiscussionRepository {
         organization: GitHubOrganization,
         repositoryID: RepositoryID,
         observedAt: Date,
-        parserVersion: Int = 1
+        parserVersion: Int = 1,
+        coverageRecords: [CoverageRecord] = []
     ) async throws {
         guard accountID == vault.accountID else { throw DiscussionRepositoryError.accountScopeMismatch }
         try await vault.writeTransaction { database in
@@ -59,6 +60,14 @@ actor DiscussionRepository {
                 )
             }
             try Self.deleteAbsent(discussions.map(\.nodeID), accountID: accountID, repositoryID: repositoryID, in: database)
+            for record in coverageRecords {
+                try CoverageRepository.save(
+                    record,
+                    attemptedAt: observedAt,
+                    expectedAccountID: accountID,
+                    in: database
+                )
+            }
         }
     }
 
@@ -69,17 +78,48 @@ actor DiscussionRepository {
         diagnostic: String,
         parserVersion: Int = 1
     ) async throws {
+        try await recordFailure(
+            pages: [page],
+            accountID: accountID,
+            observedAt: observedAt,
+            diagnostic: diagnostic,
+            parserVersion: parserVersion,
+            coverageRecord: nil
+        )
+    }
+
+    /// Stores replay provenance and its scoped coverage transition together.
+    /// A failure in either write rolls the whole failure record back, preventing
+    /// coverage from claiming evidence that was not retained.
+    func recordFailure(
+        pages: [GitHubDiscussionRawPage],
+        accountID: AccountID,
+        observedAt: Date,
+        diagnostic: String,
+        parserVersion: Int = 1,
+        coverageRecord: CoverageRecord?
+    ) async throws {
         guard accountID == vault.accountID else { throw DiscussionRepositoryError.accountScopeMismatch }
         try await vault.writeTransaction { database in
-            let snapshot = RawAPISnapshot(id: .make(), accountID: accountID, githubNodeID: nil, endpoint: page.endpoint,
-                                          eTag: nil, parserVersion: parserVersion, observedAt: observedAt, payload: page.payload)
-            try RawAPISnapshotRepository.save(snapshot, in: database)
-            try NormalizationFailureRepository.record(
-                .init(id: UUID(), accountID: accountID, rawSnapshotID: snapshot.id, githubNodeID: nil,
-                      endpoint: page.endpoint, parserVersion: parserVersion, occurredAt: observedAt,
-                      redactedDiagnostic: String(diagnostic.prefix(4_096))),
-                in: database
-            )
+            for page in pages {
+                let snapshot = RawAPISnapshot(id: .make(), accountID: accountID, githubNodeID: nil, endpoint: page.endpoint,
+                                              eTag: nil, parserVersion: parserVersion, observedAt: observedAt, payload: page.payload)
+                try RawAPISnapshotRepository.save(snapshot, in: database)
+                try NormalizationFailureRepository.record(
+                    .init(id: UUID(), accountID: accountID, rawSnapshotID: snapshot.id, githubNodeID: nil,
+                          endpoint: page.endpoint, parserVersion: parserVersion, occurredAt: observedAt,
+                          redactedDiagnostic: String(diagnostic.prefix(4_096))),
+                    in: database
+                )
+            }
+            if let coverageRecord {
+                try CoverageRepository.save(
+                    coverageRecord,
+                    attemptedAt: observedAt,
+                    expectedAccountID: accountID,
+                    in: database
+                )
+            }
         }
     }
 
@@ -96,7 +136,9 @@ actor DiscussionRepository {
         let repositoryCount = try Int.fetchOne(database, sql: """
             SELECT COUNT(*) FROM repositories
             JOIN account_repository_access ON account_repository_access.repository_id = repositories.id
-            WHERE repositories.id = ? AND repositories.organization_id = ? AND account_repository_access.account_id = ?
+            WHERE repositories.id = ? AND repositories.organization_id = ?
+              AND account_repository_access.account_id = ?
+              AND account_repository_access.access_state = 'available'
             """, arguments: [repositoryID.rawValue, organization.id.rawValue, accountID.rawValue]) ?? 0
         guard repositoryCount == 1 else { throw DiscussionRepositoryError.repositoryScopeMismatch }
     }

@@ -13,7 +13,8 @@ actor ProjectV2Repository {
 
     func replaceProjects(
         _ projects: [GitHubProjectV2Record], rawPages: [GitHubProjectV2RawPage],
-        accountID: AccountID, organization: GitHubOrganization, observedAt: Date, parserVersion: Int = 1
+        accountID: AccountID, organization: GitHubOrganization, observedAt: Date, parserVersion: Int = 1,
+        coverageRecords: [CoverageRecord] = []
     ) async throws {
         guard accountID == vault.accountID else { throw ProjectV2RepositoryError.accountScopeMismatch }
         try await vault.writeTransaction { database in
@@ -35,12 +36,14 @@ actor ProjectV2Repository {
                                      project.state.rawValue, Self.milliseconds(project.updatedAt)])
             }
             try Self.deleteAbsentProjects(projects.map(\.nodeID), accountID: accountID, organizationID: organization.id, in: database)
+            try Self.saveCoverage(coverageRecords, accountID: accountID, attemptedAt: observedAt, in: database)
         }
     }
 
     func replaceItems(
         _ items: [GitHubProjectV2ItemRecord], project: GitHubProjectV2Record, rawPages: [GitHubProjectV2RawPage],
-        accountID: AccountID, organization: GitHubOrganization, observedAt: Date, parserVersion: Int = 1
+        accountID: AccountID, organization: GitHubOrganization, observedAt: Date, parserVersion: Int = 1,
+        coverageRecords: [CoverageRecord] = []
     ) async throws {
         guard accountID == vault.accountID else { throw ProjectV2RepositoryError.accountScopeMismatch }
         try await vault.writeTransaction { database in
@@ -54,6 +57,12 @@ actor ProjectV2Repository {
                   Set(items.map(\.nodeID)).count == items.count else { throw GitHubProjectV2NormalizationError.duplicateItemID }
             try Self.saveRaw(rawPages, accountID: accountID, observedAt: observedAt, parserVersion: parserVersion, in: database)
             for item in items {
+                let linkedContentNodeID = try Self.linkedContentNodeID(
+                    reference: item.contentNodeID,
+                    accountID: accountID,
+                    organizationID: organization.id,
+                    in: database
+                )
                 // ProjectV2Item has no source URL; its project URL is retained with an immutable item fragment.
                 let itemURL = URL(string: project.url.absoluteString + "#item-\(item.nodeID.rawValue)")!
                 try GitHubNodeRepository.save(.init(nodeID: item.nodeID, accountID: accountID, organizationID: organization.id,
@@ -64,11 +73,12 @@ actor ProjectV2Repository {
                 try database.execute(sql: """
                     INSERT INTO project_items (
                       github_node_id, project_node_id, content_node_id, content_node_reference, content_kind, updated_at_ms
-                    ) VALUES (?, ?, NULL, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(github_node_id) DO UPDATE SET project_node_id = excluded.project_node_id,
-                      content_node_id = NULL, content_node_reference = excluded.content_node_reference,
+                      content_node_id = excluded.content_node_id, content_node_reference = excluded.content_node_reference,
                       content_kind = excluded.content_kind, updated_at_ms = excluded.updated_at_ms
-                    """, arguments: [item.nodeID.rawValue, item.projectNodeID.rawValue, item.contentNodeID?.rawValue,
+                    """, arguments: [item.nodeID.rawValue, item.projectNodeID.rawValue, linkedContentNodeID?.rawValue,
+                                     item.contentNodeID?.rawValue,
                                      item.contentKind?.rawValue, Self.milliseconds(item.updatedAt)])
                 if item.fieldValuesComplete {
                     try database.execute(sql: "DELETE FROM project_field_values WHERE project_item_node_id = ?", arguments: [item.nodeID.rawValue])
@@ -83,18 +93,46 @@ actor ProjectV2Repository {
                 }
             }
             try Self.deleteAbsentItems(items.map(\.nodeID), accountID: accountID, projectID: project.nodeID, in: database)
+            try Self.resolveContentReferences(accountID: accountID, organizationID: organization.id, in: database)
+            try Self.saveCoverage(coverageRecords, accountID: accountID, attemptedAt: observedAt, in: database)
         }
     }
 
     func recordFailedPage(_ page: GitHubProjectV2RawPage, accountID: AccountID, observedAt: Date, diagnostic: String, parserVersion: Int = 1) async throws {
+        try await recordFailure(
+            pages: [page], accountID: accountID, observedAt: observedAt,
+            diagnostic: diagnostic, parserVersion: parserVersion, coverageRecord: nil
+        )
+    }
+
+    func recordFailure(
+        pages: [GitHubProjectV2RawPage], accountID: AccountID, observedAt: Date,
+        diagnostic: String, parserVersion: Int = 1, coverageRecord: CoverageRecord?
+    ) async throws {
         guard accountID == vault.accountID else { throw ProjectV2RepositoryError.accountScopeMismatch }
         try await vault.writeTransaction { database in
-            let snapshot = RawAPISnapshot(id: .make(), accountID: accountID, githubNodeID: nil, endpoint: page.endpoint,
-                                          eTag: nil, parserVersion: parserVersion, observedAt: observedAt, payload: page.payload)
-            try RawAPISnapshotRepository.save(snapshot, in: database)
-            try NormalizationFailureRepository.record(.init(id: UUID(), accountID: accountID, rawSnapshotID: snapshot.id,
-                githubNodeID: nil, endpoint: page.endpoint, parserVersion: parserVersion, occurredAt: observedAt,
-                redactedDiagnostic: String(diagnostic.prefix(4_096))), in: database)
+            for page in pages {
+                let snapshot = RawAPISnapshot(id: .make(), accountID: accountID, githubNodeID: nil, endpoint: page.endpoint,
+                                              eTag: nil, parserVersion: parserVersion, observedAt: observedAt, payload: page.payload)
+                try RawAPISnapshotRepository.save(snapshot, in: database)
+                try NormalizationFailureRepository.record(.init(id: UUID(), accountID: accountID, rawSnapshotID: snapshot.id,
+                    githubNodeID: nil, endpoint: page.endpoint, parserVersion: parserVersion, occurredAt: observedAt,
+                    redactedDiagnostic: String(diagnostic.prefix(4_096))), in: database)
+            }
+            if let coverageRecord {
+                try Self.saveCoverage([coverageRecord], accountID: accountID, attemptedAt: observedAt, in: database)
+            }
+        }
+    }
+
+    func resolveContentReferences(accountID: AccountID, organizationID: OrganizationID) async throws {
+        guard accountID == vault.accountID else { throw ProjectV2RepositoryError.accountScopeMismatch }
+        try await vault.writeTransaction { database in
+            try Self.resolveContentReferences(
+                accountID: accountID,
+                organizationID: organizationID,
+                in: database
+            )
         }
     }
 
@@ -103,6 +141,70 @@ actor ProjectV2Repository {
             try RawAPISnapshotRepository.save(.init(id: .make(), accountID: accountID, githubNodeID: nil, endpoint: page.endpoint,
                 eTag: nil, parserVersion: parserVersion, observedAt: observedAt, payload: page.payload), in: database)
         }
+    }
+
+    private nonisolated static func saveCoverage(
+        _ records: [CoverageRecord], accountID: AccountID, attemptedAt: Date, in database: Database
+    ) throws {
+        for record in records {
+            try CoverageRepository.save(
+                record,
+                attemptedAt: attemptedAt,
+                expectedAccountID: accountID,
+                in: database
+            )
+        }
+    }
+
+    private nonisolated static func linkedContentNodeID(
+        reference: GitHubNodeID?, accountID: AccountID, organizationID: OrganizationID, in database: Database
+    ) throws -> GitHubNodeID? {
+        guard let reference else { return nil }
+        let value = try String.fetchOne(database, sql: """
+            SELECT github_node_id
+            FROM github_nodes
+            WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+              AND kind IN (?, ?, ?)
+            """, arguments: [
+                reference.rawValue, accountID.rawValue, organizationID.rawValue,
+                GitHubContentKind.issue.rawValue, GitHubContentKind.pullRequest.rawValue,
+                GitHubContentKind.projectDraftIssue.rawValue
+            ])
+        return value.flatMap(GitHubNodeID.init(rawValue:))
+    }
+
+    private nonisolated static func resolveContentReferences(
+        accountID: AccountID, organizationID: OrganizationID, in database: Database
+    ) throws {
+        try database.execute(sql: """
+            UPDATE project_items
+            SET content_node_id = content_node_reference
+            WHERE content_node_reference IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM projects
+                JOIN github_nodes AS project_nodes
+                  ON project_nodes.github_node_id = projects.github_node_id
+                WHERE projects.github_node_id = project_items.project_node_id
+                  AND projects.organization_id = ?
+                  AND project_nodes.account_id = ?
+                  AND project_nodes.organization_id = ?
+                  AND project_nodes.kind = ?
+              )
+              AND EXISTS (
+                SELECT 1 FROM github_nodes
+                WHERE github_nodes.github_node_id = project_items.content_node_reference
+                  AND github_nodes.account_id = ?
+                  AND github_nodes.organization_id = ?
+                  AND github_nodes.kind IN (?, ?, ?)
+              )
+            """, arguments: [
+                organizationID.rawValue, accountID.rawValue, organizationID.rawValue,
+                GitHubContentKind.project.rawValue,
+                accountID.rawValue, organizationID.rawValue,
+                GitHubContentKind.issue.rawValue, GitHubContentKind.pullRequest.rawValue,
+                GitHubContentKind.projectDraftIssue.rawValue
+            ])
     }
 
     private nonisolated static func validateOrganization(accountID: AccountID, organization: GitHubOrganization, in database: Database) throws {

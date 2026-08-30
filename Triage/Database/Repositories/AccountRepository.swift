@@ -350,11 +350,13 @@ actor AccountRepository {
         }
         let updatedAt = Self.milliseconds(repository.updatedAt)
         return try await vault.write { database in
-            let priorHasDiscussions = try Bool.fetchOne(
+            let prior = try Row.fetchOne(
                 database,
-                sql: "SELECT has_discussions FROM repositories WHERE id = ?",
+                sql: "SELECT has_discussions, has_discussions_known FROM repositories WHERE id = ?",
                 arguments: [repositoryID.rawValue]
             )
+            let priorHasDiscussions: Bool? = prior?["has_discussions"]
+            let priorHasDiscussionsKnown: Bool = prior?["has_discussions_known"] ?? false
             let summary = RepositorySummary(
                 id: repositoryID,
                 nodeID: nodeID,
@@ -363,20 +365,23 @@ actor AccountRepository {
                 isPrivate: repository.isPrivate,
                 isArchived: repository.isArchived,
                 hasDiscussions: repository.hasDiscussions ?? priorHasDiscussions ?? false,
+                hasDiscussionsKnown: repository.hasDiscussions != nil || priorHasDiscussionsKnown,
                 url: repository.htmlURL
             )
             try database.execute(
                 sql: """
                     INSERT INTO repositories (
                         id, organization_id, github_repository_id, github_node_id, owner_login, name,
-                        is_private, is_archived, has_discussions, html_url, updated_at_ms, archived_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_private, is_archived, has_discussions, has_discussions_known,
+                        html_url, updated_at_ms, archived_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         owner_login = excluded.owner_login,
                         name = excluded.name,
                         is_private = excluded.is_private,
                         is_archived = excluded.is_archived,
                         has_discussions = excluded.has_discussions,
+                        has_discussions_known = excluded.has_discussions_known,
                         html_url = excluded.html_url,
                         updated_at_ms = excluded.updated_at_ms,
                         archived_at_ms = excluded.archived_at_ms
@@ -384,7 +389,8 @@ actor AccountRepository {
                 arguments: [
                     summary.id.rawValue, organizationID.rawValue, String(repository.id), nodeID.rawValue,
                     summary.ownerLogin, summary.name, summary.isPrivate, summary.isArchived,
-                    summary.hasDiscussions, summary.url.absoluteString, updatedAt,
+                    summary.hasDiscussions, summary.hasDiscussionsKnown,
+                    summary.url.absoluteString, updatedAt,
                     summary.isArchived ? updatedAt : nil
                 ]
             )

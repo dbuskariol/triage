@@ -517,7 +517,7 @@ final class WorkRelationRepositoryTests: XCTestCase {
         let initialStream = try await repository.stream(withID: streamID, accountID: fixture.accountID)
         let initial = try XCTUnwrap(initialStream)
         XCTAssertEqual(initial.status, .partial)
-        XCTAssertEqual(initial.highWater, coverage.intervalEnd)
+        XCTAssertNil(initial.highWater)
         XCTAssertEqual(initial.lastAttemptAt, fixture.date)
 
         let completed = SyncStream(

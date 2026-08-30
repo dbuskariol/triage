@@ -1,12 +1,14 @@
 import Foundation
 
 enum GitHubDiscussionClientError: Error, Equatable, Sendable {
-    case paginationLoop
-    case paginationLimitExceeded
-    case queryCostExceeded
-    case missingRequestedRepository
-    case incompleteConnection
-    case partialResponse(GitHubDiscussionRawPage)
+    case paginationLoop([GitHubDiscussionRawPage])
+    case paginationLimitExceeded([GitHubDiscussionRawPage])
+    case queryCostExceeded([GitHubDiscussionRawPage])
+    case missingRequestedRepository([GitHubDiscussionRawPage])
+    case incompleteConnection([GitHubDiscussionRawPage])
+    case missingData([GitHubDiscussionRawPage])
+    case undecodableResponse([GitHubDiscussionRawPage])
+    case partialResponse([GitHubDiscussionRawPage])
     case normalizationFailed([GitHubDiscussionRawPage])
     case aggregateLimitExceeded([GitHubDiscussionRawPage])
 }
@@ -34,6 +36,7 @@ actor GitHubDiscussionClient {
     func allDiscussions(
         repositoryNodeID: GitHubNodeID
     ) async throws -> GitHubDiscussionInventory {
+        try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.repositoryDiscussions()
         var after: String?
         var cursors = Set<String>()
@@ -44,23 +47,37 @@ actor GitHubDiscussionClient {
 
         while true {
             guard pages.count < Self.maximumPages else {
-                throw GitHubDiscussionClientError.paginationLimitExceeded
+                throw GitHubDiscussionClientError.paginationLimitExceeded(pages)
             }
-            let response = try await client.execute(
+            let decodingResult = try await client.executePreservingUndecodableResponse(
                 query,
                 variables: CursorVariables(repositoryID: repositoryNodeID.rawValue, after: after),
                 as: GitHubDiscussionPayload.self
             )
+            try Task.checkCancellation()
+            let response: GitHubGraphQLResponse<GitHubDiscussionPayload>
+            switch decodingResult {
+            case let .response(decoded):
+                response = decoded
+            case let .undecodable(undecodable):
+                let rawPage = GitHubDiscussionRawPage(
+                    endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
+                    payload: undecodable.payload
+                )
+                throw GitHubDiscussionClientError.undecodableResponse(pages + [rawPage])
+            }
             let rawPage = GitHubDiscussionRawPage(
                 endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
                 payload: response.payload
             )
             guard response.errors.isEmpty else {
-                throw GitHubDiscussionClientError.partialResponse(rawPage)
+                throw GitHubDiscussionClientError.partialResponse(pages + [rawPage])
             }
-            guard let payload = response.data else { throw GitHubGraphQLError.missingData }
+            guard let payload = response.data else {
+                throw GitHubDiscussionClientError.missingData(pages + [rawPage])
+            }
             guard payload.rateLimit.cost >= 0, payload.rateLimit.cost <= Self.maximumQueryCost else {
-                throw GitHubDiscussionClientError.queryCostExceeded
+                throw GitHubDiscussionClientError.queryCostExceeded(pages + [rawPage])
             }
             guard totalCost <= Self.maximumQueryCost - payload.rateLimit.cost,
                   totalBytes <= Self.maximumPayloadBytes - rawPage.payload.count
@@ -71,17 +88,17 @@ actor GitHubDiscussionClient {
             totalBytes += rawPage.payload.count
             pages.append(rawPage)
             guard let repository = payload.node, repository.id == repositoryNodeID.rawValue else {
-                throw GitHubDiscussionClientError.missingRequestedRepository
+                throw GitHubDiscussionClientError.missingRequestedRepository(pages)
             }
             guard !repository.discussions.nodes.contains(where: { $0 == nil }) else {
-                throw GitHubDiscussionClientError.incompleteConnection
+                throw GitHubDiscussionClientError.incompleteConnection(pages)
             }
             collected.append(contentsOf: repository.discussions.nodes.compactMap { $0 })
             guard repository.discussions.pageInfo.hasNextPage else { break }
             guard let cursor = repository.discussions.pageInfo.endCursor,
                   cursors.insert(cursor).inserted
             else {
-                throw GitHubDiscussionClientError.paginationLoop
+                throw GitHubDiscussionClientError.paginationLoop(pages)
             }
             after = cursor
         }

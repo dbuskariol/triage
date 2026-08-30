@@ -241,6 +241,35 @@ final class CoverageRepositoryTests: XCTestCase {
         XCTAssertEqual(stream.status, .failed)
     }
 
+    func testFirstIncompleteCoverageDoesNotCreateAHighWater() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let end = fixture.date.addingTimeInterval(3_600)
+        let partial = CoverageRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: fixture.streamID,
+            intervalStart: fixture.date,
+            intervalEnd: end,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision,
+            status: .partial,
+            lastSuccessfulAt: nil,
+            failureDetail: "Pagination remains incomplete."
+        )
+
+        try await CoverageRepository(vault: fixture.vault).save(partial, attemptedAt: end)
+
+        let stream = try await SyncStreamRepository(vault: fixture.vault).stream(
+            withID: fixture.streamID,
+            accountID: fixture.accountID
+        )
+        XCTAssertNil(stream?.highWater)
+        XCTAssertEqual(stream?.status, .partial)
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()
