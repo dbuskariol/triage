@@ -1568,6 +1568,132 @@ enum TriageDatabaseMigrator {
                     capability_revision, feature, stream_id, target_kind, target_id
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "036-repository-inventory-replay-receipts",
+            checksum: "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
+        ) { database in
+            try database.execute(sql: """
+                CREATE UNIQUE INDEX sync_streams_exact_scope
+                ON sync_streams (account_id, organization_id, feature, id)
+                """)
+            try database.execute(sql: """
+                CREATE TABLE repository_inventory_replay_receipts (
+                    id TEXT PRIMARY KEY NOT NULL
+                        CHECK (length(id) BETWEEN 1 AND 128),
+                    account_id TEXT NOT NULL
+                        CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL
+                        CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (feature = 'repositories'),
+                    stream_id TEXT NOT NULL
+                        CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL
+                        CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    credential_revision TEXT NOT NULL
+                        CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL
+                        CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    raw_source_revision TEXT NOT NULL
+                        CHECK (length(raw_source_revision) BETWEEN 1 AND 500),
+                    etag TEXT CHECK (
+                        etag IS NULL OR length(etag) BETWEEN 1 AND 2048
+                    ),
+                    last_modified TEXT CHECK (
+                        last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048
+                    ),
+                    raw_observed_at_ms INTEGER NOT NULL,
+                    normalized_committed_at_ms INTEGER NOT NULL,
+                    last_validated_at_ms INTEGER NOT NULL,
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    page_count INTEGER NOT NULL CHECK (page_count BETWEEN 1 AND 100),
+                    normalized_repository_count INTEGER NOT NULL CHECK (
+                        normalized_repository_count BETWEEN 0 AND 10000
+                    ),
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    UNIQUE (
+                        account_id, organization_id, feature, stream_id, request_key
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (account_id, organization_id, feature, stream_id)
+                        REFERENCES sync_streams(account_id, organization_id, feature, id)
+                        ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL),
+                    CHECK (normalized_committed_at_ms >= raw_observed_at_ms),
+                    CHECK (last_validated_at_ms >= normalized_committed_at_ms)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE repository_inventory_replay_receipt_pages (
+                    receipt_id TEXT NOT NULL
+                        REFERENCES repository_inventory_replay_receipts(id) ON DELETE CASCADE
+                        CHECK (length(receipt_id) BETWEEN 1 AND 128),
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    endpoint TEXT NOT NULL CHECK (length(endpoint) BETWEEN 1 AND 2048),
+                    request_key TEXT NOT NULL CHECK (
+                        length(request_key) BETWEEN 1 AND 2048
+                        AND request_key = 'GET ' || endpoint
+                    ),
+                    link_header TEXT CHECK (
+                        link_header IS NULL OR length(link_header) BETWEEN 1 AND 8192
+                    ),
+                    next_endpoint TEXT CHECK (
+                        next_endpoint IS NULL OR length(next_endpoint) BETWEEN 1 AND 2048
+                    ),
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE CASCADE
+                        CHECK (length(raw_snapshot_id) BETWEEN 1 AND 512),
+                    object_count INTEGER NOT NULL CHECK (object_count BETWEEN 0 AND 100),
+                    raw_payload_digest BLOB NOT NULL CHECK (length(raw_payload_digest) = 32),
+                    repository_id_digest BLOB NOT NULL CHECK (length(repository_id_digest) = 32),
+                    PRIMARY KEY (receipt_id, page_index),
+                    UNIQUE (receipt_id, endpoint),
+                    UNIQUE (receipt_id, request_key),
+                    UNIQUE (receipt_id, raw_snapshot_id),
+                    CHECK (next_endpoint IS NULL OR link_header IS NOT NULL)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX repository_inventory_replay_receipts_current_scope
+                ON repository_inventory_replay_receipts (
+                    account_id, organization_id, feature, stream_id,
+                    credential_revision, capability_revision, last_validated_at_ms
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX repository_inventory_replay_receipt_pages_snapshot
+                ON repository_inventory_replay_receipt_pages (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER repository_inventory_protect_replay_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM repository_inventory_replay_receipt_pages
+                    WHERE raw_snapshot_id = OLD.id
+                )
+                AND EXISTS (
+                    SELECT 1 FROM accounts WHERE id = OLD.account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'repository inventory replay receipt is durable');
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER repository_inventory_protect_replay_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM repository_inventory_replay_receipt_pages
+                    WHERE raw_snapshot_id = OLD.id
+                )
+                AND EXISTS (
+                    SELECT 1 FROM accounts WHERE id = OLD.account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'repository inventory replay receipt is immutable');
+                END
+                """)
         }
     ]
 }
