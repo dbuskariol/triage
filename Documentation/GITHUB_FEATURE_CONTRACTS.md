@@ -65,10 +65,21 @@ produces an empty or complete inbox.
 | Issue and pull request discovery | `GET /search/issues`; `GitHubIssueSearchClient`, then `GitHubSearchNormalizer` | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | REST page numbers. Partition each relationship into open plus closed/merged in the preceding 90 days. Snapshot time before search; bisect updated ranges when a shard is incomplete or reaches the result cap. | Search ETags when supplied; 100 results/page, 30 requests/minute search budget | Repository/time-range shards may replace a too-large organization shard. Notifications are discovery evidence only. Any unresolved shard leaves issue/PR search coverage incomplete. |
 | Current issue and PR fields | `TriageHydrateNodes` GraphQL query; `GitHubGraphQLQueries.hydrateNodes`, then node normalizer | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | `nodes(ids:)`; 25-50 IDs, five-minute updated-at overlap | No ETag; 500 points / 4 MiB | REST search supplies candidate identity only. Missing node, partial GraphQL error, or query budget exhaustion leaves the field and repository coverage incomplete. |
 | Private repository membership | Repository inventory plus hydrated `Repository.isPrivate` | Same as repository inventory | Same inventory/reconciliation cadence | Inventory budget | No fallback. A hidden repository is inaccessible, not absent. |
-| Issue timeline | `GET /repos/{owner}/{repo}/issues/{number}/timeline`; `GitHubTimelineClient`, then `GitHubTimelineNormalizer` | OAuth/classic `repo`; fine-grained Issues read or Pull requests read | `Link`; first page on candidate update, then continue from durable page cursor | ETag; 2 MiB/page | None. Timeline events are REST-authoritative; a failure downgrades only timeline coverage. |
+| Issue timeline | `GET /repos/{owner}/{repo}/issues/{number}/timeline`; `GitHubTimelineClient`, then `GitHubTimelineNormalizer` | OAuth/classic `repo`; fine-grained Issues read or Pull requests read | `Link`; first page on candidate update, then continue from durable page cursor | ETag or Last-Modified; 2 MiB/page | No alternate source. Timeline events are REST-authoritative; a failure downgrades only timeline coverage. |
 | Pull request review history | `GET /repos/{owner}/{repo}/pulls/{number}/reviews`; `GitHubPullRequestClient.reviews` | OAuth/classic `repo`; fine-grained Pull requests read | `Link`; full first load, then five-minute overlap | ETag; 2 MiB/page | None. Failure leaves review-history coverage incomplete. |
 | Requested reviewers | `GET /repos/{owner}/{repo}/pulls/{number}/requested_reviewers`; `GitHubPullRequestClient.requestedReviewers` | OAuth/classic `repo`; fine-grained Pull requests read | None; fetch after candidate or PR update | ETag; 256 KiB | GraphQL `reviewRequests` corroborates but cannot silently disagree. A disagreement records partial review coverage. |
 | Review threads and comments | A committed, independently paginated GraphQL query before use | OAuth/classic `repo`; fine-grained Pull requests read | Cursor per PR review-thread connection, five-minute overlap | 500 points / 4 MiB | None. This feature stays unknown until the document exists; it must not be inferred from review summaries. |
+
+Timeline `304` reuse additionally requires one encrypted receipt that binds the
+exact current first-page validator to every contiguous raw page, the raw source
+revision, parser version, a previously completed timeline shard, and the count
+and digest of the normalized timeline state. Every receipt-bound raw page is
+protected from compaction. Cancellation or any missing, stale, corrupt, gapped,
+or cross-authority evidence leaves the prior normalized state unchanged. When
+the server returned `304` but local receipt validation fails, the timeline
+client may make one explicit unconditional request to that same endpoint; it
+must not use another GitHub source, treat the stale state as current, or mark
+coverage complete from the `304` alone.
 
 ## Context features
 

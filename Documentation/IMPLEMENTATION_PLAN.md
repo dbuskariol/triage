@@ -968,6 +968,15 @@ legacy or partially scoped raw rows remain evidence only. Old superseded
 payloads are compacted only after normalized state and testable replay are
 preserved.
 
+Timeline conditional replay binds the exact first-page validator to a durable
+receipt covering every contiguous raw page, the prior completed source
+revision, parser version, and the count and digest of normalized timeline
+state. All receipt-bound pages remain compaction-protected. A `304` may advance
+the current timeline source revision only after that receipt and normalized
+state revalidate atomically; otherwise the synchronizer makes at most one
+unconditional request to the same timeline endpoint and leaves coverage
+incomplete if that authoritative request cannot complete.
+
 ## 13. Synchronization engine
 
 ### 13.1 Streams

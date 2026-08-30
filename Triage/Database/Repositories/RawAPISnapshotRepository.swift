@@ -198,6 +198,11 @@ actor RawAPISnapshotRepository {
                           FROM role_search_page_replays
                           WHERE role_search_page_replays.raw_snapshot_id = raw_api_snapshots.id
                       )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM timeline_replay_receipt_pages
+                          WHERE timeline_replay_receipt_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
                     """,
                 arguments: [
                     accountID.rawValue,

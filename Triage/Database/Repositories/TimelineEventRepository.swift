@@ -23,7 +23,14 @@ struct TimelineSavedPageInventory: Sendable {
     let pageCount: Int
     let firstPageETag: String?
     let firstPageLastModified: String?
+    let pageProvenances: [TimelineRawPageProvenance]
     let latestPageProvenance: TimelineRawPageProvenance
+}
+
+struct TimelineReplayReceiptInput: Sendable {
+    let validator: ConditionalRequestValidator
+    let rawSourceRevision: String
+    let pages: [TimelineRawPageProvenance]
 }
 
 actor TimelineEventRepository {
@@ -276,6 +283,7 @@ actor TimelineEventRepository {
                 pageCount: matching.count,
                 firstPageETag: matching.first?.eTag,
                 firstPageLastModified: matching.first?.lastModified,
+                pageProvenances: persistedPages.map(\.0),
                 latestPageProvenance: persistedPages[persistedPages.count - 1].0
             )
         }
@@ -420,7 +428,8 @@ actor TimelineEventRepository {
         accountID: AccountID,
         organizationID: OrganizationID,
         observedAt: Date,
-        conditionalRequestCacheMutation: ConditionalRequestCacheMutation? = nil
+        conditionalRequestCacheMutation: ConditionalRequestCacheMutation? = nil,
+        replayReceipt: TimelineReplayReceiptInput? = nil
     ) async throws {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
@@ -430,6 +439,7 @@ actor TimelineEventRepository {
         }
         try Self.validate(events)
         try await vault.writeTransaction { database in
+            try Task.checkCancellation()
             try Self.replace(
                 events,
                 candidate: candidate,
@@ -445,22 +455,539 @@ actor TimelineEventRepository {
                 completedAt: observedAt,
                 in: database
             )
+            try Task.checkCancellation()
             switch conditionalRequestCacheMutation {
             case let .save(validator):
+                guard let replayReceipt, replayReceipt.validator == validator else {
+                    throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+                }
                 try ConditionalRequestCacheRepository.save(
                     validator,
                     expectedAccountID: accountID,
                     in: database
                 )
+                try Self.saveReplayReceipt(
+                    replayReceipt,
+                    candidate: candidate,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    completedAt: observedAt,
+                    in: database
+                )
             case let .remove(identity):
+                guard replayReceipt == nil else {
+                    throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+                }
                 try ConditionalRequestCacheRepository.remove(
                     for: identity,
                     expectedAccountID: accountID,
                     in: database
                 )
+                try Self.removeReplayReceipt(
+                    for: identity,
+                    githubNodeID: candidate.nodeID,
+                    in: database
+                )
             case nil:
+                guard replayReceipt == nil else {
+                    throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+                }
                 break
             }
+        }
+    }
+
+    func completeNotModifiedReplay(
+        candidate: TimelineCandidate,
+        validator: ConditionalRequestValidator,
+        observedAt: Date
+    ) async throws -> Bool {
+        let identity = validator.identity
+        let accountID = identity.scope.accountID
+        let organizationID = identity.scope.organizationID
+        guard accountID == vault.accountID else {
+            throw TimelineEventRepositoryError.accountScopeMismatch
+        }
+        guard identity == Self.requestIdentity(
+            scope: identity.scope,
+            candidate: candidate,
+            requestKey: identity.requestKey
+        ),
+              Self.isValidRequestKey(identity.requestKey, candidate: candidate, pageIndex: 1)
+        else {
+            throw TimelineEventRepositoryError.candidateScopeMismatch
+        }
+        return try await vault.writeTransaction { database in
+            try Self.requireCandidateScope(
+                candidate,
+                accountID: accountID,
+                organizationID: organizationID,
+                in: database
+            )
+            guard let currentValidator = try ConditionalRequestCacheRepository.validator(
+                for: identity,
+                expectedAccountID: accountID,
+                in: database
+            ), currentValidator == validator,
+                  let row = try Row.fetchOne(
+                    database,
+                    sql: """
+                        SELECT id, account_id, organization_id, github_node_id, feature,
+                               stream_id, request_key, credential_revision, capability_revision,
+                               normalized_source_revision, raw_source_revision, etag, last_modified,
+                               validator_observed_at_ms, first_raw_snapshot_id, parser_version,
+                               page_count, normalized_event_count, normalized_digest, completed_at_ms
+                        FROM timeline_replay_receipts
+                        WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                          AND feature = ? AND stream_id = ? AND request_key = ?
+                          AND credential_revision = ? AND capability_revision = ?
+                        """,
+                    arguments: [
+                        accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                        CoverageFeature.timelines.rawValue, identity.streamID.rawValue,
+                        identity.requestKey, identity.scope.credentialRevision.rawValue,
+                        identity.scope.capabilityRevision.rawValue
+                    ]
+                  )
+            else {
+                return false
+            }
+            guard let receiptID: String = row["id"],
+                  receiptID == Self.replayReceiptID(for: identity, nodeID: candidate.nodeID),
+                  (row["account_id"] as String?) == accountID.rawValue,
+                  (row["organization_id"] as String?) == organizationID.rawValue,
+                  (row["github_node_id"] as String?) == candidate.nodeID.rawValue,
+                  (row["feature"] as String?) == CoverageFeature.timelines.rawValue,
+                  (row["stream_id"] as String?) == identity.streamID.rawValue,
+                  (row["request_key"] as String?) == identity.requestKey,
+                  (row["credential_revision"] as String?) == identity.scope.credentialRevision.rawValue,
+                  (row["capability_revision"] as String?) == identity.scope.capabilityRevision.rawValue,
+                  let normalizedSourceRevision: String = row["normalized_source_revision"],
+                  !normalizedSourceRevision.isEmpty,
+                  normalizedSourceRevision.count <= 500,
+                  let rawSourceRevision: String = row["raw_source_revision"],
+                  !rawSourceRevision.isEmpty,
+                  rawSourceRevision.count <= 500,
+                  let validatorObservedAtMilliseconds: Int64 = row["validator_observed_at_ms"],
+                  validatorObservedAtMilliseconds == Self.milliseconds(validator.observedAt),
+                  let firstRawSnapshotID = RawAPISnapshotID(rawValue: row["first_raw_snapshot_id"]),
+                  let parserVersion: Int = row["parser_version"],
+                  parserVersion == 1,
+                  let pageCount: Int = row["page_count"],
+                  pageCount > 0,
+                  pageCount <= 100,
+                  let normalizedEventCount: Int = row["normalized_event_count"],
+                  normalizedEventCount >= 0,
+                  let normalizedDigest: Data = row["normalized_digest"],
+                  normalizedDigest.count == SHA256.Digest.byteCount,
+                  let completedAtMilliseconds: Int64 = row["completed_at_ms"],
+                  completedAtMilliseconds >= 0
+            else {
+                return false
+            }
+            let receiptETag: String? = row["etag"]
+            let receiptLastModified: String? = row["last_modified"]
+            guard Self.validHeaderValidator(receiptETag),
+                  Self.validHeaderValidator(receiptLastModified),
+                  receiptETag != nil || receiptLastModified != nil,
+                  receiptETag == validator.eTag,
+                  receiptLastModified == validator.lastModified
+            else {
+                return false
+            }
+            let pageRows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT page_index, raw_snapshot_id
+                    FROM timeline_replay_receipt_pages
+                    WHERE receipt_id = ?
+                    ORDER BY page_index
+                    """,
+                arguments: [receiptID]
+            )
+            guard pageRows.count == pageCount else { return false }
+            var pageSnapshotIDs = [RawAPISnapshotID]()
+            pageSnapshotIDs.reserveCapacity(pageCount)
+            for (offset, pageRow) in pageRows.enumerated() {
+                try Task.checkCancellation()
+                guard let pageIndex: Int = pageRow["page_index"],
+                      pageIndex == offset + 1,
+                      let snapshotID = RawAPISnapshotID(rawValue: pageRow["raw_snapshot_id"])
+                else {
+                    return false
+                }
+                pageSnapshotIDs.append(snapshotID)
+            }
+            guard pageSnapshotIDs.first == firstRawSnapshotID,
+                  try Self.rawPagesAreValid(
+                    pageSnapshotIDs,
+                    rawSourceRevision: rawSourceRevision,
+                    validator: validator,
+                    candidate: candidate,
+                    in: database
+                  ),
+                  try Self.completedShardExists(
+                    streamID: identity.streamID,
+                    sourceRevision: normalizedSourceRevision,
+                    in: database
+                  ),
+                  let normalizedState = try Self.normalizedStateDigest(
+                    nodeID: candidate.nodeID,
+                    expectedSourceRevision: normalizedSourceRevision,
+                    in: database
+                  ),
+                  normalizedState.count == normalizedEventCount,
+                  normalizedState.digest == normalizedDigest
+            else {
+                return false
+            }
+            try Task.checkCancellation()
+            try database.execute(
+                sql: """
+                    UPDATE timeline_events
+                    SET source_revision = ?
+                    WHERE subject_node_id = ? AND source_revision = ?
+                    """,
+                arguments: [
+                    candidate.sourceRevision, candidate.nodeID.rawValue, normalizedSourceRevision
+                ]
+            )
+            try TimelineCandidateRepository.completeDownloadedTimeline(
+                for: candidate,
+                accountID: accountID,
+                organizationID: organizationID,
+                completedAt: observedAt,
+                in: database
+            )
+            let refreshedValidator = ConditionalRequestValidator(
+                identity: identity,
+                eTag: validator.eTag,
+                lastModified: validator.lastModified,
+                observedAt: observedAt
+            )
+            try ConditionalRequestCacheRepository.save(
+                refreshedValidator,
+                expectedAccountID: accountID,
+                in: database
+            )
+            try database.execute(
+                sql: """
+                    UPDATE timeline_replay_receipts
+                    SET normalized_source_revision = ?, validator_observed_at_ms = ?,
+                        completed_at_ms = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    candidate.sourceRevision, Self.milliseconds(observedAt),
+                    Self.milliseconds(observedAt), receiptID
+                ]
+            )
+            guard database.changesCount == 1 else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
+            return true
+        }
+    }
+
+    private nonisolated static func saveReplayReceipt(
+        _ input: TimelineReplayReceiptInput,
+        candidate: TimelineCandidate,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        completedAt: Date,
+        in database: Database
+    ) throws {
+        let identity = input.validator.identity
+        guard input.rawSourceRevision == candidate.sourceRevision,
+              identity.scope.accountID == accountID,
+              identity.scope.organizationID == organizationID,
+              identity.feature == .timelines,
+              identity.streamID == SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)"),
+              isValidRequestKey(identity.requestKey, candidate: candidate, pageIndex: 1),
+              !input.pages.isEmpty,
+              input.pages.count <= 100,
+              input.pages.enumerated().allSatisfy({ offset, page in
+                  page.parserVersion == 1
+                      && page.endpoint == committedSnapshotEndpoint(
+                        for: candidate,
+                        pageIndex: offset + 1
+                      )
+              }),
+              try rawPagesAreValid(
+                input.pages.map(\.snapshotID),
+                rawSourceRevision: input.rawSourceRevision,
+                validator: input.validator,
+                candidate: candidate,
+                in: database
+              ),
+              try completedShardExists(
+                streamID: identity.streamID,
+                sourceRevision: candidate.sourceRevision,
+                in: database
+              ),
+              let normalizedState = try normalizedStateDigest(
+                nodeID: candidate.nodeID,
+                expectedSourceRevision: candidate.sourceRevision,
+                in: database
+              )
+        else {
+            throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+        }
+        let receiptID = replayReceiptID(for: identity, nodeID: candidate.nodeID)
+        try database.execute(
+            sql: """
+                DELETE FROM timeline_replay_receipts
+                WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                  AND feature = ? AND stream_id = ? AND request_key = ?
+                """,
+            arguments: [
+                accountID.rawValue, organizationID.rawValue, candidate.nodeID.rawValue,
+                CoverageFeature.timelines.rawValue, identity.streamID.rawValue,
+                identity.requestKey
+            ]
+        )
+        try database.execute(
+            sql: """
+                INSERT INTO timeline_replay_receipts (
+                    id, account_id, organization_id, github_node_id, feature, stream_id,
+                    request_key, credential_revision, capability_revision,
+                    normalized_source_revision, raw_source_revision, etag, last_modified,
+                    validator_observed_at_ms, first_raw_snapshot_id, parser_version,
+                    page_count, normalized_event_count, normalized_digest, completed_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+            arguments: [
+                receiptID, accountID.rawValue, organizationID.rawValue,
+                candidate.nodeID.rawValue, CoverageFeature.timelines.rawValue,
+                identity.streamID.rawValue, identity.requestKey,
+                identity.scope.credentialRevision.rawValue,
+                identity.scope.capabilityRevision.rawValue, candidate.sourceRevision,
+                input.rawSourceRevision, input.validator.eTag, input.validator.lastModified,
+                milliseconds(input.validator.observedAt), input.pages[0].snapshotID.rawValue,
+                1, input.pages.count, normalizedState.count, normalizedState.digest,
+                milliseconds(completedAt)
+            ]
+        )
+        for (offset, page) in input.pages.enumerated() {
+            try database.execute(
+                sql: """
+                    INSERT INTO timeline_replay_receipt_pages (
+                        receipt_id, page_index, raw_snapshot_id
+                    ) VALUES (?, ?, ?)
+                    """,
+                arguments: [receiptID, offset + 1, page.snapshotID.rawValue]
+            )
+        }
+    }
+
+    private nonisolated static func removeReplayReceipt(
+        for identity: ConditionalRequestIdentity,
+        githubNodeID: GitHubNodeID,
+        in database: Database
+    ) throws {
+        try database.execute(
+            sql: """
+                DELETE FROM timeline_replay_receipts
+                WHERE account_id = ? AND organization_id = ? AND github_node_id = ?
+                  AND feature = ? AND stream_id = ? AND request_key = ?
+                """,
+            arguments: [
+                identity.scope.accountID.rawValue, identity.scope.organizationID.rawValue,
+                githubNodeID.rawValue, identity.feature.rawValue, identity.streamID.rawValue,
+                identity.requestKey
+            ]
+        )
+    }
+
+    private nonisolated static func rawPagesAreValid(
+        _ expectedSnapshotIDs: [RawAPISnapshotID],
+        rawSourceRevision: String,
+        validator: ConditionalRequestValidator,
+        candidate: TimelineCandidate,
+        in database: Database
+    ) throws -> Bool {
+        guard !expectedSnapshotIDs.isEmpty,
+              expectedSnapshotIDs.count <= 100,
+              Set(expectedSnapshotIDs).count == expectedSnapshotIDs.count,
+              rawSourceRevision.count <= 500
+        else {
+            return false
+        }
+        let prefix = snapshotEndpointPrefix(
+            nodeID: candidate.nodeID,
+            sourceRevision: rawSourceRevision,
+            repository: candidate.repository,
+            number: candidate.number
+        )
+        let rows = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
+                       authority_organization_id, authority_feature, authority_stream_id,
+                       authority_request_key, authority_credential_revision,
+                       authority_capability_revision, parser_version, observed_at_ms, payload
+                FROM raw_api_snapshots
+                WHERE account_id = ? AND github_node_id = ? AND endpoint LIKE ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM normalization_failures
+                      WHERE normalization_failures.raw_snapshot_id = raw_api_snapshots.id
+                  )
+                ORDER BY endpoint
+                """,
+            arguments: [
+                validator.identity.scope.accountID.rawValue,
+                candidate.nodeID.rawValue,
+                prefix + "%"
+            ]
+        )
+        var decoded = [RawAPISnapshot]()
+        decoded.reserveCapacity(rows.count)
+        do {
+            for row in rows {
+                try Task.checkCancellation()
+                decoded.append(try RawAPISnapshotRepository.snapshot(from: row))
+            }
+        } catch is RawAPISnapshotRepositoryError {
+            return false
+        }
+        let committed = decoded.filter { snapshot in
+            guard snapshot.endpoint.hasPrefix(prefix) else { return false }
+            let suffix = snapshot.endpoint.dropFirst(prefix.count)
+            return suffix.count == 3 && suffix.allSatisfy(\.isNumber)
+        }
+        guard committed.count == expectedSnapshotIDs.count else { return false }
+        for (offset, snapshot) in committed.enumerated() {
+            try Task.checkCancellation()
+            let pageIndex = offset + 1
+            guard snapshot.id == expectedSnapshotIDs[offset],
+                  snapshot.githubNodeID == candidate.nodeID,
+                  snapshot.endpoint == prefix + String(format: "%03d", pageIndex),
+                  snapshot.parserVersion == 1,
+                  snapshot.payload.count <= maximumRawPageBytes,
+                  snapshot.requestIdentity == requestIdentity(
+                    scope: validator.identity.scope,
+                    candidate: candidate,
+                    requestKey: snapshot.requestIdentity?.requestKey ?? ""
+                  ),
+                  isValidRequestKey(
+                    snapshot.requestIdentity?.requestKey ?? "",
+                    candidate: candidate,
+                    pageIndex: pageIndex
+                  )
+            else {
+                return false
+            }
+            if pageIndex == 1 {
+                guard snapshot.requestIdentity == validator.identity,
+                      snapshot.eTag == validator.eTag,
+                      snapshot.lastModified == validator.lastModified
+                else {
+                    return false
+                }
+            }
+            let failureCount = try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM normalization_failures WHERE raw_snapshot_id = ?",
+                arguments: [snapshot.id.rawValue]
+            ) ?? 0
+            guard failureCount == 0 else { return false }
+        }
+        return true
+    }
+
+    private nonisolated static func completedShardExists(
+        streamID: SyncStreamID,
+        sourceRevision: String,
+        in database: Database
+    ) throws -> Bool {
+        let count = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*) FROM sync_shards
+                WHERE stream_id = ? AND query_kind = ? AND state = ?
+                  AND page_cursor IS NULL AND completed_at_ms IS NOT NULL
+                """,
+            arguments: [
+                streamID.rawValue, "timeline:\(sourceRevision)",
+                SyncShardState.completed.rawValue
+            ]
+        ) ?? 0
+        return count == 1
+    }
+
+    private nonisolated static func normalizedStateDigest(
+        nodeID: GitHubNodeID,
+        expectedSourceRevision: String,
+        in database: Database
+    ) throws -> (count: Int, digest: Data)? {
+        let rows = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT github_event_id, actor_id, kind, occurred_at_ms, payload_json,
+                       source_revision
+                FROM timeline_events
+                WHERE subject_node_id = ?
+                ORDER BY github_event_id
+                """,
+            arguments: [nodeID.rawValue]
+        )
+        var material = Data("triage.timeline.normalized.v1".utf8)
+        for row in rows {
+            try Task.checkCancellation()
+            guard let eventID: String = row["github_event_id"],
+                  let kind: String = row["kind"],
+                  let occurredAtMilliseconds: Int64 = row["occurred_at_ms"],
+                  let payload: Data = row["payload_json"],
+                  (row["source_revision"] as String?) == expectedSourceRevision
+            else {
+                return nil
+            }
+            appendLengthPrefixed(Data(eventID.utf8), to: &material)
+            if let actorID: String = row["actor_id"] {
+                material.append(1)
+                appendLengthPrefixed(Data(actorID.utf8), to: &material)
+            } else {
+                material.append(0)
+            }
+            appendLengthPrefixed(Data(kind.utf8), to: &material)
+            appendLengthPrefixed(Data(String(occurredAtMilliseconds).utf8), to: &material)
+            appendLengthPrefixed(payload, to: &material)
+        }
+        return (rows.count, Data(SHA256.hash(data: material)))
+    }
+
+    private nonisolated static func appendLengthPrefixed(_ value: Data, to data: inout Data) {
+        var length = UInt64(value.count).bigEndian
+        Swift.withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
+    }
+
+    private nonisolated static func replayReceiptID(
+        for identity: ConditionalRequestIdentity,
+        nodeID: GitHubNodeID
+    ) -> String {
+        let material = [
+            identity.scope.accountID.rawValue,
+            identity.scope.organizationID.rawValue,
+            nodeID.rawValue,
+            identity.feature.rawValue,
+            identity.streamID.rawValue,
+            identity.requestKey,
+            identity.scope.credentialRevision.rawValue,
+            identity.scope.capabilityRevision.rawValue
+        ].joined(separator: "\u{1F}")
+        let digest = SHA256.hash(data: Data(material.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "timeline-replay:\(digest)"
+    }
+
+    private nonisolated static func validHeaderValidator(_ value: String?) -> Bool {
+        guard let value else { return true }
+        guard !value.isEmpty, value.count <= 2_048 else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            scalar.value >= 0x20 && scalar.value != 0x7F
         }
     }
 
@@ -610,9 +1137,23 @@ actor TimelineEventRepository {
     }
 
     private nonisolated static func snapshotEndpointPrefix(for candidate: TimelineCandidate) -> String {
-        let material = "\(candidate.nodeID.rawValue)|\(candidate.sourceRevision)"
+        snapshotEndpointPrefix(
+            nodeID: candidate.nodeID,
+            sourceRevision: candidate.sourceRevision,
+            repository: candidate.repository,
+            number: candidate.number
+        )
+    }
+
+    private nonisolated static func snapshotEndpointPrefix(
+        nodeID: GitHubNodeID,
+        sourceRevision: String,
+        repository: GitHubRepositoryPath,
+        number: Int
+    ) -> String {
+        let material = "\(nodeID.rawValue)|\(sourceRevision)"
         let digest = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
-        return "GET \(candidate.repository.path)/issues/\(candidate.number)/timeline#\(digest):"
+        return "GET \(repository.path)/issues/\(number)/timeline#\(digest):"
     }
 
     private nonisolated static func requestIdentity(

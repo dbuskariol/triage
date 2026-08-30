@@ -687,6 +687,595 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(eventIDs, ["fresh-event"])
     }
 
+    func testValidNotModifiedReceiptCompletesNewSourceRevisionWithoutBodyFetch() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let initialPayload = Data(
+            #"[{"id":"stable-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8
+        )
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    initialPayload,
+                    ["ETag": "stable-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = ConditionalTimelineSession()
+        let replayedAt = fixture.observedAt.addingTimeInterval(60)
+        let replayed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            budget: TimelineRefreshBudget(maximumPages: 1, maximumDecodedBytes: 1_024),
+            observedAt: replayedAt
+        )
+
+        XCTAssertEqual(replayed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        let receivedLastModified = await session.receivedLastModifiedValidators()
+        XCTAssertEqual(receivedETags, ["stable-etag"])
+        XCTAssertEqual(receivedLastModified, [nil])
+        let state = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT github_event_id FROM timeline_events"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT source_revision FROM timeline_events"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT normalized_source_revision FROM timeline_replay_receipts"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT raw_source_revision FROM timeline_replay_receipts"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM sync_shards WHERE state = 'completed'"
+                )
+            )
+        }
+        XCTAssertEqual(state.0, 1)
+        XCTAssertEqual(state.1, "stable-event")
+        XCTAssertEqual(state.2, "revision-2")
+        XCTAssertEqual(state.3, "revision-2")
+        XCTAssertEqual(state.4, "revision-1")
+        XCTAssertEqual(state.5, 2)
+        let validator = try await ConditionalRequestCacheRepository(vault: fixture.vault)
+            .validator(for: fixture.conditionalRequestIdentity)
+        XCTAssertEqual(validator?.observedAt, replayedAt)
+    }
+
+    func testLastModifiedReceiptAuthorizesEmptyTimelineReplay() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data("[]".utf8),
+                    ["Last-Modified": lastModified]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-empty-2")
+        let session = ConditionalTimelineSession()
+        let replayed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            budget: TimelineRefreshBudget(maximumPages: 1, maximumDecodedBytes: 1_024),
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(replayed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        let receivedLastModified = await session.receivedLastModifiedValidators()
+        XCTAssertEqual(receivedETags, [nil])
+        XCTAssertEqual(receivedLastModified, [lastModified])
+        let state = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_events"),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT normalized_event_count FROM timeline_replay_receipts"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT normalized_source_revision FROM timeline_replay_receipts"
+                )
+            )
+        }
+        XCTAssertEqual(state.0, 0)
+        XCTAssertEqual(state.1, 0)
+        XCTAssertEqual(state.2, "revision-empty-2")
+    }
+
+    func testNotModifiedWithIncompleteReceiptFallsBackToSameEndpoint() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"old-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "old-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+        try await fixture.vault.write { database in
+            try database.execute(sql: "DELETE FROM timeline_replay_receipt_pages")
+        }
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = ConditionalTimelineSession()
+        let refreshed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        XCTAssertEqual(receivedETags, ["old-etag", nil])
+        let state = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(database, sql: "SELECT github_event_id FROM timeline_events"),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT raw_source_revision FROM timeline_replay_receipts"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM timeline_replay_receipt_pages"
+                )
+            )
+        }
+        XCTAssertEqual(state.0, "authoritative-event")
+        XCTAssertEqual(state.1, "revision-2")
+        XCTAssertEqual(state.2, 1)
+    }
+
+    func testCancellationAfterNotModifiedLeavesReplayAuthorityUnchanged() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"stable-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "stable-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = CancellingNotModifiedTimelineSession()
+        let service = try timelineService(fixture: fixture, session: session)
+        let refreshTask = Task {
+            try await service.refresh(
+                scope: fixture.scope,
+                githubOrganizationID: 2,
+                currentUserID: ActorID(rawValue: "U_current")!,
+                candidates: [updatedCandidate],
+                observedAt: fixture.observedAt.addingTimeInterval(60)
+            )
+        }
+
+        do {
+            _ = try await refreshTask.value
+            XCTFail("Expected cancellation after the conditional response.")
+        } catch is CancellationError {
+        }
+
+        let receivedETags = await session.receivedValidators()
+        XCTAssertEqual(receivedETags, ["stable-etag"])
+        let unchanged = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT source_revision FROM timeline_events"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT normalized_source_revision FROM timeline_replay_receipts"
+                ),
+                try Int64.fetchOne(
+                    database,
+                    sql: "SELECT validator_observed_at_ms FROM timeline_replay_receipts"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM sync_shards WHERE state = 'completed'"
+                ),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")
+            )
+        }
+        XCTAssertEqual(unchanged.0, "revision-1")
+        XCTAssertEqual(unchanged.1, "revision-1")
+        XCTAssertEqual(
+            unchanged.2,
+            Int64((fixture.observedAt.timeIntervalSince1970 * 1_000).rounded())
+        )
+        XCTAssertEqual(unchanged.3, 1)
+        XCTAssertEqual(unchanged.4, 1)
+        let unchangedValidator = try await ConditionalRequestCacheRepository(vault: fixture.vault)
+            .validator(for: fixture.conditionalRequestIdentity)
+        XCTAssertEqual(unchangedValidator?.observedAt, fixture.observedAt)
+    }
+
+    func testNotModifiedWithCorruptNormalizedStateFallsBackUnconditionally() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"old-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "old-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE timeline_events SET payload_json = ?",
+                arguments: [Data(#"{"event":"tampered"}"#.utf8)]
+            )
+        }
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = ConditionalTimelineSession()
+        let refreshed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        XCTAssertEqual(receivedETags, ["old-etag", nil])
+        let state = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(database, sql: "SELECT github_event_id FROM timeline_events"),
+                try String.fetchOne(database, sql: "SELECT source_revision FROM timeline_events"),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT raw_source_revision FROM timeline_replay_receipts"
+                )
+            )
+        }
+        XCTAssertEqual(state.0, "authoritative-event")
+        XCTAssertEqual(state.1, "revision-2")
+        XCTAssertEqual(state.2, "revision-2")
+    }
+
+    func testNotModifiedWithMismatchedReceiptValidatorFallsBackUnconditionally() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"old-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "old-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE timeline_replay_receipts SET etag = 'mismatched-etag'"
+            )
+        }
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = ConditionalTimelineSession()
+        let refreshed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        XCTAssertEqual(receivedETags, ["old-etag", nil])
+        let eventID = try await fixture.vault.read { database in
+            try String.fetchOne(database, sql: "SELECT github_event_id FROM timeline_events")
+        }
+        XCTAssertEqual(eventID, "authoritative-event")
+    }
+
+    func testNotModifiedWithGappedReceiptPageIndicesFallsBackUnconditionally() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"old-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "old-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+        let unrelatedSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "unrelated-receipt-page")!,
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "https://api.github.com/unrelated",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: fixture.observedAt.addingTimeInterval(1),
+            payload: Data("[]".utf8)
+        )
+        try await RawAPISnapshotRepository(vault: fixture.vault).save(unrelatedSnapshot)
+        try await fixture.vault.write { database in
+            let receiptID = try String.fetchOne(
+                database,
+                sql: "SELECT id FROM timeline_replay_receipts"
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO timeline_replay_receipt_pages (
+                        receipt_id, page_index, raw_snapshot_id
+                    ) VALUES (?, 3, ?)
+                    """,
+                arguments: [receiptID, unrelatedSnapshot.id.rawValue]
+            )
+            try database.execute(
+                sql: "UPDATE timeline_replay_receipts SET page_count = 2 WHERE id = ?",
+                arguments: [receiptID]
+            )
+        }
+
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let session = ConditionalTimelineSession()
+        let refreshed = try await timelineService(fixture: fixture, session: session).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        XCTAssertEqual(receivedETags, ["old-etag", nil])
+        let state = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(database, sql: "SELECT github_event_id FROM timeline_events"),
+                try Int.fetchAll(
+                    database,
+                    sql: "SELECT page_index FROM timeline_replay_receipt_pages ORDER BY page_index"
+                )
+            )
+        }
+        XCTAssertEqual(state.0, "authoritative-event")
+        XCTAssertEqual(state.1, [1])
+    }
+
+    func testTimelineReplayReceiptProtectsEveryRawPageFromCompaction() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let secondPage = URL(
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+        )!
+        let refreshed = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"first","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    [
+                        "ETag": "two-page-etag",
+                        "Link": "<\(secondPage)>; rel=\"next\""
+                    ]
+                ),
+                "/repos/github/triage/issues/1/timeline?page=2": (
+                    Data(#"[{"id":"second","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
+                    [:]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+
+        let receiptSnapshotIDs = try await fixture.vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: "SELECT raw_snapshot_id FROM timeline_replay_receipt_pages ORDER BY page_index"
+            )
+        }
+        XCTAssertEqual(receiptSnapshotIDs.count, 2)
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+        let receiptSnapshots = try await repository.snapshots(for: fixture.accountID)
+            .filter { receiptSnapshotIDs.contains($0.id.rawValue) }
+        XCTAssertEqual(receiptSnapshots.count, 2)
+        for (offset, snapshot) in receiptSnapshots.enumerated() {
+            try await repository.save(RawAPISnapshot(
+                id: RawAPISnapshotID(rawValue: "newer-timeline-page-\(offset + 1)")!,
+                accountID: snapshot.accountID,
+                githubNodeID: snapshot.githubNodeID,
+                endpoint: snapshot.endpoint,
+                eTag: snapshot.eTag,
+                lastModified: snapshot.lastModified,
+                parserVersion: snapshot.parserVersion,
+                observedAt: fixture.observedAt.addingTimeInterval(60),
+                payload: snapshot.payload,
+                requestIdentity: snapshot.requestIdentity
+            ))
+        }
+
+        let removed = try await repository.compact(
+            accountID: fixture.accountID,
+            retainingMostRecentPerSource: 1,
+            before: fixture.observedAt.addingTimeInterval(120)
+        )
+
+        XCTAssertEqual(removed, 0)
+        let retainedIDs = Set(
+            try await repository.snapshots(for: fixture.accountID).map(\.id.rawValue)
+        )
+        XCTAssertTrue(Set(receiptSnapshotIDs).isSubset(of: retainedIDs))
+        XCTAssertEqual(retainedIDs.count, 4)
+    }
+
+    func testValidatorlessRefreshRetiresObsoleteAuthorityReceiptAndReleasesRawPage() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let first = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"old-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                    ["ETag": "old-etag"]
+                )
+            ])
+        ).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(first.outcomes.map(\.status), [.refreshed])
+        let initialSnapshots = try await RawAPISnapshotRepository(vault: fixture.vault)
+            .snapshots(for: fixture.accountID)
+        let oldSnapshot = try XCTUnwrap(initialSnapshots.first)
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE accounts SET credential_revision = 'credential-2' WHERE id = ?",
+                arguments: [fixture.accountID.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    UPDATE account_organizations
+                    SET capability_revision = 'capability-2'
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [fixture.accountID.rawValue, fixture.organizationID.rawValue]
+            )
+        }
+        let currentScope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-2")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
+        )
+        let updatedCandidate = try await fixture.advanceSourceRevision(to: "revision-2")
+        let refreshed = try await timelineService(
+            fixture: fixture,
+            session: TimelineRefreshSession(responses: [
+                "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                    Data(#"[{"id":"new-event","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
+                    [:]
+                )
+            ])
+        ).refresh(
+            scope: currentScope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [updatedCandidate],
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+        XCTAssertEqual(refreshed.outcomes.map(\.status), [.refreshed])
+        let receiptCount = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_replay_receipts")
+        }
+        XCTAssertEqual(receiptCount, 0)
+
+        let rawRepository = RawAPISnapshotRepository(vault: fixture.vault)
+        try await rawRepository.save(RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "newer-unbound-old-authority-page")!,
+            accountID: oldSnapshot.accountID,
+            githubNodeID: oldSnapshot.githubNodeID,
+            endpoint: oldSnapshot.endpoint,
+            eTag: nil,
+            parserVersion: oldSnapshot.parserVersion,
+            observedAt: fixture.observedAt.addingTimeInterval(120),
+            payload: oldSnapshot.payload
+        ))
+        let removed = try await rawRepository.compact(
+            accountID: fixture.accountID,
+            retainingMostRecentPerSource: 1,
+            before: fixture.observedAt.addingTimeInterval(180)
+        )
+        XCTAssertEqual(removed, 1)
+        let retainedIDs = Set(
+            try await rawRepository.snapshots(for: fixture.accountID).map(\.id)
+        )
+        XCTAssertFalse(retainedIDs.contains(oldSnapshot.id))
+    }
+
     func testUndecodableTransportPayloadIsRetainedWithRedactedFailure() async throws {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
@@ -764,7 +1353,10 @@ final class TimelineEventRepositoryTests: XCTestCase {
             transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
                 "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
                     Data(#"[{"id":"new-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
-                    ["Link": "<\(secondPage)>; rel=\"next\""]
+                    [
+                        "ETag": "retry-etag",
+                        "Link": "<\(secondPage)>; rel=\"next\""
+                    ]
                 ),
                 "/repos/github/triage/issues/1/timeline?page=2": (
                     Data(#"[{"id":"new-final","event":"mentioned","token":"ghp_rawTimelineSecret"}]"#.utf8),
@@ -842,13 +1434,20 @@ final class TimelineEventRepositoryTests: XCTestCase {
             observedAt: fixture.observedAt
         )
         XCTAssertEqual(recovered.refreshedTimelineNodeIDs, [fixture.nodeID])
-        let recoveredEventIDs = try await fixture.vault.read { database in
-            try String.fetchAll(
-                database,
-                sql: "SELECT github_event_id FROM timeline_events ORDER BY github_event_id"
+        let recoveredState = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(
+                    database,
+                    sql: "SELECT github_event_id FROM timeline_events ORDER BY github_event_id"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM timeline_replay_receipt_pages"
+                )
             )
         }
-        XCTAssertEqual(recoveredEventIDs, ["new-event", "new-final"])
+        XCTAssertEqual(recoveredState.0, ["new-event", "new-final"])
+        XCTAssertEqual(recoveredState.1, 2)
         let retainedFailureSnapshot = try await RawAPISnapshotRepository(vault: fixture.vault).snapshots(
             for: fixture.accountID
         )
@@ -1042,6 +1641,22 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(state.1, 0)
         XCTAssertEqual(state.2, 0)
     }
+
+    private func timelineService(
+        fixture: TimelineFixture,
+        session: any HTTPSession
+    ) throws -> GitHubTimelineRefreshService {
+        GitHubTimelineRefreshService(
+            client: GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )),
+            candidateRepository: TimelineCandidateRepository(vault: fixture.vault),
+            eventRepository: TimelineEventRepository(vault: fixture.vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: fixture.vault),
+            conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: fixture.vault)
+        )
+    }
 }
 
 private final class TimelineFixture: @unchecked Sendable {
@@ -1179,6 +1794,22 @@ private final class TimelineFixture: @unchecked Sendable {
         )
     }
 
+    func advanceSourceRevision(to sourceRevision: String) async throws -> TimelineCandidate {
+        try await vault.write { database in
+            try database.execute(
+                sql: "UPDATE github_nodes SET source_revision = ? WHERE github_node_id = ?",
+                arguments: [sourceRevision, nodeID.rawValue]
+            )
+        }
+        return TimelineCandidate(
+            nodeID: candidate.nodeID,
+            repositoryID: candidate.repositoryID,
+            repository: candidate.repository,
+            number: candidate.number,
+            sourceRevision: sourceRevision
+        )
+    }
+
     func remove() {
         try? FileManager.default.removeItem(at: directory)
     }
@@ -1197,6 +1828,28 @@ private actor CancellingTimelineSession: HTTPSession {
                 headerFields: nil
             )!
         )
+    }
+}
+
+private actor CancellingNotModifiedTimelineSession: HTTPSession {
+    private var validators = [String?]()
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        validators.append(request.value(forHTTPHeaderField: "If-None-Match"))
+        withUnsafeCurrentTask { $0?.cancel() }
+        return (
+            Data(),
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 304,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )
+    }
+
+    func receivedValidators() -> [String?] {
+        validators
     }
 }
 
