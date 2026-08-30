@@ -13,9 +13,11 @@ enum SourceAccessObservationRepositoryError: Error, Equatable, Sendable {
     case invalidSourceRevision
     case invalidTimestamp
     case invalidResultReason
-    case invalidDeletionAuthority
-    case missingAuthoritativeDeletionCoverage
-    case missingAuthoritativeDeletionReceipt
+    /// No committed GitHub source contract currently authorizes a source-access
+    /// observation to conclude that content was deleted. A complete coverage
+    /// interval, an omission, and an exact raw response are evidence only until
+    /// a named source-specific deletion proof is introduced.
+    case authoritativeDeletionContractUnavailable
     case staleObservation
     case conflictingObservation
     case invalidLimit
@@ -136,7 +138,6 @@ actor SourceAccessObservationRepository {
         )
         try validateSourceProvenance(canonicalObservation, in: database)
         try validateRawSnapshot(canonicalObservation, in: database)
-        try validateAuthoritativeDeletionCoverage(canonicalObservation, in: database)
         let observedAtMilliseconds = try milliseconds(canonicalObservation.observedAt)
 
         if let existing = try fetchObservation(id: canonicalObservation.id, in: database) {
@@ -263,17 +264,15 @@ actor SourceAccessObservationRepository {
              (.inaccessible, .forbidden),
              (.inaccessible, .ssoRequired),
              (.inaccessible, .approvalRequired),
-             (.unknown, .inventoryOmission),
-             (.authoritativelyDeleted, .authoritativeOmission),
-             (.authoritativelyDeleted, .immutableIdentityReplacement):
+             (.unknown, .inventoryOmission):
             break
+        case (.authoritativelyDeleted, _):
+            // Fail closed until a source-specific contract names a deletion
+            // proof with non-fabricable authority. Generic coverage, absence,
+            // or retained raw data must never be sufficient on their own.
+            throw SourceAccessObservationRepositoryError.authoritativeDeletionContractUnavailable
         default:
             throw SourceAccessObservationRepositoryError.invalidResultReason
-        }
-        if observation.result == .authoritativelyDeleted,
-           observation.authority != .fullReconciliation
-            || observation.confirmation != .confirmed {
-            throw SourceAccessObservationRepositoryError.invalidDeletionAuthority
         }
         if observation.result == .unknown,
            observation.confirmation != .provisional {
@@ -328,38 +327,6 @@ actor SourceAccessObservationRepository {
         ) ?? 0
         guard count == 1 else {
             throw SourceAccessObservationRepositoryError.streamScopeMismatch
-        }
-    }
-
-    private nonisolated static func validateAuthoritativeDeletionCoverage(
-        _ observation: SourceAccessObservation,
-        in database: Database
-    ) throws {
-        guard observation.result == .authoritativelyDeleted else { return }
-        let count = try Int.fetchOne(
-            database,
-            sql: """
-                SELECT COUNT(*) FROM coverage_records
-                WHERE account_id = ? AND organization_id = ?
-                  AND feature = ? AND stream_id = ?
-                  AND credential_revision = ? AND capability_revision = ?
-                  AND status = ? AND last_successful_at_ms = ?
-                  AND repository_id IS NULL
-                  AND interval_start_ms IS NULL AND interval_end_ms IS NULL
-                """,
-            arguments: [
-                observation.scope.accountID.rawValue,
-                observation.scope.organizationID.rawValue,
-                observation.feature.rawValue,
-                observation.streamID.rawValue,
-                observation.scope.credentialRevision.rawValue,
-                observation.scope.capabilityRevision.rawValue,
-                CoverageStatus.complete.rawValue,
-                try milliseconds(observation.observedAt)
-            ]
-        ) ?? 0
-        guard count > 0 else {
-            throw SourceAccessObservationRepositoryError.missingAuthoritativeDeletionCoverage
         }
     }
 
@@ -419,13 +386,7 @@ actor SourceAccessObservationRepository {
         _ observation: SourceAccessObservation,
         in database: Database
     ) throws {
-        guard let rawSnapshotID = observation.rawSnapshotID else {
-            if observation.result == .authoritativelyDeleted {
-                throw SourceAccessObservationRepositoryError
-                    .missingAuthoritativeDeletionReceipt
-            }
-            return
-        }
+        guard let rawSnapshotID = observation.rawSnapshotID else { return }
         let locatorClause: String
         let locatorArguments: [String]
         switch observation.source.kind {
