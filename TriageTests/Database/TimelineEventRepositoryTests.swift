@@ -20,6 +20,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
             page,
             candidate: fixture.candidate,
             pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
             accountID: fixture.accountID,
             organizationID: fixture.organizationID,
             observedAt: fixture.observedAt
@@ -33,6 +35,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
                 snapshotID,
                 candidate: fixture.candidate,
                 pageIndex: 1,
+                requestKey: fixture.timelineRequestKey,
+                scope: fixture.scope,
                 nextPageURL: invalidNextPage,
                 accountID: fixture.accountID,
                 organizationID: fixture.organizationID,
@@ -78,6 +82,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
             page,
             candidate: fixture.candidate,
             pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
             accountID: fixture.accountID,
             organizationID: fixture.organizationID,
             observedAt: fixture.observedAt
@@ -86,6 +92,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
             snapshotID,
             candidate: fixture.candidate,
             pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
             nextPageURL: nil,
             accountID: fixture.accountID,
             organizationID: fixture.organizationID,
@@ -289,6 +297,87 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(state.1, CoverageStatus.partial.rawValue)
         XCTAssertEqual(state.2, 1)
         XCTAssertEqual(state.3, 0)
+    }
+
+    func testResumedTraversalRequiresExactRawAuthorityAndRetainsLastModified() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let secondPage = URL(
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+        )!
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let firstService = GitHubTimelineRefreshService(
+            client: GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
+                    "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                        Data(#"[{"id":"first","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                        [
+                            "Last-Modified": lastModified,
+                            "Link": "<\(secondPage)>; rel=\"next\""
+                        ]
+                    )
+                ])),
+                credential: SecretValue("token")
+            )),
+            candidateRepository: TimelineCandidateRepository(vault: fixture.vault),
+            eventRepository: TimelineEventRepository(vault: fixture.vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: fixture.vault),
+            conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: fixture.vault)
+        )
+
+        let deferred = try await firstService.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            budget: TimelineRefreshBudget(maximumPages: 1, maximumDecodedBytes: 1_024),
+            observedAt: fixture.observedAt
+        )
+        XCTAssertEqual(deferred.outcomes.map(\.status), [.deferredByBudget])
+
+        let initialSnapshots = try await RawAPISnapshotRepository(vault: fixture.vault)
+            .snapshots(for: fixture.accountID)
+        let firstSnapshot = try XCTUnwrap(initialSnapshots.first)
+        XCTAssertEqual(firstSnapshot.lastModified, lastModified)
+        XCTAssertEqual(firstSnapshot.requestIdentity, fixture.conditionalRequestIdentity)
+
+        let resumedService = GitHubTimelineRefreshService(
+            client: GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
+                    "/repos/github/triage/issues/1/timeline?page=2": (
+                        Data(#"[{"id":"second","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
+                        [:]
+                    )
+                ])),
+                credential: SecretValue("token")
+            )),
+            candidateRepository: TimelineCandidateRepository(vault: fixture.vault),
+            eventRepository: TimelineEventRepository(vault: fixture.vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: fixture.vault),
+            conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: fixture.vault)
+        )
+        let resumed = try await resumedService.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(resumed.outcomes.map(\.status), [.refreshed])
+        let snapshots = try await RawAPISnapshotRepository(vault: fixture.vault)
+            .snapshots(for: fixture.accountID)
+        XCTAssertEqual(snapshots.count, 2)
+        let secondSnapshot = try XCTUnwrap(
+            snapshots.first { $0.requestIdentity?.requestKey.hasSuffix("timeline?page=2") == true }
+        )
+        XCTAssertEqual(secondSnapshot.requestIdentity?.scope, fixture.scope)
+        XCTAssertEqual(secondSnapshot.requestIdentity?.feature, .timelines)
+        XCTAssertEqual(secondSnapshot.requestIdentity?.streamID, fixture.timelineStreamID)
+        let validator = try await ConditionalRequestCacheRepository(vault: fixture.vault)
+            .validator(for: fixture.conditionalRequestIdentity)
+        XCTAssertNil(validator?.eTag)
+        XCTAssertEqual(validator?.lastModified, lastModified)
     }
 
     func testScopedPartialResultsPreservePriorTimelineAndRetainPendingRawResponse() async throws {
@@ -978,12 +1067,16 @@ private final class TimelineFixture: @unchecked Sendable {
         SyncStreamID(rawValue: "timeline:\(nodeID.rawValue)")!
     }
 
+    var timelineRequestKey: String {
+        "GET /repos/github/triage/issues/1/timeline?per_page=100&page=1"
+    }
+
     var conditionalRequestIdentity: ConditionalRequestIdentity {
         ConditionalRequestIdentity(
             scope: scope,
             feature: .timelines,
             streamID: timelineStreamID,
-            requestKey: "GET /repos/github/triage/issues/1/timeline?per_page=100&page=1"
+            requestKey: timelineRequestKey
         )
     }
 
