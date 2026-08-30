@@ -112,8 +112,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 
         let result = try await service.hydrate(
             nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
-            accountID: accountID,
-            organizationID: organizationID,
+            scope: hydrationScope(accountID: accountID, organizationID: organizationID),
             repositoryID: { _ in nil }
         )
 
@@ -177,8 +176,10 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 
         let result = try await service.hydrate(
             nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
-            accountID: accountID,
-            organizationID: OrganizationID(rawValue: "org-1")!,
+            scope: hydrationScope(
+                accountID: accountID,
+                organizationID: OrganizationID(rawValue: "org-1")!
+            ),
             repositoryID: { _ in nil }
         )
         XCTAssertEqual(result.outcomes.map(\.status), [.partialGraphQL([.unknown])])
@@ -242,8 +243,10 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         do {
             _ = try await service.hydrate(
                 nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
-                accountID: accountID,
-                organizationID: OrganizationID(rawValue: "org-1")!,
+                scope: hydrationScope(
+                    accountID: accountID,
+                    organizationID: OrganizationID(rawValue: "org-1")!
+                ),
                 repositoryID: { _ in nil }
             )
             XCTFail("Expected cancellation.")
@@ -254,6 +257,99 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         let failures = try await NormalizationFailureRepository(vault: vault).failures(for: accountID)
         XCTAssertTrue(snapshots.isEmpty)
         XCTAssertTrue(failures.isEmpty)
+    }
+
+    func testCredentialRotationDuringHydrationResponseCancelsWithoutPostGateWrites() async throws {
+        try await assertScopeRotationDuringHydration(.credential)
+    }
+
+    func testCapabilityRotationDuringHydrationResponseCancelsWithoutPostGateWrites() async throws {
+        try await assertScopeRotationDuringHydration(.capability)
+    }
+
+    private func assertScopeRotationDuringHydration(_ rotation: HydrationScopeRotation) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hydration-scope-rotation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "org-1")!
+        let observedAt = Date(timeIntervalSince1970: 2_000)
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        try await AccountRepository(vault: vault).save(
+            GitHubAccount(
+                id: accountID,
+                githubUserID: 1,
+                nodeID: GitHubNodeID(rawValue: "U_1")!,
+                login: "octocat",
+                authenticationKind: .oauth,
+                credentialID: CredentialID.make(),
+                credentialStatus: .active,
+                createdAt: observedAt
+            ),
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!
+        )
+        try await insertHydrationCandidate(
+            into: vault,
+            accountID: accountID,
+            organizationID: organizationID,
+            observedAt: observedAt
+        )
+        let gate = HydrationResponseGate()
+        let service = GitHubNodeHydrationService(
+            client: GitHubGraphQLClient(
+                session: HydrationGraphQLSession(
+                    body: Data(#"{"data":null,"errors":[{"message":"partial"}]}"#.utf8),
+                    gate: gate
+                ),
+                credential: SecretValue("token")
+            ),
+            detailsRepository: GitHubNodeDetailsRepository(vault: vault),
+            rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+            batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault),
+            clock: { observedAt }
+        )
+        let task = Task {
+            try await service.hydrate(
+                nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
+                scope: hydrationScope(accountID: accountID, organizationID: organizationID),
+                repositoryID: { _ in RepositoryID(rawValue: "repo-1")! }
+            )
+        }
+
+        await gate.waitUntilEntered()
+        let before = try await hydrationDurableState(in: vault)
+        try await vault.write { database in
+            switch rotation {
+            case .credential:
+                try database.execute(
+                    sql: "UPDATE accounts SET credential_revision = 'credential-2' WHERE id = ?",
+                    arguments: [accountID.rawValue]
+                )
+            case .capability:
+                try database.execute(
+                    sql: """
+                        UPDATE account_organizations
+                        SET capability_revision = 'capability-2'
+                        WHERE account_id = ? AND organization_id = ?
+                    """,
+                    arguments: [accountID.rawValue, organizationID.rawValue]
+                )
+            }
+        }
+        await gate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected scope rotation to cancel hydration.")
+        } catch is CancellationError {
+            // Expected supersession.
+        }
+        let after = try await hydrationDurableState(in: vault)
+        XCTAssertEqual(after, before)
     }
 
     func testNormalizesMergedPullRequestWithAuthoritativeFields() throws {
@@ -427,6 +523,50 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
     }
 }
 
+private func hydrationScope(
+    accountID: AccountID,
+    organizationID: OrganizationID
+) -> SynchronizationScope {
+    SynchronizationScope(
+        accountID: accountID,
+        organizationID: organizationID,
+        credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+        capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+    )
+}
+
+private enum HydrationScopeRotation {
+    case credential
+    case capability
+}
+
+private struct HydrationDurableState: Equatable {
+    let rawSnapshots: Int
+    let normalizationFailures: Int
+    let batchMetrics: Int
+    let actors: Int
+    let issues: Int
+    let pullRequests: Int
+    let sourceRevision: String?
+}
+
+private func hydrationDurableState(in vault: AccountVault) async throws -> HydrationDurableState {
+    try await vault.read { database in
+        HydrationDurableState(
+            rawSnapshots: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!,
+            normalizationFailures: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM normalization_failures")!,
+            batchMetrics: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM github_hydration_batch_metrics")!,
+            actors: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM actors")!,
+            issues: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM issues")!,
+            pullRequests: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM pull_requests")!,
+            sourceRevision: try String.fetchOne(
+                database,
+                sql: "SELECT source_revision FROM github_nodes WHERE github_node_id = 'I_1'"
+            )
+        )
+    }
+}
+
 private func insertHydrationCandidate(
     into vault: AccountVault,
     accountID: AccountID,
@@ -495,18 +635,24 @@ private actor HydrationGraphQLSession: HTTPSession {
     let body: Data
     let cancelBeforeReturn: Bool
     let headerFields: [String: String]?
+    let gate: HydrationResponseGate?
 
     init(
         body: Data,
         cancelBeforeReturn: Bool = false,
-        headerFields: [String: String]? = nil
+        headerFields: [String: String]? = nil,
+        gate: HydrationResponseGate? = nil
     ) {
         self.body = body
         self.cancelBeforeReturn = cancelBeforeReturn
         self.headerFields = headerFields
+        self.gate = gate
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if let gate {
+            await gate.enterAndWait()
+        }
         if cancelBeforeReturn {
             withUnsafeCurrentTask { $0?.cancel() }
         }
@@ -519,5 +665,31 @@ private actor HydrationGraphQLSession: HTTPSession {
                 headerFields: headerFields
             )!
         )
+    }
+}
+
+private actor HydrationResponseGate {
+    private var entered = false
+    private var released = false
+    private var enteredWaiters = [CheckedContinuation<Void, Never>]()
+    private var releaseWaiters = [CheckedContinuation<Void, Never>]()
+
+    func enterAndWait() async {
+        entered = true
+        enteredWaiters.forEach { $0.resume() }
+        enteredWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
     }
 }

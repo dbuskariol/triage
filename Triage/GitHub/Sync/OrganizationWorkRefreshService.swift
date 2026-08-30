@@ -24,17 +24,26 @@ actor OrganizationWorkRefreshService {
     func refresh(
         account: GitHubAccount,
         organization: GitHubOrganization,
+        synchronizationScope: SynchronizationScope,
         reconciliationIntent: SynchronizationReconciliationIntent
     ) async throws -> [WorkItemID] {
-        let token = try await credentialReader.accessToken(for: account)
+        guard synchronizationScope.accountID == account.id,
+              synchronizationScope.organizationID == organization.id
+        else {
+            throw CancellationError()
+        }
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
-        let synchronizationScope = try await AccountRepository(vault: vault).synchronizationScope(
+        let currentScope = try await AccountRepository(vault: vault).synchronizationScope(
             for: account.id,
             organizationID: organization.id
         )
+        guard currentScope == synchronizationScope else {
+            throw CancellationError()
+        }
+        let token = try await credentialReader.accessToken(for: account)
         let coverageRepository = CoverageRepository(vault: vault)
         let streamID = SyncStreamID(rawValue: "role-discovery-\(organization.id.rawValue)")!
         let attemptedAt = Date()
@@ -483,8 +492,7 @@ actor OrganizationWorkRefreshService {
             batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault)
         ).hydrate(
             nodeIDs: nodeIDs,
-            accountID: scope.accountID,
-            organizationID: scope.organizationID,
+            scope: scope,
             githubOrganizationID: organization.githubOrganizationID,
             repositoryID: repositoryID
         )

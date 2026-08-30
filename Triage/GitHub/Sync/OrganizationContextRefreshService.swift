@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 struct OrganizationContextSelectionPolicy: Equatable, Sendable {
     let maximumDiscussionRepositories: Int
@@ -163,11 +164,12 @@ actor OrganizationContextRefreshService {
         else {
             throw OrganizationContextRefreshServiceError.accountScopeMismatch
         }
-        try Task.checkCancellation()
+        try await validateCurrentScope(scope)
         let streams = try await SyncStreamRepository(vault: vault).streams(
             for: scope.accountID,
             organizationID: scope.organizationID
         )
+        try await validateCurrentScope(scope)
         let streamsByID = Dictionary(uniqueKeysWithValues: streams.map { ($0.id, $0) })
         var recovery = OrganizationContextRecovery()
         let discussionCoverage = try await refreshDiscussions(
@@ -178,7 +180,7 @@ actor OrganizationContextRefreshService {
             streamsByID: streamsByID,
             recovery: &recovery
         )
-        try Task.checkCancellation()
+        try await validateCurrentScope(scope)
         let projects = try await refreshProjects(
             scope: scope,
             organization: organization,
@@ -248,7 +250,7 @@ actor OrganizationContextRefreshService {
                 streamsByID: streamsByID
             ))
         }
-        try await saveCoverage(preliminaryCoverage, attemptedAt: observedAt)
+        try await saveCoverage(preliminaryCoverage, scope: scope, attemptedAt: observedAt)
 
         eligible.sort {
             Self.candidatePrecedes(
@@ -267,7 +269,7 @@ actor OrganizationContextRefreshService {
         let selected = Array(eligible.prefix(selectionPolicy.maximumDiscussionRepositories))
         let deferredCount = eligible.count - selected.count
         for repository in selected {
-            try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let streamID = Self.discussionStreamID(
                 organizationID: organization.id,
                 repositoryID: repository.id
@@ -281,10 +283,12 @@ actor OrganizationContextRefreshService {
                     streamsByID[streamID]?.highWater,
                     observedAt
                 )
+                try await validateCurrentScope(scope)
                 metadataStatuses.append(coverage.status)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try await validateCurrentScope(scope)
                 if Self.isTransportCancellation(error) { throw CancellationError() }
                 guard Self.isExpectedSourceError(error) else { throw error }
                 metadataStatuses.append(Self.coverageStatus(for: error))
@@ -334,7 +338,11 @@ actor OrganizationContextRefreshService {
             status: .unavailable,
             detail: "Discussion replies are unavailable until their independently paginated source is implemented."
         )
-        try await saveCoverage([aggregate, commentsAggregate, repliesAggregate], attemptedAt: observedAt)
+        try await saveCoverage(
+            [aggregate, commentsAggregate, repliesAggregate],
+            scope: scope,
+            attemptedAt: observedAt
+        )
         return aggregate
     }
 
@@ -348,6 +356,7 @@ actor OrganizationContextRefreshService {
         let inventoryStreamID = Self.projectInventoryStreamID(organizationID: organization.id)
         let inventory: ProjectV2SynchronizationResult
         do {
+            try await validateCurrentScope(scope)
             inventory = try await refreshProjectInventory(
                 scope,
                 organization,
@@ -355,9 +364,11 @@ actor OrganizationContextRefreshService {
                 streamsByID[inventoryStreamID]?.highWater,
                 observedAt
             )
+            try await validateCurrentScope(scope)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            try await validateCurrentScope(scope)
             if Self.isTransportCancellation(error) { throw CancellationError() }
             guard Self.isExpectedSourceError(error) else { throw error }
             Self.recordRecovery(from: error, observedAt: observedAt, into: &recovery)
@@ -374,7 +385,7 @@ actor OrganizationContextRefreshService {
                 status: status,
                 detail: "Project items could not be planned because Projects V2 inventory did not complete."
             )
-            try await saveCoverage([aggregate], attemptedAt: observedAt)
+            try await saveCoverage([aggregate], scope: scope, attemptedAt: observedAt)
             return (nil, aggregate)
         }
 
@@ -397,7 +408,7 @@ actor OrganizationContextRefreshService {
         let deferredCount = projects.count - selected.count
         var statuses = [CoverageStatus]()
         for project in selected {
-            try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let streamID = Self.projectItemsStreamID(
                 organizationID: organization.id,
                 projectID: project.nodeID
@@ -411,10 +422,12 @@ actor OrganizationContextRefreshService {
                     streamsByID[streamID]?.highWater,
                     observedAt
                 )
+                try await validateCurrentScope(scope)
                 statuses.append(coverage.status)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try await validateCurrentScope(scope)
                 if Self.isTransportCancellation(error) { throw CancellationError() }
                 guard Self.isExpectedSourceError(error) else { throw error }
                 statuses.append(Self.coverageStatus(for: error))
@@ -440,7 +453,7 @@ actor OrganizationContextRefreshService {
                 deferredCount: deferredCount
             )
         )
-        try await saveCoverage([aggregate], attemptedAt: observedAt)
+        try await saveCoverage([aggregate], scope: scope, attemptedAt: observedAt)
         return (inventory.projectCoverage, aggregate)
     }
 
@@ -511,10 +524,15 @@ actor OrganizationContextRefreshService {
         )
     }
 
-    private func saveCoverage(_ records: [CoverageRecord], attemptedAt: Date) async throws {
+    private func saveCoverage(
+        _ records: [CoverageRecord],
+        scope: SynchronizationScope,
+        attemptedAt: Date
+    ) async throws {
         guard !records.isEmpty else { return }
         let accountID = vault.accountID
         try await vault.write { database in
+            try Self.validateCurrentScope(scope, in: database)
             for record in records {
                 try CoverageRepository.save(
                     record,
@@ -523,6 +541,31 @@ actor OrganizationContextRefreshService {
                     in: database
                 )
             }
+        }
+    }
+
+    private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
+        try Task.checkCancellation()
+        do {
+            try await vault.read { database in
+                try Self.validateCurrentScope(scope, in: database)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        do {
+            try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope {
+            throw CancellationError()
+        } catch OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
         }
     }
 
