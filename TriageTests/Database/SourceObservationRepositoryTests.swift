@@ -353,7 +353,7 @@ final class SourceObservationRepositoryTests: XCTestCase {
         let repository = SourceAccessObservationRepository(vault: fixture.vault)
         let omission = fixture.observation(
             id: "inventory-omission",
-            source: .endpoint("GET /orgs/acme/repos?type=all&per_page=100"),
+            source: .endpoint("/orgs/acme/repos?type=all&per_page=100"),
             result: .unknown,
             reason: .inventoryOmission,
             authority: .fullReconciliation,
@@ -402,7 +402,7 @@ final class SourceObservationRepositoryTests: XCTestCase {
         XCTAssertEqual(counts, .init(observations: 0, projections: 0))
     }
 
-    func testRawSnapshotRequiresExactAuthorityTimestampAndSourceLocator() async throws {
+    func testRawSnapshotRequiresExactAuthorityTimestampSourceAndRequestKey() async throws {
         let fixture = try await SourceObservationFixture()
         defer { fixture.remove() }
         let repository = SourceAccessObservationRepository(vault: fixture.vault)
@@ -413,17 +413,22 @@ final class SourceObservationRepositoryTests: XCTestCase {
         )
         let wrongLocatorID = try await fixture.seedRawSnapshot(
             id: "raw-wrong-locator",
-            source: .endpoint("GET /orgs/acme/teams?per_page=100")
+            source: .endpoint("/orgs/acme/teams?per_page=100")
         )
         let wrongTimeID = try await fixture.seedRawSnapshot(
             id: "raw-wrong-time",
             observedAt: fixture.date.addingTimeInterval(1)
         )
+        let wrongRequestKeyID = try await fixture.seedRawSnapshot(
+            id: "raw-wrong-request-key",
+            requestKey: "GET /orgs/acme/teams?per_page=100"
+        )
 
         for (id, rawSnapshotID) in [
             ("wrong-authority", wrongAuthorityID),
             ("wrong-locator", wrongLocatorID),
-            ("wrong-time", wrongTimeID)
+            ("wrong-time", wrongTimeID),
+            ("wrong-request-key", wrongRequestKeyID)
         ] {
             await assertThrows(.rawSnapshotScopeMismatch) {
                 _ = try await repository.record(
@@ -431,21 +436,34 @@ final class SourceObservationRepositoryTests: XCTestCase {
                 )
             }
         }
+        let rejectedCounts = try await fixture.counts()
+        XCTAssertEqual(rejectedCounts, .init(observations: 0, projections: 0))
+
+        let endpointSnapshotID = try await fixture.seedRawSnapshot(
+            id: "raw-endpoint-authority"
+        )
+        let endpointObservation = fixture.observation(
+            id: "endpoint-authority",
+            rawSnapshotID: endpointSnapshotID
+        )
+        _ = try await repository.record(endpointObservation)
 
         let querySource = SourceAccessLocator.query("OrganizationRepositoryInventory")
         let querySnapshotID = try await fixture.seedRawSnapshot(
             id: "raw-query-authority",
-            source: querySource
+            source: querySource,
+            observedAt: fixture.date.addingTimeInterval(1)
         )
         let queryObservation = fixture.observation(
             id: "query-authority",
             source: querySource,
-            rawSnapshotID: querySnapshotID
+            rawSnapshotID: querySnapshotID,
+            observedAt: fixture.date.addingTimeInterval(1)
         )
         _ = try await repository.record(queryObservation)
 
         let counts = try await fixture.counts()
-        XCTAssertEqual(counts, .init(observations: 1, projections: 1))
+        XCTAssertEqual(counts, .init(observations: 2, projections: 1))
     }
 
     func testSourceNodeAndEventMustHaveProvableExactScopeAndRelationship() async throws {
@@ -641,7 +659,7 @@ final class SourceObservationRepositoryTests: XCTestCase {
                 )
             }
         }
-        XCTAssertEqual(receiptState?.0, "GET /orgs/acme/repos?type=all&per_page=100")
+        XCTAssertEqual(receiptState?.0, "/orgs/acme/repos?type=all&per_page=100")
         XCTAssertEqual(receiptState?.1, Data("{}".utf8))
         XCTAssertEqual(receiptState?.2, CoverageFeature.repositories.rawValue)
         XCTAssertEqual(receiptState?.3, fixture.streamID.rawValue)
@@ -663,7 +681,7 @@ final class SourceObservationRepositoryTests: XCTestCase {
                 id: ordinarySnapshotID,
                 accountID: fixture.account.id,
                 githubNodeID: nil,
-                endpoint: "GET /orgs/acme/repos?type=all&per_page=100",
+                endpoint: "/orgs/acme/repos?type=all&per_page=100",
                 eTag: nil,
                 parserVersion: 1,
                 observedAt: deletionTime.addingTimeInterval(1),
@@ -1095,7 +1113,7 @@ private final class SourceObservationFixture: @unchecked Sendable {
                 id: rawSnapshotID,
                 accountID: account.id,
                 githubNodeID: nil,
-                endpoint: "GET /orgs/acme/repos?type=all&per_page=100",
+                endpoint: "/orgs/acme/repos?type=all&per_page=100",
                 eTag: nil,
                 parserVersion: 1,
                 observedAt: date,
@@ -1116,7 +1134,7 @@ private final class SourceObservationFixture: @unchecked Sendable {
         feature: CoverageFeature = .repositories,
         streamID: SyncStreamID? = nil,
         target: SourceAccessTarget? = nil,
-        source: SourceAccessLocator = .endpoint("GET /orgs/acme/repos?type=all&per_page=100"),
+        source: SourceAccessLocator = .endpoint("/orgs/acme/repos?type=all&per_page=100"),
         sourceNodeID: GitHubNodeID? = nil,
         sourceEventID: GitHubEventID? = nil,
         sourceRevision: String = "revision-1",
@@ -1240,9 +1258,10 @@ private final class SourceObservationFixture: @unchecked Sendable {
         feature: CoverageFeature = .repositories,
         streamID: SyncStreamID? = nil,
         source: SourceAccessLocator = .endpoint(
-            "GET /orgs/acme/repos?type=all&per_page=100"
+            "/orgs/acme/repos?type=all&per_page=100"
         ),
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        requestKey: String? = nil
     ) async throws -> RawAPISnapshotID {
         let snapshotID = RawAPISnapshotID(rawValue: id)!
         let endpoint: String
@@ -1264,7 +1283,12 @@ private final class SourceObservationFixture: @unchecked Sendable {
                     scope: scope,
                     feature: feature,
                     streamID: streamID ?? self.streamID,
-                    requestKey: source.value
+                    requestKey: requestKey ?? {
+                        switch source {
+                        case let .endpoint(value): "GET \(value)"
+                        case let .query(value): value
+                        }
+                    }()
                 )
             )
         )

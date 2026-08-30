@@ -427,12 +427,29 @@ actor SourceAccessObservationRepository {
             return
         }
         let locatorClause: String
+        let locatorArguments: [String]
         switch observation.source.kind {
         case .endpoint:
-            locatorClause = "endpoint = ?"
+            locatorClause = "endpoint = ? AND authority_request_key = ?"
+            locatorArguments = [
+                observation.source.value,
+                "GET \(observation.source.value)"
+            ]
         case .query:
             locatorClause = "authority_request_key = ?"
+            locatorArguments = [observation.source.value]
         }
+        var arguments: [DatabaseValueConvertible?] = [
+            rawSnapshotID.rawValue,
+            observation.scope.accountID.rawValue,
+            observation.scope.organizationID.rawValue,
+            observation.feature.rawValue,
+            observation.streamID.rawValue,
+            observation.scope.credentialRevision.rawValue,
+            observation.scope.capabilityRevision.rawValue,
+            try milliseconds(observation.observedAt)
+        ]
+        arguments.append(contentsOf: locatorArguments)
         guard let row = try Row.fetchOne(
             database,
             sql: """
@@ -445,17 +462,7 @@ actor SourceAccessObservationRepository {
                   AND authority_capability_revision = ?
                   AND observed_at_ms = ? AND \(locatorClause)
                 """,
-            arguments: [
-                rawSnapshotID.rawValue,
-                observation.scope.accountID.rawValue,
-                observation.scope.organizationID.rawValue,
-                observation.feature.rawValue,
-                observation.streamID.rawValue,
-                observation.scope.credentialRevision.rawValue,
-                observation.scope.capabilityRevision.rawValue,
-                try milliseconds(observation.observedAt),
-                observation.source.value
-            ]
+            arguments: StatementArguments(arguments)
         ) else {
             throw SourceAccessObservationRepositoryError.rawSnapshotScopeMismatch
         }

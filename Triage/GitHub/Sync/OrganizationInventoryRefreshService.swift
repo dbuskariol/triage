@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -242,11 +243,29 @@ actor OrganizationInventoryRefreshService {
         case .fullReconciliation:
             nil
         }
-        let fetched = try await client.fetchRepositories(
+        var fetched = try await client.fetchRepositories(
             in: context.organization.login,
             validators: requestValidators
         )
         try Task.checkCancellation()
+        if case let .notModified(ssoHeader) = fetched {
+            try throwForSSORequirement(
+                in: ssoHeader,
+                githubOrganizationID: context.organization.githubOrganizationID
+            )
+            fetched = try await client.fetchRepositories(
+                in: context.organization.login,
+                validators: nil
+            )
+            try Task.checkCancellation()
+            if case let .notModified(ssoHeader) = fetched {
+                try throwForSSORequirement(
+                    in: ssoHeader,
+                    githubOrganizationID: context.organization.githubOrganizationID
+                )
+                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
+            }
+        }
         let coverage = completeCoverage(feature: .repositories, context: context, observedAt: observedAt)
         switch fetched {
         case let .modified(inventory):
@@ -254,29 +273,36 @@ actor OrganizationInventoryRefreshService {
                 in: inventory.ssoHeader,
                 githubOrganizationID: context.organization.githubOrganizationID
             )
+            let preparedPages = try Self.prepareRepositoryPages(
+                inventory.pages,
+                context: context,
+                observedAt: observedAt
+            )
+            guard let rootPage = preparedPages.first else {
+                throw GitHubRepositoryTeamClientError.invalidRepository
+            }
+            let sourceRevision = Self.repositorySourceRevision(for: preparedPages)
+            try Task.checkCancellation()
             let summaries = try await context.repositoryInventory.writeTransaction(
                 accountID: context.account.id
             ) { database in
-                for page in inventory.pages {
-                    try RawAPISnapshotRepository.save(
-                        RawAPISnapshot(
-                            id: RawAPISnapshotID.make(),
-                            accountID: context.account.id,
-                            githubNodeID: nil,
-                            endpoint: page.endpoint,
-                            eTag: page.page.etag,
-                            parserVersion: 1,
-                            observedAt: observedAt,
-                            payload: page.page.payload
-                        ),
-                        in: database
-                    )
+                try Task.checkCancellation()
+                try Self.validateRepositoryAggregateReplay(
+                    preparedPages,
+                    context: context,
+                    observedAt: observedAt,
+                    in: database
+                )
+                for page in preparedPages {
+                    try Task.checkCancellation()
+                    try RawAPISnapshotRepository.save(page.snapshot, in: database)
                 }
-                let summaries = try RepositoryInventoryRepository.replace(
+                let reconciliation = try RepositoryInventoryRepository.reconcile(
                     inventory.values,
                     accountID: context.account.id,
                     organization: context.organization,
                     observedAt: observedAt,
+                    reconciliationIntent: reconciliationIntent,
                     in: database
                 )
                 try CoverageRepository.save(
@@ -285,6 +311,101 @@ actor OrganizationInventoryRefreshService {
                     expectedAccountID: context.account.id,
                     in: database
                 )
+                for repositoryID in reconciliation.returnedRepositoryIDs {
+                    try Task.checkCancellation()
+                    guard let page = preparedPages.first(where: {
+                        $0.repositoryIDs.contains(repositoryID)
+                    }),
+                    let sourceNodeID = GitHubNodeID(rawValue: repositoryID.rawValue)
+                    else {
+                        throw GitHubRepositoryTeamClientError.invalidRepository
+                    }
+                    try CoverageRepository.save(
+                        Self.repositoryAccessCoverage(
+                            repositoryID: repositoryID,
+                            status: .complete,
+                            lastSuccessfulAt: observedAt,
+                            failureDetail: nil,
+                            context: context
+                        ),
+                        attemptedAt: observedAt,
+                        expectedAccountID: context.account.id,
+                        in: database
+                    )
+                    _ = try SourceAccessObservationRepository.record(
+                        SourceAccessObservation(
+                            id: Self.repositoryAccessObservationID(
+                                repositoryID: repositoryID,
+                                sourceRevision: sourceRevision,
+                                rawSnapshotID: page.snapshot.id,
+                                result: .accessible,
+                                authority: Self.sourceAuthority(for: reconciliationIntent),
+                                observedAt: observedAt,
+                                context: context
+                            ),
+                            scope: context.synchronizationScope,
+                            feature: .repositories,
+                            streamID: conditionalIdentity.streamID,
+                            target: .repository(repositoryID),
+                            source: .endpoint(page.endpoint),
+                            sourceNodeID: sourceNodeID,
+                            sourceEventID: nil,
+                            sourceRevision: sourceRevision,
+                            rawSnapshotID: page.snapshot.id,
+                            result: .accessible,
+                            reason: .directResponse,
+                            authority: Self.sourceAuthority(for: reconciliationIntent),
+                            confirmation: .confirmed,
+                            observedAt: observedAt
+                        ),
+                        expectedAccountID: context.account.id,
+                        in: database
+                    )
+                }
+                for repositoryID in reconciliation.omittedRepositoryIDs {
+                    try Task.checkCancellation()
+                    try CoverageRepository.save(
+                        Self.repositoryAccessCoverage(
+                            repositoryID: repositoryID,
+                            status: .unknown,
+                            lastSuccessfulAt: nil,
+                            failureDetail: "Repository visibility was omitted from the latest complete inventory response.",
+                            context: context
+                        ),
+                        attemptedAt: observedAt,
+                        expectedAccountID: context.account.id,
+                        in: database
+                    )
+                    _ = try SourceAccessObservationRepository.record(
+                        SourceAccessObservation(
+                            id: Self.repositoryAccessObservationID(
+                                repositoryID: repositoryID,
+                                sourceRevision: sourceRevision,
+                                rawSnapshotID: nil,
+                                result: .unknown,
+                                authority: Self.sourceAuthority(for: reconciliationIntent),
+                                observedAt: observedAt,
+                                context: context
+                            ),
+                            scope: context.synchronizationScope,
+                            feature: .repositories,
+                            streamID: conditionalIdentity.streamID,
+                            target: .repository(repositoryID),
+                            source: .endpoint(rootPage.endpoint),
+                            sourceNodeID: nil,
+                            sourceEventID: nil,
+                            sourceRevision: sourceRevision,
+                            rawSnapshotID: nil,
+                            result: .unknown,
+                            reason: .inventoryOmission,
+                            authority: Self.sourceAuthority(for: reconciliationIntent),
+                            confirmation: .provisional,
+                            observedAt: observedAt
+                        ),
+                        expectedAccountID: context.account.id,
+                        in: database
+                    )
+                }
                 try Self.persistConditionalValidator(
                     eTag: inventory.pages.first?.page.etag,
                     lastModified: inventory.pages.first?.page.lastModified,
@@ -293,21 +414,14 @@ actor OrganizationInventoryRefreshService {
                     expectedAccountID: context.account.id,
                     in: database
                 )
-                return summaries
+                return reconciliation.summaries
             }
             return (
                 summaries,
                 try await committedCoverage(coverage, context: context)
             )
         case .notModified:
-            let summaries = try await context.repositoryInventory.repositories(
-                accountID: context.account.id,
-                organization: context.organization
-            )
-            return (
-                summaries,
-                try await commitCoverage(coverage, context: context, attemptedAt: observedAt)
-            )
+            throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
         }
     }
 
@@ -346,7 +460,11 @@ actor OrganizationInventoryRefreshService {
                 }
                 return TeamMembershipTarget(id: teamID, slug: team.slug)
             }
-        case .notModified:
+        case let .notModified(ssoHeader):
+            try throwForSSORequirement(
+                in: ssoHeader,
+                githubOrganizationID: context.organization.githubOrganizationID
+            )
             updatedTeams = nil
             teamPages = []
             let cachedTeams = try await context.teamInventory.teams(
@@ -601,8 +719,14 @@ actor OrganizationInventoryRefreshService {
         in header: GitHubSSOHeader?,
         githubOrganizationID: UInt64
     ) throws {
-        if let requirement = header?.scoped(to: githubOrganizationID) {
+        guard let requirement = header?.scoped(to: githubOrganizationID) else {
+            return
+        }
+        switch requirement {
+        case .authorizationRequired:
             throw OrganizationRefreshError.ssoRequirement(requirement)
+        case .partialResults, .malformed:
+            throw GitHubRepositoryTeamClientError.partialResults
         }
     }
 
@@ -611,7 +735,8 @@ actor OrganizationInventoryRefreshService {
         githubOrganizationID: UInt64
     ) -> OrganizationRefreshError? {
         guard let failure = error as? GitHubFailure,
-              let header = failure.ssoHeader?.scoped(to: githubOrganizationID)
+              let header = failure.ssoHeader?.scoped(to: githubOrganizationID),
+              case .authorizationRequired = header
         else {
             return nil
         }
@@ -619,10 +744,24 @@ actor OrganizationInventoryRefreshService {
     }
 
     private func reportedError(for error: Error, context: Context) -> Error {
-        ssoRequirement(
+        if let requirement = ssoRequirement(
             for: error,
             githubOrganizationID: context.organization.githubOrganizationID
-        ) ?? error
+        ) {
+            return requirement
+        }
+        if let failure = error as? GitHubFailure,
+           let header = failure.ssoHeader?.scoped(
+               to: context.organization.githubOrganizationID
+           ) {
+            switch header {
+            case .authorizationRequired:
+                break
+            case .partialResults, .malformed:
+                return GitHubRepositoryTeamClientError.partialResults
+            }
+        }
+        return error
     }
 
     private func streamID(for feature: CoverageFeature, organizationID: OrganizationID) -> SyncStreamID {
@@ -687,13 +826,245 @@ actor OrganizationInventoryRefreshService {
         }
     }
 
+    private nonisolated static func prepareRepositoryPages(
+        _ pages: [GitHubRepositoryTeamPage<GitHubRepositoryDTO>],
+        context: Context,
+        observedAt: Date
+    ) throws -> [PreparedRepositoryPage] {
+        try pages.map { page in
+            let repositoryIDs = try page.page.values.map { repository in
+                guard let repositoryID = RepositoryID(rawValue: repository.nodeID) else {
+                    throw GitHubRepositoryTeamClientError.invalidRepository
+                }
+                return repositoryID
+            }
+            let requestIdentity = ConditionalRequestIdentity(
+                scope: context.synchronizationScope,
+                feature: .repositories,
+                streamID: SyncStreamID(
+                    rawValue: "inventory-repositories-\(context.organization.id.rawValue)"
+                )!,
+                requestKey: "GET \(page.endpoint)"
+            )
+            return PreparedRepositoryPage(
+                endpoint: page.endpoint,
+                repositoryIDs: repositoryIDs,
+                snapshot: RawAPISnapshot(
+                    id: repositoryPageSnapshotID(
+                        page: page,
+                        context: context,
+                        observedAt: observedAt
+                    ),
+                    accountID: context.account.id,
+                    githubNodeID: nil,
+                    endpoint: page.endpoint,
+                    eTag: page.page.etag,
+                    lastModified: page.page.lastModified,
+                    parserVersion: 1,
+                    observedAt: observedAt,
+                    payload: page.page.payload,
+                    requestIdentity: requestIdentity
+                )
+            )
+        }
+    }
+
+    private nonisolated static func repositorySourceRevision(
+        for pages: [PreparedRepositoryPage]
+    ) -> String {
+        var hasher = SHA256()
+        updateDigest(with: Data("repository-inventory-v1".utf8), hasher: &hasher)
+        for page in pages {
+            updateDigest(with: Data(page.endpoint.utf8), hasher: &hasher)
+            updateDigest(with: page.snapshot.payload, hasher: &hasher)
+        }
+        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return "repository-inventory-v1:\(digest)"
+    }
+
+    /// Raw pages are the only aggregate receipt available before the durable
+    /// normalized-replay receipt is introduced. Reject a different complete
+    /// response at the same canonical instant even when both inventories have
+    /// no repository targets on which to record an access observation.
+    private nonisolated static func validateRepositoryAggregateReplay(
+        _ pages: [PreparedRepositoryPage],
+        context: Context,
+        observedAt: Date,
+        in database: Database
+    ) throws {
+        guard let streamID = pages.first?.snapshot.requestIdentity?.streamID else {
+            throw GitHubRepositoryTeamClientError.invalidRepository
+        }
+        let proposedObservedAtMilliseconds = canonicalMilliseconds(observedAt)
+        let maximumObservedAtMilliseconds = try Int64.fetchOne(
+            database,
+            sql: """
+                SELECT MAX(observed_at_ms)
+                FROM raw_api_snapshots
+                WHERE account_id = ?
+                  AND authority_organization_id = ?
+                  AND authority_feature = ?
+                  AND authority_stream_id = ?
+                  AND authority_credential_revision = ?
+                  AND authority_capability_revision = ?
+                """,
+            arguments: [
+                context.account.id.rawValue,
+                context.organization.id.rawValue,
+                CoverageFeature.repositories.rawValue,
+                streamID.rawValue,
+                context.synchronizationScope.credentialRevision.rawValue,
+                context.synchronizationScope.capabilityRevision.rawValue
+            ]
+        )
+        guard let maximumObservedAtMilliseconds else { return }
+        guard proposedObservedAtMilliseconds >= maximumObservedAtMilliseconds else {
+            throw SourceAccessObservationRepositoryError.staleObservation
+        }
+        guard proposedObservedAtMilliseconds == maximumObservedAtMilliseconds else { return }
+        let existingSnapshotIDs = try String.fetchAll(
+            database,
+            sql: """
+                SELECT id
+                FROM raw_api_snapshots
+                WHERE account_id = ?
+                  AND authority_organization_id = ?
+                  AND authority_feature = ?
+                  AND authority_stream_id = ?
+                  AND authority_credential_revision = ?
+                  AND authority_capability_revision = ?
+                  AND observed_at_ms = ?
+                ORDER BY id
+                """,
+            arguments: [
+                context.account.id.rawValue,
+                context.organization.id.rawValue,
+                CoverageFeature.repositories.rawValue,
+                streamID.rawValue,
+                context.synchronizationScope.credentialRevision.rawValue,
+                context.synchronizationScope.capabilityRevision.rawValue,
+                proposedObservedAtMilliseconds
+            ]
+        )
+        let proposedSnapshotIDs = pages.map(\.snapshot.id.rawValue).sorted()
+        guard existingSnapshotIDs == proposedSnapshotIDs else {
+            throw SourceAccessObservationRepositoryError.conflictingObservation
+        }
+    }
+
+    private nonisolated static func repositoryPageSnapshotID(
+        page: GitHubRepositoryTeamPage<GitHubRepositoryDTO>,
+        context: Context,
+        observedAt: Date
+    ) -> RawAPISnapshotID {
+        let components = [
+            Data("repository-page-v1".utf8),
+            Data(context.account.id.rawValue.utf8),
+            Data(context.organization.id.rawValue.utf8),
+            Data(context.synchronizationScope.credentialRevision.rawValue.utf8),
+            Data(context.synchronizationScope.capabilityRevision.rawValue.utf8),
+            Data(page.endpoint.utf8),
+            Data((page.page.etag ?? "<nil>").utf8),
+            Data((page.page.lastModified ?? "<nil>").utf8),
+            Data(String(canonicalMilliseconds(observedAt)).utf8),
+            page.page.payload
+        ]
+        return RawAPISnapshotID(rawValue: "repository-page:\(digest(components))")!
+    }
+
+    private nonisolated static func repositoryAccessObservationID(
+        repositoryID: RepositoryID,
+        sourceRevision: String,
+        rawSnapshotID: RawAPISnapshotID?,
+        result: SourceAccessResult,
+        authority: SourceAccessAuthority,
+        observedAt: Date,
+        context: Context
+    ) -> SourceAccessObservationID {
+        let components = [
+            Data("repository-access-observation-v1".utf8),
+            Data(context.account.id.rawValue.utf8),
+            Data(context.organization.id.rawValue.utf8),
+            Data(context.synchronizationScope.credentialRevision.rawValue.utf8),
+            Data(context.synchronizationScope.capabilityRevision.rawValue.utf8),
+            Data(repositoryID.rawValue.utf8),
+            Data(sourceRevision.utf8),
+            Data((rawSnapshotID?.rawValue ?? "<nil>").utf8),
+            Data(result.rawValue.utf8),
+            Data(authority.rawValue.utf8),
+            Data(String(canonicalMilliseconds(observedAt)).utf8)
+        ]
+        return SourceAccessObservationID(
+            rawValue: "repository-access:\(digest(components))"
+        )!
+    }
+
+    private nonisolated static func digest(_ components: [Data]) -> String {
+        var hasher = SHA256()
+        for component in components {
+            updateDigest(with: component, hasher: &hasher)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func canonicalMilliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func updateDigest(
+        with data: Data,
+        hasher: inout SHA256
+    ) {
+        var length = UInt64(data.count).bigEndian
+        withUnsafeBytes(of: &length) { bytes in
+            hasher.update(data: Data(bytes))
+        }
+        hasher.update(data: data)
+    }
+
+    private nonisolated static func repositoryAccessCoverage(
+        repositoryID: RepositoryID,
+        status: CoverageStatus,
+        lastSuccessfulAt: Date?,
+        failureDetail: String?,
+        context: Context
+    ) -> CoverageRecord {
+        CoverageRecord(
+            accountID: context.account.id,
+            organizationID: context.organization.id,
+            repositoryID: repositoryID,
+            feature: .repositories,
+            streamID: SyncStreamID(
+                rawValue: "inventory-repositories-\(context.organization.id.rawValue)"
+            )!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: context.synchronizationScope.credentialRevision,
+            capabilityRevision: context.synchronizationScope.capabilityRevision,
+            status: status,
+            lastSuccessfulAt: lastSuccessfulAt,
+            failureDetail: failureDetail
+        )
+    }
+
+    private nonisolated static func sourceAuthority(
+        for intent: SynchronizationReconciliationIntent
+    ) -> SourceAccessAuthority {
+        switch intent {
+        case .incremental:
+            .incremental
+        case .fullReconciliation:
+            .fullReconciliation
+        }
+    }
+
     nonisolated static func coverageStatus(for error: Error) -> CoverageStatus {
         if let refreshError = error as? OrganizationRefreshError,
            case .ssoRequirement = refreshError {
             return .requiresSSO
         }
         if let clientError = error as? GitHubRepositoryTeamClientError,
-           clientError == .ambiguousMembershipVisibility {
+           clientError == .ambiguousMembershipVisibility || clientError == .partialResults {
             return .partial
         }
         guard let failure = error as? GitHubFailure else {
@@ -724,7 +1095,7 @@ actor OrganizationInventoryRefreshService {
             return .ssoRequired(header)
         }
         if let clientError = error as? GitHubRepositoryTeamClientError,
-           clientError == .ambiguousMembershipVisibility {
+           clientError == .ambiguousMembershipVisibility || clientError == .partialResults {
             return .partial
         }
         guard let failure = error as? GitHubFailure else {
@@ -786,5 +1157,11 @@ actor OrganizationInventoryRefreshService {
     private struct TeamMembershipTarget: Sendable {
         let id: TeamID
         let slug: String
+    }
+
+    private struct PreparedRepositoryPage: Sendable {
+        let endpoint: String
+        let repositoryIDs: [RepositoryID]
+        let snapshot: RawAPISnapshot
     }
 }

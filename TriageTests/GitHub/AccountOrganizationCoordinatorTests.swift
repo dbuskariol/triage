@@ -1687,12 +1687,13 @@ private actor ControlledRefreshOperation: AccountOrganizationRefreshOperating {
 
     func request(at ordinal: Int) async throws -> AccountOrganizationRefreshRequest {
         precondition(ordinal >= 0, "A request ordinal cannot be negative.")
-        for _ in 0..<100_000 {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if requests.indices.contains(ordinal) {
                 return requests[ordinal]
             }
-            await Task.yield()
+            try await Task.sleep(for: .milliseconds(1))
         }
         throw CoordinatorTestAwaitError.budgetExhausted("A refresh request was not published.")
     }

@@ -844,6 +844,62 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         }
     }
 
+    func testStaleRequirementManifestInvalidatesOnlyDurableAndSchedulerProjection() async throws {
+        let fixture = try await DurableStateFixture()
+        defer { fixture.remove() }
+        let scope = fixture.scope()
+        let repository = AccountOrganizationDurableStateRepository(vault: fixture.vault)
+        let scheduler = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let workflow = try await fixture.installRepositoryBackedWorkflow()
+        let currentRequirements = try await fixture.vault.read { database in
+            try CoverageRequirementProfile.build(for: scope, coverage: [], in: database)
+        }
+        let staleRequirements = currentRequirements.filter {
+            !($0.feature == .repositories && $0.repositoryID == workflow.repositoryID)
+        }
+        XCTAssertEqual(staleRequirements.count + 1, currentRequirements.count)
+
+        let coverage = currentRequirements.map { fixture.completeCoverage($0, scope: scope) }
+        for record in coverage {
+            try await CoverageRepository(vault: fixture.vault).save(record, attemptedAt: fixture.now)
+        }
+        let cachedState = AccountOrganizationCachedState(
+            coverage: coverage,
+            coverageRequirements: staleRequirements,
+            lastSuccessfulSyncAt: fixture.successDate
+        )
+        XCTAssertEqual(cachedState.freshness.status, .fresh)
+        let durable = AccountOrganizationDurableState(cachedState: cachedState)
+        let payload = try JSONEncoder().encode(
+            RawDurableStateEnvelope(
+                formatVersion: AccountOrganizationDurableStateRepository.formatVersion,
+                scope: scope,
+                durableState: durable
+            )
+        )
+        try await fixture.insertRawDurablePayload(payload, scope: scope)
+        try await scheduler.save(fixture.completedSchedule(scope: scope, generation: 1))
+
+        let loaded = try await repository.loadState(for: scope)
+        let counts = try await fixture.rawRowCounts()
+        let retainedCoverage = try await CoverageRepository(vault: fixture.vault).records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let retainedWorkItems = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let retainedWorkItem = try XCTUnwrap(retainedWorkItems.first)
+
+        XCTAssertNil(loaded)
+        XCTAssertEqual(counts.durable, 0)
+        XCTAssertEqual(counts.scheduler, 0)
+        XCTAssertEqual(retainedCoverage.count, coverage.count)
+        XCTAssertEqual(retainedWorkItem.id, workflow.workItemID)
+        XCTAssertEqual(retainedWorkItem.workflow, workflow.state)
+    }
+
     func testConcurrentFinalizersAllowExactlyOneOwnershipWinner() async throws {
         let fixture = try await DurableStateFixture()
         defer { fixture.remove() }
@@ -1080,6 +1136,96 @@ private final class DurableStateFixture: @unchecked Sendable {
                 detail: detail
             )
         )
+    }
+
+    func completeCoverage(
+        _ requirement: CoverageRequirement,
+        scope: SynchronizationScope
+    ) -> CoverageRecord {
+        CoverageRecord(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            repositoryID: requirement.repositoryID,
+            feature: requirement.feature,
+            streamID: requirement.streamID,
+            intervalStart: requirement.intervalStart,
+            intervalEnd: requirement.intervalEnd,
+            credentialRevision: scope.credentialRevision,
+            capabilityRevision: scope.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: successDate,
+            failureDetail: nil
+        )
+    }
+
+    func installRepositoryBackedWorkflow() async throws -> (
+        repositoryID: RepositoryID,
+        workItemID: WorkItemID,
+        state: WorkflowState
+    ) {
+        let repositoryID = RepositoryID(rawValue: "R_durable_repository")!
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO repositories (
+                        id, organization_id, github_repository_id, github_node_id,
+                        owner_login, name, is_private, is_archived, has_discussions,
+                        html_url, updated_at_ms, archived_at_ms, has_discussions_known
+                    ) VALUES (?, ?, '900', ?, 'durable-org', 'retained', 1, 0, 1, ?, ?, NULL, 1)
+                    """,
+                arguments: [
+                    repositoryID.rawValue,
+                    organizationID.rawValue,
+                    repositoryID.rawValue,
+                    "https://github.com/durable-org/retained",
+                    Int64(now.timeIntervalSince1970 * 1_000)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_repository_access (
+                        account_id, repository_id, access_state, observed_at_ms
+                    ) VALUES (?, ?, 'available', ?)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    repositoryID.rawValue,
+                    Int64(now.timeIntervalSince1970 * 1_000)
+                ]
+            )
+        }
+        let node = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "I_durable_retained")!,
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: repositoryID,
+            kind: .issue,
+            numericID: "901",
+            number: 1,
+            title: "Retained work item",
+            state: .open,
+            url: URL(string: "https://github.com/durable-org/retained/issues/1")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: now,
+            updatedAt: now,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "retained-v1",
+            observedAt: now,
+            accessibility: .accessible
+        )
+        try await GitHubNodeRepository(vault: vault).save(node)
+        let workItemID = try await WorkItemRepository(vault: vault).ensureWorkItem(for: node)
+        let state = WorkflowState(
+            status: .waiting,
+            isPinned: true,
+            priority: .high,
+            localNote: "Keep this local workflow state.",
+            updatedAt: successDate
+        )
+        try await WorkflowRepository(vault: vault).save(state, for: workItemID)
+        return (repositoryID, workItemID, state)
     }
 
     func persistCoverage(from state: AccountOrganizationDurableState) async throws {

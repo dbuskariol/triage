@@ -8,6 +8,7 @@ enum GitHubRepositoryTeamClientError: Error, Equatable, Sendable {
     case invalidPaginationLink
     case pageObjectLimitExceeded
     case notModifiedWithoutCachedState
+    case partialResults
     case ambiguousMembershipVisibility
     case invalidRepository
     case repositoryOutsideOrganization
@@ -19,7 +20,7 @@ enum GitHubRepositoryTeamClientError: Error, Equatable, Sendable {
 
 enum GitHubRepositoryTeamFetch<Value: Sendable>: Sendable {
     case modified(GitHubRepositoryTeamInventory<Value>)
-    case notModified
+    case notModified(ssoHeader: GitHubSSOHeader?)
 }
 
 struct GitHubRepositoryTeamPage<Value: Sendable>: Sendable {
@@ -98,15 +99,17 @@ actor GitHubRepositoryTeamClient {
             repositoryPaginationOrganization: organization,
             validator: { try Self.validate($0, organization: organization) }
         )
-        guard case let .modified(inventory) = result else {
-            return .notModified
+        switch result {
+        case let .modified(inventory):
+            guard Set(inventory.values.map(\.id)).count == inventory.values.count,
+                  Set(inventory.values.map(\.nodeID)).count == inventory.values.count
+            else {
+                throw GitHubRepositoryTeamClientError.duplicateRepository
+            }
+            return .modified(inventory)
+        case let .notModified(ssoHeader):
+            return .notModified(ssoHeader: ssoHeader)
         }
-        guard Set(inventory.values.map(\.id)).count == inventory.values.count,
-              Set(inventory.values.map(\.nodeID)).count == inventory.values.count
-        else {
-            throw GitHubRepositoryTeamClientError.duplicateRepository
-        }
-        return .modified(inventory)
     }
 
     func allTeams(
@@ -131,16 +134,18 @@ actor GitHubRepositoryTeamClient {
             validators: validators,
             validator: Self.validate
         )
-        guard case let .modified(inventory) = result else {
-            return .notModified
+        switch result {
+        case let .modified(inventory):
+            guard Set(inventory.values.map(\.id)).count == inventory.values.count,
+                  Set(inventory.values.map(\.nodeID)).count == inventory.values.count,
+                  Set(inventory.values.map(\.slug)).count == inventory.values.count
+            else {
+                throw GitHubRepositoryTeamClientError.duplicateTeam
+            }
+            return .modified(inventory)
+        case let .notModified(ssoHeader):
+            return .notModified(ssoHeader: ssoHeader)
         }
-        guard Set(inventory.values.map(\.id)).count == inventory.values.count,
-              Set(inventory.values.map(\.nodeID)).count == inventory.values.count,
-              Set(inventory.values.map(\.slug)).count == inventory.values.count
-        else {
-            throw GitHubRepositoryTeamClientError.duplicateTeam
-        }
-        return .modified(inventory)
     }
 
     func membership(
@@ -187,7 +192,7 @@ actor GitHubRepositoryTeamClient {
             guard validators != nil else {
                 throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
             }
-            return .notModified
+            return .notModified(ssoHeader: failure.ssoHeader)
         }
         var pages = [GitHubRepositoryTeamPage(page: page, endpoint: endpoint)]
         var values = [Value]()

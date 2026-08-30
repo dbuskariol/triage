@@ -6,7 +6,14 @@ enum RepositoryInventoryRepositoryError: Error, Equatable, Sendable {
     case organizationScopeMismatch
     case invalidRepository
     case duplicateRepository
+    case immutableIdentityConflict
     case invalidPersistedData
+}
+
+struct RepositoryInventoryReconciliationResult: Equatable, Sendable {
+    let summaries: [RepositorySummary]
+    let returnedRepositoryIDs: [RepositoryID]
+    let omittedRepositoryIDs: [RepositoryID]
 }
 
 actor RepositoryInventoryRepository {
@@ -22,13 +29,30 @@ actor RepositoryInventoryRepository {
         organization: GitHubOrganization,
         observedAt: Date
     ) async throws -> [RepositorySummary] {
+        try await reconcile(
+            repositories,
+            accountID: accountID,
+            organization: organization,
+            observedAt: observedAt,
+            reconciliationIntent: .incremental
+        ).summaries
+    }
+
+    func reconcile(
+        _ repositories: [GitHubRepositoryDTO],
+        accountID: AccountID,
+        organization: GitHubOrganization,
+        observedAt: Date,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) async throws -> RepositoryInventoryReconciliationResult {
         try ensureAccountScope(accountID)
         return try await vault.writeTransaction { database in
-            try Self.replace(
+            try Self.reconcile(
                 repositories,
                 accountID: accountID,
                 organization: organization,
                 observedAt: observedAt,
+                reconciliationIntent: reconciliationIntent,
                 in: database
             )
         }
@@ -101,18 +125,36 @@ actor RepositoryInventoryRepository {
         observedAt: Date,
         in database: Database
     ) throws -> [RepositorySummary] {
+        try reconcile(
+            repositories,
+            accountID: accountID,
+            organization: organization,
+            observedAt: observedAt,
+            reconciliationIntent: .incremental,
+            in: database
+        ).summaries
+    }
+
+    nonisolated static func reconcile(
+        _ repositories: [GitHubRepositoryDTO],
+        accountID: AccountID,
+        organization: GitHubOrganization,
+        observedAt: Date,
+        reconciliationIntent: SynchronizationReconciliationIntent,
+        in database: Database
+    ) throws -> RepositoryInventoryReconciliationResult {
         try validateOrganizationScope(accountID: accountID, organization: organization, in: database)
+        let persistedRepositories = try persistedRepositories(in: database)
+        let persistedByID = Dictionary(
+            uniqueKeysWithValues: persistedRepositories.map { ($0.id, $0) }
+        )
         let normalized = try repositories.map { repository in
             guard let repositoryID = RepositoryID(rawValue: repository.nodeID) else {
                 throw RepositoryInventoryRepositoryError.invalidRepository
             }
-            let prior = try Row.fetchOne(
-                database,
-                sql: "SELECT has_discussions, has_discussions_known FROM repositories WHERE id = ?",
-                arguments: [repositoryID.rawValue]
-            )
-            let priorHasDiscussions: Bool? = prior?["has_discussions"]
-            let priorHasDiscussionsKnown: Bool = prior?["has_discussions_known"] ?? false
+            let prior = persistedByID[repositoryID]
+            let priorHasDiscussions = prior?.hasDiscussions
+            let priorHasDiscussionsKnown = prior?.hasDiscussionsKnown ?? false
             let hasDiscussions = repository.hasDiscussions ?? priorHasDiscussions ?? false
             let hasDiscussionsKnown = repository.hasDiscussions != nil || priorHasDiscussionsKnown
             return try normalize(
@@ -124,12 +166,28 @@ actor RepositoryInventoryRepository {
         }
         guard Set(normalized.map(\.id)).count == normalized.count,
               Set(normalized.map(\.nodeID)).count == normalized.count,
-              Set(normalized.map { "\($0.ownerLogin.lowercased())/\($0.name)" }).count == normalized.count
+              Set(normalized.map(\.githubRepositoryID)).count == normalized.count,
+              Set(normalized.map(\.caseFoldedOwnerAndName)).count == normalized.count
         else {
             throw RepositoryInventoryRepositoryError.duplicateRepository
         }
+        try validateImmutableIdentities(
+            normalized,
+            organizationID: organization.id,
+            persistedRepositories: persistedRepositories,
+            reconciliationIntent: reconciliationIntent
+        )
 
-        let repositoryIDs = normalized.map(\.id.rawValue)
+        let priorRepositoryIDs = try repositoryIDsInOrganization(
+            organizationID: organization.id,
+            in: database
+        )
+        let returnedRepositoryIDs = normalized.map(\.id)
+        let returnedRepositoryIDSet = Set(returnedRepositoryIDs)
+        let omittedRepositoryIDs = priorRepositoryIDs
+            .filter { !returnedRepositoryIDSet.contains($0) }
+            .sorted { $0.rawValue < $1.rawValue }
+
         try markRepositoryAccessUnknown(
             accountID: accountID,
             organizationID: organization.id,
@@ -137,21 +195,8 @@ actor RepositoryInventoryRepository {
             in: database
         )
 
-        // Avoid a unique-name collision when GitHub applies a rename or name swap in one inventory.
-        for repositoryID in repositoryIDs {
-            try database.execute(
-                sql: """
-                    UPDATE repositories
-                    SET name = '__triage_inventory_rename__' || id
-                    WHERE id = ? AND organization_id = ?
-                    """,
-                arguments: [repositoryID, organization.id.rawValue]
-            )
-        }
-
         let observedAtMilliseconds = milliseconds(observedAt)
         for repository in normalized {
-            try removeReplacedRepositoryIdentity(repository, organizationID: organization.id, in: database)
             try database.execute(
                 sql: """
                     INSERT INTO repositories (
@@ -205,7 +250,11 @@ actor RepositoryInventoryRepository {
                 ]
             )
         }
-        return normalized.map(\.summary)
+        return RepositoryInventoryReconciliationResult(
+            summaries: normalized.map(\.summary),
+            returnedRepositoryIDs: returnedRepositoryIDs,
+            omittedRepositoryIDs: omittedRepositoryIDs
+        )
     }
 
     private func ensureAccountScope(_ accountID: AccountID) throws {
@@ -278,45 +327,122 @@ actor RepositoryInventoryRepository {
     ) throws {
         try database.execute(
             sql: """
-                UPDATE account_repository_access
-                SET access_state = ?, observed_at_ms = ?
-                WHERE account_id = ?
-                  AND repository_id IN (
-                      SELECT id FROM repositories WHERE organization_id = ?
-                  )
+                INSERT INTO account_repository_access (
+                    account_id, repository_id, access_state, observed_at_ms
+                )
+                SELECT ?, repositories.id, ?, ?
+                FROM repositories
+                WHERE repositories.organization_id = ?
+                ON CONFLICT(account_id, repository_id) DO UPDATE SET
+                    access_state = excluded.access_state,
+                    observed_at_ms = excluded.observed_at_ms
                 """,
             arguments: [
+                accountID.rawValue,
                 RepositoryAccessState.unknown.rawValue,
                 milliseconds(observedAt),
-                accountID.rawValue,
                 organizationID.rawValue
             ]
         )
     }
 
-    /// A current inventory row at the same GitHub owner/name with a different
-    /// immutable node ID is positive replacement evidence. Ordinary omission
-    /// is not, so only this narrow identity collision may remove cached data.
-    private nonisolated static func removeReplacedRepositoryIdentity(
-        _ repository: InventoryRepository,
+    private nonisolated static func persistedRepositories(
+        in database: Database
+    ) throws -> [PersistedInventoryRepository] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT id, organization_id, github_repository_id, github_node_id,
+                       owner_login, name, has_discussions, has_discussions_known
+                FROM repositories
+                """
+        ).map { row in
+            guard let id = RepositoryID(rawValue: row["id"]),
+                  let organizationID = OrganizationID(rawValue: row["organization_id"]),
+                  let githubRepositoryIDValue: String = row["github_repository_id"],
+                  let githubRepositoryID = UInt64(githubRepositoryIDValue),
+                  githubRepositoryID > 0,
+                  let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                  id.rawValue == nodeID.rawValue,
+                  let ownerLogin: String = row["owner_login"],
+                  let name: String = row["name"],
+                  let hasDiscussions: Bool = row["has_discussions"],
+                  let hasDiscussionsKnown: Bool = row["has_discussions_known"]
+            else {
+                throw RepositoryInventoryRepositoryError.invalidPersistedData
+            }
+            return PersistedInventoryRepository(
+                id: id,
+                organizationID: organizationID,
+                githubRepositoryID: githubRepositoryID,
+                nodeID: nodeID,
+                ownerLogin: ownerLogin,
+                name: name,
+                hasDiscussions: hasDiscussions,
+                hasDiscussionsKnown: hasDiscussionsKnown
+            )
+        }
+    }
+
+    private nonisolated static func repositoryIDsInOrganization(
         organizationID: OrganizationID,
         in database: Database
-    ) throws {
-        try database.execute(
+    ) throws -> [RepositoryID] {
+        try String.fetchAll(
+            database,
             sql: """
-                DELETE FROM repositories
+                SELECT id
+                FROM repositories
                 WHERE organization_id = ?
-                  AND owner_login = ?
-                  AND name = ?
-                  AND id <> ?
+                ORDER BY id
                 """,
-            arguments: [
-                organizationID.rawValue,
-                repository.ownerLogin,
-                repository.name,
-                repository.id.rawValue
-            ]
+            arguments: [organizationID.rawValue]
+        ).map { value in
+            guard let id = RepositoryID(rawValue: value) else {
+                throw RepositoryInventoryRepositoryError.invalidPersistedData
+            }
+            return id
+        }
+    }
+
+    private nonisolated static func validateImmutableIdentities(
+        _ repositories: [InventoryRepository],
+        organizationID: OrganizationID,
+        persistedRepositories: [PersistedInventoryRepository],
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) throws {
+        // Identity replacement is deliberately unsupported for both intents until
+        // an independently persisted, authoritative deletion workflow owns it.
+        switch reconciliationIntent {
+        case .incremental, .fullReconciliation:
+            break
+        }
+
+        let persistedByNodeID = Dictionary(
+            uniqueKeysWithValues: persistedRepositories.map { ($0.nodeID, $0) }
         )
+        let persistedByGitHubRepositoryID = Dictionary(
+            uniqueKeysWithValues: persistedRepositories.map { ($0.githubRepositoryID, $0) }
+        )
+        for repository in repositories {
+            if let persisted = persistedByNodeID[repository.nodeID],
+               persisted.githubRepositoryID != repository.githubRepositoryID
+                || persisted.organizationID != organizationID {
+                throw RepositoryInventoryRepositoryError.immutableIdentityConflict
+            }
+            if let persisted = persistedByGitHubRepositoryID[repository.githubRepositoryID],
+               persisted.nodeID != repository.nodeID
+                || persisted.organizationID != organizationID {
+                throw RepositoryInventoryRepositoryError.immutableIdentityConflict
+            }
+            if persistedRepositories.contains(where: {
+                $0.organizationID == organizationID
+                    && $0.caseFoldedOwnerAndName == repository.caseFoldedOwnerAndName
+                    && $0.id != repository.id
+            }) {
+                throw RepositoryInventoryRepositoryError.immutableIdentityConflict
+            }
+        }
     }
 
     private nonisolated static func isGitHubLogin(_ value: String) -> Bool {
@@ -361,6 +487,17 @@ private struct InventoryRepository: Sendable {
     let url: URL
     let updatedAt: Date
 
+    var caseFoldedOwnerAndName: String {
+        Self.caseFoldedOwnerAndName(ownerLogin: ownerLogin, name: name)
+    }
+
+    static func caseFoldedOwnerAndName(ownerLogin: String, name: String) -> String {
+        let locale = Locale(identifier: "en_US_POSIX")
+        let foldedOwner = ownerLogin.folding(options: .caseInsensitive, locale: locale)
+        let foldedName = name.folding(options: .caseInsensitive, locale: locale)
+        return "\(foldedOwner)/\(foldedName)"
+    }
+
     var summary: RepositorySummary {
         RepositorySummary(
             id: id,
@@ -373,5 +510,20 @@ private struct InventoryRepository: Sendable {
             hasDiscussionsKnown: hasDiscussionsKnown,
             url: url
         )
+    }
+}
+
+private struct PersistedInventoryRepository: Sendable {
+    let id: RepositoryID
+    let organizationID: OrganizationID
+    let githubRepositoryID: UInt64
+    let nodeID: GitHubNodeID
+    let ownerLogin: String
+    let name: String
+    let hasDiscussions: Bool
+    let hasDiscussionsKnown: Bool
+
+    var caseFoldedOwnerAndName: String {
+        InventoryRepository.caseFoldedOwnerAndName(ownerLogin: ownerLogin, name: name)
     }
 }

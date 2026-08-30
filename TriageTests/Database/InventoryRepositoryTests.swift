@@ -4,7 +4,7 @@ import XCTest
 @testable import Triage
 
 final class InventoryRepositoryTests: XCTestCase {
-    func testRepositoryReplacementHandlesRenameAndOnlyDeletesAfterReplacement() async throws {
+    func testRepositoryReconciliationHandlesRenameWithoutChangingImmutableIdentity() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
@@ -17,18 +17,34 @@ final class InventoryRepositoryTests: XCTestCase {
             observedAt: fixture.date
         )
         let renamed = fixture.repository(id: 1, nodeID: "R_1", name: "new-name")
-        let summaries = try await repository.replace(
+        let result = try await repository.reconcile(
             [renamed],
             accountID: fixture.account.id,
             organization: fixture.organization,
-            observedAt: fixture.date.addingTimeInterval(1)
+            observedAt: fixture.date.addingTimeInterval(1),
+            reconciliationIntent: .incremental
         )
 
-        XCTAssertEqual(summaries.map(\.name), ["new-name"])
+        XCTAssertEqual(result.summaries.map(\.name), ["new-name"])
+        XCTAssertEqual(result.returnedRepositoryIDs, [RepositoryID(rawValue: "R_1")!])
+        XCTAssertTrue(result.omittedRepositoryIDs.isEmpty)
         let persisted = try await fixture.vault.read { database in
-            try String.fetchAll(database, sql: "SELECT name FROM repositories")
+            try Row.fetchAll(
+                database,
+                sql: "SELECT id, github_repository_id, github_node_id, name FROM repositories"
+            ).map { row in
+                (
+                    row["id"] as String,
+                    row["github_repository_id"] as String,
+                    row["github_node_id"] as String,
+                    row["name"] as String
+                )
+            }
         }
-        XCTAssertEqual(persisted, ["new-name"])
+        XCTAssertEqual(persisted.map(\.0), ["R_1"])
+        XCTAssertEqual(persisted.map(\.1), ["1"])
+        XCTAssertEqual(persisted.map(\.2), ["R_1"])
+        XCTAssertEqual(persisted.map(\.3), ["new-name"])
     }
 
     func testTeamReplacementStoresExplicitCurrentAccountMembershipState() async throws {
@@ -254,14 +270,23 @@ final class InventoryRepositoryTests: XCTestCase {
         )
         try await GitHubNodeRepository(vault: fixture.vault).save(cachedNode)
 
-        let summaries = try await repository.replace(
+        let result = try await repository.reconcile(
             [visibleRepository],
             accountID: fixture.account.id,
             organization: fixture.organization,
-            observedAt: fixture.date.addingTimeInterval(60)
+            observedAt: fixture.date.addingTimeInterval(60),
+            reconciliationIntent: .fullReconciliation
         )
 
-        XCTAssertEqual(summaries.map(\.id.rawValue), [visibleRepository.nodeID])
+        XCTAssertEqual(result.summaries.map(\.id.rawValue), [visibleRepository.nodeID])
+        XCTAssertEqual(
+            result.returnedRepositoryIDs,
+            [RepositoryID(rawValue: visibleRepository.nodeID)!]
+        )
+        XCTAssertEqual(
+            result.omittedRepositoryIDs,
+            [RepositoryID(rawValue: privateRepository.nodeID)!]
+        )
         let retained = try await fixture.vault.read { database in
             (
                 try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM repositories"),
@@ -286,16 +311,22 @@ final class InventoryRepositoryTests: XCTestCase {
         )
         XCTAssertEqual(omittedCandidates.map(\.id.rawValue), [visibleRepository.nodeID])
 
-        let restored = try await repository.replace(
+        let restored = try await repository.reconcile(
             [privateRepository, visibleRepository],
             accountID: fixture.account.id,
             organization: fixture.organization,
-            observedAt: fixture.date.addingTimeInterval(120)
+            observedAt: fixture.date.addingTimeInterval(120),
+            reconciliationIntent: .incremental
         )
         XCTAssertEqual(
-            Set(restored.map(\.id.rawValue)),
+            Set(restored.summaries.map(\.id.rawValue)),
             Set([privateRepository.nodeID, visibleRepository.nodeID])
         )
+        XCTAssertEqual(
+            Set(restored.returnedRepositoryIDs.map(\.rawValue)),
+            Set([privateRepository.nodeID, visibleRepository.nodeID])
+        )
+        XCTAssertTrue(restored.omittedRepositoryIDs.isEmpty)
         let restoredAccess = try await fixture.vault.read { database in
             try String.fetchOne(
                 database,
@@ -306,7 +337,118 @@ final class InventoryRepositoryTests: XCTestCase {
         XCTAssertEqual(restoredAccess, RepositoryAccessState.available.rawValue)
     }
 
-    func testSameNameDifferentNodeIsExplicitReplacementEvidence() async throws {
+    func testOmittedPersistedRepositoryWithoutAccessLeafIsReportedAndRepairedToUnknown() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let omitted = fixture.repository(id: 1, nodeID: "R_omitted", name: "omitted")
+        let returned = fixture.repository(id: 2, nodeID: "R_returned", name: "returned")
+        _ = try await repository.replace(
+            [omitted, returned],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM account_repository_access WHERE account_id = ? AND repository_id = ?",
+                arguments: [fixture.account.id.rawValue, omitted.nodeID]
+            )
+        }
+
+        let result = try await repository.reconcile(
+            [returned],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(1),
+            reconciliationIntent: .incremental
+        )
+
+        XCTAssertEqual(result.returnedRepositoryIDs, [RepositoryID(rawValue: returned.nodeID)!])
+        XCTAssertEqual(result.omittedRepositoryIDs, [RepositoryID(rawValue: omitted.nodeID)!])
+        let access = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT repository_id, access_state
+                    FROM account_repository_access
+                    WHERE account_id = ?
+                    ORDER BY repository_id
+                    """,
+                arguments: [fixture.account.id.rawValue]
+            ).map { (($0["repository_id"] as String), ($0["access_state"] as String)) }
+        }
+        XCTAssertEqual(access.map(\.0), [omitted.nodeID, returned.nodeID])
+        XCTAssertEqual(access.map(\.1), [
+            RepositoryAccessState.unknown.rawValue,
+            RepositoryAccessState.available.rawValue
+        ])
+    }
+
+    func testMissingAccessLeafRepairRollsBackWithLaterReconciliationFailure() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let omitted = fixture.repository(id: 1, nodeID: "R_omitted", name: "omitted")
+        let returned = fixture.repository(id: 2, nodeID: "R_returned", name: "returned")
+        _ = try await repository.replace(
+            [omitted, returned],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM account_repository_access WHERE account_id = ? AND repository_id = ?",
+                arguments: [fixture.account.id.rawValue, omitted.nodeID]
+            )
+            try database.execute(sql: """
+                CREATE TRIGGER fail_returned_repository_access
+                BEFORE UPDATE OF access_state ON account_repository_access
+                WHEN NEW.repository_id = 'R_returned' AND NEW.access_state = 'available'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced reconciliation failure');
+                END
+                """)
+        }
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await repository.reconcile(
+                [returned],
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                observedAt: fixture.date.addingTimeInterval(1),
+                reconciliationIntent: .fullReconciliation
+            )
+        } verify: { error in
+            XCTAssertTrue(error is DatabaseError)
+        }
+
+        let access = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT access_state FROM account_repository_access
+                        WHERE account_id = ? AND repository_id = ?
+                        """,
+                    arguments: [fixture.account.id.rawValue, omitted.nodeID]
+                ) as String?,
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT access_state FROM account_repository_access
+                        WHERE account_id = ? AND repository_id = ?
+                        """,
+                    arguments: [fixture.account.id.rawValue, returned.nodeID]
+                ) as String?
+            )
+        }
+        XCTAssertNil(access.0)
+        XCTAssertEqual(access.1, RepositoryAccessState.available.rawValue)
+    }
+
+    func testSameNameDifferentNodeFailsClosedWithoutDeletingPersistedGraph() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
@@ -339,14 +481,27 @@ final class InventoryRepositoryTests: XCTestCase {
             accessibility: .accessible
         )
         try await GitHubNodeRepository(vault: fixture.vault).save(oldNode)
-        let replacement = fixture.repository(id: 2, nodeID: "R_new", name: "recreated")
+        let replacement = fixture.repository(id: 2, nodeID: "R_new", name: "RECREATED")
 
-        _ = try await repository.replace(
-            [replacement],
-            accountID: fixture.account.id,
-            organization: fixture.organization,
-            observedAt: fixture.date.addingTimeInterval(60)
-        )
+        for intent in [
+            SynchronizationReconciliationIntent.incremental,
+            .fullReconciliation
+        ] {
+            await XCTAssertThrowsErrorAsync {
+                _ = try await repository.reconcile(
+                    [replacement],
+                    accountID: fixture.account.id,
+                    organization: fixture.organization,
+                    observedAt: fixture.date.addingTimeInterval(60),
+                    reconciliationIntent: intent
+                )
+            } verify: { error in
+                XCTAssertEqual(
+                    error as? RepositoryInventoryRepositoryError,
+                    .immutableIdentityConflict
+                )
+            }
+        }
 
         let persisted = try await fixture.vault.read { database in
             (
@@ -355,11 +510,111 @@ final class InventoryRepositoryTests: XCTestCase {
                     database,
                     sql: "SELECT repository_id FROM github_nodes WHERE github_node_id = ?",
                     arguments: [oldNode.nodeID.rawValue]
+                ) as String?,
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT access_state FROM account_repository_access WHERE repository_id = ?",
+                    arguments: [oldRepository.nodeID]
                 ) as String?
             )
         }
-        XCTAssertEqual(persisted.0, [replacement.nodeID])
-        XCTAssertNil(persisted.1)
+        XCTAssertEqual(persisted.0, [oldRepository.nodeID])
+        XCTAssertEqual(persisted.1, oldRepository.nodeID)
+        XCTAssertEqual(persisted.2, RepositoryAccessState.available.rawValue)
+    }
+
+    func testSameNodeWithChangedNumericGitHubIDFailsClosed() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let original = fixture.repository(id: 1, nodeID: "R_1", name: "retained")
+        _ = try await repository.replace(
+            [original],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let changedNumericID = fixture.repository(id: 2, nodeID: "R_1", name: "retained")
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await repository.reconcile(
+                [changedNumericID],
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                observedAt: fixture.date.addingTimeInterval(1),
+                reconciliationIntent: .incremental
+            )
+        } verify: { error in
+            XCTAssertEqual(
+                error as? RepositoryInventoryRepositoryError,
+                .immutableIdentityConflict
+            )
+        }
+
+        let identity = try await fixture.persistedRepositoryIdentity()
+        XCTAssertEqual(identity, .init(id: "R_1", numericID: "1", nodeID: "R_1", access: "available"))
+    }
+
+    func testSameNumericGitHubIDWithChangedNodeFailsClosed() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let original = fixture.repository(id: 1, nodeID: "R_1", name: "retained")
+        _ = try await repository.replace(
+            [original],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let changedNodeID = fixture.repository(id: 1, nodeID: "R_2", name: "different-name")
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await repository.reconcile(
+                [changedNodeID],
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                observedAt: fixture.date.addingTimeInterval(1),
+                reconciliationIntent: .fullReconciliation
+            )
+        } verify: { error in
+            XCTAssertEqual(
+                error as? RepositoryInventoryRepositoryError,
+                .immutableIdentityConflict
+            )
+        }
+
+        let identity = try await fixture.persistedRepositoryIdentity()
+        XCTAssertEqual(identity, .init(id: "R_1", numericID: "1", nodeID: "R_1", access: "available"))
+    }
+
+    func testDuplicateCaseFoldedOwnerAndNameFailsBeforeMutation() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let original = fixture.repository(id: 1, nodeID: "R_1", name: "retained")
+        _ = try await repository.replace(
+            [original],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let first = fixture.repository(id: 2, nodeID: "R_2", name: "Case-Name")
+        let second = fixture.repository(id: 3, nodeID: "R_3", name: "case-name")
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await repository.reconcile(
+                [first, second],
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                observedAt: fixture.date.addingTimeInterval(1),
+                reconciliationIntent: .incremental
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? RepositoryInventoryRepositoryError, .duplicateRepository)
+        }
+
+        let identity = try await fixture.persistedRepositoryIdentity()
+        XCTAssertEqual(identity, .init(id: "R_1", numericID: "1", nodeID: "R_1", access: "available"))
     }
 
     func testInventoryOmissionDoesNotChangeSiblingOrganizationAccess() async throws {
@@ -551,9 +806,40 @@ private final class InventoryFixture: @unchecked Sendable {
         )
     }
 
+    func persistedRepositoryIdentity() async throws -> PersistedRepositoryIdentity? {
+        try await vault.read { database in
+            try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT repositories.id, repositories.github_repository_id,
+                           repositories.github_node_id, account_repository_access.access_state
+                    FROM repositories
+                    JOIN account_repository_access
+                      ON account_repository_access.repository_id = repositories.id
+                    WHERE account_repository_access.account_id = ?
+                    """,
+                arguments: [account.id.rawValue]
+            ).map { row in
+                PersistedRepositoryIdentity(
+                    id: row["id"],
+                    numericID: row["github_repository_id"],
+                    nodeID: row["github_node_id"],
+                    access: row["access_state"]
+                )
+            }
+        }
+    }
+
     func remove() {
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+private struct PersistedRepositoryIdentity: Equatable {
+    let id: String
+    let numericID: String
+    let nodeID: String
+    let access: String
 }
 
 private func XCTAssertThrowsErrorAsync(
