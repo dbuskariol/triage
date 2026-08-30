@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 /// The deliberately small source boundary used by review-thread refreshes.
 /// Implementations must return the complete, independently paginated inventory
@@ -114,41 +115,51 @@ actor PullRequestReviewThreadRefreshService {
     }
 
     func refresh(
-        accountID: AccountID,
-        organizationID: OrganizationID,
+        scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         limit: Int = 50,
         observedAt: Date = .now
     ) async throws -> PullRequestReviewThreadRefreshResult {
+        let accountID = scope.accountID
+        let organizationID = scope.organizationID
+        try await validateCurrentScope(scope)
         let inventory = try await candidateRepository.candidates(
             accountID: accountID,
             organizationID: organizationID,
             limit: limit
         )
+        try await validateCurrentScope(scope)
         var outcomes = [PullRequestReviewThreadRefreshOutcome]()
         outcomes.reserveCapacity(inventory.candidates.count)
 
         for candidate in inventory.candidates {
-            try Task.checkCancellation()
             do {
+                try await validateCurrentScope(scope)
                 let threadInventory = try await fetcher.allReviewThreads(
                     pullRequestNodeID: candidate.nodeID,
                     observedAt: observedAt
                 )
-                try Task.checkCancellation()
-                try await threadRepository.replace(
-                    pullRequestNodeID: candidate.nodeID,
-                    organizationID: organizationID,
-                    repositoryID: candidate.repositoryID,
-                    currentUserNodeID: currentUserNodeID,
-                    inventory: threadInventory,
-                    observedAt: observedAt
-                )
-                try Task.checkCancellation()
+                try await validateCurrentScope(scope)
+                try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                    try Self.validateCurrentScope(scope, in: database)
+                    try PullRequestReviewThreadRepository.replace(
+                        pullRequestNodeID: candidate.nodeID,
+                        accountID: accountID,
+                        organizationID: organizationID,
+                        repositoryID: candidate.repositoryID,
+                        currentUserNodeID: currentUserNodeID,
+                        records: threadInventory.records,
+                        rawPages: threadInventory.rawPages,
+                        observedAt: observedAt,
+                        in: database
+                    )
+                }
+                try await validateCurrentScope(scope)
                 outcomes.append(outcome(for: candidate, status: .refreshed))
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try await validateCurrentScope(scope)
                 outcomes.append(
                     outcome(
                         for: candidate,
@@ -162,10 +173,36 @@ actor PullRequestReviewThreadRefreshService {
             }
         }
 
+        try await validateCurrentScope(scope)
         return PullRequestReviewThreadRefreshResult(
             outcomes: outcomes,
             hasRemainingCandidates: inventory.hasRemainingCandidates
         )
+    }
+
+    private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
+        try Task.checkCancellation()
+        do {
+            try await candidateRepository.writeTransaction(accountID: scope.accountID) { database in
+                try Self.validateCurrentScope(scope, in: database)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        do {
+            try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope {
+            throw CancellationError()
+        } catch OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
     }
 
     private func outcome(

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import Triage
 
@@ -18,8 +19,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.date.addingTimeInterval(10)
         )
@@ -49,8 +49,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.date.addingTimeInterval(10)
         )
@@ -76,8 +75,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.date.addingTimeInterval(10)
         )
@@ -102,8 +100,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
 
         do {
             _ = try await service.refresh(
-                accountID: fixture.accountID,
-                organizationID: fixture.organizationID,
+                scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
                 observedAt: fixture.date.addingTimeInterval(10)
             )
@@ -128,8 +125,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
 
         do {
             _ = try await service.refresh(
-                accountID: fixture.accountID,
-                organizationID: fixture.organizationID,
+                scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
                 observedAt: fixture.date.addingTimeInterval(10)
             )
@@ -142,6 +138,67 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
         XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
     }
+
+    func testCredentialRotationDuringReviewResponseCancelsWithoutDurableWrites() async throws {
+        try await assertScopeRotationDuringReviewResponse(.credential)
+    }
+
+    func testCapabilityRotationDuringReviewResponseCancelsWithoutDurableWrites() async throws {
+        try await assertScopeRotationDuringReviewResponse(.capability)
+    }
+
+    private func assertScopeRotationDuringReviewResponse(
+        _ rotation: PullRequestReviewScopeRotation
+    ) async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        let gate = PullRequestReviewResponseGate()
+        let service = try fixture.service(
+            responses: [
+                fixture.reviewsPath: .response(
+                    fixture.reviewPayload(nodeID: fixture.replacementReviewNodeID.rawValue)
+                ),
+                fixture.requestedReviewersPath: .response(
+                    fixture.requestedReviewersPayload(
+                        nodeID: fixture.replacementReviewerNodeID.rawValue
+                    )
+                )
+            ],
+            gate: gate
+        )
+        let task = Task {
+            try await service.refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.date.addingTimeInterval(10)
+            )
+        }
+
+        await gate.waitUntilEntered()
+        let before = try await fixture.durableState()
+        try await fixture.rotate(rotation)
+        await gate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected scope rotation to cancel review refresh.")
+        } catch is CancellationError {
+            // Expected supersession.
+        }
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+}
+
+private enum PullRequestReviewScopeRotation {
+    case credential
+    case capability
+}
+
+private struct PullRequestReviewDurableState: Equatable {
+    let rawSnapshots: Int
+    let reviews: Int
+    let reviewRequests: Int
 }
 
 private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
@@ -164,6 +221,15 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
     let replacementReviewerNodeID = GitHubNodeID(rawValue: "U_replacement")!
     let secondReviewNodeID = GitHubNodeID(rawValue: "R_second")!
     let secondReviewerNodeID = GitHubNodeID(rawValue: "U_second")!
+
+    var scope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+    }
 
     var reviewsPath: String { "/repos/github/triage/pulls/1/reviews?per_page=100" }
     var requestedReviewersPath: String { "/repos/github/triage/pulls/1/requested_reviewers" }
@@ -246,11 +312,12 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
     }
 
     func service(
-        responses: [String: PullRequestReviewRefreshSession.Outcome]
+        responses: [String: PullRequestReviewRefreshSession.Outcome],
+        gate: PullRequestReviewResponseGate? = nil
     ) throws -> PullRequestReviewRefreshService {
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(
-                session: PullRequestReviewRefreshSession(responses: responses)
+                session: PullRequestReviewRefreshSession(responses: responses, gate: gate)
             ),
             credential: SecretValue("token")
         )
@@ -258,6 +325,43 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
             client: GitHubPullRequestClient(client: restClient),
             candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
         )
+    }
+
+    func durableState() async throws -> PullRequestReviewDurableState {
+        try await vault.read { database in
+            PullRequestReviewDurableState(
+                rawSnapshots: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM raw_api_snapshots"
+                )!,
+                reviews: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM reviews")!,
+                reviewRequests: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_requests"
+                )!
+            )
+        }
+    }
+
+    func rotate(_ rotation: PullRequestReviewScopeRotation) async throws {
+        try await vault.write { database in
+            switch rotation {
+            case .credential:
+                try database.execute(
+                    sql: "UPDATE accounts SET credential_revision = 'credential-2' WHERE id = ?",
+                    arguments: [accountID.rawValue]
+                )
+            case .capability:
+                try database.execute(
+                    sql: """
+                        UPDATE account_organizations
+                        SET capability_revision = 'capability-2'
+                        WHERE account_id = ? AND organization_id = ?
+                    """,
+                    arguments: [accountID.rawValue, organizationID.rawValue]
+                )
+            }
+        }
     }
 
     func seedCachedReviewState() async throws {
@@ -434,9 +538,14 @@ private actor PullRequestReviewRefreshSession: HTTPSession {
     }
 
     private let responses: [String: Outcome]
+    private let gate: PullRequestReviewResponseGate?
 
-    init(responses: [String: Outcome]) {
+    init(
+        responses: [String: Outcome],
+        gate: PullRequestReviewResponseGate? = nil
+    ) {
         self.responses = responses
+        self.gate = gate
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -446,6 +555,9 @@ private actor PullRequestReviewRefreshSession: HTTPSession {
         let pathAndQuery = [url.path, url.query].compactMap { $0 }.joined(separator: "?")
         guard let outcome = responses[pathAndQuery] else {
             throw URLError(.resourceUnavailable)
+        }
+        if let gate {
+            await gate.enterAndWait()
         }
         switch outcome {
         case let .response(body, headers):
@@ -463,5 +575,31 @@ private actor PullRequestReviewRefreshSession: HTTPSession {
         case .cancellation:
             throw CancellationError()
         }
+    }
+}
+
+private actor PullRequestReviewResponseGate {
+    private var entered = false
+    private var released = false
+    private var enteredWaiters = [CheckedContinuation<Void, Never>]()
+    private var releaseWaiters = [CheckedContinuation<Void, Never>]()
+
+    func enterAndWait() async {
+        entered = true
+        enteredWaiters.forEach { $0.resume() }
+        enteredWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
     }
 }

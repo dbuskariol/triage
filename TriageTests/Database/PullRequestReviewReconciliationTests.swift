@@ -293,8 +293,12 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: SynchronizationScope(
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+            ),
             githubOrganizationID: 2,
             observedAt: fixture.date
         )
