@@ -64,6 +64,8 @@ enum AccountOrganizationCoverageManifest {
         .reviewThreads,
         .timelines,
         .discussions,
+        .discussionComments,
+        .discussionReplies,
         .projects,
         .projectItems,
         .roleDiscovery

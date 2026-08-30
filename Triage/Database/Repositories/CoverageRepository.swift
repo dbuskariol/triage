@@ -258,7 +258,7 @@ actor CoverageRepository {
                 record.accountID.rawValue,
                 record.organizationID.rawValue,
                 record.feature.rawValue,
-                record.intervalEnd.map(milliseconds),
+                record.status == .complete ? record.intervalEnd.map(milliseconds) : nil,
                 record.lastSuccessfulAt.map(milliseconds),
                 attemptedAtMilliseconds,
                 record.status.rawValue,

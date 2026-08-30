@@ -163,7 +163,7 @@ actor GitHubCapabilityProbe {
     private func unsupportedCapabilityStatus(for capability: GitHubCapability) -> CapabilityStatus {
         switch capability {
         case .pullRequestReviewThreads, .discussions, .projects, .projectFields:
-            .unavailable
+            .unknown
         case .copilot:
             .unavailable
         case .copilotModels:

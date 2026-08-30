@@ -112,6 +112,7 @@ final class AccountRepositoryTests: XCTestCase {
             accountID: accountID
         )
         XCTAssertFalse(preservedSummary.hasDiscussions)
+        XCTAssertTrue(preservedSummary.hasDiscussionsKnown)
         let persistedHasDiscussions = try await vault.read { database in
             try Bool.fetchOne(
                 database,

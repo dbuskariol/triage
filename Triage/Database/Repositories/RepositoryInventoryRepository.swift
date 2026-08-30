@@ -81,7 +81,8 @@ actor RepositoryInventoryRepository {
                 sql: """
                     SELECT repositories.id, repositories.github_node_id, repositories.owner_login,
                            repositories.name, repositories.is_private, repositories.is_archived,
-                           repositories.has_discussions, repositories.html_url
+                           repositories.has_discussions, repositories.has_discussions_known,
+                           repositories.html_url
                     FROM repositories
                     JOIN account_repository_access
                       ON account_repository_access.repository_id = repositories.id
@@ -98,6 +99,7 @@ actor RepositoryInventoryRepository {
                       let isPrivate: Bool = row["is_private"],
                       let isArchived: Bool = row["is_archived"],
                       let hasDiscussions: Bool = row["has_discussions"],
+                      let hasDiscussionsKnown: Bool = row["has_discussions_known"],
                       let urlString: String = row["html_url"],
                       let url = URL(string: urlString)
                 else {
@@ -111,6 +113,7 @@ actor RepositoryInventoryRepository {
                     isPrivate: isPrivate,
                     isArchived: isArchived,
                     hasDiscussions: hasDiscussions,
+                    hasDiscussionsKnown: hasDiscussionsKnown,
                     url: url
                 )
             }
@@ -129,15 +132,20 @@ actor RepositoryInventoryRepository {
             guard let repositoryID = RepositoryID(rawValue: repository.nodeID) else {
                 throw RepositoryInventoryRepositoryError.invalidRepository
             }
-            let priorHasDiscussions = try Bool.fetchOne(
+            let prior = try Row.fetchOne(
                 database,
-                sql: "SELECT has_discussions FROM repositories WHERE id = ?",
+                sql: "SELECT has_discussions, has_discussions_known FROM repositories WHERE id = ?",
                 arguments: [repositoryID.rawValue]
             )
+            let priorHasDiscussions: Bool? = prior?["has_discussions"]
+            let priorHasDiscussionsKnown: Bool = prior?["has_discussions_known"] ?? false
+            let hasDiscussions = repository.hasDiscussions ?? priorHasDiscussions ?? false
+            let hasDiscussionsKnown = repository.hasDiscussions != nil || priorHasDiscussionsKnown
             return try normalize(
                 repository,
                 organization: organization,
-                hasDiscussions: repository.hasDiscussions ?? priorHasDiscussions ?? false
+                hasDiscussions: hasDiscussions,
+                hasDiscussionsKnown: hasDiscussionsKnown
             )
         }
         guard Set(normalized.map(\.id)).count == normalized.count,
@@ -173,8 +181,9 @@ actor RepositoryInventoryRepository {
                 sql: """
                     INSERT INTO repositories (
                         id, organization_id, github_repository_id, github_node_id, owner_login, name,
-                        is_private, is_archived, has_discussions, html_url, updated_at_ms, archived_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_private, is_archived, has_discussions, has_discussions_known,
+                        html_url, updated_at_ms, archived_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         organization_id = excluded.organization_id,
                         github_repository_id = excluded.github_repository_id,
@@ -184,6 +193,7 @@ actor RepositoryInventoryRepository {
                         is_private = excluded.is_private,
                         is_archived = excluded.is_archived,
                         has_discussions = excluded.has_discussions,
+                        has_discussions_known = excluded.has_discussions_known,
                         html_url = excluded.html_url,
                         updated_at_ms = excluded.updated_at_ms,
                         archived_at_ms = excluded.archived_at_ms
@@ -198,6 +208,7 @@ actor RepositoryInventoryRepository {
                     repository.isPrivate,
                     repository.isArchived,
                     repository.hasDiscussions,
+                    repository.hasDiscussionsKnown,
                     repository.url.absoluteString,
                     milliseconds(repository.updatedAt),
                     repository.isArchived ? milliseconds(repository.updatedAt) : nil
@@ -251,7 +262,8 @@ actor RepositoryInventoryRepository {
     private nonisolated static func normalize(
         _ repository: GitHubRepositoryDTO,
         organization: GitHubOrganization,
-        hasDiscussions: Bool
+        hasDiscussions: Bool,
+        hasDiscussionsKnown: Bool
     ) throws -> InventoryRepository {
         guard repository.id > 0,
               let nodeID = GitHubNodeID(rawValue: repository.nodeID),
@@ -272,6 +284,7 @@ actor RepositoryInventoryRepository {
             isPrivate: repository.isPrivate,
             isArchived: repository.isArchived,
             hasDiscussions: hasDiscussions,
+            hasDiscussionsKnown: hasDiscussionsKnown,
             url: repository.htmlURL,
             updatedAt: repository.updatedAt
         )
@@ -354,6 +367,7 @@ private struct InventoryRepository: Sendable {
     let isPrivate: Bool
     let isArchived: Bool
     let hasDiscussions: Bool
+    let hasDiscussionsKnown: Bool
     let url: URL
     let updatedAt: Date
 
@@ -366,6 +380,7 @@ private struct InventoryRepository: Sendable {
             isPrivate: isPrivate,
             isArchived: isArchived,
             hasDiscussions: hasDiscussions,
+            hasDiscussionsKnown: hasDiscussionsKnown,
             url: url
         )
     }

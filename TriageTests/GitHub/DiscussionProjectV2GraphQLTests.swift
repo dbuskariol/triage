@@ -27,7 +27,10 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
             _ = try await client.allDiscussions(repositoryNodeID: GitHubNodeID(rawValue: "R_1")!)
             XCTFail("Expected cursor loop rejection.")
         } catch let error as GitHubDiscussionClientError {
-            XCTAssertEqual(error, .paginationLoop)
+            guard case let .paginationLoop(pages) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(pages.count, 2)
         }
     }
 
@@ -55,6 +58,14 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
             comments: .init(totalCount: 0)
         )
         XCTAssertThrowsError(try GitHubDiscussionNormalizer.normalize([value]))
+
+        let inconsistentAnswer = GitHubDiscussionPayload.Discussion(
+            id: "D_2", number: 2, title: "Answered", body: nil,
+            url: URL(string: "https://github.com/acme/repo/discussions/2")!,
+            createdAt: .now, updatedAt: .now, closedAt: nil, isAnswered: true,
+            category: nil, answer: nil, comments: .init(totalCount: 0)
+        )
+        XCTAssertThrowsError(try GitHubDiscussionNormalizer.normalize([inconsistentAnswer]))
     }
 
     func testProjectFieldNormalizerRejectsMalformedKnownUnionAndPreservesUnknownContext() throws {
@@ -89,6 +100,83 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertNil(invalidNormalized[0].dateValue)
         XCTAssertEqual(invalidNormalized[0].context, "invalid UTC date-only scalar")
     }
+
+    func testProjectClientsEncodeTheExactDeclaredVariableNames() async throws {
+        let session = DiscussionProjectSession(responses: [
+            projectInventoryResponse(),
+            projectItemsResponse(),
+            projectFieldValuesResponse()
+        ])
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        let projects = try await client.allProjects(
+            organizationNodeID: GitHubNodeID(rawValue: "O_1")!
+        )
+        XCTAssertEqual(projects.projects.map(\.nodeID.rawValue), ["P_1"])
+        let items = try await client.allItems(projectNodeID: GitHubNodeID(rawValue: "P_1")!)
+        XCTAssertEqual(items.items.map(\.nodeID.rawValue), ["PVTI_1"])
+
+        let bodies = await session.requestBodies()
+        XCTAssertEqual(bodies.count, 3)
+        XCTAssertEqual(try variableKeys(in: bodies[0]), ["organizationID"])
+        XCTAssertEqual(try variableKeys(in: bodies[1]), ["projectID"])
+        XCTAssertEqual(try variableKeys(in: bodies[2]), ["itemID"])
+        XCTAssertFalse(bodies.contains { String(decoding: $0, as: UTF8.self).contains("\"nodeID\"") })
+    }
+
+    func testProjectMissingRequestedNodeCarriesItsRawPage() async throws {
+        let session = DiscussionProjectSession(responses: [
+            Data("""
+            {"data":{"node":null,"rateLimit":{"cost":1,"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
+            """.utf8)
+        ])
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allProjects(
+                organizationNodeID: GitHubNodeID(rawValue: "O_missing")!
+            )
+            XCTFail("Expected a missing-node failure.")
+        } catch let error as GitHubProjectV2ClientError {
+            guard case let .missingRequestedNode(pages) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(pages.count, 1)
+            XCTAssertTrue(pages[0].endpoint.contains("TriageOrganizationProjectsV2"))
+            XCTAssertFalse(pages[0].payload.isEmpty)
+        }
+    }
+
+    func testProjectUndecodableResponseCarriesItsRawPage() async throws {
+        let malformed = Data("{".utf8)
+        let session = DiscussionProjectSession(responses: [malformed])
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allProjects(
+                organizationNodeID: GitHubNodeID(rawValue: "O_1")!
+            )
+            XCTFail("Expected an undecodable-response failure.")
+        } catch let error as GitHubProjectV2ClientError {
+            guard case let .undecodableResponse(pages) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(pages.count, 1)
+            XCTAssertTrue(pages[0].endpoint.contains("TriageOrganizationProjectsV2"))
+            XCTAssertEqual(pages[0].payload, malformed)
+        }
+    }
+}
+
+private func variableKeys(in body: Data) throws -> Set<String> {
+    let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    return Set(try XCTUnwrap(json["variables"] as? [String: Any]).keys)
 }
 
 private func discussionResponse(id: String, hasNextPage: Bool, cursor: String?, cost: Int = 1) -> Data {
@@ -106,11 +194,33 @@ private func projectDateField(_ date: String) -> GitHubProjectV2FieldValuePayloa
     )
 }
 
+private func projectInventoryResponse() -> Data {
+    Data("""
+    {"data":{"node":{"id":"O_1","projectsV2":{"nodes":[{"id":"P_1","number":1,"title":"Roadmap","shortDescription":null,"closed":false,"url":"https://github.com/orgs/acme/projects/1","updatedAt":"2026-01-01T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
+    """.utf8)
+}
+
+private func projectItemsResponse() -> Data {
+    Data("""
+    {"data":{"node":{"id":"P_1","items":{"nodes":[{"id":"PVTI_1","type":"ISSUE","updatedAt":"2026-01-01T00:00:00Z","content":{"__typename":"Issue","id":"I_1"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4998,"resetAt":"2026-01-02T00:00:00Z"}}}
+    """.utf8)
+}
+
+private func projectFieldValuesResponse() -> Data {
+    Data("""
+    {"data":{"node":{"id":"PVTI_1","fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4997,"resetAt":"2026-01-02T00:00:00Z"}}}
+    """.utf8)
+}
+
 private actor DiscussionProjectSession: HTTPSession {
     private var responses: [Data]
+    private var bodies = [Data]()
     init(responses: [Data]) { self.responses = responses }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         guard !responses.isEmpty else { throw URLError(.resourceUnavailable) }
+        bodies.append(try XCTUnwrap(request.httpBody))
         return (responses.removeFirst(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
+
+    func requestBodies() -> [Data] { bodies }
 }

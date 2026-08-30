@@ -33,6 +33,7 @@ actor WorkItemRepository {
                         repositories.is_private AS repository_is_private,
                         repositories.is_archived AS repository_is_archived,
                         repositories.has_discussions AS repository_has_discussions,
+                        repositories.has_discussions_known AS repository_has_discussions_known,
                         repositories.html_url AS repository_html_url,
                         workflow_states.status AS workflow_status,
                         workflow_states.pinned AS workflow_pinned,
@@ -268,6 +269,7 @@ actor WorkItemRepository {
             isPrivate: row["repository_is_private"],
             isArchived: row["repository_is_archived"],
             hasDiscussions: row["repository_has_discussions"],
+            hasDiscussionsKnown: row["repository_has_discussions_known"],
             url: url
         )
     }
@@ -538,6 +540,7 @@ actor WorkItemRepository {
                         repositories.is_private AS repository_is_private,
                         repositories.is_archived AS repository_is_archived,
                         repositories.has_discussions AS repository_has_discussions,
+                        repositories.has_discussions_known AS repository_has_discussions_known,
                         repositories.html_url AS repository_html_url,
                         actors.id AS actor_id, actors.github_node_id AS actor_node_id,
                         actors.login AS actor_login, actors.display_name AS actor_display_name,

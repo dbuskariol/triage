@@ -43,7 +43,52 @@ struct RepositorySummary: Codable, Equatable, Sendable, Identifiable {
     let isPrivate: Bool
     let isArchived: Bool
     let hasDiscussions: Bool
+    /// False means GitHub omitted the capability and Triage must not interpret
+    /// `hasDiscussions == false` as authoritative feature disablement.
+    let hasDiscussionsKnown: Bool
     let url: URL
+
+    init(
+        id: RepositoryID,
+        nodeID: GitHubNodeID,
+        ownerLogin: String,
+        name: String,
+        isPrivate: Bool,
+        isArchived: Bool,
+        hasDiscussions: Bool,
+        hasDiscussionsKnown: Bool = true,
+        url: URL
+    ) {
+        self.id = id
+        self.nodeID = nodeID
+        self.ownerLogin = ownerLogin
+        self.name = name
+        self.isPrivate = isPrivate
+        self.isArchived = isArchived
+        self.hasDiscussions = hasDiscussions
+        self.hasDiscussionsKnown = hasDiscussionsKnown
+        self.url = url
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, nodeID, ownerLogin, name, isPrivate, isArchived
+        case hasDiscussions, hasDiscussionsKnown, url
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(RepositoryID.self, forKey: .id),
+            nodeID: try values.decode(GitHubNodeID.self, forKey: .nodeID),
+            ownerLogin: try values.decode(String.self, forKey: .ownerLogin),
+            name: try values.decode(String.self, forKey: .name),
+            isPrivate: try values.decode(Bool.self, forKey: .isPrivate),
+            isArchived: try values.decode(Bool.self, forKey: .isArchived),
+            hasDiscussions: try values.decode(Bool.self, forKey: .hasDiscussions),
+            hasDiscussionsKnown: try values.decodeIfPresent(Bool.self, forKey: .hasDiscussionsKnown) ?? false,
+            url: try values.decode(URL.self, forKey: .url)
+        )
+    }
 
     var fullName: String {
         "\(ownerLogin)/\(name)"
