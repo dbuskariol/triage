@@ -210,7 +210,7 @@ actor RawAPISnapshotRepository {
         }
     }
 
-    private nonisolated static func snapshot(from row: Row) throws -> RawAPISnapshot {
+    nonisolated static func snapshot(from row: Row) throws -> RawAPISnapshot {
         guard let id = RawAPISnapshotID(rawValue: row["id"]),
               let accountID = AccountID(rawValue: row["account_id"]),
               let endpoint: String = row["endpoint"],

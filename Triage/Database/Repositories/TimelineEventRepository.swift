@@ -22,6 +22,7 @@ struct TimelineSavedPageInventory: Sendable {
     let events: [GitHubTimelineEventDTO]
     let pageCount: Int
     let firstPageETag: String?
+    let firstPageLastModified: String?
     let latestPageProvenance: TimelineRawPageProvenance
 }
 
@@ -38,6 +39,8 @@ actor TimelineEventRepository {
         _ page: GitHubPage<GitHubTimelineEventDTO>,
         candidate: TimelineCandidate,
         pageIndex: Int,
+        requestKey: String,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         observedAt: Date
@@ -45,7 +48,11 @@ actor TimelineEventRepository {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
         }
-        guard candidate.sourceRevision.count <= 500 else {
+        guard candidate.sourceRevision.count <= 500,
+              scope.accountID == accountID,
+              scope.organizationID == organizationID,
+              Self.isValidRequestKey(requestKey, candidate: candidate, pageIndex: pageIndex)
+        else {
             throw TimelineEventRepositoryError.candidateScopeMismatch
         }
         guard pageIndex > 0, pageIndex <= 100, page.payload.count <= Self.maximumRawPageBytes else {
@@ -54,6 +61,11 @@ actor TimelineEventRepository {
         let snapshotID = Self.snapshotID(
             for: candidate,
             pageIndex: pageIndex,
+            requestIdentity: Self.requestIdentity(
+                scope: scope,
+                candidate: candidate,
+                requestKey: requestKey
+            ),
             payload: page.payload
         )
         try await vault.write { database in
@@ -70,9 +82,15 @@ actor TimelineEventRepository {
                     githubNodeID: candidate.nodeID,
                     endpoint: Self.snapshotEndpoint(for: candidate, pageIndex: pageIndex),
                     eTag: page.etag,
+                    lastModified: page.lastModified,
                     parserVersion: 1,
                     observedAt: observedAt,
-                    payload: page.payload
+                    payload: page.payload,
+                    requestIdentity: Self.requestIdentity(
+                        scope: scope,
+                        candidate: candidate,
+                        requestKey: requestKey
+                    )
                 ),
                 in: database
             )
@@ -84,6 +102,8 @@ actor TimelineEventRepository {
         _ page: GitHubUndecodablePage,
         candidate: TimelineCandidate,
         pageIndex: Int,
+        requestKey: String,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         observedAt: Date,
@@ -92,7 +112,11 @@ actor TimelineEventRepository {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
         }
-        guard candidate.sourceRevision.count <= 500 else {
+        guard candidate.sourceRevision.count <= 500,
+              scope.accountID == accountID,
+              scope.organizationID == organizationID,
+              Self.isValidRequestKey(requestKey, candidate: candidate, pageIndex: pageIndex)
+        else {
             throw TimelineEventRepositoryError.candidateScopeMismatch
         }
         guard pageIndex > 0, pageIndex <= 100, page.payload.count <= Self.maximumRawPageBytes else {
@@ -101,6 +125,11 @@ actor TimelineEventRepository {
         let snapshotID = Self.snapshotID(
             for: candidate,
             pageIndex: pageIndex,
+            requestIdentity: Self.requestIdentity(
+                scope: scope,
+                candidate: candidate,
+                requestKey: requestKey
+            ),
             payload: page.payload
         )
         try await vault.writeTransaction { database in
@@ -117,9 +146,15 @@ actor TimelineEventRepository {
                     githubNodeID: candidate.nodeID,
                     endpoint: Self.pendingSnapshotEndpoint(for: candidate, pageIndex: pageIndex),
                     eTag: page.etag,
+                    lastModified: page.lastModified,
                     parserVersion: 1,
                     observedAt: observedAt,
-                    payload: page.payload
+                    payload: page.payload,
+                    requestIdentity: Self.requestIdentity(
+                        scope: scope,
+                        candidate: candidate,
+                        requestKey: requestKey
+                    )
                 ),
                 in: database
             )
@@ -142,13 +177,17 @@ actor TimelineEventRepository {
 
     func savedPages(
         for candidate: TimelineCandidate,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID
     ) async throws -> TimelineSavedPageInventory {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
         }
-        guard candidate.sourceRevision.count <= 500 else {
+        guard candidate.sourceRevision.count <= 500,
+              scope.accountID == accountID,
+              scope.organizationID == organizationID
+        else {
             throw TimelineEventRepositoryError.candidateScopeMismatch
         }
         return try await vault.read { database in
@@ -161,7 +200,10 @@ actor TimelineEventRepository {
             let snapshots = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, endpoint, etag, parser_version, payload
+                    SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
+                           authority_organization_id, authority_feature, authority_stream_id,
+                           authority_request_key, authority_credential_revision,
+                           authority_capability_revision, parser_version, observed_at_ms, payload
                     FROM raw_api_snapshots
                     WHERE account_id = ? AND github_node_id = ? AND endpoint LIKE ?
                       AND NOT EXISTS (
@@ -178,36 +220,48 @@ actor TimelineEventRepository {
                 ]
             )
             let prefix = Self.snapshotEndpointPrefix(for: candidate)
-            let matching = snapshots.filter { row in
-                guard let endpoint: String = row["endpoint"], endpoint.hasPrefix(prefix) else {
-                    return false
+            let matching = try snapshots.compactMap { row -> RawAPISnapshot? in
+                let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
+                guard snapshot.endpoint.hasPrefix(prefix) else {
+                    return nil
                 }
-                let pageIndex = endpoint.dropFirst(prefix.count)
-                return pageIndex.count == 3 && Int(pageIndex) != nil
+                let pageIndex = snapshot.endpoint.dropFirst(prefix.count)
+                return pageIndex.count == 3 && Int(pageIndex) != nil ? snapshot : nil
             }
             guard !matching.isEmpty, matching.count <= 100 else {
                 throw TimelineEventRepositoryError.invalidPersistedPage(nil)
             }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let persistedPages = try matching.map { row -> (TimelineRawPageProvenance, Data) in
-                guard let rawSnapshotID: String = row["id"],
-                      let snapshotID = RawAPISnapshotID(rawValue: rawSnapshotID),
-                      let endpoint: String = row["endpoint"],
-                      let parserVersion: Int = row["parser_version"],
-                      parserVersion > 0,
-                      let payload: Data = row["payload"],
-                      payload.count <= Self.maximumRawPageBytes
+            let persistedPages = try matching.enumerated().map {
+                offset, snapshot -> (TimelineRawPageProvenance, Data) in
+                let pageIndex = offset + 1
+                guard snapshot.endpoint == Self.committedSnapshotEndpoint(
+                    for: candidate,
+                    pageIndex: pageIndex
+                ),
+                      snapshot.parserVersion == 1,
+                      snapshot.payload.count <= Self.maximumRawPageBytes,
+                      snapshot.requestIdentity == Self.requestIdentity(
+                        scope: scope,
+                        candidate: candidate,
+                        requestKey: snapshot.requestIdentity?.requestKey ?? ""
+                      ),
+                      Self.isValidRequestKey(
+                        snapshot.requestIdentity?.requestKey ?? "",
+                        candidate: candidate,
+                        pageIndex: pageIndex
+                      )
                 else {
                     throw TimelineEventRepositoryError.invalidPersistedPage(nil)
                 }
                 return (
                     TimelineRawPageProvenance(
-                        snapshotID: snapshotID,
-                        endpoint: endpoint,
-                        parserVersion: parserVersion
+                        snapshotID: snapshot.id,
+                        endpoint: snapshot.endpoint,
+                        parserVersion: snapshot.parserVersion
                     ),
-                    payload
+                    snapshot.payload
                 )
             }
             let events = try persistedPages.flatMap { provenance, payload in
@@ -220,7 +274,8 @@ actor TimelineEventRepository {
             return TimelineSavedPageInventory(
                 events: events,
                 pageCount: matching.count,
-                firstPageETag: matching.first?["etag"],
+                firstPageETag: matching.first?.eTag,
+                firstPageLastModified: matching.first?.lastModified,
                 latestPageProvenance: persistedPages[persistedPages.count - 1].0
             )
         }
@@ -230,6 +285,8 @@ actor TimelineEventRepository {
         _ snapshotID: RawAPISnapshotID,
         candidate: TimelineCandidate,
         pageIndex: Int,
+        requestKey: String,
+        scope: SynchronizationScope,
         nextPageURL: URL?,
         accountID: AccountID,
         organizationID: OrganizationID,
@@ -238,7 +295,11 @@ actor TimelineEventRepository {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
         }
-        guard candidate.sourceRevision.count <= 500 else {
+        guard candidate.sourceRevision.count <= 500,
+              scope.accountID == accountID,
+              scope.organizationID == organizationID,
+              Self.isValidRequestKey(requestKey, candidate: candidate, pageIndex: pageIndex)
+        else {
             throw TimelineEventRepositoryError.candidateScopeMismatch
         }
         guard pageIndex > 0, pageIndex <= 100 else {
@@ -251,6 +312,35 @@ actor TimelineEventRepository {
                 organizationID: organizationID,
                 in: database
             )
+            guard let row = try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
+                           authority_organization_id, authority_feature, authority_stream_id,
+                           authority_request_key, authority_credential_revision,
+                           authority_capability_revision, parser_version, observed_at_ms, payload
+                    FROM raw_api_snapshots
+                    WHERE id = ? AND account_id = ?
+                    """,
+                arguments: [snapshotID.rawValue, accountID.rawValue]
+            ) else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
+            let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
+            guard snapshot.githubNodeID == candidate.nodeID,
+                  snapshot.endpoint == Self.pendingSnapshotEndpoint(
+                    for: candidate,
+                    pageIndex: pageIndex
+                  ),
+                  snapshot.parserVersion == 1,
+                  snapshot.requestIdentity == Self.requestIdentity(
+                    scope: scope,
+                    candidate: candidate,
+                    requestKey: requestKey
+                  )
+            else {
+                throw TimelineEventRepositoryError.invalidPersistedPage(nil)
+            }
             try database.execute(
                 sql: """
                     DELETE FROM raw_api_snapshots
@@ -481,10 +571,19 @@ actor TimelineEventRepository {
     private nonisolated static func snapshotID(
         for candidate: TimelineCandidate,
         pageIndex: Int,
+        requestIdentity: ConditionalRequestIdentity,
         payload: Data
     ) -> RawAPISnapshotID {
         let payloadDigest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
-        let material = "\(candidate.nodeID.rawValue)|\(candidate.sourceRevision)|\(pageIndex)|\(payloadDigest)"
+        let material = [
+            candidate.nodeID.rawValue,
+            candidate.sourceRevision,
+            String(pageIndex),
+            requestIdentity.scope.credentialRevision.rawValue,
+            requestIdentity.scope.capabilityRevision.rawValue,
+            requestIdentity.requestKey,
+            payloadDigest
+        ].joined(separator: "\u{1F}")
         let digest = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
         return RawAPISnapshotID(rawValue: "timeline:\(digest)")!
     }
@@ -514,6 +613,52 @@ actor TimelineEventRepository {
         let material = "\(candidate.nodeID.rawValue)|\(candidate.sourceRevision)"
         let digest = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
         return "GET \(candidate.repository.path)/issues/\(candidate.number)/timeline#\(digest):"
+    }
+
+    private nonisolated static func requestIdentity(
+        scope: SynchronizationScope,
+        candidate: TimelineCandidate,
+        requestKey: String
+    ) -> ConditionalRequestIdentity {
+        ConditionalRequestIdentity(
+            scope: scope,
+            feature: .timelines,
+            streamID: SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!,
+            requestKey: requestKey
+        )
+    }
+
+    private nonisolated static func isValidRequestKey(
+        _ requestKey: String,
+        candidate: TimelineCandidate,
+        pageIndex: Int
+    ) -> Bool {
+        let prefix = "GET "
+        guard requestKey.hasPrefix(prefix),
+              let components = URLComponents(
+                string: "https://api.github.com" + String(requestKey.dropFirst(prefix.count))
+              ),
+              components.scheme == "https",
+              components.host == "api.github.com",
+              components.path == "\(candidate.repository.path)/issues/\(candidate.number)/timeline",
+              components.fragment == nil
+        else {
+            return false
+        }
+        let items = components.queryItems ?? []
+        let allowedNames: Set<String> = ["page", "per_page"]
+        let perPage = items.first(where: { $0.name == "per_page" })?.value.flatMap(Int.init) ?? 100
+        guard !items.isEmpty,
+              Set(items.map(\.name)).count == items.count,
+              items.allSatisfy({ allowedNames.contains($0.name) }),
+              let page = items.first(where: { $0.name == "page" })?.value.flatMap(Int.init),
+              page == pageIndex,
+              perPage > 0,
+              perPage <= 100
+        else {
+            return false
+        }
+        return true
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {

@@ -331,6 +331,7 @@ actor GitHubTimelineRefreshService {
             if let nextPageURL = checkpoint.nextPageURL {
                 let resumedPages = try await eventRepository.savedPages(
                     for: candidate,
+                    scope: scope,
                     accountID: accountID,
                     organizationID: organizationID
                 )
@@ -339,6 +340,7 @@ actor GitHubTimelineRefreshService {
                     from: nextPageURL,
                     candidate: candidate,
                     startingAt: resumedPages.pageCount + 1,
+                    scope: scope,
                     accountID: accountID,
                     organizationID: organizationID,
                     githubOrganizationID: githubOrganizationID,
@@ -354,6 +356,7 @@ actor GitHubTimelineRefreshService {
             }
             saved = try await eventRepository.savedPages(
                 for: candidate,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID
             )
@@ -374,6 +377,7 @@ actor GitHubTimelineRefreshService {
                 repository: candidate.repository,
                 issueOrPullRequestNumber: candidate.number,
                 validators: requestValidators,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID,
                 githubOrganizationID: githubOrganizationID,
@@ -400,6 +404,7 @@ actor GitHubTimelineRefreshService {
                     repository: candidate.repository,
                     issueOrPullRequestNumber: candidate.number,
                     validators: nil,
+                    scope: scope,
                     accountID: accountID,
                     organizationID: organizationID,
                     githubOrganizationID: githubOrganizationID,
@@ -423,6 +428,8 @@ actor GitHubTimelineRefreshService {
                     firstPage,
                     candidate: candidate,
                     pageIndex: 1,
+                    requestKey: Self.requestKey(for: candidate),
+                    scope: scope,
                     accountID: accountID,
                     organizationID: organizationID,
                     observedAt: observedAt
@@ -448,6 +455,8 @@ actor GitHubTimelineRefreshService {
                     rawSnapshotID,
                     candidate: candidate,
                     pageIndex: 1,
+                    requestKey: Self.requestKey(for: candidate),
+                    scope: scope,
                     nextPageURL: firstPage.nextPageURL,
                     accountID: accountID,
                     organizationID: organizationID,
@@ -459,6 +468,7 @@ actor GitHubTimelineRefreshService {
                         from: nextPageURL,
                         candidate: candidate,
                         startingAt: 2,
+                        scope: scope,
                         accountID: accountID,
                         organizationID: organizationID,
                         githubOrganizationID: githubOrganizationID,
@@ -471,6 +481,7 @@ actor GitHubTimelineRefreshService {
             }
             saved = try await eventRepository.savedPages(
                 for: candidate,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID
             )
@@ -509,12 +520,10 @@ actor GitHubTimelineRefreshService {
         let currentTraversalValidators: GitHubHTTPValidators?
         if let firstPageValidators {
             currentTraversalValidators = firstPageValidators
-        } else if resumedFromCheckpoint, let eTag = saved.firstPageETag {
-            // Raw timeline checkpoints currently retain ETag provenance only.
-            // Do not combine that new page ETag with an older Last-Modified value.
-            currentTraversalValidators = try GitHubHTTPValidators(
-                eTag: eTag,
-                lastModified: nil
+        } else if resumedFromCheckpoint {
+            currentTraversalValidators = try Self.httpValidators(
+                eTag: saved.firstPageETag,
+                lastModified: saved.firstPageLastModified
             )
         } else {
             currentTraversalValidators = nil
@@ -548,6 +557,7 @@ actor GitHubTimelineRefreshService {
         from initialURL: URL,
         candidate: TimelineCandidate,
         startingAt initialPageIndex: Int,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
@@ -566,12 +576,19 @@ actor GitHubTimelineRefreshService {
             guard budget.reservePage() else {
                 throw ControlFlowError.budgetExhausted
             }
+            let requestKey = try Self.requestKey(
+                for: url,
+                candidate: candidate,
+                pageIndex: pageIndex
+            )
             let page = try await nextPagePreservingRejectedPayload(
                 url,
                 candidate: candidate,
                 repository: candidate.repository,
                 issueOrPullRequestNumber: candidate.number,
                 pageIndex: pageIndex,
+                requestKey: requestKey,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID,
                 githubOrganizationID: githubOrganizationID,
@@ -586,6 +603,8 @@ actor GitHubTimelineRefreshService {
                 page,
                 candidate: candidate,
                 pageIndex: pageIndex,
+                requestKey: requestKey,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID,
                 observedAt: observedAt
@@ -617,6 +636,8 @@ actor GitHubTimelineRefreshService {
                 rawSnapshotID,
                 candidate: candidate,
                 pageIndex: pageIndex,
+                requestKey: requestKey,
+                scope: scope,
                 nextPageURL: followingPageURL,
                 accountID: accountID,
                 organizationID: organizationID,
@@ -633,6 +654,7 @@ actor GitHubTimelineRefreshService {
         repository: GitHubRepositoryPath,
         issueOrPullRequestNumber: Int,
         validators: GitHubHTTPValidators?,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
@@ -650,6 +672,8 @@ actor GitHubTimelineRefreshService {
                 error.page,
                 candidate: candidate,
                 pageIndex: 1,
+                requestKey: Self.requestKey(for: candidate),
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID,
                 githubOrganizationID: githubOrganizationID,
@@ -666,6 +690,8 @@ actor GitHubTimelineRefreshService {
         repository: GitHubRepositoryPath,
         issueOrPullRequestNumber: Int,
         pageIndex: Int,
+        requestKey: String,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
@@ -683,6 +709,8 @@ actor GitHubTimelineRefreshService {
                 error.page,
                 candidate: candidate,
                 pageIndex: pageIndex,
+                requestKey: requestKey,
+                scope: scope,
                 accountID: accountID,
                 organizationID: organizationID,
                 githubOrganizationID: githubOrganizationID,
@@ -697,6 +725,8 @@ actor GitHubTimelineRefreshService {
         _ page: GitHubUndecodablePage,
         candidate: TimelineCandidate,
         pageIndex: Int,
+        requestKey: String,
+        scope: SynchronizationScope,
         accountID: AccountID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
@@ -709,6 +739,8 @@ actor GitHubTimelineRefreshService {
             page,
             candidate: candidate,
             pageIndex: pageIndex,
+            requestKey: requestKey,
+            scope: scope,
             accountID: accountID,
             organizationID: organizationID,
             observedAt: observedAt,
@@ -851,6 +883,29 @@ actor GitHubTimelineRefreshService {
 
     private nonisolated static func requestKey(for candidate: TimelineCandidate) -> String {
         "GET \(candidate.repository.path)/issues/\(candidate.number)/timeline?per_page=100&page=1"
+    }
+
+    private nonisolated static func requestKey(
+        for url: URL,
+        candidate: TimelineCandidate,
+        pageIndex: Int
+    ) throws -> String {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "https",
+              components.host?.caseInsensitiveCompare("api.github.com") == .orderedSame,
+              components.port == nil,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              components.path == "\(candidate.repository.path)/issues/\(candidate.number)/timeline",
+              let query = components.percentEncodedQuery,
+              !query.isEmpty,
+              let page = components.queryItems?.first(where: { $0.name == "page" })?.value.flatMap(Int.init),
+              page == pageIndex
+        else {
+            throw GitHubTimelineClientError.invalidPaginationLink
+        }
+        return "GET \(components.percentEncodedPath)?\(query)"
     }
 
     private nonisolated static func conditionalRequestIdentity(
