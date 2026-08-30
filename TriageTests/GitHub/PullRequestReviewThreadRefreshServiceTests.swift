@@ -13,8 +13,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         let service = fixture.service(fetcher: fetcher)
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.observedAt
         )
@@ -49,8 +48,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await fixture.service(fetcher: fetcher).refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.observedAt
         )
@@ -75,8 +73,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await fixture.service(fetcher: fetcher).refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             observedAt: fixture.observedAt
         )
@@ -103,8 +100,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         let service = fixture.service(fetcher: fetcher)
         let refresh = Task {
             try await service.refresh(
-                accountID: fixture.accountID,
-                organizationID: fixture.organizationID,
+                scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
                 observedAt: fixture.observedAt
             )
@@ -129,6 +125,45 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         XCTAssertEqual(counts.1, 0)
     }
 
+    func testCredentialRotationDuringThreadResponseCancelsWithoutDurableWrites() async throws {
+        try await assertScopeRotationDuringThreadResponse(.credential)
+    }
+
+    func testCapabilityRotationDuringThreadResponseCancelsWithoutDurableWrites() async throws {
+        try await assertScopeRotationDuringThreadResponse(.capability)
+    }
+
+    private func assertScopeRotationDuringThreadResponse(
+        _ rotation: ReviewThreadScopeRotation
+    ) async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        let fetcher = BlockingReviewThreadFetcher(
+            inventory: fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+        )
+        let service = fixture.service(fetcher: fetcher)
+        let task = Task {
+            try await service.refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.observedAt
+            )
+        }
+
+        await fetcher.waitUntilStarted()
+        let before = try await fixture.durableState()
+        try await fixture.rotate(rotation)
+        await fetcher.finishFetch()
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await task.value
+        }) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+
     func testResultRetainsRemainingCandidateSignal() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
@@ -138,8 +173,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         ])
 
         let result = try await fixture.service(fetcher: fetcher).refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             limit: 1,
             observedAt: fixture.observedAt
@@ -182,6 +216,19 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         XCTAssertEqual(result(.failed).coverageAssessment.status, .failed)
         XCTAssertEqual(result(.rateLimited(retryAt: nil)).coverageAssessment.status, .partial)
     }
+}
+
+private enum ReviewThreadScopeRotation {
+    case credential
+    case capability
+}
+
+private struct ReviewThreadDurableState: Equatable {
+    let rawSnapshots: Int
+    let reviews: Int
+    let reviewRequests: Int
+    let reviewThreads: Int
+    let comments: Int
 }
 
 private actor ReviewThreadFetcher: PullRequestReviewThreadFetching {
@@ -293,6 +340,15 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
     let observedAt = Date(timeIntervalSince1970: 1_000)
     let vault: AccountVault
     private(set) var firstPullRequest: NormalizedGitHubNode! = nil
+
+    var scope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+    }
 
     init() async throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -444,6 +500,48 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
             ],
             metrics: .init(pageCount: 1, responseBytes: 11, queryCost: 1)
         )
+    }
+
+    func durableState() async throws -> ReviewThreadDurableState {
+        try await vault.read { database in
+            ReviewThreadDurableState(
+                rawSnapshots: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM raw_api_snapshots"
+                )!,
+                reviews: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM reviews")!,
+                reviewRequests: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_requests"
+                )!,
+                reviewThreads: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_threads"
+                )!,
+                comments: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments")!
+            )
+        }
+    }
+
+    func rotate(_ rotation: ReviewThreadScopeRotation) async throws {
+        try await vault.write { database in
+            switch rotation {
+            case .credential:
+                try database.execute(
+                    sql: "UPDATE accounts SET credential_revision = 'credential-2' WHERE id = ?",
+                    arguments: [accountID.rawValue]
+                )
+            case .capability:
+                try database.execute(
+                    sql: """
+                        UPDATE account_organizations
+                        SET capability_revision = 'capability-2'
+                        WHERE account_id = ? AND organization_id = ?
+                    """,
+                    arguments: [accountID.rawValue, organizationID.rawValue]
+                )
+            }
+        }
     }
 
     func remove() {

@@ -135,6 +135,7 @@ actor OrganizationWorkRefreshService {
             ).refreshInventory(
                 account: account,
                 organization: organization,
+                synchronizationScope: synchronizationScope,
                 rateLimitController: rateLimitController,
                 requestPriority: requestPriority,
                 reconciliationIntent: reconciliationIntent
@@ -916,8 +917,7 @@ actor OrganizationWorkRefreshService {
                 client: GitHubPullRequestClient(client: restClient),
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
             ).refresh(
-                accountID: scope.accountID,
-                organizationID: scope.organizationID,
+                scope: scope,
                 githubOrganizationID: organization.githubOrganizationID
             )
             try await validateCurrentScope(scope, vault: vault)
@@ -1019,8 +1019,7 @@ actor OrganizationWorkRefreshService {
                 threadRepository: PullRequestReviewThreadRepository(vault: vault),
                 currentUserNodeID: currentUserNodeID
             ).refresh(
-                accountID: scope.accountID,
-                organizationID: scope.organizationID,
+                scope: scope,
                 githubOrganizationID: organization.githubOrganizationID,
                 observedAt: attemptedAt
             )

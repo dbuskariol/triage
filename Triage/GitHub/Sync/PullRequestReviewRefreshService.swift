@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 struct PullRequestReviewRefreshResult: Sendable {
     let refreshedPullRequestNodeIDs: [GitHubNodeID]
@@ -23,37 +24,57 @@ actor PullRequestReviewRefreshService {
     }
 
     func refresh(
-        accountID: AccountID,
-        organizationID: OrganizationID,
+        scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         limit: Int = 50,
         observedAt: Date = .now
     ) async throws -> PullRequestReviewRefreshResult {
+        let accountID = scope.accountID
+        let organizationID = scope.organizationID
+        try await validateCurrentScope(scope)
         let inventory = try await candidateRepository.candidates(
             accountID: accountID,
             organizationID: organizationID,
             limit: limit
         )
+        try await validateCurrentScope(scope)
         var refreshedPullRequestNodeIDs = [GitHubNodeID]()
         var ssoHeaders = [GitHubSSOHeader]()
         let observedAtMilliseconds = Self.milliseconds(observedAt)
 
         for candidate in inventory.candidates {
-            try Task.checkCancellation()
-            let reviews = try await client.allReviews(
-                repository: candidate.repository,
-                number: candidate.number
-            )
-            try Task.checkCancellation()
+            let reviews: GitHubPullRequestReviewInventory
+            do {
+                try await validateCurrentScope(scope)
+                reviews = try await client.allReviews(
+                    repository: candidate.repository,
+                    number: candidate.number
+                )
+                try await validateCurrentScope(scope)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try await validateCurrentScope(scope)
+                throw error
+            }
             ssoHeaders.append(contentsOf: reviews.ssoHeaders)
             if reviews.ssoHeader?.scoped(to: githubOrganizationID) != nil {
                 continue
             }
-            let requestedReviewers = try await client.requestedReviewers(
-                repository: candidate.repository,
-                number: candidate.number
-            )
-            try Task.checkCancellation()
+            let requestedReviewers: GitHubResponse<GitHubRequestedReviewersDTO>
+            do {
+                try await validateCurrentScope(scope)
+                requestedReviewers = try await client.requestedReviewers(
+                    repository: candidate.repository,
+                    number: candidate.number
+                )
+                try await validateCurrentScope(scope)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try await validateCurrentScope(scope)
+                throw error
+            }
             if let ssoHeader = requestedReviewers.ssoHeader {
                 ssoHeaders.append(ssoHeader)
             }
@@ -64,6 +85,7 @@ actor PullRequestReviewRefreshService {
                 continue
             }
             try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                try Self.validateCurrentScope(scope, in: database)
                 for (index, page) in reviews.pages.enumerated() {
                     try RawAPISnapshotRepository.save(
                         RawAPISnapshot(
@@ -107,14 +129,40 @@ actor PullRequestReviewRefreshService {
                     in: database
                 )
             }
-            try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             refreshedPullRequestNodeIDs.append(candidate.nodeID)
         }
+        try await validateCurrentScope(scope)
         return PullRequestReviewRefreshResult(
             refreshedPullRequestNodeIDs: refreshedPullRequestNodeIDs,
             hasRemainingCandidates: inventory.hasRemainingCandidates,
             ssoHeaders: ssoHeaders
         )
+    }
+
+    private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
+        try Task.checkCancellation()
+        do {
+            try await candidateRepository.writeTransaction(accountID: scope.accountID) { database in
+                try Self.validateCurrentScope(scope, in: database)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        do {
+            try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope {
+            throw CancellationError()
+        } catch OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
