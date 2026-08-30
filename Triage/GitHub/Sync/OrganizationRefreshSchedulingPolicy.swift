@@ -133,10 +133,7 @@ struct OrganizationRefreshSchedulingPolicy: Sendable {
         }
         let deadline: Date
         if trigger.performsFullReconciliation {
-            deadline = max(
-                state.nextFullReconciliationAt,
-                state.nextIncrementalRefreshAt
-            )
+            deadline = state.nextFullReconciliationAt
         } else {
             deadline = state.nextIncrementalRefreshAt
         }
@@ -205,14 +202,21 @@ struct OrganizationRefreshSchedulingPolicy: Sendable {
             }
         case .unavailable:
             failureCount = 0
-            nextIncrementalRefreshAt = eventDate.addingTimeInterval(
+            let unavailableDeadline = eventDate.addingTimeInterval(
                 inactiveCadence.nextInterval(randomUnit: randomUnit)
+            )
+            nextIncrementalRefreshAt = unavailableDeadline
+            nextFullReconciliationAt = max(
+                nextFullReconciliationAt,
+                unavailableDeadline
             )
         case .transientFailure:
             failureCount = incrementedFailureCount(failureCount)
-            nextIncrementalRefreshAt = eventDate.addingTimeInterval(
+            let backoffDeadline = eventDate.addingTimeInterval(
                 transientBackoffInterval(failureCount: failureCount, randomUnit: randomUnit)
             )
+            nextIncrementalRefreshAt = backoffDeadline
+            nextFullReconciliationAt = max(nextFullReconciliationAt, backoffDeadline)
         case let .rateLimited(retryAt):
             failureCount = incrementedFailureCount(failureCount)
             let backoffDeadline = eventDate.addingTimeInterval(

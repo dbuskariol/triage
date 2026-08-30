@@ -62,19 +62,11 @@ final class OrganizationRefreshSchedulingPolicyTests: XCTestCase {
         )
     }
 
-    func testFullReconciliationWaitsForBothFullDeadlineAndTransientIncrementalFloor() {
+    func testFullReconciliationDeadlineIsIndependentFromNormalIncrementalCadence() {
         let state = makeState(incrementalOffset: 600, fullOffset: -1)
 
         XCTAssertEqual(
             policy.eligibility(of: state, for: .fullReconciliation, at: now),
-            .notDue(until: now.addingTimeInterval(600))
-        )
-        XCTAssertEqual(
-            policy.eligibility(
-                of: state,
-                for: .fullReconciliation,
-                at: now.addingTimeInterval(600)
-            ),
             .eligible
         )
     }
@@ -202,7 +194,47 @@ final class OrganizationRefreshSchedulingPolicyTests: XCTestCase {
         )
         XCTAssertEqual(failed.consecutiveTransientFailureCount, 20)
         XCTAssertEqual(failed.nextIncrementalRefreshAt, now.addingTimeInterval(3_600))
+        XCTAssertEqual(failed.nextFullReconciliationAt, now.addingTimeInterval(3_600))
         XCTAssertEqual(failed.lastCompletedAt, now)
+    }
+
+    func testUnavailableOutcomeDefersBothIncrementalAndFullRetries() throws {
+        let attemptID = UUID()
+        let started = try startedState(
+            makeState(incrementalOffset: 0, fullOffset: 0),
+            trigger: .fullReconciliation,
+            attemptID: attemptID
+        )
+        let failedAt = now.addingTimeInterval(5)
+
+        let unavailable = try XCTUnwrap(
+            policy.finish(
+                started,
+                ownedBy: attemptID,
+                generation: started.generation,
+                trigger: .fullReconciliation,
+                outcome: .unavailable,
+                at: failedAt,
+                randomUnit: 0
+            )
+        )
+
+        XCTAssertEqual(
+            unavailable.nextIncrementalRefreshAt,
+            failedAt.addingTimeInterval(20 * 60)
+        )
+        XCTAssertEqual(
+            unavailable.nextFullReconciliationAt,
+            failedAt.addingTimeInterval(20 * 60)
+        )
+        XCTAssertEqual(
+            policy.eligibility(
+                of: unavailable,
+                for: .fullReconciliation,
+                at: failedAt
+            ),
+            .notDue(until: failedAt.addingTimeInterval(20 * 60))
+        )
     }
 
     func testRateLimitUsesConservativeMaximumOfRetryAndTransientBackoff() throws {
