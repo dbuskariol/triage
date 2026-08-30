@@ -26,7 +26,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allDiscussions(
                 repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected cursor loop rejection.")
         } catch let error as GitHubDiscussionClientError {
@@ -46,7 +47,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allDiscussions(
                 repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected aggregate budget rejection.")
         } catch let error as GitHubDiscussionClientError {
@@ -70,7 +72,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allDiscussions(
                 repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected scoped partial-result rejection.")
         } catch let error as GitHubDiscussionClientError {
@@ -93,10 +96,34 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
 
         let inventory = try await client.allDiscussions(
             repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
-            githubOrganizationID: 1
+            githubOrganizationID: 1,
+            validateScope: {}
         )
 
         XCTAssertEqual(inventory.discussions.map(\.nodeID.rawValue), ["D_1"])
+    }
+
+    func testDiscussionClientStopsWhenScopeChangesAfterAnInFlightPage() async throws {
+        let session = DiscussionProjectSession(responses: [
+            discussionResponse(id: "D_1", hasNextPage: false, cursor: nil)
+        ])
+        let validator = ScopeChangeAfterNetworkValidator()
+        let client = GitHubDiscussionClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allDiscussions(
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                githubOrganizationID: 1,
+                validateScope: { try await validator.validate() }
+            )
+            XCTFail("Expected the post-request scope validation to cancel the traversal.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let callCount = await validator.callCount()
+        XCTAssertEqual(callCount, 3)
     }
 
     func testDiscussionNormalizerRejectsMalformedDiscussion() {
@@ -161,12 +188,14 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
 
         let projects = try await client.allProjects(
             organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
-            githubOrganizationID: 1
+            githubOrganizationID: 1,
+            validateScope: {}
         )
         XCTAssertEqual(projects.projects.map(\.nodeID.rawValue), ["P_1"])
         let items = try await client.allItems(
             projectNodeID: GitHubNodeID(rawValue: "P_1")!,
-            githubOrganizationID: 1
+            githubOrganizationID: 1,
+            validateScope: {}
         )
         XCTAssertEqual(items.items.map(\.nodeID.rawValue), ["PVTI_1"])
 
@@ -191,7 +220,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allProjects(
                 organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected scoped partial-result rejection.")
         } catch let error as GitHubProjectV2ClientError {
@@ -216,7 +246,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allProjects(
                 organizationNodeID: GitHubNodeID(rawValue: "O_missing")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected a missing-node failure.")
         } catch let error as GitHubProjectV2ClientError {
@@ -239,7 +270,8 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         do {
             _ = try await client.allProjects(
                 organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
-                githubOrganizationID: 1
+                githubOrganizationID: 1,
+                validateScope: {}
             )
             XCTFail("Expected an undecodable-response failure.")
         } catch let error as GitHubProjectV2ClientError {
@@ -251,6 +283,19 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
             XCTAssertEqual(pages[0].payload, malformed)
         }
     }
+}
+
+private actor ScopeChangeAfterNetworkValidator {
+    private var calls = 0
+
+    func validate() throws {
+        calls += 1
+        // allDiscussions validates before the request, at the page boundary,
+        // and immediately after the awaited transport call.
+        if calls == 3 { throw CancellationError() }
+    }
+
+    func callCount() -> Int { calls }
 }
 
 private func variableKeys(in body: Data) throws -> Set<String> {

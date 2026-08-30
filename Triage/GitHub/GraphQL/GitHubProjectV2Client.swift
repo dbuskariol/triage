@@ -17,7 +17,15 @@ enum GitHubProjectV2ClientError: Error, Equatable, Sendable {
 
 struct GitHubProjectV2RawPage: Equatable, Sendable {
     let endpoint: String
+    /// Canonical GraphQL operation and exact variables for this raw page.
+    let requestKey: String
     let payload: Data
+
+    init(endpoint: String, requestKey: String? = nil, payload: Data) {
+        self.endpoint = endpoint
+        self.requestKey = requestKey ?? endpoint
+        self.payload = payload
+    }
 }
 
 struct GitHubProjectV2Inventory: Sendable {
@@ -41,9 +49,11 @@ actor GitHubProjectV2Client {
 
     func allProjects(
         organizationNodeID: GitHubNodeID,
-        githubOrganizationID: UInt64
+        githubOrganizationID: UInt64,
+        validateScope: @escaping @Sendable () async throws -> Void
     ) async throws -> GitHubProjectV2Inventory {
         try Task.checkCancellation()
+        try await validateScope()
         let query = try GitHubGraphQLQueries.organizationProjectsV2()
         var pages = [GitHubProjectV2RawPage]()
         var projects = [GitHubProjectV2InventoryPayload.Project]()
@@ -51,6 +61,7 @@ actor GitHubProjectV2Client {
         var cursors = Set<String>()
         var budget = AggregateBudget()
         while true {
+            try await validateScope()
             let response = try await execute(
                 query,
                 variables: OrganizationProjectsVariables(
@@ -58,12 +69,18 @@ actor GitHubProjectV2Client {
                     after: after
                 ),
                 endpoint: "graphql:TriageOrganizationProjectsV2/organization=\(organizationNodeID.rawValue)",
+                requestKey: Self.requestKey(
+                    operation: "TriageOrganizationProjectsV2",
+                    target: "organization=\(organizationNodeID.rawValue)",
+                    after: after
+                ),
                 page: pages.count + 1,
                 priorPages: pages,
                 githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2InventoryPayload.self
             )
             try Task.checkCancellation()
+            try await validateScope()
             try validateSSO(
                 response.response.metadata.ssoHeader,
                 githubOrganizationID: githubOrganizationID,
@@ -99,9 +116,11 @@ actor GitHubProjectV2Client {
 
     func allItems(
         projectNodeID: GitHubNodeID,
-        githubOrganizationID: UInt64
+        githubOrganizationID: UInt64,
+        validateScope: @escaping @Sendable () async throws -> Void
     ) async throws -> GitHubProjectV2Items {
         try Task.checkCancellation()
+        try await validateScope()
         let query = try GitHubGraphQLQueries.projectV2Items()
         var rawPages = [GitHubProjectV2RawPage]()
         var items = [GitHubProjectV2ItemPayload.Item]()
@@ -109,6 +128,7 @@ actor GitHubProjectV2Client {
         var cursors = Set<String>()
         var budget = AggregateBudget()
         while true {
+            try await validateScope()
             let response = try await execute(
                 query,
                 variables: ProjectItemsVariables(
@@ -116,12 +136,18 @@ actor GitHubProjectV2Client {
                     after: after
                 ),
                 endpoint: "graphql:TriageProjectV2Items/project=\(projectNodeID.rawValue)",
+                requestKey: Self.requestKey(
+                    operation: "TriageProjectV2Items",
+                    target: "project=\(projectNodeID.rawValue)",
+                    after: after
+                ),
                 page: rawPages.count + 1,
                 priorPages: rawPages,
                 githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2ItemPayload.self
             )
             try Task.checkCancellation()
+            try await validateScope()
             try validateSSO(
                 response.response.metadata.ssoHeader,
                 githubOrganizationID: githubOrganizationID,
@@ -156,7 +182,8 @@ actor GitHubProjectV2Client {
                 itemNodeID: itemID,
                 githubOrganizationID: githubOrganizationID,
                 rawPages: &rawPages,
-                budget: &budget
+                budget: &budget,
+                validateScope: validateScope
             )
             do {
                 normalized.append(try GitHubProjectV2Normalizer.item(item, projectNodeID: projectNodeID, fieldValues: values))
@@ -171,7 +198,8 @@ actor GitHubProjectV2Client {
         itemNodeID: GitHubNodeID,
         githubOrganizationID: UInt64,
         rawPages: inout [GitHubProjectV2RawPage],
-        budget: inout AggregateBudget
+        budget: inout AggregateBudget,
+        validateScope: @escaping @Sendable () async throws -> Void
     ) async throws -> [GitHubProjectV2FieldValuePayload.Value] {
         let query = try GitHubGraphQLQueries.projectV2ItemFieldValues()
         var values = [GitHubProjectV2FieldValuePayload.Value]()
@@ -179,6 +207,7 @@ actor GitHubProjectV2Client {
         var cursors = Set<String>()
         var pageCount = 0
         while true {
+            try await validateScope()
             let response = try await execute(
                 query,
                 variables: ProjectItemFieldValuesVariables(
@@ -186,12 +215,18 @@ actor GitHubProjectV2Client {
                     after: after
                 ),
                 endpoint: "graphql:TriageProjectV2ItemFieldValues/item=\(itemNodeID.rawValue)",
+                requestKey: Self.requestKey(
+                    operation: "TriageProjectV2ItemFieldValues",
+                    target: "item=\(itemNodeID.rawValue)",
+                    after: after
+                ),
                 page: pageCount + 1,
                 priorPages: rawPages,
                 githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2FieldValuePayload.self
             )
             try Task.checkCancellation()
+            try await validateScope()
             try validateSSO(
                 response.response.metadata.ssoHeader,
                 githubOrganizationID: githubOrganizationID,
@@ -226,6 +261,7 @@ actor GitHubProjectV2Client {
         _ query: GitHubGraphQLQuery,
         variables: Variables,
         endpoint: String,
+        requestKey: String,
         page: Int,
         priorPages: [GitHubProjectV2RawPage],
         githubOrganizationID: UInt64,
@@ -238,10 +274,11 @@ actor GitHubProjectV2Client {
         )
         switch decodingResult {
         case let .response(response):
-            return (response, .init(endpoint: "\(endpoint)/page=\(page)", payload: response.payload))
+            return (response, .init(endpoint: "\(endpoint)/page=\(page)", requestKey: requestKey, payload: response.payload))
         case let .undecodable(undecodable):
             let rawPage = GitHubProjectV2RawPage(
                 endpoint: "\(endpoint)/page=\(page)",
+                requestKey: requestKey,
                 payload: undecodable.payload
             )
             if let header = undecodable.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
@@ -323,6 +360,15 @@ actor GitHubProjectV2Client {
             cost += nextCost
             bytes += page.payload.count
         }
+    }
+
+    private nonisolated static func requestKey(operation: String, target: String, after: String?) -> String {
+        "graphql:\(operation)/\(target)/after=\(cursorComponent(after))"
+    }
+
+    private nonisolated static func cursorComponent(_ cursor: String?) -> String {
+        guard let cursor else { return "none" }
+        return Data(cursor.utf8).base64EncodedString()
     }
 
     private static let maximumPayloadBytes = 4 * 1_024 * 1_024

@@ -41,21 +41,21 @@ actor NormalizationFailureRepository {
         guard !failure.redactedDiagnostic.isEmpty, failure.redactedDiagnostic.count <= 4_096 else {
             throw NormalizationFailureRepositoryError.invalidDiagnostic
         }
-        let snapshotCount = try Int.fetchOne(
+        guard let snapshot = try Row.fetchOne(
             database,
-            sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE id = ? AND account_id = ?",
+            sql: "SELECT github_node_id FROM raw_api_snapshots WHERE id = ? AND account_id = ?",
             arguments: [failure.rawSnapshotID.rawValue, failure.accountID.rawValue]
-        ) ?? 0
-        guard snapshotCount == 1 else {
+        ) else {
             throw NormalizationFailureRepositoryError.snapshotScopeMismatch
         }
+        let snapshotNodeID: String? = snapshot["github_node_id"]
         if let nodeID = failure.githubNodeID {
-            let nodeCount = try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
-                arguments: [nodeID.rawValue, failure.accountID.rawValue]
-            ) ?? 0
-            guard nodeCount == 1 else {
+            // A normalization failure may be bound to a content, repository,
+            // or organization source node. The immutable raw snapshot is the
+            // authority for that source; requiring exact equality prevents a
+            // failure from being attached to an unrelated node while allowing
+            // valid repository-scoped raw evidence.
+            guard snapshotNodeID == nodeID.rawValue else {
                 throw NormalizationFailureRepositoryError.nodeScopeMismatch
             }
         }

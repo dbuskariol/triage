@@ -45,11 +45,14 @@ actor DiscussionSynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let inventory = try await client.allDiscussions(
                 repositoryNodeID: repositoryNodeID,
-                githubOrganizationID: organization.githubOrganizationID
+                githubOrganizationID: organization.githubOrganizationID,
+                validateScope: { [repository] in try await repository.validateCurrentScope(scope) }
             )
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let result = recordCoverage(.complete, detail: nil)
             let comments = unavailableCoverage(
                 feature: .discussionComments,
@@ -64,12 +67,16 @@ actor DiscussionSynchronizationService {
             try await repository.replace(
                 inventory.discussions,
                 rawPages: inventory.rawPages,
+                scope: scope,
                 accountID: scope.accountID,
                 organization: organization,
                 repositoryID: repositoryID,
+                repositoryNodeID: repositoryNodeID,
+                streamID: streamID,
                 observedAt: observedAt,
                 coverageRecords: [result, comments, replies]
             )
+            try await validateCurrentScope(scope)
             return .init(
                 discussions: inventory.discussions,
                 coverage: result,
@@ -80,18 +87,27 @@ actor DiscussionSynchronizationService {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
+        } catch DiscussionRepositoryError.staleSynchronizationScope,
+                DiscussionRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
         } catch {
             let failure = recordCoverage(
                 status(for: error, githubOrganizationID: organization.githubOrganizationID),
                 detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID)
             )
-            try await repository.recordFailure(
-                pages: discussionRawPages(for: error),
-                accountID: scope.accountID,
-                observedAt: observedAt,
-                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
-                coverageRecord: failure
-            )
+            do {
+                try await repository.recordFailure(
+                    pages: discussionRawPages(for: error), scope: scope, accountID: scope.accountID,
+                    organization: organization, repositoryID: repositoryID, repositoryNodeID: repositoryNodeID,
+                    streamID: streamID, observedAt: observedAt,
+                    diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                    coverageRecord: failure
+                )
+                try await validateCurrentScope(scope)
+            } catch DiscussionRepositoryError.staleSynchronizationScope,
+                    DiscussionRepositoryError.organizationScopeMismatch {
+                throw CancellationError()
+            }
             throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
@@ -125,6 +141,15 @@ actor DiscussionSynchronizationService {
                            status: status, lastSuccessfulAt: status == .complete ? observedAt : nil, failureDetail: detail)
         }
     }
+
+    private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
+        do {
+            try await repository.validateCurrentScope(scope)
+        } catch DiscussionRepositoryError.staleSynchronizationScope,
+                DiscussionRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
+    }
 }
 
 actor ProjectV2SynchronizationService {
@@ -147,25 +172,34 @@ actor ProjectV2SynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let inventory = try await client.allProjects(
                 organizationNodeID: organization.nodeID,
-                githubOrganizationID: organization.githubOrganizationID
+                githubOrganizationID: organization.githubOrganizationID,
+                validateScope: { [repository] in try await repository.validateCurrentScope(scope) }
             )
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let projectCoverage = makeCoverage(feature: .projects, streamID: streamID, repositoryID: nil, status: .complete,
                                                detail: nil, success: observedAt)
             try await repository.replaceProjects(
                 inventory.projects,
                 rawPages: inventory.rawPages,
+                scope: scope,
                 accountID: scope.accountID,
                 organization: organization,
+                streamID: streamID,
                 observedAt: observedAt,
                 coverageRecords: [projectCoverage]
             )
+            try await validateCurrentScope(scope)
             return .init(projects: inventory.projects, projectCoverage: projectCoverage, itemCoverages: [:])
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch ProjectV2RepositoryError.staleSynchronizationScope,
+                ProjectV2RepositoryError.organizationScopeMismatch {
             throw CancellationError()
         } catch {
             let failed = makeCoverage(
@@ -176,12 +210,19 @@ actor ProjectV2SynchronizationService {
                 detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
                 success: nil
             )
-            try await repository.recordFailure(
-                pages: projectRawPages(for: error), accountID: scope.accountID,
-                observedAt: observedAt,
-                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
-                coverageRecord: failed
-            )
+            do {
+                try await repository.recordFailure(
+                    pages: projectRawPages(for: error), scope: scope, accountID: scope.accountID,
+                    organization: organization, feature: .projects, streamID: streamID,
+                    sourceNodeID: organization.nodeID, observedAt: observedAt,
+                    diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                    coverageRecord: failed
+                )
+                try await validateCurrentScope(scope)
+            } catch ProjectV2RepositoryError.staleSynchronizationScope,
+                    ProjectV2RepositoryError.organizationScopeMismatch {
+                throw CancellationError()
+            }
             throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
@@ -202,11 +243,14 @@ actor ProjectV2SynchronizationService {
             ?? Date(timeIntervalSince1970: 0)
         do {
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let inventory = try await client.allItems(
                 projectNodeID: project.nodeID,
-                githubOrganizationID: organization.githubOrganizationID
+                githubOrganizationID: organization.githubOrganizationID,
+                validateScope: { [repository] in try await repository.validateCurrentScope(scope) }
             )
             try Task.checkCancellation()
+            try await validateCurrentScope(scope)
             let status: CoverageStatus = inventory.items.contains(where: { !$0.fieldValuesComplete }) ? .partial : .complete
             let result = coverageRecord(status: status, detail: status == .partial ? "one or more field unions were incomplete" : nil,
                                         success: status == .complete ? observedAt : nil)
@@ -214,15 +258,21 @@ actor ProjectV2SynchronizationService {
                 inventory.items,
                 project: project,
                 rawPages: inventory.rawPages,
+                scope: scope,
                 accountID: scope.accountID,
                 organization: organization,
+                streamID: streamID,
                 observedAt: observedAt,
                 coverageRecords: [result]
             )
+            try await validateCurrentScope(scope)
             return result
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch ProjectV2RepositoryError.staleSynchronizationScope,
+                ProjectV2RepositoryError.organizationScopeMismatch {
             throw CancellationError()
         } catch {
             let failed = coverageRecord(
@@ -230,12 +280,19 @@ actor ProjectV2SynchronizationService {
                 detail: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
                 success: nil
             )
-            try await repository.recordFailure(
-                pages: projectRawPages(for: error), accountID: scope.accountID,
-                observedAt: observedAt,
-                diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
-                coverageRecord: failed
-            )
+            do {
+                try await repository.recordFailure(
+                    pages: projectRawPages(for: error), scope: scope, accountID: scope.accountID,
+                    organization: organization, feature: .projectItems, streamID: streamID,
+                    sourceNodeID: project.nodeID, observedAt: observedAt,
+                    diagnostic: diagnostic(for: error, githubOrganizationID: organization.githubOrganizationID),
+                    coverageRecord: failed
+                )
+                try await validateCurrentScope(scope)
+            } catch ProjectV2RepositoryError.staleSynchronizationScope,
+                    ProjectV2RepositoryError.organizationScopeMismatch {
+                throw CancellationError()
+            }
             throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
         }
 
@@ -244,6 +301,15 @@ actor ProjectV2SynchronizationService {
                            feature: .projectItems, streamID: streamID, intervalStart: intervalStart, intervalEnd: observedAt,
                            credentialRevision: scope.credentialRevision, capabilityRevision: scope.capabilityRevision,
                            status: status, lastSuccessfulAt: success, failureDetail: detail)
+        }
+    }
+
+    private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
+        do {
+            try await repository.validateCurrentScope(scope)
+        } catch ProjectV2RepositoryError.staleSynchronizationScope,
+                ProjectV2RepositoryError.organizationScopeMismatch {
+            throw CancellationError()
         }
     }
 }
