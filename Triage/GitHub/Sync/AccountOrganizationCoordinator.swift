@@ -227,7 +227,7 @@ protocol AccountOrganizationRefreshFinalizing: Sendable {
         for scope: SynchronizationScope,
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
-    ) async throws -> Bool
+    ) async throws -> AccountOrganizationDurableState?
 
     /// Commits a terminal failed attempt after snapshotting the exact
     /// revision-qualified coverage already written by its source streams.
@@ -869,8 +869,9 @@ actor AccountOrganizationCoordinator {
             return
         }
         let durableState = AccountOrganizationDurableState(cachedState: cachedState)
+        let committedState: AccountOrganizationDurableState
         do {
-            guard try await finalizer.finalize(
+            guard let finalizedState = try await finalizer.finalize(
                 durableState,
                 schedule: completedSchedule,
                 for: activeRefresh.synchronizationScope,
@@ -880,6 +881,7 @@ actor AccountOrganizationCoordinator {
                 await reconcileLostOwnership(activeRefresh)
                 return
             }
+            committedState = finalizedState
         } catch {
             persistenceFailed(
                 error,
@@ -894,7 +896,7 @@ actor AccountOrganizationCoordinator {
         states[scope] = AccountOrganizationCoordinatorState(
             synchronizationScope: activeRefresh.synchronizationScope,
             phase: .idle,
-            durableState: durableState,
+            durableState: committedState,
             schedulerState: completedSchedule
         )
     }

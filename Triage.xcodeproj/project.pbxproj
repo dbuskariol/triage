@@ -227,6 +227,8 @@
 		DE043FA0482963AC5A667EB7 /* WorkspacePresentationStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA274A68A82D12CDF3AE968A /* WorkspacePresentationStateTests.swift */; };
 		DE05BC04CD8923DDF0C81E05 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2A1934FE94A3A99DE0F6B385 /* PrivacyInfo.xcprivacy */; };
 		DEAAD030D292A062B542AE1F /* CoverageEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73E253D2EC34DD35631BE213 /* CoverageEvaluator.swift */; };
+		AA3200010000000000000001 /* CoverageRequirementProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3200020000000000000002 /* CoverageRequirementProfile.swift */; };
+		AA3200030000000000000003 /* CoverageRequirementProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3200040000000000000004 /* CoverageRequirementProfileTests.swift */; };
 		DF26F1B11AE871C9C1CD0D1C /* RawAPISnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 685C9BC1AB25C9717714338D /* RawAPISnapshot.swift */; };
 		DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */; };
 		E5234A186105C7ECE50B1245 /* AuthBrokerProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */; };
@@ -400,6 +402,8 @@
 		738A7187EF795179516FEBB9 /* PullRequestReviewThreadRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewThreadRepository.swift; sourceTree = "<group>"; };
 		73B6C120D53AF4AB82741BF9 /* SSOAuthorizationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSOAuthorizationCoordinator.swift; sourceTree = "<group>"; };
 		73E253D2EC34DD35631BE213 /* CoverageEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageEvaluator.swift; sourceTree = "<group>"; };
+		AA3200020000000000000002 /* CoverageRequirementProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRequirementProfile.swift; sourceTree = "<group>"; };
+		AA3200040000000000000004 /* CoverageRequirementProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageRequirementProfileTests.swift; sourceTree = "<group>"; };
 		7443B9424599ADCB985AEEA5 /* GitHubNodeHydrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubNodeHydrationService.swift; sourceTree = "<group>"; };
 		74F904F6D0D32CB06A9BBE9D /* GitHubTimelineNormalizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTimelineNormalizerTests.swift; sourceTree = "<group>"; };
 		761FAC7A6CCD5623D99A634C /* GitHubRepositoryTeamClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRepositoryTeamClient.swift; sourceTree = "<group>"; };
@@ -978,6 +982,7 @@
 				F50498A61942E18CC59DC3B2 /* ConversationFollowUpRuleTests.swift */,
 				4C13CEF01C6626CB0551D3A0 /* CopilotIPCTests.swift */,
 				081382E2229C72722DD3E171 /* CoverageEvaluatorTests.swift */,
+				AA3200040000000000000004 /* CoverageRequirementProfileTests.swift */,
 				D1621D430E460B6DA22335CF /* DerivedIntelligenceCoordinatorTests.swift */,
 				985CB795105B8BF41EEB2BC1 /* DirectResponsibilityRuleTests.swift */,
 				F02109B1F0588F53598FB02E /* InboxEligibilityRuleTests.swift */,
@@ -996,6 +1001,7 @@
 				555658DD05F52459D277E381 /* AttentionRanker.swift */,
 				0EBB781CC2753A9CEC178490 /* BusinessDayPolicy.swift */,
 				73E253D2EC34DD35631BE213 /* CoverageEvaluator.swift */,
+				AA3200020000000000000002 /* CoverageRequirementProfile.swift */,
 				C63CAB32E5F2BD1A0F77CA2A /* DerivedIntelligenceCoordinator.swift */,
 				69059AEFA8E3488C971070DA /* WorkflowActionService.swift */,
 				B886DF6920A5CC0B84CE8EA6 /* WorkflowTransition.swift */,
@@ -1194,6 +1200,7 @@
 				795B2C23261A97E506E9C357 /* CopilotHelperClientTests.swift in Sources */,
 				F5CD2629BF68DA61326628EE /* CopilotIPCTests.swift in Sources */,
 				DF35D32938B9E934A9C3DF2D /* CoverageEvaluatorTests.swift in Sources */,
+				AA3200030000000000000003 /* CoverageRequirementProfileTests.swift in Sources */,
 				364AF9C5BE29D893800B3C8A /* CoverageRepositoryTests.swift in Sources */,
 				54DFA6EA6877C636EB142DB3 /* CredentialLifecycleTests.swift in Sources */,
 				C71B8697287D376C0BCBB393 /* DerivedIntelligenceCoordinatorTests.swift in Sources */,
@@ -1318,6 +1325,7 @@
 				2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */,
 				1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */,
 				DEAAD030D292A062B542AE1F /* CoverageEvaluator.swift in Sources */,
+				AA3200010000000000000001 /* CoverageRequirementProfile.swift in Sources */,
 				373594353CB0240CB731F891 /* CoverageRepository.swift in Sources */,
 				3ABE0BAEB34FB0FC696F7351 /* CredentialLifecycle.swift in Sources */,
 				8324BB31D297F6BD4E7EF60D /* DerivedIntelligenceCoordinator.swift in Sources */,

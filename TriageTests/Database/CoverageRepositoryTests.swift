@@ -270,6 +270,33 @@ final class CoverageRepositoryTests: XCTestCase {
         XCTAssertEqual(stream?.status, .partial)
     }
 
+    func testCurrentRevisionCoverageReadFailsClosedAtItsBound() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await CoverageRepository(vault: fixture.vault).save(
+            fixture.record(status: .complete, lastSuccessfulAt: fixture.date, failureDetail: nil)
+        )
+        let scope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+
+        do {
+            _ = try await fixture.vault.read { database in
+                try CoverageRepository.currentRecords(
+                    for: scope,
+                    in: database,
+                    maximumCount: 0
+                )
+            }
+            XCTFail("Current coverage must not materialize beyond its explicit bound.")
+        } catch {
+            XCTAssertEqual(error as? CoverageRepositoryError, .tooManyRecords)
+        }
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

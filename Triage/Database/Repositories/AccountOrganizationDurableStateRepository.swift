@@ -107,7 +107,7 @@ actor AccountOrganizationDurableStateRepository {
         for scope: SynchronizationScope,
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
-    ) async throws -> Bool {
+    ) async throws -> AccountOrganizationDurableState? {
         try await finalizeProjection(
             state,
             schedule: schedule,
@@ -115,7 +115,7 @@ actor AccountOrganizationDurableStateRepository {
             ifOwnedBy: expectedAttemptID,
             generation: expectedGeneration,
             coverageMode: .requireCandidateMatch
-        ) != nil
+        )
     }
 
     func finalizeFailure(
@@ -183,6 +183,11 @@ actor AccountOrganizationDurableStateRepository {
                 for: scope,
                 in: database
             )
+            let coverageRequirements = try CoverageRequirementProfile.build(
+                for: scope,
+                coverage: persistedCoverage,
+                in: database
+            )
             let stateToPersist: AccountOrganizationDurableState
             switch coverageMode {
             case .requireCandidateMatch:
@@ -192,11 +197,16 @@ actor AccountOrganizationDurableStateRepository {
                 else {
                     throw AccountOrganizationDurableStateRepositoryError.invalidProjection
                 }
-                stateToPersist = candidateState
+                stateToPersist = try Self.successProjection(
+                    from: candidateState,
+                    coverageRequirements: coverageRequirements,
+                    for: scope
+                )
             case .snapshotPersistedFailure:
                 stateToPersist = try Self.failureProjection(
                     from: candidateState,
                     persistedCoverage: persistedCoverage,
+                    coverageRequirements: coverageRequirements,
                     for: scope
                 )
             }
@@ -429,6 +439,7 @@ actor AccountOrganizationDurableStateRepository {
     private nonisolated static func failureProjection(
         from candidate: AccountOrganizationDurableState,
         persistedCoverage: [CoverageRecord],
+        coverageRequirements: [CoverageRequirement],
         for scope: SynchronizationScope
     ) throws -> AccountOrganizationDurableState {
         guard candidate.freshness.status != .fresh,
@@ -436,22 +447,8 @@ actor AccountOrganizationDurableStateRepository {
         else {
             throw AccountOrganizationDurableStateRepositoryError.invalidProjection
         }
-        guard !persistedCoverage.isEmpty else {
-            guard candidate.cachedState?.coverage.isEmpty != false else {
-                throw AccountOrganizationDurableStateRepositoryError.invalidProjection
-            }
-            return try canonicalized(
-                AccountOrganizationDurableState(
-                    cachedState: nil,
-                    freshness: FreshnessState(
-                        status: candidate.freshness.status,
-                        lastSuccessfulSyncAt: nil,
-                        nextRetryAt: candidate.freshness.nextRetryAt,
-                        detail: candidate.freshness.detail
-                    )
-                ),
-                for: scope
-            )
+        guard !persistedCoverage.isEmpty || candidate.cachedState?.coverage.isEmpty != false else {
+            throw AccountOrganizationDurableStateRepositoryError.invalidProjection
         }
         let latestSuccessfulAt = persistedCoverage
             .compactMap(\.lastSuccessfulAt)
@@ -462,7 +459,7 @@ actor AccountOrganizationDurableStateRepository {
             AccountOrganizationDurableState(
                 cachedState: AccountOrganizationCachedState(
                     coverage: persistedCoverage,
-                    coverageRequirements: candidate.cachedState?.coverageRequirements,
+                    coverageRequirements: coverageRequirements,
                     lastSuccessfulSyncAt: latestSuccessfulAt
                 ),
                 freshness: FreshnessState(
@@ -472,6 +469,25 @@ actor AccountOrganizationDurableStateRepository {
                     detail: candidate.freshness.detail
                 )
             ),
+            for: scope
+        )
+    }
+
+    private nonisolated static func successProjection(
+        from candidate: AccountOrganizationDurableState,
+        coverageRequirements: [CoverageRequirement],
+        for scope: SynchronizationScope
+    ) throws -> AccountOrganizationDurableState {
+        guard let cachedState = candidate.cachedState else {
+            throw AccountOrganizationDurableStateRepositoryError.invalidProjection
+        }
+        let enrichedCachedState = AccountOrganizationCachedState(
+            coverage: cachedState.coverage,
+            coverageRequirements: coverageRequirements,
+            lastSuccessfulSyncAt: cachedState.lastSuccessfulSyncAt
+        )
+        return try canonicalized(
+            AccountOrganizationDurableState(cachedState: enrichedCachedState),
             for: scope
         )
     }
@@ -503,9 +519,9 @@ actor AccountOrganizationDurableStateRepository {
         }
         guard !cachedState.coverage.isEmpty else {
             guard cachedState.lastSuccessfulSyncAt == nil,
-                  state.freshness.status == .stale,
-                  state.freshness.lastSuccessfulSyncAt == nil,
-                  state.freshness.nextRetryAt == nil
+                  state.freshness.status != .fresh,
+                  state.freshness.status != .refreshing,
+                  state.freshness.lastSuccessfulSyncAt == nil
             else {
                 throw AccountOrganizationDurableStateRepositoryError.invalidProjection
             }
