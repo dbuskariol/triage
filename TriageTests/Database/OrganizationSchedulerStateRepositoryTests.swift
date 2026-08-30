@@ -95,7 +95,8 @@ final class OrganizationSchedulerStateRepositoryTests: XCTestCase {
 
         let didReplace = try await repository.replace(
             staleCompletion,
-            ifOwnedBy: staleAttemptID
+            ifOwnedBy: staleAttemptID,
+            generation: 1
         )
 
         XCTAssertFalse(didReplace)
@@ -114,13 +115,66 @@ final class OrganizationSchedulerStateRepositoryTests: XCTestCase {
         )
         let didCompleteCurrent = try await repository.replace(
             currentCompletion,
-            ifOwnedBy: currentAttemptID
+            ifOwnedBy: currentAttemptID,
+            generation: 2
         )
         XCTAssertTrue(didCompleteCurrent)
         let completed = try await repository.state(
             for: fixture.scope(organizationID: fixture.firstOrganizationID)
         )
         XCTAssertEqual(completed, currentCompletion)
+    }
+
+    func testCancellationRetainsPriorCompletionAndRequiresAttemptGeneration() async throws {
+        let fixture = try await SchedulerFixture()
+        defer { fixture.remove() }
+        let repository = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let attemptID = UUID()
+        let priorCompletion = fixture.now.addingTimeInterval(-60)
+        let active = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 2,
+            nextIncrementalOffset: 600,
+            activeAttemptID: attemptID,
+            generation: 7,
+            lastAttemptAt: fixture.now,
+            lastCompletedAt: priorCompletion
+        )
+        try await repository.save(active)
+        let cancelled = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 2,
+            nextIncrementalOffset: 600,
+            generation: 7,
+            lastAttemptAt: fixture.now,
+            lastCompletedAt: priorCompletion,
+            updatedAt: fixture.now.addingTimeInterval(1)
+        )
+
+        do {
+            _ = try await repository.replace(
+                cancelled,
+                ifOwnedBy: attemptID,
+                generation: 6
+            )
+            XCTFail("The replacement state must match its claimed attempt generation.")
+        } catch {
+            XCTAssertEqual(
+                error as? OrganizationSchedulerStateRepositoryError,
+                .staleGeneration
+            )
+        }
+        let didCancel = try await repository.replace(
+            cancelled,
+            ifOwnedBy: attemptID,
+            generation: 7
+        )
+
+        XCTAssertTrue(didCancel)
+        let stored = try await repository.state(
+            for: fixture.scope(organizationID: fixture.firstOrganizationID)
+        )
+        XCTAssertEqual(stored, cancelled)
     }
 
     func testRepositoryRejectsForeignAccountAndUnassociatedOrganization() async throws {
@@ -201,13 +255,14 @@ final class OrganizationSchedulerStateRepositoryTests: XCTestCase {
             organizationID: fixture.firstOrganizationID,
             failureCount: 0,
             nextIncrementalOffset: 60,
+            activeAttemptID: UUID(),
             lastAttemptAt: fixture.now.addingTimeInterval(2),
-            lastCompletedAt: fixture.now.addingTimeInterval(1),
-            updatedAt: fixture.now.addingTimeInterval(2)
+            lastCompletedAt: fixture.now.addingTimeInterval(3),
+            updatedAt: fixture.now.addingTimeInterval(3)
         )
         do {
             try await repository.save(reversed)
-            XCTFail("A completion cannot predate its recorded attempt.")
+            XCTFail("An active attempt cannot follow a newer completion.")
         } catch {
             XCTAssertEqual(error as? OrganizationSchedulerStateRepositoryError, .invalidTimestampOrder)
         }

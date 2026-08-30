@@ -1007,6 +1007,86 @@ enum TriageDatabaseMigrator {
                     account_id, blocked_reason, next_full_reconciliation_at_ms, organization_id
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "027-organization-scheduler-cancelled-attempts",
+            checksum: "a989337fe48737cb48e606df087eb83b5add6bbde807a530bbea3d94ddd4147c"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE organization_scheduler_states_rebuilt (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    next_incremental_refresh_at_ms INTEGER NOT NULL,
+                    next_full_reconciliation_at_ms INTEGER NOT NULL,
+                    rate_limited_until_ms INTEGER,
+                    blocked_reason TEXT CHECK (
+                        blocked_reason IS NULL OR blocked_reason IN (
+                            'authenticationRequired', 'ssoRequired', 'approvalRequired'
+                        )
+                    ),
+                    consecutive_transient_failure_count INTEGER NOT NULL
+                        CHECK (consecutive_transient_failure_count BETWEEN 0 AND 20),
+                    active_attempt_id TEXT,
+                    last_attempt_at_ms INTEGER,
+                    last_completed_at_ms INTEGER,
+                    generation INTEGER NOT NULL CHECK (generation >= 0),
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (
+                        active_attempt_id IS NULL OR last_attempt_at_ms IS NOT NULL
+                    ),
+                    CHECK (
+                        active_attempt_id IS NULL OR last_attempt_at_ms IS NULL
+                        OR last_completed_at_ms IS NULL
+                        OR last_completed_at_ms <= last_attempt_at_ms
+                    ),
+                    CHECK (
+                        last_attempt_at_ms IS NULL OR updated_at_ms >= last_attempt_at_ms
+                    ),
+                    CHECK (
+                        last_completed_at_ms IS NULL OR updated_at_ms >= last_completed_at_ms
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                INSERT INTO organization_scheduler_states_rebuilt (
+                    account_id, organization_id, credential_revision,
+                    capability_revision, next_incremental_refresh_at_ms,
+                    next_full_reconciliation_at_ms, rate_limited_until_ms,
+                    blocked_reason, consecutive_transient_failure_count,
+                    active_attempt_id, last_attempt_at_ms, last_completed_at_ms,
+                    generation, updated_at_ms
+                )
+                SELECT account_id, organization_id, credential_revision,
+                       capability_revision, next_incremental_refresh_at_ms,
+                       next_full_reconciliation_at_ms, rate_limited_until_ms,
+                       blocked_reason, consecutive_transient_failure_count,
+                       active_attempt_id, last_attempt_at_ms, last_completed_at_ms,
+                       generation, updated_at_ms
+                FROM organization_scheduler_states
+                """)
+            try database.execute(sql: "DROP TABLE organization_scheduler_states")
+            try database.execute(sql: """
+                ALTER TABLE organization_scheduler_states_rebuilt
+                RENAME TO organization_scheduler_states
+                """)
+            try database.execute(sql: """
+                CREATE INDEX organization_scheduler_states_due
+                ON organization_scheduler_states (
+                    account_id, blocked_reason, next_incremental_refresh_at_ms, organization_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX organization_scheduler_states_reconciliation_due
+                ON organization_scheduler_states (
+                    account_id, blocked_reason, next_full_reconciliation_at_ms, organization_id
+                )
+                """)
         }
     ]
 }
