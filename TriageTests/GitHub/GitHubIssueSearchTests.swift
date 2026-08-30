@@ -16,6 +16,23 @@ final class GitHubIssueSearchTests: XCTestCase {
         )
     }
 
+    func testBuildsVisibleTeamReviewRequestSearch() throws {
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .teamReviewRequested(
+                teamNodeID: GitHubNodeID(rawValue: "T_1")!,
+                teamSlug: "mac-apps"
+            )
+        )
+
+        XCTAssertEqual(
+            query.value,
+            "org:github is:open team-review-requested:github/mac-apps"
+        )
+    }
+
     func testSearchRejectsUntrustedQualifierInputs() {
         XCTAssertThrowsError(
             try GitHubIssueSearchQuery(
@@ -23,6 +40,17 @@ final class GitHubIssueSearchTests: XCTestCase {
                 userLogin: "octocat",
                 state: .open,
                 relationship: .involves
+            )
+        )
+        XCTAssertThrowsError(
+            try GitHubIssueSearchQuery(
+                organizationLogin: "github",
+                userLogin: "octocat",
+                state: .open,
+                relationship: .teamReviewRequested(
+                    teamNodeID: GitHubNodeID(rawValue: "T_1")!,
+                    teamSlug: "Mac Apps"
+                )
             )
         )
         XCTAssertThrowsError(
@@ -51,7 +79,7 @@ final class GitHubIssueSearchTests: XCTestCase {
 
         XCTAssertEqual(
             query.value,
-            "org:github is:closed review-involves:octocat updated:1970-01-01T00:01:00Z..1970-01-01T00:02:00Z closed:>=1970-01-01"
+            "org:github is:closed reviewed-by:octocat updated:1970-01-01T00:01:00Z..1970-01-01T00:02:00Z closed:>=1970-01-01"
         )
     }
 

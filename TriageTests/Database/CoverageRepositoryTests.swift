@@ -74,6 +74,46 @@ final class CoverageRepositoryTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testRemovingLegacyUnboundedRecordPreservesBoundedCoverageForTheStream() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = CoverageRepository(vault: fixture.vault)
+        let unbounded = fixture.record(
+            status: .partial,
+            lastSuccessfulAt: nil,
+            failureDetail: "Legacy attempt."
+        )
+        let bounded = CoverageRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            repositoryID: nil,
+            feature: .issues,
+            streamID: fixture.streamID,
+            intervalStart: fixture.date,
+            intervalEnd: fixture.date.addingTimeInterval(3_600),
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: fixture.date.addingTimeInterval(3_600),
+            failureDetail: nil
+        )
+        try await repository.save(unbounded, attemptedAt: fixture.date)
+        try await repository.save(bounded, attemptedAt: fixture.date.addingTimeInterval(3_600))
+
+        try await repository.removeUnboundedRecord(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            feature: .issues,
+            streamID: fixture.streamID
+        )
+
+        let records = try await repository.records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(records, [bounded])
+    }
+
     func testCoverageIsStrictlyBoundToItsVaultAccount() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

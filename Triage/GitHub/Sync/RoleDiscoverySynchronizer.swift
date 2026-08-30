@@ -5,14 +5,25 @@ struct RoleDiscoverySyncResult: Sendable {
     let candidateNodeIDs: Set<GitHubNodeID>
 }
 
+struct RoleDiscoveryStreamOutcome: Equatable, Sendable {
+    let kind: RoleDiscoveryStreamKind
+    let status: CoverageStatus
+    let failureDetail: String?
+}
+
 actor RoleDiscoverySynchronizer {
-    private let searchClient: GitHubIssueSearchClient
+    typealias StreamOutcomeRecorder = @Sendable (
+        RoleDiscoveryStream,
+        RoleDiscoveryStreamOutcome
+    ) async throws -> Void
+
+    private let searchClient: any GitHubIssueSearchExecuting
     private let workItemRepository: WorkItemRepository
     private let shardRepository: SyncShardRepository
     private let clock: @Sendable () -> Date
 
     init(
-        searchClient: GitHubIssueSearchClient,
+        searchClient: any GitHubIssueSearchExecuting,
         workItemRepository: WorkItemRepository,
         shardRepository: SyncShardRepository,
         clock: @escaping @Sendable () -> Date = Date.init
@@ -26,44 +37,100 @@ actor RoleDiscoverySynchronizer {
     func synchronize(
         plan: RoleDiscoveryPlan,
         accountID: AccountID,
-        accountNodeID: GitHubNodeID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
         streamID: SyncStreamID,
         searchRange: SearchTimeRange,
         accessibleRepositoryNames: [String],
-        repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?
+        repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?,
+        streams: [RoleDiscoveryStream]? = nil,
+        recordStreamOutcome: @escaping StreamOutcomeRecorder = { _, _ in }
     ) async throws -> RoleDiscoverySyncResult {
         let accumulator = RoleDiscoveryAccumulator()
+        let observationClock = clock
         let shardExecutor = SearchShardExecutor(
             client: searchClient,
             shardRepository: shardRepository,
             clock: clock
         )
-        for query in plan.openQueries + plan.recentClosedQueries {
-            try await shardExecutor.execute(
-                query: query,
-                range: searchRange,
-                streamID: streamID,
-                accountID: accountID,
-                accessibleRepositoryNames: accessibleRepositoryNames
-            ) { [self] response, boundedQuery, page in
-                try await self.throwForSSORequirement(
-                    in: response.ssoHeader,
+        let selectedStreams = streams ?? plan.streams
+        var firstFailure: (any Error)?
+        for (streamIndex, stream) in selectedStreams.enumerated() {
+            do {
+                for query in stream.queries {
+                    try await shardExecutor.execute(
+                        query: query,
+                        range: searchRange,
+                        streamID: stream.streamID(parent: streamID),
+                        accountID: accountID,
+                        accessibleRepositoryNames: accessibleRepositoryNames,
+                        prepareControlPage: { response, boundedQuery, page in
+                            Self.prepareControlPageWrite(
+                                response,
+                                query: boundedQuery,
+                                page: page,
+                                accountID: accountID,
+                                observedAt: observationClock()
+                            )
+                        }
+                    ) { [self] response, boundedQuery, page in
+                        try await self.throwForSSORequirement(
+                            in: response.ssoHeader,
+                            githubOrganizationID: githubOrganizationID
+                        )
+                        return try await self.preparePageWrite(
+                            response,
+                            query: boundedQuery,
+                            page: page,
+                            accountID: accountID,
+                            organizationID: organizationID,
+                            repositoryID: repositoryID,
+                            accumulator: accumulator
+                        )
+                    }
+                }
+            } catch {
+                let outcome = Self.outcome(
+                    for: stream.kind,
+                    error: error,
                     githubOrganizationID: githubOrganizationID
                 )
-                return try await self.preparePageWrite(
-                    response,
-                    query: boundedQuery,
-                    page: page,
-                    accountID: accountID,
-                    organizationID: organizationID,
-                    accountNodeID: accountNodeID,
-                    relationship: query.relationship,
-                    repositoryID: repositoryID,
-                    accumulator: accumulator
+                try await recordStreamOutcome(
+                    stream,
+                    outcome
                 )
+                if error is CancellationError {
+                    throw CancellationError()
+                }
+                if firstFailure == nil {
+                    firstFailure = error
+                }
+                if Self.shouldDeferRemainingStreams(after: error) {
+                    for remainingStream in selectedStreams.dropFirst(streamIndex + 1) {
+                        try await recordStreamOutcome(
+                            remainingStream,
+                            Self.deferredOutcome(
+                                for: remainingStream.kind,
+                                after: outcome
+                            )
+                        )
+                    }
+                    break
+                }
+                continue
             }
+            try await recordStreamOutcome(
+                stream,
+                RoleDiscoveryStreamOutcome(
+                    kind: stream.kind,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+        }
+
+        if let firstFailure {
+            throw firstFailure
         }
 
         let candidateNodeIDs = await accumulator.committedNodeIDs()
@@ -82,8 +149,6 @@ actor RoleDiscoverySynchronizer {
         page: Int,
         accountID: AccountID,
         organizationID: OrganizationID,
-        accountNodeID: GitHubNodeID,
-        relationship: GitHubIssueSearchRelationship,
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?,
         accumulator: RoleDiscoveryAccumulator
     ) async throws -> PreparedSearchShardPageWrite {
@@ -98,10 +163,6 @@ actor RoleDiscoverySynchronizer {
             observedAt: observedAt,
             payload: response.payload
         )
-        let relationships = await accumulator.combinedRelationships(
-            for: response.value,
-            adding: relationship
-        )
         var entries: [NormalizedPageEntry] = []
         var failures: [NormalizationFailure] = []
         for item in response.value.items {
@@ -115,8 +176,7 @@ actor RoleDiscoverySynchronizer {
                 )
                 entries.append(
                     NormalizedPageEntry(
-                        node: node,
-                        relationships: relationships[node.nodeID.rawValue] ?? []
+                        node: node
                     )
                 )
             } catch let error as GitHubSearchNormalizationError {
@@ -145,29 +205,8 @@ actor RoleDiscoverySynchronizer {
                 try RawAPISnapshotRepository.save(snapshot, in: database)
                 for entry in preparedEntries {
                     try GitHubNodeRepository.save(entry.node, in: database)
-                    let workItemID = try WorkItemRepository.ensureWorkItem(
+                    _ = try WorkItemRepository.ensureWorkItem(
                         for: entry.node,
-                        in: database
-                    )
-                    try WorkRelationRepository.replace(
-                        Self.discoveryRelations(
-                            relationships: entry.relationships,
-                            node: entry.node,
-                            accountNodeID: accountNodeID,
-                            observedAt: observedAt
-                        ),
-                        accountID: accountID,
-                        subjectNodeID: entry.node.nodeID,
-                        in: database
-                    )
-                    try AttentionReasonRepository.replaceDiscoveryReasons(
-                        workItemID: workItemID,
-                        reasons: Self.discoveryReasons(
-                            relationships: entry.relationships,
-                            node: entry.node,
-                            evaluatedAt: observedAt
-                        ),
-                        accountID: accountID,
                         in: database
                     )
                 }
@@ -177,10 +216,34 @@ actor RoleDiscoverySynchronizer {
             },
             didCommit: {
                 await accumulator.storeCommitted(
-                    relationship: relationship,
                     nodes: committedNodes
                 )
             }
+        )
+    }
+
+    private nonisolated static func prepareControlPageWrite(
+        _ response: GitHubResponse<GitHubIssueSearchPage>,
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        accountID: AccountID,
+        observedAt: Date
+    ) -> PreparedSearchShardPageWrite {
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=\(query.value)&page=\(page)",
+            eTag: response.etag,
+            parserVersion: 1,
+            observedAt: observedAt,
+            payload: response.payload
+        )
+        return PreparedSearchShardPageWrite(
+            write: { database in
+                try RawAPISnapshotRepository.save(snapshot, in: database)
+            },
+            didCommit: {}
         )
     }
 
@@ -190,27 +253,8 @@ actor RoleDiscoverySynchronizer {
 
     private actor RoleDiscoveryAccumulator {
         private var nodeIDs: Set<GitHubNodeID> = []
-        private var relationshipsByNodeID: [String: Set<GitHubIssueSearchRelationship>] = [:]
 
-        func combinedRelationships(
-            for page: GitHubIssueSearchPage,
-            adding relationship: GitHubIssueSearchRelationship
-        ) -> [String: Set<GitHubIssueSearchRelationship>] {
-            var combined: [String: Set<GitHubIssueSearchRelationship>] = [:]
-            for item in page.items {
-                combined[item.nodeID] = relationshipsByNodeID[item.nodeID, default: []]
-                combined[item.nodeID, default: []].insert(relationship)
-            }
-            return combined
-        }
-
-        func storeCommitted(
-            relationship: GitHubIssueSearchRelationship,
-            nodes: [NormalizedGitHubNode]
-        ) {
-            for node in nodes {
-                relationshipsByNodeID[node.nodeID.rawValue, default: []].insert(relationship)
-            }
+        func storeCommitted(nodes: [NormalizedGitHubNode]) {
             nodeIDs.formUnion(nodes.map(\.nodeID))
         }
 
@@ -221,7 +265,6 @@ actor RoleDiscoverySynchronizer {
 
     private struct NormalizedPageEntry: Sendable {
         let node: NormalizedGitHubNode
-        let relationships: Set<GitHubIssueSearchRelationship>
     }
 
     private nonisolated static func redactedDiagnostic(for error: GitHubSearchNormalizationError) -> String {
@@ -242,82 +285,103 @@ actor RoleDiscoverySynchronizer {
         }
     }
 
-    private nonisolated static func discoveryReasons(
-        relationships: Set<GitHubIssueSearchRelationship>,
-        node: NormalizedGitHubNode,
-        evaluatedAt: Date
-    ) -> [AttentionReason] {
-        let definitions: [(GitHubIssueSearchRelationship, Int, String, String)] = [
-            (.reviewRequested, 1_000, "Review requested", "You are currently requested to review this pull request."),
-            (.assigned, 850, "Assigned to you", "You are currently assigned to this work."),
-            (.mentioned, 750, "Mentioned", "You were directly mentioned in this work.")
-        ]
-        return definitions.compactMap { relationship, strength, title, explanation in
-            guard relationships.contains(relationship) else { return nil }
-            let evidence = EvidenceReference(
-                id: EvidenceID(rawValue: "discovery-\(relationship.qualifier)-\(node.nodeID.rawValue)")!,
-                source: .restSearch,
-                nodeID: node.nodeID,
-                sourceRevision: node.sourceRevision,
-                observedAt: evaluatedAt
+    private nonisolated static func outcome(
+        for kind: RoleDiscoveryStreamKind,
+        error: any Error,
+        githubOrganizationID: UInt64
+    ) -> RoleDiscoveryStreamOutcome {
+        if error is CancellationError {
+            return RoleDiscoveryStreamOutcome(
+                kind: kind,
+                status: .partial,
+                failureDetail: "Role discovery was cancelled before this stream completed."
             )
-            return AttentionReason(
-                id: "discovery.\(relationship.qualifier)-\(node.nodeID.rawValue)",
-                category: .directResponsibility,
-                ruleID: "discovery.\(relationship.qualifier)",
-                ruleVersion: 1,
-                strength: strength,
-                title: title,
-                explanation: explanation,
-                evidence: [evidence],
-                evaluatedAt: evaluatedAt
+        }
+        if case .ssoRequirement = error as? OrganizationRefreshError {
+            return RoleDiscoveryStreamOutcome(
+                kind: kind,
+                status: .requiresSSO,
+                failureDetail: "GitHub organization SSO authorization is required for this discovery stream."
             )
+        }
+        if let failure = error as? GitHubFailure {
+            if failure.ssoHeader?.scoped(to: githubOrganizationID) != nil {
+                return RoleDiscoveryStreamOutcome(
+                    kind: kind,
+                    status: .requiresSSO,
+                    failureDetail: "GitHub organization SSO authorization is required for this discovery stream."
+                )
+            }
+            if let restriction = failure.accessRestriction {
+                return switch restriction {
+                case .organizationApprovalRequired, .oauthApplicationApprovalRequired:
+                    RoleDiscoveryStreamOutcome(
+                        kind: kind,
+                        status: .requiresApproval,
+                        failureDetail: "GitHub organization approval is required for this discovery stream."
+                    )
+                case .organizationPolicyBlocked:
+                    RoleDiscoveryStreamOutcome(
+                        kind: kind,
+                        status: .unavailable,
+                        failureDetail: "Organization policy blocks this discovery stream."
+                    )
+                }
+            }
+            return switch failure.kind {
+            case .rateLimited, .secondaryRateLimited:
+                RoleDiscoveryStreamOutcome(
+                    kind: kind,
+                    status: .partial,
+                    failureDetail: "GitHub rate limiting left this discovery stream incomplete."
+                )
+            case .forbidden, .notFound:
+                RoleDiscoveryStreamOutcome(
+                    kind: kind,
+                    status: .unavailable,
+                    failureDetail: "This discovery stream is unavailable to the selected account."
+                )
+            case .unauthorized, .serverFailure, .unexpectedResponse:
+                RoleDiscoveryStreamOutcome(
+                    kind: kind,
+                    status: .failed,
+                    failureDetail: "This discovery stream failed."
+                )
+            }
+        }
+        return RoleDiscoveryStreamOutcome(
+            kind: kind,
+            status: .failed,
+            failureDetail: "This discovery stream failed."
+        )
+    }
+
+    private nonisolated static func shouldDeferRemainingStreams(after error: any Error) -> Bool {
+        if error is OrganizationRefreshError {
+            return true
+        }
+        guard let failure = error as? GitHubFailure else {
+            return false
+        }
+        if failure.ssoHeader != nil || failure.accessRestriction != nil {
+            return true
+        }
+        return switch failure.kind {
+        case .unauthorized, .rateLimited, .secondaryRateLimited, .serverFailure:
+            true
+        case .forbidden, .notFound, .unexpectedResponse:
+            false
         }
     }
 
-    private nonisolated static func discoveryRelations(
-        relationships: Set<GitHubIssueSearchRelationship>,
-        node: NormalizedGitHubNode,
-        accountNodeID: GitHubNodeID,
-        observedAt: Date
-    ) -> [WorkRelation] {
-        relationships.compactMap { relationship in
-            let kind: WorkRelationKind? = switch relationship {
-            case .involves:
-                nil
-            case .authored:
-                WorkRelationKind.authored
-            case .assigned:
-                .assigned
-            case .mentioned:
-                .mentioned
-            case .commented:
-                .commented
-            case .reviewRequested:
-                .reviewRequestedDirectly
-            case .reviewInvolves:
-                .reviewed
-            }
-            guard let kind else {
-                return nil
-            }
-            let evidence = EvidenceReference(
-                id: EvidenceID(rawValue: "discovery-\(relationship.qualifier)-\(node.nodeID.rawValue)")!,
-                source: .restSearch,
-                nodeID: node.nodeID,
-                sourceRevision: node.sourceRevision,
-                observedAt: observedAt
-            )
-            return WorkRelation(
-                kind: kind,
-                subjectNodeID: node.nodeID,
-                objectNodeID: accountNodeID,
-                confidence: .confirmed,
-                evidence: [evidence],
-                observedAt: observedAt
-            )
-        }.sorted { lhs, rhs in
-            lhs.kind.rawValue < rhs.kind.rawValue
-        }
+    private nonisolated static func deferredOutcome(
+        for kind: RoleDiscoveryStreamKind,
+        after outcome: RoleDiscoveryStreamOutcome
+    ) -> RoleDiscoveryStreamOutcome {
+        RoleDiscoveryStreamOutcome(
+            kind: kind,
+            status: outcome.status == .complete ? .partial : outcome.status,
+            failureDetail: "This discovery stream was deferred after an earlier account or organization-wide failure."
+        )
     }
 }

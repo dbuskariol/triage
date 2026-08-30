@@ -50,6 +50,27 @@ actor CoverageRepository {
         }
     }
 
+    func removeUnboundedRecord(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        feature: CoverageFeature,
+        streamID: SyncStreamID
+    ) async throws {
+        guard accountID == vault.accountID else {
+            throw CoverageRepositoryError.accountScopeMismatch
+        }
+        try await vault.write { database in
+            try Self.removeUnboundedRecord(
+                accountID: accountID,
+                organizationID: organizationID,
+                feature: feature,
+                streamID: streamID,
+                expectedAccountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
     nonisolated static func save(
         _ record: CoverageRecord,
         attemptedAt: Date,
@@ -102,6 +123,32 @@ actor CoverageRepository {
                 record.status.rawValue,
                 record.lastSuccessfulAt.map(milliseconds),
                 record.failureDetail
+            ]
+        )
+    }
+
+    nonisolated static func removeUnboundedRecord(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        feature: CoverageFeature,
+        streamID: SyncStreamID,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws {
+        guard accountID == expectedAccountID else {
+            throw CoverageRepositoryError.accountScopeMismatch
+        }
+        try database.execute(
+            sql: """
+                DELETE FROM coverage_records
+                WHERE account_id = ? AND organization_id = ? AND feature = ? AND stream_id = ?
+                  AND interval_start_ms IS NULL AND interval_end_ms IS NULL
+                """,
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                feature.rawValue,
+                streamID.rawValue
             ]
         )
     }
