@@ -12,6 +12,7 @@ enum RawAPISnapshotRepositoryError: Error, Equatable, Sendable {
     case invalidRetentionLimit
     case invalidPersistedData
     case payloadTooLarge
+    case immutableSnapshotConflict
 }
 
 actor RawAPISnapshotRepository {
@@ -35,12 +36,62 @@ actor RawAPISnapshotRepository {
     nonisolated static func save(_ snapshot: RawAPISnapshot, in database: Database) throws {
         try validate(snapshot)
         if let nodeID = snapshot.githubNodeID {
-            let matchingCount = try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
-                arguments: [nodeID.rawValue, snapshot.accountID.rawValue]
-            ) ?? 0
-            guard matchingCount == 1 else {
+            let contentNodeCount: Int
+            if let identity = snapshot.requestIdentity {
+                contentNodeCount = try Int.fetchOne(
+                    database,
+                    sql: """
+                        SELECT COUNT(*) FROM github_nodes
+                        WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+                        """,
+                    arguments: [
+                        nodeID.rawValue, snapshot.accountID.rawValue,
+                        identity.scope.organizationID.rawValue
+                    ]
+                ) ?? 0
+            } else {
+                // Historical raw rows did not carry source authority. Retain
+                // their existing account-only diagnostic validation, but they
+                // can never authorize scoped conditional replay.
+                contentNodeCount = try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id = ? AND account_id = ?",
+                    arguments: [nodeID.rawValue, snapshot.accountID.rawValue]
+                ) ?? 0
+            }
+            let repositoryNodeCount: Int
+            if let identity = snapshot.requestIdentity {
+                repositoryNodeCount = try Int.fetchOne(
+                    database,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM repositories
+                        JOIN account_repository_access
+                          ON account_repository_access.repository_id = repositories.id
+                        WHERE repositories.github_node_id = ?
+                          AND repositories.organization_id = ?
+                          AND account_repository_access.account_id = ?
+                          AND account_repository_access.access_state = 'available'
+                        """,
+                    arguments: [
+                        nodeID.rawValue, identity.scope.organizationID.rawValue,
+                        snapshot.accountID.rawValue
+                    ]
+                ) ?? 0
+            } else {
+                repositoryNodeCount = 0
+            }
+            let organizationNodeCount: Int
+            if let identity = snapshot.requestIdentity {
+                organizationNodeCount = try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM organizations WHERE id = ? AND github_node_id = ?",
+                    arguments: [identity.scope.organizationID.rawValue, nodeID.rawValue]
+                ) ?? 0
+            } else {
+                organizationNodeCount = 0
+            }
+            guard contentNodeCount + repositoryNodeCount + organizationNodeCount == 1 else {
                 throw RawAPISnapshotRepositoryError.nodeScopeMismatch
             }
         }
@@ -67,6 +118,21 @@ actor RawAPISnapshotRepository {
                 throw RawAPISnapshotRepositoryError.requestAuthorityScopeMismatch
             }
         }
+        if let row = try Row.fetchOne(database, sql: """
+            SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
+                   authority_organization_id, authority_feature, authority_stream_id,
+                   authority_request_key, authority_credential_revision,
+                   authority_capability_revision, parser_version, observed_at_ms, payload
+            FROM raw_api_snapshots WHERE id = ?
+            """, arguments: [snapshot.id.rawValue]) {
+            guard Self.matchesPersistedIdentity(
+                try Self.snapshot(from: row),
+                candidate: snapshot
+            ) else {
+                throw RawAPISnapshotRepositoryError.immutableSnapshotConflict
+            }
+            return
+        }
         try database.execute(
                 sql: """
                     INSERT INTO raw_api_snapshots (
@@ -75,21 +141,6 @@ actor RawAPISnapshotRepository {
                         authority_request_key, authority_credential_revision,
                         authority_capability_revision, parser_version, observed_at_ms, payload
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        account_id = excluded.account_id,
-                        github_node_id = excluded.github_node_id,
-                        endpoint = excluded.endpoint,
-                        etag = excluded.etag,
-                        last_modified = excluded.last_modified,
-                        authority_organization_id = excluded.authority_organization_id,
-                        authority_feature = excluded.authority_feature,
-                        authority_stream_id = excluded.authority_stream_id,
-                        authority_request_key = excluded.authority_request_key,
-                        authority_credential_revision = excluded.authority_credential_revision,
-                        authority_capability_revision = excluded.authority_capability_revision,
-                        parser_version = excluded.parser_version,
-                        observed_at_ms = excluded.observed_at_ms,
-                        payload = excluded.payload
                 """,
                 arguments: [
                     snapshot.id.rawValue, snapshot.accountID.rawValue, snapshot.githubNodeID?.rawValue,
@@ -205,6 +256,16 @@ actor RawAPISnapshotRepository {
                       )
                       AND NOT EXISTS (
                           SELECT 1
+                          FROM timeline_current_pages
+                          WHERE timeline_current_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM timeline_staged_pages
+                          WHERE timeline_staged_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
                           FROM repository_inventory_replay_receipt_pages
                           WHERE repository_inventory_replay_receipt_pages.raw_snapshot_id
                               = raw_api_snapshots.id
@@ -283,13 +344,19 @@ actor RawAPISnapshotRepository {
         guard validHeaderValidator(eTag), validHeaderValidator(lastModified) else {
             throw RawAPISnapshotRepositoryError.invalidPersistedData
         }
-        return RawAPISnapshot(
+        let snapshot = RawAPISnapshot(
             id: id, accountID: accountID, githubNodeID: nodeID, endpoint: endpoint,
             eTag: eTag, lastModified: lastModified, parserVersion: parserVersion,
             observedAt: Date(timeIntervalSince1970: TimeInterval(observedAtMilliseconds) / 1_000),
             payload: payload,
             requestIdentity: requestIdentity
         )
+        do {
+            try validate(snapshot)
+        } catch {
+            throw RawAPISnapshotRepositoryError.invalidPersistedData
+        }
+        return snapshot
     }
 
     private nonisolated static func validHeaderValidator(_ value: String?) -> Bool {
@@ -298,6 +365,22 @@ actor RawAPISnapshotRepository {
         return value.unicodeScalars.allSatisfy { scalar in
             scalar.value >= 0x20 && scalar.value != 0x7F
         }
+    }
+
+    private nonisolated static func matchesPersistedIdentity(
+        _ persisted: RawAPISnapshot,
+        candidate: RawAPISnapshot
+    ) -> Bool {
+        persisted.id == candidate.id
+            && persisted.accountID == candidate.accountID
+            && persisted.githubNodeID == candidate.githubNodeID
+            && persisted.endpoint == candidate.endpoint
+            && persisted.eTag == candidate.eTag
+            && persisted.lastModified == candidate.lastModified
+            && persisted.parserVersion == candidate.parserVersion
+            && milliseconds(persisted.observedAt) == milliseconds(candidate.observedAt)
+            && persisted.payload == candidate.payload
+            && persisted.requestIdentity == candidate.requestIdentity
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {

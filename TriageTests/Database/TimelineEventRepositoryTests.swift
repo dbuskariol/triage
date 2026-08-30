@@ -48,7 +48,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         }
 
         let state = try await fixture.vault.read { database in
-            (
+            return (
                 try String.fetchOne(database, sql: "SELECT endpoint FROM raw_api_snapshots WHERE id = ?", arguments: [snapshotID.rawValue]),
                 try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_shards"),
                 try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_streams")
@@ -116,7 +116,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
                 candidate: fixture.candidate,
                 accountID: fixture.accountID,
                 organizationID: fixture.organizationID,
-                observedAt: fixture.observedAt.addingTimeInterval(1)
+                observedAt: fixture.observedAt.addingTimeInterval(1),
+                relationReconciliation: .unavailable
             )
             XCTFail("Expected injected completion failure.")
         } catch is DatabaseError {
@@ -140,7 +141,8 @@ final class TimelineEventRepositoryTests: XCTestCase {
             candidate: fixture.candidate,
             accountID: fixture.accountID,
             organizationID: fixture.organizationID,
-            observedAt: fixture.observedAt.addingTimeInterval(1)
+            observedAt: fixture.observedAt.addingTimeInterval(1),
+            relationReconciliation: .unavailable
         )
         let completed = try await fixture.vault.read { database in
             (
@@ -152,6 +154,371 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(completed.0, ["new-event"])
         XCTAssertEqual(completed.1, SyncShardState.completed.rawValue)
         XCTAssertEqual(completed.2, CoverageStatus.complete.rawValue)
+    }
+
+    func testCompleteTimelineWritesPageBoundConfirmedRelationAndCoverage() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        let payload = Data(#"[{"id":"comment-1","event":"commented","actor":{"node_id":"U_commenter","login":"commenter"},"created_at":"2026-01-01T00:00:00Z"}]"#.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let events = try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+        let snapshotID = try await repository.saveRawPage(
+            GitHubPage(values: events, payload: payload, nextPageURL: nil, etag: nil, lastModified: nil, ssoHeader: nil),
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        try await repository.commitValidatedRawPage(
+            snapshotID,
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
+            nextPageURL: nil,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            attemptedAt: fixture.observedAt
+        )
+        let saved = try await repository.savedPages(
+            for: fixture.candidate,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let normalized = try GitHubTimelineNormalizer.normalize(saved.events)
+
+        try await repository.replaceAndComplete(
+            normalized,
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt,
+            relationReconciliation: .complete(
+                scope: fixture.scope,
+                pageProvenances: saved.pageProvenances,
+                eventPageProvenances: saved.eventPageProvenances
+            )
+        )
+
+        let persisted = try await fixture.vault.read { database in
+            let relation = try Row.fetchOne(database, sql: """
+                SELECT relations.kind, relations.object_node_id, relation_evidence.source,
+                       relation_evidence.source_locator, relation_evidence.raw_snapshot_id,
+                       relation_evidence.confirmation
+                FROM relations
+                JOIN relation_evidence ON relation_evidence.relation_id = relations.id
+                """)
+            let coverage = try Row.fetchOne(database, sql: """
+                SELECT repository_id, feature, stream_id, status, last_successful_at_ms
+                FROM coverage_records
+                """)
+            return TimelineRelationPersistence(
+                relationKind: relation?["kind"],
+                relationObjectNodeID: relation?["object_node_id"],
+                evidenceSource: relation?["source"],
+                evidenceLocator: relation?["source_locator"],
+                evidenceRawSnapshotID: relation?["raw_snapshot_id"],
+                evidenceConfirmation: relation?["confirmation"],
+                coverageRepositoryID: coverage?["repository_id"],
+                coverageFeature: coverage?["feature"],
+                coverageStreamID: coverage?["stream_id"],
+                coverageStatus: coverage?["status"],
+                coverageLastSuccessfulAtMilliseconds: coverage?["last_successful_at_ms"]
+            )
+        }
+        XCTAssertEqual(persisted.relationKind, WorkRelationKind.commented.rawValue)
+        XCTAssertEqual(persisted.relationObjectNodeID, "U_commenter")
+        XCTAssertEqual(persisted.evidenceSource, EvidenceSource.restTimeline.rawValue)
+        XCTAssertEqual(persisted.evidenceLocator, fixture.timelineRequestKey)
+        XCTAssertEqual(persisted.evidenceRawSnapshotID, snapshotID.rawValue)
+        XCTAssertEqual(persisted.evidenceConfirmation, EvidenceConfirmation.confirmed.rawValue)
+        XCTAssertEqual(persisted.coverageRepositoryID, fixture.repositoryID.rawValue)
+        XCTAssertEqual(persisted.coverageFeature, CoverageFeature.timelines.rawValue)
+        XCTAssertEqual(persisted.coverageStreamID, fixture.timelineStreamID.rawValue)
+        XCTAssertEqual(persisted.coverageStatus, CoverageStatus.complete.rawValue)
+        XCTAssertEqual(persisted.coverageLastSuccessfulAtMilliseconds, fixture.observedAtMilliseconds)
+    }
+
+    func testRelationRawAuthorityFailureRollsBackTimelineAndCoverage() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        try await repository.replace(
+            [fixture.event(id: "old-event", payload: #"{"event":"mentioned"}"#)],
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        let (normalized, provenance) = try await fixture.pageBoundComment(repository: repository)
+        let invalidProvenance = TimelineRawPageProvenance(
+            snapshotID: RawAPISnapshotID.make(),
+            endpoint: provenance.endpoint,
+            requestKey: provenance.requestKey,
+            parserVersion: provenance.parserVersion,
+            observedAt: provenance.observedAt
+        )
+
+        do {
+            try await repository.replaceAndComplete(
+                normalized,
+                candidate: fixture.candidate,
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                observedAt: fixture.observedAt,
+                relationReconciliation: .complete(
+                    scope: fixture.scope,
+                    pageProvenances: [invalidProvenance],
+                    eventPageProvenances: [normalized[0].id: invalidProvenance]
+                )
+            )
+            XCTFail("Expected cross-snapshot relation authority rejection.")
+        } catch let error as WorkRelationRepositoryError {
+            XCTAssertEqual(error, .rawSnapshotScopeMismatch)
+        }
+
+        let rolledBack = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relation_evidence")
+            )
+        }
+        XCTAssertEqual(rolledBack.0, ["old-event"])
+        XCTAssertEqual(rolledBack.1, 0)
+        XCTAssertEqual(rolledBack.2, 0)
+    }
+
+    func testTwoPageTimelineRetainsEachExactPageBindingAcrossIdempotentReplay() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        let pageOne = try fixture.timelinePage(
+            eventID: "comment-page-one",
+            actorNodeID: "U_page_one",
+            pageIndex: 1
+        )
+        let pageTwo = try fixture.timelinePage(
+            eventID: "review-page-two",
+            actorNodeID: "U_page_two",
+            pageIndex: 2
+        )
+        let firstSnapshotID = try await repository.saveRawPage(
+            pageOne.page,
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: pageOne.requestKey,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        try await repository.commitValidatedRawPage(
+            firstSnapshotID,
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: pageOne.requestKey,
+            scope: fixture.scope,
+            nextPageURL: URL(string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"),
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            attemptedAt: fixture.observedAt
+        )
+        let secondSnapshotID = try await repository.saveRawPage(
+            pageTwo.page,
+            candidate: fixture.candidate,
+            pageIndex: 2,
+            requestKey: pageTwo.requestKey,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        try await repository.commitValidatedRawPage(
+            secondSnapshotID,
+            candidate: fixture.candidate,
+            pageIndex: 2,
+            requestKey: pageTwo.requestKey,
+            scope: fixture.scope,
+            nextPageURL: nil,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            attemptedAt: fixture.observedAt
+        )
+        let saved = try await repository.savedPages(
+            for: fixture.candidate,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let normalized = try GitHubTimelineNormalizer.normalize(saved.events)
+        let reconciliation = TimelineRelationReconciliation.complete(
+            scope: fixture.scope,
+            pageProvenances: saved.pageProvenances,
+            eventPageProvenances: saved.eventPageProvenances
+        )
+
+        try await repository.replaceAndComplete(
+            normalized,
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt,
+            relationReconciliation: reconciliation
+        )
+        try await repository.replaceAndComplete(
+            normalized,
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt,
+            relationReconciliation: reconciliation
+        )
+
+        let bindings = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: "SELECT source_locator, raw_snapshot_id FROM relation_evidence ORDER BY source_locator"
+            ).map { row in
+                ((row["source_locator"] as String?) ?? "") + "\u{0}" + ((row["raw_snapshot_id"] as String?) ?? "")
+            }
+        }
+        XCTAssertEqual(bindings, [
+            pageOne.requestKey + "\u{0}" + firstSnapshotID.rawValue,
+            pageTwo.requestKey + "\u{0}" + secondSnapshotID.rawValue
+        ])
+    }
+
+    func testOnePageRefreshPublishesShrinkOnlyAtCompletionAndRetainsRawHistory() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        let pageOne = try fixture.timelinePage(eventID: "old-one", actorNodeID: "U_one", pageIndex: 1)
+        let pageTwo = try fixture.timelinePage(eventID: "old-two", actorNodeID: "U_two", pageIndex: 2)
+        let firstID = try await repository.saveRawPage(pageOne.page, candidate: fixture.candidate, pageIndex: 1, requestKey: pageOne.requestKey, scope: fixture.scope, accountID: fixture.accountID, organizationID: fixture.organizationID, observedAt: fixture.observedAt)
+        try await repository.commitValidatedRawPage(firstID, candidate: fixture.candidate, pageIndex: 1, requestKey: pageOne.requestKey, scope: fixture.scope, nextPageURL: URL(string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"), accountID: fixture.accountID, organizationID: fixture.organizationID, attemptedAt: fixture.observedAt)
+        let secondID = try await repository.saveRawPage(pageTwo.page, candidate: fixture.candidate, pageIndex: 2, requestKey: pageTwo.requestKey, scope: fixture.scope, accountID: fixture.accountID, organizationID: fixture.organizationID, observedAt: fixture.observedAt)
+        try await repository.commitValidatedRawPage(secondID, candidate: fixture.candidate, pageIndex: 2, requestKey: pageTwo.requestKey, scope: fixture.scope, nextPageURL: nil, accountID: fixture.accountID, organizationID: fixture.organizationID, attemptedAt: fixture.observedAt)
+        let oldSaved = try await repository.savedPages(for: fixture.candidate, scope: fixture.scope, accountID: fixture.accountID, organizationID: fixture.organizationID)
+        try await repository.replaceAndComplete(try GitHubTimelineNormalizer.normalize(oldSaved.events), candidate: fixture.candidate, accountID: fixture.accountID, organizationID: fixture.organizationID, observedAt: fixture.observedAt, relationReconciliation: .unavailable)
+
+        let refreshedCandidate = try await fixture.advanceSourceRevision(to: "revision-shrunk")
+        let newPage = try fixture.timelinePage(eventID: "new-only", actorNodeID: "U_new", pageIndex: 1)
+        let newID = try await repository.saveRawPage(newPage.page, candidate: refreshedCandidate, pageIndex: 1, requestKey: newPage.requestKey, scope: fixture.scope, accountID: fixture.accountID, organizationID: fixture.organizationID, observedAt: fixture.observedAt.addingTimeInterval(1))
+        try await repository.commitValidatedRawPage(newID, candidate: refreshedCandidate, pageIndex: 1, requestKey: newPage.requestKey, scope: fixture.scope, nextPageURL: nil, accountID: fixture.accountID, organizationID: fixture.organizationID, attemptedAt: fixture.observedAt.addingTimeInterval(1))
+
+        let beforePublication = try await fixture.vault.read { database in
+            (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_current_pages"), try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_staged_pages"), try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events ORDER BY github_event_id"))
+        }
+        XCTAssertEqual(beforePublication.0, 2)
+        XCTAssertEqual(beforePublication.1, 1)
+        XCTAssertEqual(beforePublication.2, ["old-one", "old-two"])
+
+        let newSaved = try await repository.savedPages(for: refreshedCandidate, scope: fixture.scope, accountID: fixture.accountID, organizationID: fixture.organizationID)
+        try await repository.replaceAndComplete(try GitHubTimelineNormalizer.normalize(newSaved.events), candidate: refreshedCandidate, accountID: fixture.accountID, organizationID: fixture.organizationID, observedAt: fixture.observedAt.addingTimeInterval(1), relationReconciliation: .unavailable)
+        let published = try await fixture.vault.read { database in
+            (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_current_pages"), try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM timeline_staged_pages"), try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events"))
+        }
+        XCTAssertEqual(published.0, 1)
+        XCTAssertEqual(published.1, 0)
+        XCTAssertEqual(published.2, 3)
+        XCTAssertEqual(published.3, ["new-only"])
+    }
+
+    func testUnavailableTimelineReconciliationDoesNotDeleteExistingRelations() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        let (normalized, _) = try await fixture.pageBoundComment(repository: repository)
+        let saved = try await repository.savedPages(
+            for: fixture.candidate,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        try await repository.replaceAndComplete(
+            normalized,
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt,
+            relationReconciliation: .complete(
+                scope: fixture.scope,
+                pageProvenances: saved.pageProvenances,
+                eventPageProvenances: saved.eventPageProvenances
+            )
+        )
+
+        try await repository.replaceAndComplete(
+            [fixture.event(id: "resumed-event", payload: #"{"event":"mentioned"}"#)],
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt.addingTimeInterval(1),
+            relationReconciliation: .unavailable
+        )
+
+        let evidenceCount = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM relation_evidence")
+        }
+        XCTAssertEqual(evidenceCount, 1)
+    }
+
+    func testStaleScopeRollsBackTimelineRelationCompletion() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        try await repository.replace(
+            [fixture.event(id: "old-event", payload: #"{"event":"mentioned"}"#)],
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        let (normalized, _) = try await fixture.pageBoundComment(repository: repository)
+        let saved = try await repository.savedPages(
+            for: fixture.candidate,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE account_organizations SET capability_revision = 'capability-rotated'"
+            )
+        }
+
+        do {
+            try await repository.replaceAndComplete(
+                normalized,
+                candidate: fixture.candidate,
+                accountID: fixture.accountID,
+                organizationID: fixture.organizationID,
+                observedAt: fixture.observedAt,
+                relationReconciliation: .complete(
+                    scope: fixture.scope,
+                    pageProvenances: saved.pageProvenances,
+                    eventPageProvenances: saved.eventPageProvenances
+                )
+            )
+            XCTFail("Expected stale scope rejection.")
+        } catch let error as WorkRelationRepositoryError {
+            XCTAssertEqual(error, .staleSynchronizationScope)
+        }
+        let rolledBack = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records")
+            )
+        }
+        XCTAssertEqual(rolledBack.0, ["old-event"])
+        XCTAssertEqual(rolledBack.1, 0)
     }
 
     func testOutcomeClassificationPreservesScopedSSOApprovalPolicyAndRetryTime() throws {
@@ -1659,6 +2026,20 @@ final class TimelineEventRepositoryTests: XCTestCase {
     }
 }
 
+private struct TimelineRelationPersistence: Sendable {
+    let relationKind: String?
+    let relationObjectNodeID: String?
+    let evidenceSource: String?
+    let evidenceLocator: String?
+    let evidenceRawSnapshotID: String?
+    let evidenceConfirmation: String?
+    let coverageRepositoryID: String?
+    let coverageFeature: String?
+    let coverageStreamID: String?
+    let coverageStatus: String?
+    let coverageLastSuccessfulAtMilliseconds: Int64?
+}
+
 private final class TimelineFixture: @unchecked Sendable {
     let directory: URL
     let accountID = AccountID.make()
@@ -1668,6 +2049,10 @@ private final class TimelineFixture: @unchecked Sendable {
     let observedAt = Date(timeIntervalSince1970: 1_767_225_600)
     let vault: AccountVault
     let candidate: TimelineCandidate
+
+    var observedAtMilliseconds: Int64 {
+        Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())
+    }
 
     var scope: SynchronizationScope {
         SynchronizationScope(
@@ -1791,6 +2176,69 @@ private final class TimelineFixture: @unchecked Sendable {
             actor: nil,
             occurredAt: observedAt,
             payload: Data(payload.utf8)
+        )
+    }
+
+    func pageBoundComment(
+        repository: TimelineEventRepository
+    ) async throws -> ([NormalizedGitHubTimelineEvent], TimelineRawPageProvenance) {
+        let payload = Data(#"[{"id":"comment-1","event":"commented","actor":{"node_id":"U_commenter","login":"commenter"},"created_at":"2026-01-01T00:00:00Z"}]"#.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let events = try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+        let snapshotID = try await repository.saveRawPage(
+            GitHubPage(values: events, payload: payload, nextPageURL: nil, etag: nil, lastModified: nil, ssoHeader: nil),
+            candidate: candidate,
+            pageIndex: 1,
+            requestKey: timelineRequestKey,
+            scope: scope,
+            accountID: accountID,
+            organizationID: organizationID,
+            observedAt: observedAt
+        )
+        try await repository.commitValidatedRawPage(
+            snapshotID,
+            candidate: candidate,
+            pageIndex: 1,
+            requestKey: timelineRequestKey,
+            scope: scope,
+            nextPageURL: nil,
+            accountID: accountID,
+            organizationID: organizationID,
+            attemptedAt: observedAt
+        )
+        let saved = try await repository.savedPages(
+            for: candidate,
+            scope: scope,
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        let normalized = try GitHubTimelineNormalizer.normalize(saved.events)
+        return (normalized, try XCTUnwrap(saved.eventPageProvenances[normalized[0].id]))
+    }
+
+    func timelinePage(
+        eventID: String,
+        actorNodeID: String,
+        pageIndex: Int
+    ) throws -> (page: GitHubPage<GitHubTimelineEventDTO>, requestKey: String) {
+        let event = pageIndex == 1 ? "commented" : "reviewed"
+        let payload = Data("""
+        [{"id":"\(eventID)","event":"\(event)","actor":{"node_id":"\(actorNodeID)","login":"actor-\(pageIndex)"},"created_at":"2026-01-01T00:00:00Z"}]
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let events = try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+        return (
+            GitHubPage(
+                values: events,
+                payload: payload,
+                nextPageURL: nil,
+                etag: nil,
+                lastModified: nil,
+                ssoHeader: nil
+            ),
+            "GET /repos/github/triage/issues/1/timeline?page=\(pageIndex)&per_page=100"
         )
     }
 

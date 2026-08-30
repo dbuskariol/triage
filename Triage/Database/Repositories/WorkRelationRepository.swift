@@ -22,6 +22,14 @@ struct RelationReplacementAuthority: Equatable, Sendable {
     let mode: RelationReplacementMode
 }
 
+/// One exact raw page contributing to a stream-complete reconciliation. The
+/// page may have no eligible relations; it is still required so an empty page
+/// can safely remove its former evidence.
+struct PageBoundRelationReplacement: Sendable {
+    let relations: [WorkRelation]
+    let authority: RelationReplacementAuthority
+}
+
 enum WorkRelationRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
     case subjectScopeMismatch
@@ -248,6 +256,112 @@ actor WorkRelationRepository {
         }
     }
 
+    /// Replaces a fully traversed paginated source as one stream operation.
+    /// Every page remains separately raw-bound, while the deletion scope is
+    /// the stream rather than the current set of page locators. This avoids
+    /// retaining evidence from a page that became empty or no longer exists.
+    nonisolated static func replaceCompletePages(
+        _ replacements: [PageBoundRelationReplacement],
+        accountID: AccountID,
+        subjectNodeID: GitHubNodeID,
+        scope: SynchronizationScope,
+        source: EvidenceSource,
+        feature: CoverageFeature,
+        streamID: SyncStreamID,
+        repositoryID: RepositoryID?,
+        sourceRevision: String,
+        observedAt: Date,
+        in database: Database
+    ) throws {
+        try Task.checkCancellation()
+        guard accountID == scope.accountID else {
+            throw WorkRelationRepositoryError.accountScopeMismatch
+        }
+        guard source != .localWorkflow,
+              source != .legacyUnverified,
+              !sourceRevision.isEmpty,
+              sourceRevision.count <= 500
+        else {
+            throw WorkRelationRepositoryError.invalidSourceAuthority
+        }
+        try validateCurrentScope(scope, in: database)
+        try validateSubjectNodeScope(subjectNodeID, scope: scope, in: database)
+        try validateCoverage(
+            scope: scope,
+            repositoryID: repositoryID,
+            feature: feature,
+            streamID: streamID,
+            observedAt: observedAt,
+            in: database
+        )
+        for replacement in replacements {
+            let authority = replacement.authority
+            guard authority.scope == scope,
+                  authority.source == source,
+                  authority.feature == feature,
+                  authority.streamID == streamID,
+                  authority.repositoryID == repositoryID,
+                  authority.sourceRevision == sourceRevision,
+                  milliseconds(authority.observedAt) == milliseconds(observedAt),
+                  authority.mode == .completeReconciliation
+            else {
+                throw WorkRelationRepositoryError.evidenceAuthorityMismatch
+            }
+            try validate(authority)
+            try validate(
+                replacement.relations,
+                subjectNodeID: subjectNodeID,
+                authority: authority,
+                in: database
+            )
+            try validateRawSnapshot(authority, subjectNodeID: subjectNodeID, in: database)
+        }
+
+        try database.execute(
+            sql: """
+                DELETE FROM relation_evidence
+                WHERE relation_id IN (
+                    SELECT id FROM relations
+                    WHERE account_id = ? AND subject_node_id = ?
+                )
+                  AND source = ?
+                  AND authority_kind = 'github'
+                  AND authority_account_id = ? AND authority_organization_id = ?
+                  AND authority_feature = ? AND authority_stream_id = ?
+                  AND authority_credential_revision = ?
+                  AND authority_capability_revision = ?
+                  AND source_revision = ?
+                """,
+            arguments: [
+                accountID.rawValue, subjectNodeID.rawValue, source.rawValue,
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                feature.rawValue, streamID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                sourceRevision
+            ]
+        )
+        try database.execute(
+            sql: """
+                DELETE FROM relations
+                WHERE account_id = ? AND subject_node_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM relation_evidence
+                      WHERE relation_evidence.relation_id = relations.id
+                  )
+                """,
+            arguments: [accountID.rawValue, subjectNodeID.rawValue]
+        )
+        for replacement in replacements where !replacement.relations.isEmpty {
+            try replace(
+                replacement.relations,
+                accountID: accountID,
+                subjectNodeID: subjectNodeID,
+                authority: replacement.authority,
+                in: database
+            )
+        }
+    }
+
     private nonisolated static func validate(
         _ relations: [WorkRelation],
         subjectNodeID: GitHubNodeID,
@@ -320,6 +434,24 @@ actor WorkRelationRepository {
         _ authority: RelationReplacementAuthority,
         in database: Database
     ) throws {
+        try validateCoverage(
+            scope: authority.scope,
+            repositoryID: authority.repositoryID,
+            feature: authority.feature,
+            streamID: authority.streamID,
+            observedAt: authority.observedAt,
+            in: database
+        )
+    }
+
+    private nonisolated static func validateCoverage(
+        scope: SynchronizationScope,
+        repositoryID: RepositoryID?,
+        feature: CoverageFeature,
+        streamID: SyncStreamID,
+        observedAt: Date,
+        in database: Database
+    ) throws {
         let count = try Int.fetchOne(
             database,
             sql: """
@@ -330,11 +462,11 @@ actor WorkRelationRepository {
                   AND status = ? AND last_successful_at_ms = ?
             """,
             arguments: [
-                authority.scope.accountID.rawValue, authority.scope.organizationID.rawValue,
-                authority.repositoryID?.rawValue, authority.feature.rawValue,
-                authority.streamID.rawValue, authority.scope.credentialRevision.rawValue,
-                authority.scope.capabilityRevision.rawValue, CoverageStatus.complete.rawValue,
-                milliseconds(authority.observedAt)
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                repositoryID?.rawValue, feature.rawValue,
+                streamID.rawValue, scope.credentialRevision.rawValue,
+                scope.capabilityRevision.rawValue, CoverageStatus.complete.rawValue,
+                milliseconds(observedAt)
             ]
         ) ?? 0
         guard count == 1 else {

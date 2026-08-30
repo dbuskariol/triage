@@ -1916,6 +1916,88 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX relation_evidence_raw_snapshot
                 ON relation_evidence (raw_snapshot_id)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "039-timeline-current-page-membership",
+            checksum: "498de3f54c04aa6d9c271a9f18a235859ae1fdbbe1d806b566038ed6115f64b7"
+        ) { database in
+            // Raw pages are immutable historical evidence. This table is only
+            // the exact page set selected for the current normalized timeline
+            // traversal; legacy raw rows are intentionally not backfilled.
+            try database.execute(sql: """
+                CREATE TABLE timeline_current_pages (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    github_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'timelines'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    observed_at_ms INTEGER NOT NULL,
+                    is_terminal INTEGER NOT NULL CHECK (is_terminal IN (0, 1)),
+                    PRIMARY KEY (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, page_index
+                    ),
+                    UNIQUE (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, raw_snapshot_id
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX timeline_current_pages_subject_scope
+                ON timeline_current_pages (
+                    account_id, organization_id, github_node_id, feature, stream_id,
+                    credential_revision, capability_revision, source_revision, page_index
+                )
+                """)
+            // Downloaded pages are deliberately separate from the published
+            // membership. A cancelled traversal may retain immutable raw
+            // evidence and a resumable checkpoint, but must never claim that
+            // those pages describe the current normalized projection.
+            try database.execute(sql: """
+                CREATE TABLE timeline_staged_pages (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    github_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'timelines'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    observed_at_ms INTEGER NOT NULL,
+                    is_terminal INTEGER NOT NULL CHECK (is_terminal IN (0, 1)),
+                    PRIMARY KEY (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, page_index
+                    ),
+                    UNIQUE (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        credential_revision, capability_revision, source_revision, raw_snapshot_id
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX timeline_staged_pages_subject_scope
+                ON timeline_staged_pages (
+                    account_id, organization_id, github_node_id, feature, stream_id,
+                    credential_revision, capability_revision, source_revision, page_index
+                )
+                """)
         }
     ]
 }
