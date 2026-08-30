@@ -26,35 +26,44 @@ actor CopilotXPCServiceClient: CopilotXPCFrameService {
       throw CopilotXPCError.malformedFrame
     }
 
-    return try await withCheckedThrowingContinuation { continuation in
-      let reply = CopilotXPCReplyOnce(continuation: continuation)
-      guard
-        let helper = connection.remoteObjectProxyWithErrorHandler({ _ in
-          reply.resume(throwing: CopilotXPCError.helperUnavailable)
-        }) as? TriageCopilotHelper
-      else {
-        reply.resume(throwing: CopilotXPCError.helperUnavailable)
-        return
-      }
-      helper.exchange(frame: frame) { responseFrame, error in
-        if error != nil {
+    let reply = CopilotXPCReplyOnce()
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        reply.install(continuation)
+        guard !Task.isCancelled else {
+          reply.resume(throwing: CopilotXPCError.operationCancelled)
+          return
+        }
+        guard
+          let helper = connection.remoteObjectProxyWithErrorHandler({ _ in
+            reply.resume(throwing: CopilotXPCError.helperUnavailable)
+          }) as? TriageCopilotHelper
+        else {
           reply.resume(throwing: CopilotXPCError.helperUnavailable)
           return
         }
-        guard let responseFrame else {
-          reply.resume(throwing: CopilotXPCError.invalidResponse)
-          return
-        }
-        do {
-          _ = try CopilotFrameCodec.decode(
-            responseFrame,
-            maximumBytes: CopilotIPC.maximumResponseBytes
-          )
-          reply.resume(returning: responseFrame)
-        } catch {
-          reply.resume(throwing: CopilotXPCError.malformedFrame)
+        helper.exchange(frame: frame) { responseFrame, error in
+          if error != nil {
+            reply.resume(throwing: CopilotXPCError.helperUnavailable)
+            return
+          }
+          guard let responseFrame else {
+            reply.resume(throwing: CopilotXPCError.invalidResponse)
+            return
+          }
+          do {
+            _ = try CopilotFrameCodec.decode(
+              responseFrame,
+              maximumBytes: CopilotIPC.maximumResponseBytes
+            )
+            reply.resume(returning: responseFrame)
+          } catch {
+            reply.resume(throwing: CopilotXPCError.malformedFrame)
+          }
         }
       }
+    } onCancel: {
+      reply.resume(throwing: CopilotXPCError.operationCancelled)
     }
   }
 
@@ -105,26 +114,41 @@ actor CopilotXPCFrameTransport: CopilotFrameTransport {
 private final class CopilotXPCReplyOnce: @unchecked Sendable {
   private let lock = NSLock()
   private var continuation: CheckedContinuation<Data, Error>?
+  private var pendingResult: Result<Data, Error>?
 
-  init(continuation: CheckedContinuation<Data, Error>) {
+  func install(_ continuation: CheckedContinuation<Data, Error>) {
+    lock.lock()
+    if let pendingResult {
+      lock.unlock()
+      continuation.resume(with: pendingResult)
+      return
+    }
     self.continuation = continuation
+    lock.unlock()
   }
 
   func resume(returning value: Data) {
-    resume { $0.resume(returning: value) }
+    complete(.success(value))
   }
 
   func resume(throwing error: Error) {
-    resume { $0.resume(throwing: error) }
+    complete(.failure(error))
   }
 
-  private func resume(_ operation: (CheckedContinuation<Data, Error>) -> Void) {
+  private func complete(_ result: Result<Data, Error>) {
     lock.lock()
     let continuation = continuation
     self.continuation = nil
+    if continuation == nil {
+      if pendingResult == nil {
+        pendingResult = result
+      }
+      lock.unlock()
+      return
+    }
     lock.unlock()
     if let continuation {
-      operation(continuation)
+      continuation.resume(with: result)
     }
   }
 }

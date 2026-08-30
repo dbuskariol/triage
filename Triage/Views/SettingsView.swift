@@ -40,8 +40,20 @@ struct SettingsView: View {
                 }
             }
         ) { account in
-            PersonalAccessTokenSheet(account: account)
-                .environmentObject(appModel)
+            PersonalAccessTokenSheet(
+                account: account,
+                isSubmitting: appModel.isConnecting,
+                error: appModel.connectionError,
+                onSubmit: { token, _ in
+                    await appModel.replacePersonalAccessToken(token, for: account)
+                    return appModel.connectionError == nil
+                },
+                onCancel: {
+                    Task {
+                        await appModel.resumeSelectedOrganization()
+                    }
+                }
+            )
         }
     }
 

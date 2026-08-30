@@ -1,14 +1,48 @@
+import AppKit
 import SwiftUI
 
 struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openSettings) private var openSettings
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var appModel: TriageAppModel
+    @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
 
     var body: some View {
-        if appModel.hasConnectedAccount {
+        Group {
+            if !appModel.hasConnectedAccount || !hasCompletedOnboarding {
+                OnboardingFlowView(
+                    state: onboardingState,
+                    actions: onboardingActions,
+                    onComplete: { hasCompletedOnboarding = true }
+                )
+            } else {
+                workspace
+            }
+        }
+        .onChange(of: appModel.hasConnectedAccount) { _, hasConnectedAccount in
+            if !hasConnectedAccount {
+                hasCompletedOnboarding = false
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
+            Task {
+                await appModel.recheckSelectedOrganizationAccess()
+            }
+        }
+    }
+
+    private var workspace: some View {
             NavigationSplitView {
-                AppSidebar(selection: $navigation.section)
+                WorkspaceSidebar(
+                    accounts: appModel.accounts,
+                    organizations: appModel.organizations,
+                    presentation: presentation,
+                    onSelectAccount: { appModel.selectAccount($0) },
+                    onSelectOrganization: { appModel.selectOrganization($0) },
+                    selection: $navigation.section
+                )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
             } content: {
                 WorkListView()
@@ -31,76 +65,96 @@ struct RootView: View {
                     .help("Refresh GitHub Work")
                 }
             }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
-                Task {
-                    await appModel.recheckSelectedOrganizationAccess()
-                }
-            }
-        } else {
-            OnboardingView()
-        }
     }
 
-}
+    private var presentation: WorkspacePresentationState {
+        WorkspacePresentationState(
+            workItems: appModel.workItems,
+            selectedAccountID: appModel.selectedAccountID,
+            selectedOrganizationID: appModel.selectedOrganizationID,
+            organizationAccess: appModel.selectedOrganizationAccess,
+            hasSSOAuthorizationHeader: appModel.ssoAuthorizationHeader != nil,
+            isRefreshing: appModel.isRefreshing,
+            refreshError: appModel.refreshError,
+            now: Date()
+        )
+    }
 
-private struct OnboardingView: View {
-    @EnvironmentObject private var appModel: TriageAppModel
-    @State private var isPresentingPersonalAccessToken = false
+    private var onboardingState: OnboardingPresentationState {
+        OnboardingPresentationState(
+            accounts: appModel.accounts,
+            selectedAccountID: appModel.selectedAccountID,
+            organizations: appModel.organizations,
+            selectedOrganizationID: appModel.selectedOrganizationID,
+            organizationAccess: appModel.selectedOrganizationAccess,
+            isConnecting: appModel.isConnecting,
+            isSynchronizing: appModel.isRefreshing,
+            connectionError: appModel.connectionError,
+            refreshError: appModel.refreshError,
+            aiAccess: .unavailable(
+                "Copilot analysis has not been enabled for this organization."
+            )
+        )
+    }
 
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "square.stack.3d.up")
-                .font(.system(size: 46, weight: .light))
-                .foregroundStyle(.tint)
-                .accessibilityHidden(true)
-            Text("Connect GitHub")
-                .font(.largeTitle.weight(.bold))
-            Text("Connect a GitHub account to build your organization-scoped work inbox.")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-            Button("Connect GitHub") {
+    private var onboardingActions: OnboardingActions {
+        OnboardingActions(
+            beginOAuth: {
                 guard let window = NSApp.keyWindow else {
                     appModel.recordConnectionWindowError()
                     return
                 }
-                Task {
-                    await appModel.connectGitHub(presentationAnchor: window)
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(appModel.isConnecting)
-            Button("Use a Personal Access Token") {
-                isPresentingPersonalAccessToken = true
-            }
-            .buttonStyle(.link)
-            .disabled(appModel.isConnecting)
-            if let error = appModel.connectionError {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("Triage")
-        .sheet(isPresented: $isPresentingPersonalAccessToken) {
-            PersonalAccessTokenSheet()
-                .environmentObject(appModel)
-        }
+                await appModel.connectGitHub(presentationAnchor: window)
+            },
+            submitPersonalAccessToken: { token, organization in
+                await appModel.connectPersonalAccessToken(
+                    token,
+                    resourceOwnerOrganization: organization
+                )
+                return appModel.connectionError == nil
+            },
+            selectOrganization: { appModel.selectOrganization($0) },
+            authorizeSSO: {
+                guard let header = appModel.ssoAuthorizationHeader else { return }
+                _ = SSOAuthorizationCoordinator().authorizeInBrowser(header)
+            },
+            retryAccessCheck: {
+                await appModel.recheckSelectedOrganizationAccess()
+            },
+            beginInitialSynchronization: {
+                await appModel.refreshSelectedOrganizationAfterAccessCheck()
+            },
+            openNotificationSettings: {
+                navigation.openSettings(.notifications)
+                openSettings()
+            },
+            recordAIConsent: { _ in }
+        )
     }
 }
 
 struct PersonalAccessTokenSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var appModel: TriageAppModel
     let account: GitHubAccount?
+    let isSubmitting: Bool
+    let error: String?
+    let onSubmit: @MainActor (_ token: String, _ resourceOwnerOrganization: String?) async -> Bool
+    let onCancel: @MainActor () -> Void
     @State private var tokenInput = ""
     @State private var resourceOwnerOrganization = ""
 
-    init(account: GitHubAccount? = nil) {
+    init(
+        account: GitHubAccount? = nil,
+        isSubmitting: Bool,
+        error: String?,
+        onSubmit: @escaping @MainActor (_ token: String, _ resourceOwnerOrganization: String?) async -> Bool,
+        onCancel: @escaping @MainActor () -> Void = {}
+    ) {
         self.account = account
+        self.isSubmitting = isSubmitting
+        self.error = error
+        self.onSubmit = onSubmit
+        self.onCancel = onCancel
     }
 
     private var tokenKind: PersonalAccessTokenKind? {
@@ -138,7 +192,7 @@ struct PersonalAccessTokenSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let error = appModel.connectionError {
+            if let error {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -148,122 +202,23 @@ struct PersonalAccessTokenSheet: View {
                 Button("Cancel") {
                     tokenInput = ""
                     dismiss()
-                    if account != nil {
-                        Task {
-                            await appModel.resumeSelectedOrganization()
-                        }
-                    }
+                    onCancel()
                 }
                 Button(account == nil ? "Connect" : "Replace") {
                     let token = tokenInput
                     let organization = needsResourceOwner ? resourceOwnerOrganization : nil
                     tokenInput = ""
                     Task {
-                        if let account {
-                            await appModel.replacePersonalAccessToken(token, for: account)
-                        } else {
-                            await appModel.connectPersonalAccessToken(
-                                token,
-                                resourceOwnerOrganization: organization
-                            )
-                        }
-                        if appModel.connectionError == nil {
+                        if await onSubmit(token, organization) {
                             dismiss()
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canConnect || appModel.isConnecting)
+                .disabled(!canConnect || isSubmitting)
             }
         }
         .padding(24)
         .frame(width: 460)
-    }
-}
-
-private struct AppSidebar: View {
-    @EnvironmentObject private var appModel: TriageAppModel
-    @Binding var selection: AppSection
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if appModel.accounts.count > 1 {
-                Picker("Account", selection: Binding(
-                    get: { appModel.selectedAccountID },
-                    set: { accountID in
-                        if let accountID {
-                            appModel.selectAccount(accountID)
-                        }
-                    }
-                )) {
-                    ForEach(appModel.accounts) { account in
-                        Text(account.login)
-                            .tag(Optional(account.id))
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                Divider()
-            }
-            if !appModel.organizations.isEmpty {
-                Picker("Organization", selection: Binding(
-                    get: { appModel.selectedOrganizationID },
-                    set: { organizationID in
-                        if let organizationID {
-                            appModel.selectOrganization(organizationID)
-                        }
-                    }
-                )) {
-                    ForEach(appModel.organizations) { organization in
-                        Text(organization.displayName ?? organization.login)
-                            .tag(Optional(organization.id))
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                Divider()
-            }
-            VStack(spacing: 3) {
-                ForEach(AppSection.allCases) { section in
-                    sidebarButton(section)
-                }
-            }
-            .padding(.horizontal, 9)
-            .padding(.top, 8)
-            Spacer(minLength: 12)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func sidebarButton(_ section: AppSection) -> some View {
-        let isSelected = selection == section
-        return Button {
-            selection = section
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: section.systemImage)
-                    .frame(width: 17)
-                Text(section.title)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-            }
-            .font(.body)
-            .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-            .background(
-                isSelected ? Color.accentColor : .clear,
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

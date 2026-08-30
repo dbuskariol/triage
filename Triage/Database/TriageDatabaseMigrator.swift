@@ -900,6 +900,14 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX github_hydration_batch_metrics_recent
                 ON github_hydration_batch_metrics (account_id, observed_at_ms DESC, id DESC)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "024-project-v2-field-provenance",
+            checksum: "f50dc66cc4a3786040a4d49376b7d9e48b3c546de0b1b2869cc45ae982dd9b4d"
+        ) { database in
+            try database.execute(sql: "ALTER TABLE project_field_values ADD COLUMN value_kind TEXT NOT NULL DEFAULT 'legacy'")
+            try database.execute(sql: "ALTER TABLE project_field_values ADD COLUMN context TEXT NOT NULL DEFAULT 'legacy'")
+            try database.execute(sql: "ALTER TABLE project_items ADD COLUMN content_node_reference TEXT")
         }
     ]
 }

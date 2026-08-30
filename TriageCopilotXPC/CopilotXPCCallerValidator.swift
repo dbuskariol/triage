@@ -7,7 +7,10 @@ enum CopilotXPCCallerValidator {
       let teamIdentifier = Bundle.main.object(
         forInfoDictionaryKey: "TriageExpectedTeamIdentifier"
       ) as? String,
-      !teamIdentifier.isEmpty
+      teamIdentifier.range(
+        of: #"^[A-Z0-9]{10}$"#,
+        options: .regularExpression
+      ) != nil
     else {
       throw CopilotXPCServiceError.callerNotAuthorized
     }
@@ -23,7 +26,7 @@ enum CopilotXPCCallerValidator {
     }
 
     let requirementString =
-      "identifier \"com.triage.mac\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
+      "anchor apple generic and identifier \"com.triage.mac\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
     var requirement: SecRequirement?
     guard SecRequirementCreateWithString(requirementString as CFString, [], &requirement) == errSecSuccess,
       let requirement,
