@@ -3,6 +3,101 @@ import XCTest
 @testable import Triage
 
 final class OrganizationSchedulerStateRepositoryTests: XCTestCase {
+    func testCreateIfAbsentInsertsAndRetainsFirstCurrentRevisionSchedule() async throws {
+        let fixture = try await SchedulerFixture()
+        defer { fixture.remove() }
+        let repository = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let firstAttemptID = UUID()
+        let first = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 0,
+            nextIncrementalOffset: 60,
+            activeAttemptID: firstAttemptID,
+            generation: 4,
+            lastAttemptAt: fixture.now,
+            updatedAt: fixture.now
+        )
+        let second = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 3,
+            nextIncrementalOffset: 3_600,
+            activeAttemptID: UUID(),
+            generation: 9,
+            lastAttemptAt: fixture.now.addingTimeInterval(1),
+            updatedAt: fixture.now.addingTimeInterval(1)
+        )
+
+        let inserted = try await repository.createIfAbsent(first)
+        let retained = try await repository.createIfAbsent(second)
+        let stored = try await repository.state(
+            for: fixture.scope(organizationID: fixture.firstOrganizationID)
+        )
+
+        XCTAssertEqual(inserted, first)
+        XCTAssertEqual(retained, first)
+        XCTAssertEqual(stored, first)
+        XCTAssertEqual(stored?.activeAttemptID, firstAttemptID)
+    }
+
+    func testCreateIfAbsentResetsOnlyStaleRevisionScheduleAfterCandidateIsCurrent() async throws {
+        let fixture = try await SchedulerFixture()
+        defer { fixture.remove() }
+        let repository = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let stale = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            failureCount: 4,
+            nextIncrementalOffset: 7_200,
+            rateLimitedUntil: fixture.now.addingTimeInterval(14_400),
+            blockedReason: .ssoRequired,
+            activeAttemptID: UUID(),
+            generation: 12,
+            lastAttemptAt: fixture.now
+        )
+        try await repository.save(stale)
+
+        let currentCredentialRevision = CredentialRevision(rawValue: "credential-current")!
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE accounts SET credential_revision = ? WHERE id = ?",
+                arguments: [currentCredentialRevision.rawValue, fixture.accountID.rawValue]
+            )
+        }
+        do {
+            _ = try await repository.createIfAbsent(stale)
+            XCTFail("A stale candidate must not reset a scheduler row after revision authority changes.")
+        } catch {
+            XCTAssertEqual(
+                error as? OrganizationSchedulerStateRepositoryError,
+                .staleSynchronizationScope
+            )
+        }
+        let current = fixture.state(
+            organizationID: fixture.firstOrganizationID,
+            credentialRevision: currentCredentialRevision,
+            failureCount: 0,
+            nextIncrementalOffset: 60,
+            generation: 0,
+            updatedAt: fixture.now.addingTimeInterval(1)
+        )
+
+        let reset = try await repository.createIfAbsent(current)
+        let stored = try await repository.state(
+            for: SynchronizationScope(
+                accountID: fixture.accountID,
+                organizationID: fixture.firstOrganizationID,
+                credentialRevision: currentCredentialRevision,
+                capabilityRevision: fixture.capabilityRevision
+            )
+        )
+
+        XCTAssertEqual(reset, current)
+        XCTAssertEqual(stored, current)
+        XCTAssertNil(stored?.activeAttemptID)
+        XCTAssertEqual(stored?.consecutiveTransientFailureCount, 0)
+        XCTAssertNil(stored?.rateLimitedUntil)
+        XCTAssertNil(stored?.blockedReason)
+    }
+
     func testStateRoundTripsAndReplacesOnlyItsOrganizationSchedule() async throws {
         let fixture = try await SchedulerFixture()
         defer { fixture.remove() }
