@@ -48,6 +48,7 @@ actor SearchShardExecutor {
         streamID: SyncStreamID,
         accountID: AccountID,
         accessibleRepositoryNames: [String],
+        prepareControlPage: @escaping PagePreparer = { _, _, _ in .empty },
         preparePage: @escaping PagePreparer
     ) async throws {
         let boundedQuery = try query.bounded(to: range)
@@ -57,6 +58,7 @@ actor SearchShardExecutor {
             streamID: streamID,
             accountID: accountID,
             accessibleRepositoryNames: accessibleRepositoryNames,
+            prepareControlPage: prepareControlPage,
             preparePage: preparePage
         )
     }
@@ -67,6 +69,7 @@ actor SearchShardExecutor {
         streamID: SyncStreamID,
         accountID: AccountID,
         accessibleRepositoryNames: [String],
+        prepareControlPage: @escaping PagePreparer,
         preparePage: @escaping PagePreparer
     ) async throws {
         try Task.checkCancellation()
@@ -131,8 +134,25 @@ actor SearchShardExecutor {
                     try Task.checkCancellation()
                     let response = try await client.searchResponse(query, page: page)
                     try Task.checkCancellation()
-                    guard !response.value.incompleteResults else {
-                        throw SearchShardExecutorError.incompleteSearchPage
+                    if response.value.incompleteResults {
+                        shard = try await executePartitions(
+                            planner.nextPlan(
+                                range: range,
+                                totalCount: response.value.totalCount,
+                                incompleteResults: true
+                            ),
+                            controlResponse: response,
+                            controlPage: page,
+                            query: query,
+                            range: range,
+                            streamID: streamID,
+                            accountID: accountID,
+                            accessibleRepositoryNames: accessibleRepositoryNames,
+                            shard: shard,
+                            prepareControlPage: prepareControlPage,
+                            preparePage: preparePage
+                        )
+                        return
                     }
                     let targetShard = page == pageCount
                         ? completed(shard, cursor: String(page))
@@ -145,53 +165,24 @@ actor SearchShardExecutor {
                     shard = targetShard
                 }
 
-            case let .split(firstRange, secondRange):
-                shard = running(shard, cursor: "partitioned")
-                try await shardRepository.save(shard, accountID: accountID)
-                try await executeShard(
-                    query: try query.bounded(to: firstRange),
-                    range: firstRange,
-                    streamID: streamID,
-                    accountID: accountID,
-                    accessibleRepositoryNames: accessibleRepositoryNames,
-                    preparePage: preparePage
-                )
-                try Task.checkCancellation()
-                try await executeShard(
-                    query: try query.bounded(to: secondRange),
-                    range: secondRange,
-                    streamID: streamID,
-                    accountID: accountID,
-                    accessibleRepositoryNames: accessibleRepositoryNames,
-                    preparePage: preparePage
-                )
-                try Task.checkCancellation()
-                shard = completed(shard, cursor: "partitioned")
-                try await shardRepository.save(shard, accountID: accountID)
-
-            case .repositoryPartitionRequired:
-                guard !accessibleRepositoryNames.isEmpty else {
-                    throw SearchShardExecutorError.inaccessibleRepositoryPartition
-                }
-                shard = running(shard, cursor: "partitioned")
-                try await shardRepository.save(shard, accountID: accountID)
-                for repositoryName in accessibleRepositoryNames.sorted() {
-                    try Task.checkCancellation()
-                    try await executeShard(
-                        query: try query.scoped(
-                            to: repositoryName,
-                            updatedRange: range
-                        ),
+            case .split, .repositoryPartitionRequired:
+                shard = try await executePartitions(
+                    planner.nextPlan(
                         range: range,
-                        streamID: streamID,
-                        accountID: accountID,
-                        accessibleRepositoryNames: [],
-                        preparePage: preparePage
-                    )
-                    try Task.checkCancellation()
-                }
-                shard = completed(shard, cursor: "partitioned")
-                try await shardRepository.save(shard, accountID: accountID)
+                        totalCount: firstPage.totalCount,
+                        incompleteResults: firstPage.incompleteResults
+                    ),
+                    controlResponse: firstResponse,
+                    controlPage: 1,
+                    query: query,
+                    range: range,
+                    streamID: streamID,
+                    accountID: accountID,
+                    accessibleRepositoryNames: accessibleRepositoryNames,
+                    shard: shard,
+                    prepareControlPage: prepareControlPage,
+                    preparePage: preparePage
+                )
             }
         } catch {
             if !(error is CancellationError) {
@@ -200,6 +191,71 @@ actor SearchShardExecutor {
             }
             throw error
         }
+    }
+
+    private func executePartitions(
+        _ plan: SearchShardPlan,
+        controlResponse: GitHubResponse<GitHubIssueSearchPage>,
+        controlPage: Int,
+        query: GitHubIssueSearchQuery,
+        range: SearchTimeRange,
+        streamID: SyncStreamID,
+        accountID: AccountID,
+        accessibleRepositoryNames: [String],
+        shard: SyncShard,
+        prepareControlPage: @escaping PagePreparer,
+        preparePage: @escaping PagePreparer
+    ) async throws -> SyncShard {
+        var parent = running(shard, cursor: "partitioned")
+        try await persistPage(
+            try await prepareControlPage(controlResponse, query, controlPage),
+            advancing: parent,
+            accountID: accountID
+        )
+        switch plan {
+        case let .split(firstRange, secondRange):
+            try await executeShard(
+                query: try query.bounded(to: firstRange),
+                range: firstRange,
+                streamID: streamID,
+                accountID: accountID,
+                accessibleRepositoryNames: accessibleRepositoryNames,
+                prepareControlPage: prepareControlPage,
+                preparePage: preparePage
+            )
+            try Task.checkCancellation()
+            try await executeShard(
+                query: try query.bounded(to: secondRange),
+                range: secondRange,
+                streamID: streamID,
+                accountID: accountID,
+                accessibleRepositoryNames: accessibleRepositoryNames,
+                prepareControlPage: prepareControlPage,
+                preparePage: preparePage
+            )
+        case .repositoryPartitionRequired:
+            guard !accessibleRepositoryNames.isEmpty else {
+                throw SearchShardExecutorError.inaccessibleRepositoryPartition
+            }
+            for repositoryName in accessibleRepositoryNames.sorted() {
+                try Task.checkCancellation()
+                try await executeShard(
+                    query: try query.scoped(to: repositoryName, updatedRange: range),
+                    range: range,
+                    streamID: streamID,
+                    accountID: accountID,
+                    accessibleRepositoryNames: [],
+                    prepareControlPage: prepareControlPage,
+                    preparePage: preparePage
+                )
+            }
+        case .complete:
+            throw SearchShardExecutorError.incompleteSearchPage
+        }
+        try Task.checkCancellation()
+        parent = completed(parent, cursor: "partitioned")
+        try await shardRepository.save(parent, accountID: accountID)
+        return parent
     }
 
     private func running(_ shard: SyncShard, cursor: String?) -> SyncShard {

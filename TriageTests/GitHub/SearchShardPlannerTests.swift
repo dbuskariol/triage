@@ -5,10 +5,10 @@ final class SearchShardPlannerTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 0)
     private let end = Date(timeIntervalSince1970: 3_600)
 
-    func testCompleteSearchDoesNotShard() {
+    func testSearchBelowResultCapDoesNotShard() {
         let range = SearchTimeRange(start: start, end: end)
         XCTAssertEqual(
-            SearchShardPlanner().nextPlan(range: range, totalCount: 1_000, incompleteResults: false),
+            SearchShardPlanner().nextPlan(range: range, totalCount: 999, incompleteResults: false),
             .complete(range)
         )
     }
@@ -25,6 +25,10 @@ final class SearchShardPlannerTests: XCTestCase {
         )
         XCTAssertNotEqual(
             SearchShardPlanner().nextPlan(range: range, totalCount: 1, incompleteResults: true),
+            .complete(range)
+        )
+        XCTAssertNotEqual(
+            SearchShardPlanner().nextPlan(range: range, totalCount: 1_000, incompleteResults: false),
             .complete(range)
         )
     }

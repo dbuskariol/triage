@@ -10,6 +10,7 @@ enum GitHubIssueSearchError: Error, Equatable, Sendable {
 enum GitHubIssueSearchState: String, Sendable {
     case open
     case closed
+    case merged
 }
 
 enum GitHubIssueSearchRelationship: Hashable, Sendable {
@@ -20,6 +21,7 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
     case commented
     case reviewRequested
     case reviewInvolves
+    case teamReviewRequested(teamNodeID: GitHubNodeID, teamSlug: String)
 
     var qualifier: String {
         switch self {
@@ -29,7 +31,8 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
         case .mentioned: "mentions"
         case .commented: "commenter"
         case .reviewRequested: "review-requested"
-        case .reviewInvolves: "review-involves"
+        case .reviewInvolves: "reviewed-by"
+        case .teamReviewRequested: "team-review-requested"
         }
     }
 }
@@ -65,10 +68,20 @@ struct GitHubIssueSearchQuery: Sendable {
         guard repositoryFullName.map(Self.isRepositoryFullName) ?? true else {
             throw GitHubIssueSearchError.invalidQualifier
         }
+        let relationshipValue: String
+        switch relationship {
+        case let .teamReviewRequested(_, teamSlug):
+            guard Self.isTeamSlug(teamSlug) else {
+                throw GitHubIssueSearchError.invalidQualifier
+            }
+            relationshipValue = "\(organizationLogin)/\(teamSlug)"
+        case .involves, .authored, .assigned, .mentioned, .commented, .reviewRequested, .reviewInvolves:
+            relationshipValue = userLogin
+        }
         var qualifiers = [
             "org:\(organizationLogin)",
             "is:\(state.rawValue)",
-            "\(relationship.qualifier):\(userLogin)"
+            "\(relationship.qualifier):\(relationshipValue)"
         ]
         if let updatedAfter {
             qualifiers.append("updated:>=\(Self.dayString(updatedAfter))")
@@ -140,6 +153,12 @@ struct GitHubIssueSearchQuery: Sendable {
             owner: String(components[0]),
             repository: String(components[1])
         )) != nil
+    }
+
+    private static func isTeamSlug(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 255 && value.unicodeScalars.allSatisfy {
+            $0.isASCII && ($0.properties.isLowercase || $0.properties.numericType != nil || $0 == "-")
+        }
     }
 
     private static func dayString(_ date: Date) -> String {

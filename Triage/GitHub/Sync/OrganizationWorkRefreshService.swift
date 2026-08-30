@@ -37,17 +37,6 @@ actor OrganizationWorkRefreshService {
         let coverageRepository = CoverageRepository(vault: vault)
         let streamID = SyncStreamID(rawValue: "role-discovery-\(organization.id.rawValue)")!
         let attemptedAt = Date()
-        try await coverageRepository.save(
-            coverageRecord(
-                scope: synchronizationScope,
-                streamID: streamID,
-                interval: nil,
-                status: .partial,
-                lastSuccessfulAt: nil,
-                failureDetail: nil
-            ),
-            attemptedAt: attemptedAt
-        )
         let rateLimitController = try await rateLimitControllers.controller(
             for: account.id,
             vault: vault
@@ -84,11 +73,38 @@ actor OrganizationWorkRefreshService {
                 }
                 return SearchTimeRange(start: start, end: end)
             }.max { $0.end < $1.end }
+            let overlapStart = previousHighWater.map {
+                max($0.addingTimeInterval(-10 * 60), Date(timeIntervalSince1970: 0))
+            }
             let range = incompleteRange ?? SearchTimeRange(
-                start: previousHighWater ?? Date(timeIntervalSince1970: 0),
+                start: overlapStart ?? Date(timeIntervalSince1970: 0),
                 end: serverObservedAt
             )
             searchRange = range
+            let initialRoleCoverage = coverageRecord(
+                scope: synchronizationScope,
+                streamID: streamID,
+                interval: range,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            )
+            try await vault.write { database in
+                try CoverageRepository.removeUnboundedRecord(
+                    accountID: synchronizationScope.accountID,
+                    organizationID: synchronizationScope.organizationID,
+                    feature: .roleDiscovery,
+                    streamID: streamID,
+                    expectedAccountID: synchronizationScope.accountID,
+                    in: database
+                )
+                try CoverageRepository.save(
+                    initialRoleCoverage,
+                    attemptedAt: attemptedAt,
+                    expectedAccountID: synchronizationScope.accountID,
+                    in: database
+                )
+            }
             let inventoryResult = try await OrganizationInventoryRefreshService(
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
@@ -109,6 +125,19 @@ actor OrganizationWorkRefreshService {
             if case let .failure(.ssoRequired(header), _) = inventoryResult.teams {
                 deferredSSORequirement = header
             }
+            let teamSummaries: [TeamInventorySummary]
+            let teamDiscoveryStatus: CoverageStatus
+            let teamDiscoveryFailureDetail: String?
+            switch inventoryResult.teams {
+            case let .success(summaries, _):
+                teamSummaries = summaries
+                teamDiscoveryStatus = .complete
+                teamDiscoveryFailureDetail = nil
+            case let .failure(_, coverage):
+                teamSummaries = []
+                teamDiscoveryStatus = coverage.status
+                teamDiscoveryFailureDetail = coverage.failureDetail
+            }
             let repositoryIDsByAPIURL = Dictionary(
                 uniqueKeysWithValues: inventory.map {
                     (URL(string: "https://api.github.com/repos/\($0.fullName)")!, $0.id)
@@ -120,8 +149,35 @@ actor OrganizationWorkRefreshService {
             let plan = try RoleDiscoveryPlan(
                 organizationLogin: organization.login,
                 userLogin: account.login,
+                teams: teamSummaries,
                 now: serverObservedAt
             )
+            let roleStreamRecords = plan.streams.map { stream in
+                let isUnavailableTeamStream = stream.kind == .openTeamReviewRequested
+                    && teamDiscoveryStatus != .complete
+                return roleDiscoveryCoverageRecord(
+                    scope: synchronizationScope,
+                    parentStreamID: streamID,
+                    stream: stream,
+                    interval: range,
+                    status: isUnavailableTeamStream ? teamDiscoveryStatus : .partial,
+                    lastSuccessfulAt: nil,
+                    failureDetail: isUnavailableTeamStream ? teamDiscoveryFailureDetail : nil
+                )
+            }
+            try await vault.write { database in
+                for record in roleStreamRecords {
+                    try CoverageRepository.save(
+                        record,
+                        attemptedAt: attemptedAt,
+                        expectedAccountID: synchronizationScope.accountID,
+                        in: database
+                    )
+                }
+            }
+            let executableStreams = plan.streams.filter {
+                $0.kind != .openTeamReviewRequested || teamDiscoveryStatus == .complete
+            }
             let discoveryResult = try await RoleDiscoverySynchronizer(
                 searchClient: searchClient,
                 workItemRepository: WorkItemRepository(vault: vault),
@@ -129,22 +185,39 @@ actor OrganizationWorkRefreshService {
             ).synchronize(
                 plan: plan,
                 accountID: account.id,
-                accountNodeID: account.nodeID,
                 organizationID: organization.id,
                 githubOrganizationID: organization.githubOrganizationID,
                 streamID: streamID,
                 searchRange: range,
                 accessibleRepositoryNames: inventory.map(\.fullName),
-                repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
+                repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] },
+                streams: executableStreams,
+                recordStreamOutcome: { stream, outcome in
+                    try await coverageRepository.save(
+                        self.roleDiscoveryCoverageRecord(
+                            scope: synchronizationScope,
+                            parentStreamID: streamID,
+                            stream: stream,
+                            interval: range,
+                            status: outcome.status,
+                            lastSuccessfulAt: outcome.status == .complete ? serverObservedAt : nil,
+                            failureDetail: outcome.failureDetail
+                        ),
+                        attemptedAt: attemptedAt
+                    )
+                }
             )
+            let aggregateRoleStatus = teamDiscoveryStatus == .complete
+                ? CoverageStatus.complete
+                : teamDiscoveryStatus
             try await coverageRepository.save(
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
                     interval: range,
-                    status: .complete,
-                    lastSuccessfulAt: serverObservedAt,
-                    failureDetail: nil
+                    status: aggregateRoleStatus,
+                    lastSuccessfulAt: aggregateRoleStatus == .complete ? serverObservedAt : nil,
+                    failureDetail: teamDiscoveryFailureDetail
                 ),
                 attemptedAt: attemptedAt
             )
@@ -476,6 +549,25 @@ actor OrganizationWorkRefreshService {
             failureDetail: failureDetail,
             feature: feature,
             repositoryID: repositoryID
+        )
+    }
+
+    private func roleDiscoveryCoverageRecord(
+        scope: SynchronizationScope,
+        parentStreamID: SyncStreamID,
+        stream: RoleDiscoveryStream,
+        interval: SearchTimeRange,
+        status: CoverageStatus,
+        lastSuccessfulAt: Date?,
+        failureDetail: String?
+    ) -> CoverageRecord {
+        coverageRecord(
+            scope: scope,
+            streamID: stream.streamID(parent: parentStreamID),
+            interval: interval,
+            status: status,
+            lastSuccessfulAt: lastSuccessfulAt,
+            failureDetail: failureDetail
         )
     }
 

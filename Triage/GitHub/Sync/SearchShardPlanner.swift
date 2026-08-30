@@ -30,7 +30,7 @@ struct SearchShardPlanner: Sendable {
         totalCount: Int,
         incompleteResults: Bool
     ) -> SearchShardPlan {
-        guard incompleteResults || totalCount > Self.maximumResults else {
+        guard incompleteResults || totalCount >= Self.maximumResults else {
             return .complete(range)
         }
         guard range.end.timeIntervalSince(range.start) > Self.minimumRangeDuration else {
