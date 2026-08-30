@@ -54,6 +54,30 @@ final class CoverageEvaluatorTests: XCTestCase {
         XCTAssertEqual(evaluation.freshness.status, .fresh)
     }
 
+    func testEveryNonCompleteStatusRemainsMissing() {
+        for status in [
+            CoverageStatus.partial,
+            .unavailable,
+            .requiresSSO,
+            .requiresApproval,
+            .failed,
+            .unknown
+        ] {
+            let requirement = requirement(feature: .issues)
+            let evaluation = CoverageEvaluator().evaluate(
+                requirements: [requirement],
+                records: [record(feature: .issues, status: status)],
+                accountID: accountID,
+                organizationID: organizationID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision
+            )
+
+            XCTAssertFalse(evaluation.isComplete, "\(status) must remain incomplete")
+            XCTAssertEqual(evaluation.missing, [requirement])
+        }
+    }
+
     func testStaleCredentialOrCapabilityRevisionsCannotSatisfyCoverage() {
         let requirement = requirement(feature: .issues)
         let staleCredential = CoverageRecord(

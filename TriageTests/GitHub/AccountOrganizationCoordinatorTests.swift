@@ -80,6 +80,39 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         _ = try await awaitNonRefreshingState(from: coordinator, scope: scope)
     }
 
+    func testSuccessfulCompletionPublishesFinalizerEnrichedStateImmediately() async throws {
+        let fixture = CoordinatorFixture()
+        let scope = fixture.scope()
+        let operationState = fixture.completeCachedState(for: scope, at: 2)
+        let requirement = CoverageRequirement(
+            feature: .roleDiscovery,
+            repositoryID: nil,
+            streamID: operationState.coverage[0].streamID,
+            intervalStart: operationState.coverage[0].intervalStart,
+            intervalEnd: operationState.coverage[0].intervalEnd
+        )
+        let enrichedCachedState = AccountOrganizationCachedState(
+            coverage: operationState.coverage,
+            coverageRequirements: [requirement],
+            lastSuccessfulSyncAt: operationState.lastSuccessfulSyncAt
+        )
+        let enrichedDurableState = AccountOrganizationDurableState(
+            cachedState: enrichedCachedState
+        )
+        await fixture.finalizer.overrideNextSuccessfulState(with: enrichedDurableState)
+
+        try await fixture.coordinator.select(scope)
+        let request = try await fixture.operation.request(at: 0)
+        await fixture.operation.succeed(request, with: operationState)
+        try await fixture.stateStore.awaitSaveAttempt(1)
+        _ = try await awaitNonRefreshingState(from: fixture.coordinator, scope: scope)
+
+        let liveState = await fixture.coordinator.state(for: scope)
+        let storedState = await fixture.stateStore.state(for: scope)
+        XCTAssertEqual(liveState?.durableState, enrichedDurableState)
+        XCTAssertEqual(storedState, enrichedDurableState)
+    }
+
     func testAccessFailureRemainsScopedToItsAccountOrganization() async throws {
         let fixture = CoordinatorFixture()
         let inaccessible = fixture.scope(account: "account-a", organization: "organization-a")
@@ -1376,6 +1409,7 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
     private let persistence: TestPersistence
     private let stateStore: TestStateStore
     private let scheduleStore: TestScheduleStore
+    private var nextSuccessfulState: AccountOrganizationDurableState?
 
     init(
         persistence: TestPersistence,
@@ -1393,23 +1427,32 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
         for scope: SynchronizationScope,
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
-    ) async throws -> Bool {
+    ) async throws -> AccountOrganizationDurableState? {
+        let stateToPersist = nextSuccessfulState ?? state
+        nextSuccessfulState = nil
         guard try await stateStore.prepareSave(
             for: scope,
             schedulerGeneration: schedule.generation
         ) else {
-            return false
+            return nil
         }
         guard try await scheduleStore.prepareFinalizationReplacement(for: schedule) else {
-            return false
+            return nil
         }
-        return try await persistence.finalize(
-            state,
+        guard try await persistence.finalize(
+            stateToPersist,
             schedule: schedule,
             for: scope,
             ifOwnedBy: expectedAttemptID,
             generation: expectedGeneration
-        )
+        ) else {
+            return nil
+        }
+        return stateToPersist
+    }
+
+    func overrideNextSuccessfulState(with state: AccountOrganizationDurableState) {
+        nextSuccessfulState = state
     }
 
     func finalizeFailure(
@@ -1419,7 +1462,7 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
     ) async throws -> AccountOrganizationDurableState? {
-        guard try await finalize(
+        guard let finalizedState = try await finalize(
             state,
             schedule: schedule,
             for: scope,
@@ -1428,7 +1471,7 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
         ) else {
             return nil
         }
-        return state
+        return finalizedState
     }
 
     func finalizeInterruption(
@@ -1438,7 +1481,7 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
         ifOwnedBy expectedAttemptID: UUID,
         generation expectedGeneration: UInt64
     ) async throws -> AccountOrganizationDurableState? {
-        guard try await finalize(
+        guard let finalizedState = try await finalize(
             state,
             schedule: schedule,
             for: scope,
@@ -1447,7 +1490,7 @@ private actor TestFinalizer: AccountOrganizationRefreshFinalizing {
         ) else {
             return nil
         }
-        return state
+        return finalizedState
     }
 }
 

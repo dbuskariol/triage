@@ -24,11 +24,15 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 5
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
 
         let loaded = try await repository.loadState(for: scope)
         let persistedSchedule = try await scheduler.state(for: scope)
-        XCTAssertEqual(loaded, durable)
+        XCTAssertEqual(loaded, didFinalize)
+        XCTAssertEqual(
+            loaded?.cachedState?.coverageRequirements?.count,
+            13 + RoleDiscoveryStreamKind.allCases.count
+        )
         XCTAssertEqual(persistedSchedule, completed)
     }
 
@@ -53,7 +57,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 2
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
         try await fixture.registry.closeAll()
 
         let encryptedBytes = try Data(contentsOf: fixture.databaseURL)
@@ -67,7 +71,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         let reopened = AccountOrganizationDurableStateRepository(vault: reopenedVault)
 
         let reopenedState = try await reopened.loadState(for: scope)
-        XCTAssertEqual(reopenedState, durable)
+        XCTAssertEqual(reopenedState, didFinalize)
         try await reopenedRegistry.closeAll()
     }
 
@@ -89,7 +93,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 1
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
         let currentRevision = CredentialRevision(rawValue: "credential-current")!
         try await fixture.setCredentialRevision(currentRevision)
         let currentScope = fixture.scope(credentialRevision: currentRevision)
@@ -128,7 +132,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 1
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
         let currentRevision = CapabilityRevision(rawValue: "capability-current")!
         try await fixture.setCapabilityRevision(currentRevision)
         let currentScope = fixture.scope(capabilityRevision: currentRevision)
@@ -173,7 +177,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: currentAttempt,
             generation: 4
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
 
         let staleAttempt = fixture.attemptID("00000000-0000-0000-0000-000000000106")
         do {
@@ -194,7 +198,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
 
         let loaded = try await repository.loadState(for: currentScope)
         let retainedSchedule = try await scheduler.state(for: currentScope)
-        XCTAssertEqual(loaded, currentDurable)
+        XCTAssertEqual(loaded, didFinalize)
         XCTAssertEqual(retainedSchedule, currentCompleted)
     }
 
@@ -295,7 +299,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: firstAttempt,
             generation: 3
         )
-        XCTAssertTrue(firstFinalization)
+        XCTAssertNotNil(firstFinalization)
         let currentAttempt = fixture.attemptID("00000000-0000-0000-0000-000000000110")
         let active = fixture.activeSchedule(scope: scope, attemptID: currentAttempt, generation: 4)
         let replacement = fixture.qualifiedDurableState(scope: scope, successOffset: 120)
@@ -310,10 +314,10 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             generation: 4
         )
 
-        XCTAssertFalse(didFinalize)
+        XCTAssertNil(didFinalize)
         let loaded = try await repository.loadState(for: scope)
         let persistedSchedule = try await scheduler.state(for: scope)
-        XCTAssertEqual(loaded?.cachedState, prior.cachedState)
+        XCTAssertEqual(loaded?.cachedState, firstFinalization?.cachedState)
         XCTAssertEqual(loaded?.freshness.status, .stale)
         XCTAssertEqual(
             loaded?.freshness.detail,
@@ -381,11 +385,11 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 8
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
         let persistedSchedule = try await scheduler.state(for: scope)
         let loaded = try await repository.loadState(for: scope)
         XCTAssertEqual(persistedSchedule, completed)
-        XCTAssertEqual(loaded, durable)
+        XCTAssertEqual(loaded, didFinalize)
     }
 
     func testAssociationDeletionCascadesSchedulerAndDurableRows() async throws {
@@ -406,7 +410,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: attemptID,
             generation: 1
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
         try await fixture.removeAssociation()
 
         let counts = try await fixture.rawRowCounts()
@@ -523,12 +527,52 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
 
         let committedState = try XCTUnwrap(committed)
         XCTAssertEqual(committedState.cachedState?.coverage, [failedCoverage])
+        XCTAssertEqual(
+            committedState.cachedState?.coverageRequirements?.count,
+            13 + RoleDiscoveryStreamKind.allCases.count
+        )
         XCTAssertEqual(committedState.freshness.status, .ssoRequired)
         XCTAssertNil(committedState.freshness.lastSuccessfulSyncAt)
         let loaded = try await repository.loadState(for: scope)
         let persistedSchedule = try await scheduler.state(for: scope)
         XCTAssertEqual(loaded, committedState)
         XCTAssertNil(persistedSchedule?.activeAttemptID)
+    }
+
+    func testFailureBeforeAnySourceWriteStillPersistsAuthoritativeRequirements() async throws {
+        let fixture = try await DurableStateFixture()
+        defer { fixture.remove() }
+        let repository = AccountOrganizationDurableStateRepository(vault: fixture.vault)
+        let scheduler = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let scope = fixture.scope()
+        let attemptID = fixture.attemptID("00000000-0000-0000-0000-000000000127")
+        let active = fixture.activeSchedule(scope: scope, attemptID: attemptID, generation: 11)
+        let candidate = AccountOrganizationDurableState(
+            cachedState: nil,
+            freshness: FreshnessState(
+                status: .offline,
+                detail: "A network connection is required."
+            )
+        )
+
+        try await scheduler.save(active)
+        let committed = try await repository.finalizeFailure(
+            candidate,
+            schedule: fixture.completedSchedule(scope: scope, generation: 11),
+            for: scope,
+            ifOwnedBy: attemptID,
+            generation: 11
+        )
+
+        let committedState = try XCTUnwrap(committed)
+        XCTAssertEqual(committedState.cachedState?.coverage, [])
+        XCTAssertEqual(
+            committedState.cachedState?.coverageRequirements?.count,
+            13 + RoleDiscoveryStreamKind.allCases.count
+        )
+        XCTAssertEqual(committedState.freshness.status, .offline)
+        let loaded = try await repository.loadState(for: scope)
+        XCTAssertEqual(loaded, committedState)
     }
 
     func testCoordinatorFailureAfterCoverageWritePersistsReloadableTerminalProjection() async throws {
@@ -609,7 +653,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: priorAttempt,
             generation: 1
         )
-        XCTAssertTrue(didFinalizePrior)
+        XCTAssertNotNil(didFinalizePrior)
 
         let partialCoverage = CoverageRecord(
             accountID: scope.accountID,
@@ -701,7 +745,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
             ifOwnedBy: firstAttempt,
             generation: 1
         )
-        XCTAssertTrue(didFinalize)
+        XCTAssertNotNil(didFinalize)
 
         let newerAttempt = fixture.attemptID("00000000-0000-0000-0000-000000000117")
         try await scheduler.save(
@@ -710,7 +754,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
 
         let loadedState = try await repository.loadState(for: scope)
         let loaded = try XCTUnwrap(loadedState)
-        XCTAssertEqual(loaded.cachedState, durable.cachedState)
+        XCTAssertEqual(loaded.cachedState, didFinalize?.cachedState)
         XCTAssertEqual(loaded.freshness.status, .stale)
         XCTAssertEqual(loaded.freshness.lastSuccessfulSyncAt, durable.freshness.lastSuccessfulSyncAt)
         XCTAssertNil(loaded.freshness.nextRetryAt)
@@ -832,9 +876,9 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         let persistedSchedule = try await scheduler.state(for: scope)
         let persistedState = try await repository.loadState(for: scope)
 
-        XCTAssertEqual(results.filter { $0 }.count, 1)
+        XCTAssertEqual(results.compactMap { $0 }.count, 1)
         XCTAssertEqual(persistedSchedule, completed)
-        XCTAssertEqual(persistedState, durable)
+        XCTAssertEqual(persistedState, results.compactMap { $0 }.first)
     }
 
     func testDuplicateCoverageInDecodableEnvelopeFailsClosed() async throws {

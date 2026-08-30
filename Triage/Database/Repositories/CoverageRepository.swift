@@ -7,9 +7,12 @@ enum CoverageRepositoryError: Error, Equatable, Sendable {
     case invalidInterval
     case invalidPersistedData
     case streamScopeMismatch
+    case tooManyRecords
 }
 
 actor CoverageRepository {
+    static let maximumCurrentRecordCount = 20_000
+
     private let vault: AccountVault
 
     init(vault: AccountVault) {
@@ -155,9 +158,13 @@ actor CoverageRepository {
 
     nonisolated static func currentRecords(
         for scope: SynchronizationScope,
-        in database: Database
+        in database: Database,
+        maximumCount: Int = maximumCurrentRecordCount
     ) throws -> [CoverageRecord] {
-        try Row.fetchAll(
+        guard (0...maximumCurrentRecordCount).contains(maximumCount) else {
+            throw CoverageRepositoryError.tooManyRecords
+        }
+        let rows = try Row.fetchAll(
             database,
             sql: """
                 SELECT account_id, organization_id, repository_id, feature, stream_id,
@@ -168,14 +175,20 @@ actor CoverageRepository {
                   AND credential_revision = ? AND capability_revision = ?
                 ORDER BY feature, stream_id, repository_id,
                          interval_start_ms, interval_end_ms, id
+                LIMIT ?
                 """,
             arguments: [
                 scope.accountID.rawValue,
                 scope.organizationID.rawValue,
                 scope.credentialRevision.rawValue,
-                scope.capabilityRevision.rawValue
+                scope.capabilityRevision.rawValue,
+                maximumCount + 1
             ]
-        ).map(record(from:))
+        )
+        guard rows.count <= maximumCount else {
+            throw CoverageRepositoryError.tooManyRecords
+        }
+        return try rows.map(record(from:))
     }
 
     private nonisolated static func validate(
