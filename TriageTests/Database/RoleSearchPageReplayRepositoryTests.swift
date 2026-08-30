@@ -155,6 +155,43 @@ final class RoleSearchPageReplayRepositoryTests: XCTestCase {
         let snapshots = try await rawRepository.snapshots(for: fixture.accountID)
         XCTAssertEqual(snapshots.map(\.id), [newer.id])
     }
+
+    func testReplayCacheRemovesMappingsFromSupersededRevisions() async throws {
+        let fixture = try await ReplayFixture()
+        defer { fixture.remove() }
+        let snapshot = fixture.snapshot(id: "stale-revision-page", eTag: "\"stale\"")
+        let repository = RoleSearchPageReplayRepository(vault: fixture.vault)
+        try await RawAPISnapshotRepository(vault: fixture.vault).save(snapshot)
+        let staleReplay = fixture.replay(snapshot: snapshot)
+        try await repository.save(staleReplay)
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+        let currentScope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-current")!,
+            capabilityRevision: fixture.capabilityRevision
+        )
+
+        let currentEntry = try await RoleSearchPageReplayCache(
+            repository: repository,
+            scope: currentScope
+        ).entry(for: query, page: 1)
+
+        XCTAssertNil(currentEntry)
+        let removedStaleEntry = try await repository.entry(
+            requestKey: staleReplay.requestKey,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertNil(removedStaleEntry)
+    }
 }
 
 private final class ReplayFixture: @unchecked Sendable {

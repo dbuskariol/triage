@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 struct RoleDiscoverySyncResult: Sendable {
     let workItemIDs: [WorkItemID]
@@ -20,24 +21,26 @@ actor RoleDiscoverySynchronizer {
     private let searchClient: any GitHubIssueSearchExecuting
     private let workItemRepository: WorkItemRepository
     private let shardRepository: SyncShardRepository
+    private let replayRepository: RoleSearchPageReplayRepository?
     private let clock: @Sendable () -> Date
 
     init(
         searchClient: any GitHubIssueSearchExecuting,
         workItemRepository: WorkItemRepository,
         shardRepository: SyncShardRepository,
+        replayRepository: RoleSearchPageReplayRepository? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.searchClient = searchClient
         self.workItemRepository = workItemRepository
         self.shardRepository = shardRepository
+        self.replayRepository = replayRepository
         self.clock = clock
     }
 
     func synchronize(
         plan: RoleDiscoveryPlan,
-        accountID: AccountID,
-        organizationID: OrganizationID,
+        scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         streamID: SyncStreamID,
         searchRange: SearchTimeRange,
@@ -46,11 +49,16 @@ actor RoleDiscoverySynchronizer {
         streams: [RoleDiscoveryStream]? = nil,
         recordStreamOutcome: @escaping StreamOutcomeRecorder = { _, _ in }
     ) async throws -> RoleDiscoverySyncResult {
+        let accountID = scope.accountID
+        let organizationID = scope.organizationID
         let accumulator = RoleDiscoveryAccumulator()
         let observationClock = clock
         let shardExecutor = SearchShardExecutor(
             client: searchClient,
             shardRepository: shardRepository,
+            replayCache: replayRepository.map {
+                RoleSearchPageReplayCache(repository: $0, scope: scope)
+            },
             clock: clock
         )
         let selectedStreams = streams ?? plan.streams
@@ -64,21 +72,25 @@ actor RoleDiscoverySynchronizer {
                         streamID: stream.streamID(parent: streamID),
                         accountID: accountID,
                         accessibleRepositoryNames: accessibleRepositoryNames,
-                        prepareControlPage: { response, boundedQuery, page in
-                            Self.prepareControlPageWrite(
+                        prepareControlPage: { [self] response, boundedQuery, page in
+                            try await self.throwForSSORequirement(
+                                in: response.ssoHeader,
+                                githubOrganizationID: githubOrganizationID
+                            )
+                            return try Self.prepareControlPageWrite(
                                 response,
                                 query: boundedQuery,
                                 page: page,
-                                accountID: accountID,
+                                scope: scope,
                                 observedAt: observationClock()
                             )
                         },
                         prepareUndecodablePage: { response, boundedQuery, page in
-                            Self.prepareUndecodablePageWrite(
+                            try Self.prepareUndecodablePageWrite(
                                 response,
                                 query: boundedQuery,
                                 page: page,
-                                accountID: accountID,
+                                scope: scope,
                                 observedAt: observationClock()
                             )
                         }
@@ -93,6 +105,7 @@ actor RoleDiscoverySynchronizer {
                             page: page,
                             accountID: accountID,
                             organizationID: organizationID,
+                            scope: scope,
                             repositoryID: repositoryID,
                             accumulator: accumulator
                         )
@@ -158,19 +171,17 @@ actor RoleDiscoverySynchronizer {
         page: Int,
         accountID: AccountID,
         organizationID: OrganizationID,
+        scope: SynchronizationScope,
         repositoryID: @escaping @Sendable (GitHubIssueSearchItem) -> RepositoryID?,
         accumulator: RoleDiscoveryAccumulator
     ) async throws -> PreparedSearchShardPageWrite {
         let observedAt = clock()
-        let snapshot = RawAPISnapshot(
-            id: RawAPISnapshotID.make(),
-            accountID: accountID,
-            githubNodeID: nil,
-            endpoint: "/search/issues?q=\(query.value)&page=\(page)",
-            eTag: response.etag,
-            parserVersion: 1,
-            observedAt: observedAt,
-            payload: response.payload
+        let provenance = try Self.prepareProvenance(
+            response,
+            query: query,
+            page: page,
+            scope: scope,
+            observedAt: observedAt
         )
         var entries: [NormalizedPageEntry] = []
         var failures: [NormalizationFailure] = []
@@ -193,7 +204,7 @@ actor RoleDiscoverySynchronizer {
                     NormalizationFailure(
                         id: UUID(),
                         accountID: accountID,
-                        rawSnapshotID: snapshot.id,
+                        rawSnapshotID: provenance.rawSnapshotID,
                         githubNodeID: nil,
                         endpoint: searchEndpoint(for: item),
                         parserVersion: 1,
@@ -211,7 +222,7 @@ actor RoleDiscoverySynchronizer {
         return PreparedSearchShardPageWrite(
             write: {
                 database in
-                try RawAPISnapshotRepository.save(snapshot, in: database)
+                try provenance.write(database)
                 for entry in preparedEntries {
                     try GitHubNodeRepository.save(entry.node, in: database)
                     _ = try WorkItemRepository.ensureWorkItem(
@@ -235,22 +246,19 @@ actor RoleDiscoverySynchronizer {
         _ response: GitHubResponse<GitHubIssueSearchPage>,
         query: GitHubIssueSearchQuery,
         page: Int,
-        accountID: AccountID,
+        scope: SynchronizationScope,
         observedAt: Date
-    ) -> PreparedSearchShardPageWrite {
-        let snapshot = RawAPISnapshot(
-            id: RawAPISnapshotID.make(),
-            accountID: accountID,
-            githubNodeID: nil,
-            endpoint: "/search/issues?q=\(query.value)&page=\(page)",
-            eTag: response.etag,
-            parserVersion: 1,
-            observedAt: observedAt,
-            payload: response.payload
+    ) throws -> PreparedSearchShardPageWrite {
+        let provenance = try prepareProvenance(
+            response,
+            query: query,
+            page: page,
+            scope: scope,
+            observedAt: observedAt
         )
         return PreparedSearchShardPageWrite(
             write: { database in
-                try RawAPISnapshotRepository.save(snapshot, in: database)
+                try provenance.write(database)
             },
             didCommit: {}
         )
@@ -260,15 +268,19 @@ actor RoleDiscoverySynchronizer {
         _ response: GitHubUndecodableResponse,
         query: GitHubIssueSearchQuery,
         page: Int,
-        accountID: AccountID,
+        scope: SynchronizationScope,
         observedAt: Date
-    ) -> PreparedSearchShardPageWrite {
-        let endpoint = "/search/issues?q=\(query.value)&page=\(page)"
+    ) throws -> PreparedSearchShardPageWrite {
+        let identity = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: page,
+            scope: scope
+        )
         let snapshot = RawAPISnapshot(
             id: RawAPISnapshotID.make(),
-            accountID: accountID,
+            accountID: scope.accountID,
             githubNodeID: nil,
-            endpoint: endpoint,
+            endpoint: identity.endpoint,
             eTag: response.etag,
             parserVersion: 1,
             observedAt: observedAt,
@@ -276,10 +288,10 @@ actor RoleDiscoverySynchronizer {
         )
         let failure = NormalizationFailure(
             id: UUID(),
-            accountID: accountID,
+            accountID: scope.accountID,
             rawSnapshotID: snapshot.id,
             githubNodeID: nil,
-            endpoint: endpoint,
+            endpoint: identity.endpoint,
             parserVersion: 1,
             occurredAt: observedAt,
             redactedDiagnostic: "GitHub search returned a response that could not be decoded."
@@ -288,9 +300,103 @@ actor RoleDiscoverySynchronizer {
             write: { database in
                 try RawAPISnapshotRepository.save(snapshot, in: database)
                 try NormalizationFailureRepository.record(failure, in: database)
+                try RoleSearchPageReplayRepository.remove(
+                    requestKey: identity.requestKey,
+                    accountID: scope.accountID,
+                    organizationID: scope.organizationID,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
             },
             didCommit: {}
         )
+    }
+
+    private nonisolated static func prepareProvenance(
+        _ response: GitHubResponse<GitHubIssueSearchPage>,
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        scope: SynchronizationScope,
+        observedAt: Date
+    ) throws -> PreparedRoleSearchProvenance {
+        let identity = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: page,
+            scope: scope
+        )
+        let snapshot: RawAPISnapshot?
+        let snapshotID: RawAPISnapshotID
+        switch response.source {
+        case .network:
+            let value = RawAPISnapshot(
+                id: RawAPISnapshotID.make(),
+                accountID: scope.accountID,
+                githubNodeID: nil,
+                endpoint: identity.endpoint,
+                eTag: response.etag,
+                parserVersion: 1,
+                observedAt: observedAt,
+                payload: response.payload
+            )
+            snapshot = value
+            snapshotID = value.id
+        case let .replay(replayedSnapshotID):
+            snapshot = nil
+            snapshotID = replayedSnapshotID
+        }
+        let replay = response.etag.flatMap { eTag -> RoleSearchPageReplay? in
+            guard !eTag.isEmpty else { return nil }
+            return RoleSearchPageReplay(
+                requestKey: identity.requestKey,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                queryValue: identity.queryValue,
+                page: identity.page,
+                endpoint: identity.endpoint,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                rawSnapshotID: snapshotID,
+                eTag: eTag,
+                parserVersion: 1,
+                lastValidatedAt: observedAt
+            )
+        }
+        return PreparedRoleSearchProvenance(
+            identity: identity,
+            scope: scope,
+            snapshot: snapshot,
+            replay: replay,
+            rawSnapshotID: snapshotID
+        )
+    }
+
+    private struct PreparedRoleSearchProvenance: Sendable {
+        let identity: GitHubIssueSearchRequestIdentity
+        let scope: SynchronizationScope
+        let snapshot: RawAPISnapshot?
+        let replay: RoleSearchPageReplay?
+        let rawSnapshotID: RawAPISnapshotID
+
+        func write(_ database: Database) throws {
+            if let snapshot {
+                try RawAPISnapshotRepository.save(snapshot, in: database)
+            }
+            if let replay {
+                try RoleSearchPageReplayRepository.save(
+                    replay,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            } else {
+                try RoleSearchPageReplayRepository.remove(
+                    requestKey: identity.requestKey,
+                    accountID: scope.accountID,
+                    organizationID: scope.organizationID,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            }
+        }
     }
 
     private func searchEndpoint(for item: GitHubIssueSearchItem) -> String {

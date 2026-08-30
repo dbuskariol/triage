@@ -48,6 +48,7 @@ struct GitHubResponse<Value: Sendable>: Sendable {
     let etag: String?
     let lastModified: String?
     let ssoHeader: GitHubSSOHeader?
+    let source: GitHubResponseSource
 
     init(
         value: Value,
@@ -55,7 +56,8 @@ struct GitHubResponse<Value: Sendable>: Sendable {
         linkHeader: String? = nil,
         etag: String?,
         lastModified: String?,
-        ssoHeader: GitHubSSOHeader?
+        ssoHeader: GitHubSSOHeader?,
+        source: GitHubResponseSource = .network
     ) {
         self.value = value
         self.payload = payload
@@ -63,7 +65,13 @@ struct GitHubResponse<Value: Sendable>: Sendable {
         self.etag = etag
         self.lastModified = lastModified
         self.ssoHeader = ssoHeader
+        self.source = source
     }
+}
+
+enum GitHubResponseSource: Equatable, Sendable {
+    case network
+    case replay(RawAPISnapshotID)
 }
 
 struct GitHubUndecodableResponse: Equatable, Sendable {

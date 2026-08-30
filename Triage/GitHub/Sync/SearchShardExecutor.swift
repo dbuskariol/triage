@@ -6,6 +6,7 @@ enum SearchShardExecutorError: Error, Equatable, Sendable {
     case inaccessibleRepositoryPartition
     case incompleteSearchPage
     case invalidPersistedCursor
+    case notModifiedWithoutReplay
 }
 
 struct GitHubIssueSearchUndecodableResponseError: Error, Equatable, Sendable {
@@ -38,17 +39,20 @@ actor SearchShardExecutor {
     private let client: any GitHubIssueSearchExecuting
     private let shardRepository: SyncShardRepository
     private let planner: SearchShardPlanner
+    private let replayCache: RoleSearchPageReplayCache?
     private let clock: @Sendable () -> Date
 
     init(
         client: any GitHubIssueSearchExecuting,
         shardRepository: SyncShardRepository,
         planner: SearchShardPlanner = SearchShardPlanner(),
+        replayCache: RoleSearchPageReplayCache? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
         self.shardRepository = shardRepository
         self.planner = planner
+        self.replayCache = replayCache
         self.clock = clock
     }
 
@@ -115,7 +119,6 @@ actor SearchShardExecutor {
 
         do {
             let firstResponse = try await response(
-                for: try await client.searchResult(query, page: 1),
                 query: query,
                 page: 1,
                 shard: &shard,
@@ -132,28 +135,27 @@ actor SearchShardExecutor {
             case .complete:
                 let pageCount = max(1, Int(ceil(Double(firstPage.totalCount) / 100)))
                 let resumePage = try pageAfter(cursor: shard.pageCursor, pageCount: pageCount)
-                if resumePage == 1 {
-                    let targetShard = pageCount == 1
+                let firstTargetShard = resumePage == 1
+                    ? (pageCount == 1
                         ? completed(shard, cursor: "1")
-                        : running(shard, cursor: "1")
-                    try await persistPage(
-                        try await preparePage(firstResponse, query, 1),
-                        advancing: targetShard,
-                        accountID: accountID
-                    )
-                    shard = targetShard
-                }
-                if pageCount == 1 || resumePage > pageCount {
-                    if shard.state != .completed {
-                        shard = completed(shard, cursor: String(pageCount))
+                        : running(shard, cursor: "1"))
+                    : shard
+                try await persistPage(
+                    try await preparePage(firstResponse, query, 1),
+                    advancing: firstTargetShard,
+                    accountID: accountID
+                )
+                shard = firstTargetShard
+                if pageCount == 1 {
+                    if shard.state != .completed || shard.pageCursor != "1" {
+                        shard = completed(shard, cursor: "1")
                         try await shardRepository.save(shard, accountID: accountID)
                     }
                     return
                 }
-                for page in max(2, resumePage)...pageCount {
+                for page in 2...pageCount {
                     try Task.checkCancellation()
                     let response = try await response(
-                        for: try await client.searchResult(query, page: page),
                         query: query,
                         page: page,
                         shard: &shard,
@@ -182,15 +184,24 @@ actor SearchShardExecutor {
                         )
                         return
                     }
-                    let targetShard = page == pageCount
-                        ? completed(shard, cursor: String(page))
-                        : running(shard, cursor: String(page))
+                    let targetShard: SyncShard
+                    if page < resumePage {
+                        targetShard = shard
+                    } else if page == pageCount {
+                        targetShard = completed(shard, cursor: String(page))
+                    } else {
+                        targetShard = running(shard, cursor: String(page))
+                    }
                     try await persistPage(
                         try await preparePage(response, query, page),
                         advancing: targetShard,
                         accountID: accountID
                     )
                     shard = targetShard
+                }
+                if shard.state != .completed {
+                    shard = completed(shard, cursor: String(pageCount))
+                    try await shardRepository.save(shard, accountID: accountID)
                 }
 
             case .split, .repositoryPartitionRequired:
@@ -292,26 +303,87 @@ actor SearchShardExecutor {
     }
 
     private func response(
-        for result: GitHubIssueSearchResult,
         query: GitHubIssueSearchQuery,
         page: Int,
         shard: inout SyncShard,
         accountID: AccountID,
         prepareUndecodablePage: @escaping UndecodablePagePreparer
     ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+        let cachedEntry = try await replayCache?.entry(for: query, page: page)
+        let result = try await client.searchResult(
+            query,
+            page: page,
+            ifNoneMatch: cachedEntry?.replay.eTag
+        )
         switch result {
         case let .response(response):
             return response
         case let .undecodable(response):
-            let failedShard = failed(shard)
-            try await persistPage(
-                try await prepareUndecodablePage(response, query, page),
-                advancing: failedShard,
-                accountID: accountID
+            return try await failUndecodableResponse(
+                response,
+                query: query,
+                page: page,
+                shard: &shard,
+                accountID: accountID,
+                prepareUndecodablePage: prepareUndecodablePage
             )
-            shard = failedShard
-            throw GitHubIssueSearchUndecodableResponseError(ssoHeader: response.ssoHeader)
+        case let .notModified(ssoHeader):
+            guard let cachedEntry else {
+                throw SearchShardExecutorError.notModifiedWithoutReplay
+            }
+            do {
+                return GitHubResponse(
+                    value: try GitHubIssueSearchClient.decodeReplayPayload(
+                        cachedEntry.snapshot.payload
+                    ),
+                    payload: cachedEntry.snapshot.payload,
+                    etag: cachedEntry.replay.eTag,
+                    lastModified: nil,
+                    ssoHeader: ssoHeader,
+                    source: .replay(cachedEntry.snapshot.id)
+                )
+            } catch {
+                try await replayCache?.invalidate(query: query, page: page)
+                let retry = try await client.searchResult(
+                    query,
+                    page: page,
+                    ifNoneMatch: nil
+                )
+                switch retry {
+                case let .response(response):
+                    return response
+                case let .undecodable(response):
+                    return try await failUndecodableResponse(
+                        response,
+                        query: query,
+                        page: page,
+                        shard: &shard,
+                        accountID: accountID,
+                        prepareUndecodablePage: prepareUndecodablePage
+                    )
+                case .notModified:
+                    throw SearchShardExecutorError.notModifiedWithoutReplay
+                }
+            }
         }
+    }
+
+    private func failUndecodableResponse(
+        _ response: GitHubUndecodableResponse,
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        shard: inout SyncShard,
+        accountID: AccountID,
+        prepareUndecodablePage: @escaping UndecodablePagePreparer
+    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+        let failedShard = failed(shard)
+        try await persistPage(
+            try await prepareUndecodablePage(response, query, page),
+            advancing: failedShard,
+            accountID: accountID
+        )
+        shard = failedShard
+        throw GitHubIssueSearchUndecodableResponseError(ssoHeader: response.ssoHeader)
     }
 
     private func running(_ shard: SyncShard, cursor: String?) -> SyncShard {
