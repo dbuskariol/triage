@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "031-raw-request-authority")
+        XCTAssertEqual(migrations.last?.id, "032-timeline-replay-receipts")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "5d7c3aa43bbc9a8a962b2bf34625b8e86fc59da3157656e5d1897182b72f5db3"
+            "7df5b7b72474a35f4ec6fe1e3c850661553c3ecd8ab05a502347d2013b89db88"
         )
         try await registry.closeAll()
     }
@@ -98,7 +98,8 @@ final class AccountVaultTests: XCTestCase {
                     FROM schema_migrations
                     WHERE id NOT IN (
                         '030-revision-scoped-conditional-requests',
-                        '031-raw-request-authority'
+                        '031-raw-request-authority',
+                        '032-timeline-replay-receipts'
                     )
                     ORDER BY id
                     """
@@ -208,6 +209,13 @@ final class AccountVaultTests: XCTestCase {
                         SELECT checksum FROM schema_migrations
                         WHERE id = '031-raw-request-authority'
                         """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '032-timeline-replay-receipts'
+                        """
                 )
             )
         }
@@ -225,6 +233,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(
             migrated.5,
             "5d7c3aa43bbc9a8a962b2bf34625b8e86fc59da3157656e5d1897182b72f5db3"
+        )
+        XCTAssertEqual(
+            migrated.6,
+            "7df5b7b72474a35f4ec6fe1e3c850661553c3ecd8ab05a502347d2013b89db88"
         )
     }
 

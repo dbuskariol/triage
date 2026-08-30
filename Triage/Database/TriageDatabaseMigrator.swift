@@ -1181,6 +1181,70 @@ enum TriageDatabaseMigrator {
                     parser_version, observed_at_ms DESC, id DESC
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "032-timeline-replay-receipts",
+            checksum: "7df5b7b72474a35f4ec6fe1e3c850661553c3ecd8ab05a502347d2013b89db88"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE timeline_replay_receipts (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    github_node_id TEXT NOT NULL
+                        REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'timelines'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL CHECK (
+                        length(request_key) BETWEEN 1 AND 2048
+                    ),
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    normalized_source_revision TEXT NOT NULL CHECK (
+                        length(normalized_source_revision) BETWEEN 1 AND 500
+                    ),
+                    raw_source_revision TEXT NOT NULL CHECK (
+                        length(raw_source_revision) BETWEEN 1 AND 500
+                    ),
+                    etag TEXT CHECK (
+                        etag IS NULL OR length(etag) BETWEEN 1 AND 2048
+                    ),
+                    last_modified TEXT CHECK (
+                        last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048
+                    ),
+                    validator_observed_at_ms INTEGER NOT NULL,
+                    first_raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE CASCADE,
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    page_count INTEGER NOT NULL CHECK (page_count BETWEEN 1 AND 100),
+                    normalized_event_count INTEGER NOT NULL CHECK (normalized_event_count >= 0),
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    completed_at_ms INTEGER NOT NULL,
+                    UNIQUE (
+                        account_id, organization_id, github_node_id, feature, stream_id,
+                        request_key, credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE timeline_replay_receipt_pages (
+                    receipt_id TEXT NOT NULL
+                        REFERENCES timeline_replay_receipts(id) ON DELETE CASCADE,
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE CASCADE,
+                    PRIMARY KEY (receipt_id, page_index),
+                    UNIQUE (receipt_id, raw_snapshot_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX timeline_replay_receipt_pages_snapshot
+                ON timeline_replay_receipt_pages (raw_snapshot_id)
+                """)
         }
     ]
 }

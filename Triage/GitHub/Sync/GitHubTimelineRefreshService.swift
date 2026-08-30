@@ -394,7 +394,16 @@ actor GitHubTimelineRefreshService {
                 ) {
                     throw ControlFlowError.ssoRequired(scopedHeader)
                 }
-                try await conditionalRequestCacheRepository.remove(for: identity)
+                try Task.checkCancellation()
+                if let validator,
+                   try await eventRepository.completeNotModifiedReplay(
+                    candidate: candidate,
+                    validator: validator,
+                    observedAt: observedAt
+                   ) {
+                    try Task.checkCancellation()
+                    return .refreshed
+                }
                 try Task.checkCancellation()
                 guard budget.reservePage() else {
                     throw ControlFlowError.budgetExhausted
@@ -517,6 +526,7 @@ actor GitHubTimelineRefreshService {
         }
         let conditionalIdentity = Self.conditionalRequestIdentity(for: candidate, scope: scope)
         let conditionalMutation: ConditionalRequestCacheMutation
+        let persistedValidator: ConditionalRequestValidator?
         let currentTraversalValidators: GitHubHTTPValidators?
         if let firstPageValidators {
             currentTraversalValidators = firstPageValidators
@@ -529,15 +539,16 @@ actor GitHubTimelineRefreshService {
             currentTraversalValidators = nil
         }
         if let currentTraversalValidators {
-            conditionalMutation = .save(
-                ConditionalRequestValidator(
-                    identity: conditionalIdentity,
-                    eTag: currentTraversalValidators.eTag,
-                    lastModified: currentTraversalValidators.lastModified,
-                    observedAt: observedAt
-                )
+            let validator = ConditionalRequestValidator(
+                identity: conditionalIdentity,
+                eTag: currentTraversalValidators.eTag,
+                lastModified: currentTraversalValidators.lastModified,
+                observedAt: observedAt
             )
+            persistedValidator = validator
+            conditionalMutation = .save(validator)
         } else {
+            persistedValidator = nil
             conditionalMutation = .remove(conditionalIdentity)
         }
         try Task.checkCancellation()
@@ -547,7 +558,14 @@ actor GitHubTimelineRefreshService {
             accountID: accountID,
             organizationID: organizationID,
             observedAt: observedAt,
-            conditionalRequestCacheMutation: conditionalMutation
+            conditionalRequestCacheMutation: conditionalMutation,
+            replayReceipt: persistedValidator.map {
+                TimelineReplayReceiptInput(
+                    validator: $0,
+                    rawSourceRevision: candidate.sourceRevision,
+                    pages: saved.pageProvenances
+                )
+            }
         )
         try Task.checkCancellation()
         return .refreshed
