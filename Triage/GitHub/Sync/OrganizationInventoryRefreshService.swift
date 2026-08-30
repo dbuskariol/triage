@@ -229,12 +229,11 @@ actor OrganizationInventoryRefreshService {
             context: context
         )
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
-        let eTag = validator.flatMap {
-            $0.observedAt >= observedAt.addingTimeInterval(
-                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
-            ) ? $0.eTag : nil
-        }
-        let fetched = try await client.fetchRepositories(in: context.organization.login, eTag: eTag)
+        let requestValidators = try currentHTTPValidators(from: validator, observedAt: observedAt)
+        let fetched = try await client.fetchRepositories(
+            in: context.organization.login,
+            validators: requestValidators
+        )
         try Task.checkCancellation()
         let coverage = completeCoverage(feature: .repositories, context: context, observedAt: observedAt)
         switch fetched {
@@ -276,6 +275,7 @@ actor OrganizationInventoryRefreshService {
                 )
                 try Self.persistConditionalValidator(
                     eTag: inventory.pages.first?.page.etag,
+                    lastModified: inventory.pages.first?.page.lastModified,
                     identity: conditionalIdentity,
                     observedAt: observedAt,
                     expectedAccountID: context.account.id,
@@ -311,12 +311,11 @@ actor OrganizationInventoryRefreshService {
             context: context
         )
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
-        let eTag = validator.flatMap {
-            $0.observedAt >= observedAt.addingTimeInterval(
-                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
-            ) ? $0.eTag : nil
-        }
-        let fetched = try await client.fetchTeams(in: context.organization.login, eTag: eTag)
+        let requestValidators = try currentHTTPValidators(from: validator, observedAt: observedAt)
+        let fetched = try await client.fetchTeams(
+            in: context.organization.login,
+            validators: requestValidators
+        )
         try Task.checkCancellation()
         let updatedTeams: [GitHubTeamDTO]?
         let teamPages: [GitHubRepositoryTeamPage<GitHubTeamDTO>]
@@ -426,6 +425,7 @@ actor OrganizationInventoryRefreshService {
             if preparedUpdatedTeams != nil {
                 try Self.persistConditionalValidator(
                     eTag: preparedTeamPages.first?.page.etag,
+                    lastModified: preparedTeamPages.first?.page.lastModified,
                     identity: conditionalIdentity,
                     observedAt: observedAt,
                     expectedAccountID: context.account.id,
@@ -630,19 +630,37 @@ actor OrganizationInventoryRefreshService {
         )
     }
 
+    private func currentHTTPValidators(
+        from validator: ConditionalRequestValidator?,
+        observedAt: Date
+    ) throws -> GitHubHTTPValidators? {
+        guard let validator,
+              validator.observedAt >= observedAt.addingTimeInterval(
+                  -OrganizationInventoryRefreshCadence.fullReconciliationInterval
+              )
+        else {
+            return nil
+        }
+        return try GitHubHTTPValidators(
+            eTag: validator.eTag,
+            lastModified: validator.lastModified
+        )
+    }
+
     private nonisolated static func persistConditionalValidator(
         eTag: String?,
+        lastModified: String?,
         identity: ConditionalRequestIdentity,
         observedAt: Date,
         expectedAccountID: AccountID,
         in database: Database
     ) throws {
-        if let eTag {
+        if eTag != nil || lastModified != nil {
             try ConditionalRequestCacheRepository.save(
                 ConditionalRequestValidator(
                     identity: identity,
                     eTag: eTag,
-                    lastModified: nil,
+                    lastModified: lastModified,
                     observedAt: observedAt
                 ),
                 expectedAccountID: expectedAccountID,

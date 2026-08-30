@@ -188,12 +188,11 @@ actor GitHubTimelineClient {
         repository: GitHubRepositoryPath,
         issueOrPullRequestNumber: Int,
         page: Int = 1,
-        ifNoneMatch: String? = nil
+        validators: GitHubHTTPValidators? = nil
     ) async throws -> GitHubTimelinePageResult {
         guard issueOrPullRequestNumber > 0 else {
             throw GitHubRepositoryPathError.invalidPullRequestNumber
         }
-        let headers = ifNoneMatch.map { ["If-None-Match": $0] } ?? [:]
         do {
             let decodingResult = try await client.getPagePreservingUndecodablePayload(
                 GitHubTimelineEventDTO.self,
@@ -203,7 +202,7 @@ actor GitHubTimelineClient {
                         URLQueryItem(name: "per_page", value: "100"),
                         URLQueryItem(name: "page", value: String(max(page, 1)))
                     ],
-                    headers: headers
+                    validators: validators
                 )
             )
             guard case let .page(result) = decodingResult else {
@@ -220,6 +219,9 @@ actor GitHubTimelineClient {
             )
             return .page(result)
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            guard validators != nil else {
+                throw GitHubTimelineClientError.unexpectedNotModified
+            }
             return .notModified(ssoHeader: failure.ssoHeader)
         }
     }
@@ -256,12 +258,12 @@ actor GitHubTimelineClient {
     func allTimeline(
         repository: GitHubRepositoryPath,
         issueOrPullRequestNumber: Int,
-        ifNoneMatch: String? = nil
+        validators: GitHubHTTPValidators? = nil
     ) async throws -> GitHubTimelineInventory {
         let first = try await firstPage(
             repository: repository,
             issueOrPullRequestNumber: issueOrPullRequestNumber,
-            ifNoneMatch: ifNoneMatch
+            validators: validators
         )
         guard case let .page(initialPage) = first else {
             if case let .notModified(ssoHeader) = first {

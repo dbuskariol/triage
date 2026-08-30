@@ -472,6 +472,68 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(eventIDs, ["authoritative-event"])
     }
 
+    func testLastModifiedNotModifiedRetriesUnconditionallyAndPersistsFreshValidatorPair() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: fixture.scope.accountID,
+                organizationID: fixture.scope.organizationID,
+                repositoryID: fixture.repositoryID,
+                feature: .timelines,
+                streamID: fixture.timelineStreamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: fixture.scope.credentialRevision,
+                capabilityRevision: fixture.scope.capabilityRevision,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.observedAt
+        )
+        let oldLastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let conditionalRequests = ConditionalRequestCacheRepository(vault: fixture.vault)
+        try await conditionalRequests.save(
+            ConditionalRequestValidator(
+                identity: fixture.conditionalRequestIdentity,
+                eTag: nil,
+                lastModified: oldLastModified,
+                observedAt: fixture.observedAt
+            )
+        )
+        let session = ConditionalTimelineSession()
+        let service = GitHubTimelineRefreshService(
+            client: GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )),
+            candidateRepository: TimelineCandidateRepository(vault: fixture.vault),
+            eventRepository: TimelineEventRepository(vault: fixture.vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: fixture.vault),
+            conditionalRequestCacheRepository: conditionalRequests
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(result.outcomes.map(\.status), [.refreshed])
+        let receivedETags = await session.receivedValidators()
+        let receivedLastModified = await session.receivedLastModifiedValidators()
+        XCTAssertEqual(receivedETags, [nil, nil])
+        XCTAssertEqual(receivedLastModified, [oldLastModified, nil])
+        let persisted = try await conditionalRequests.validator(
+            for: fixture.conditionalRequestIdentity
+        )
+        XCTAssertEqual(persisted?.eTag, "new-etag")
+        XCTAssertEqual(persisted?.lastModified, "Thu, 22 Oct 2015 07:28:00 GMT")
+    }
+
     func testFreshTimelineWithoutETagAtomicallyRemovesPriorValidator() async throws {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
@@ -1070,12 +1132,16 @@ private actor TimelineRefreshSession: HTTPSession {
 
 private actor ConditionalTimelineSession: HTTPSession {
     private var validators = [String?]()
+    private var lastModifiedValidators = [String?]()
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let validator = request.value(forHTTPHeaderField: "If-None-Match")
+        let lastModified = request.value(forHTTPHeaderField: "If-Modified-Since")
         validators.append(validator)
-        let statusCode = validator == nil ? 200 : 304
-        let body = validator == nil
+        lastModifiedValidators.append(lastModified)
+        let isConditional = validator != nil || lastModified != nil
+        let statusCode = isConditional ? 304 : 200
+        let body = !isConditional
             ? Data(#"[{"id":"authoritative-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8)
             : Data()
         return (
@@ -1084,12 +1150,21 @@ private actor ConditionalTimelineSession: HTTPSession {
                 url: request.url!,
                 statusCode: statusCode,
                 httpVersion: nil,
-                headerFields: validator == nil ? ["ETag": "new-etag"] : nil
+                headerFields: !isConditional
+                    ? [
+                        "ETag": "new-etag",
+                        "Last-Modified": "Thu, 22 Oct 2015 07:28:00 GMT"
+                    ]
+                    : nil
             )!
         )
     }
 
     func receivedValidators() -> [String?] {
         validators
+    }
+
+    func receivedLastModifiedValidators() -> [String?] {
+        lastModifiedValidators
     }
 }

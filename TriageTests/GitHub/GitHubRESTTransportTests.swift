@@ -8,7 +8,7 @@ final class GitHubRESTTransportTests: XCTestCase {
         let request = try GitHubRESTRequest(
             path: "/user",
             query: [URLQueryItem(name: "per_page", value: "100")],
-            headers: ["If-None-Match": "\"etag\""]
+            validators: GitHubHTTPValidators(eTag: "\"etag\"", lastModified: nil)
         )
 
         _ = try await transport.send(request, credential: SecretValue("token"))
@@ -19,6 +19,66 @@ final class GitHubRESTTransportTests: XCTestCase {
         XCTAssertEqual(captured.value(forHTTPHeaderField: "Authorization"), "Bearer token")
         XCTAssertEqual(captured.value(forHTTPHeaderField: "X-GitHub-Api-Version"), "2026-03-10")
         XCTAssertEqual(captured.value(forHTTPHeaderField: "If-None-Match"), "\"etag\"")
+    }
+
+    func testConditionalHeadersUseETagPrecedenceAndLastModifiedFallback() throws {
+        let eTagOnly = try GitHubRESTRequest(
+            path: "/user",
+            validators: GitHubHTTPValidators(eTag: "\"etag\"", lastModified: nil)
+        )
+        XCTAssertEqual(eTagOnly.headers["If-None-Match"], "\"etag\"")
+        XCTAssertNil(eTagOnly.headers["If-Modified-Since"])
+
+        let lastModifiedOnly = try GitHubRESTRequest(
+            path: "/user",
+            validators: GitHubHTTPValidators(
+                eTag: nil,
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+        XCTAssertNil(lastModifiedOnly.headers["If-None-Match"])
+        XCTAssertEqual(
+            lastModifiedOnly.headers["If-Modified-Since"],
+            "Wed, 21 Oct 2015 07:28:00 GMT"
+        )
+
+        let both = try GitHubRESTRequest(
+            path: "/user",
+            validators: GitHubHTTPValidators(
+                eTag: "\"etag\"",
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+        XCTAssertEqual(both.headers["If-None-Match"], "\"etag\"")
+        XCTAssertNil(both.headers["If-Modified-Since"])
+
+        let unconditional = try GitHubRESTRequest(path: "/user")
+        XCTAssertNil(unconditional.headers["If-None-Match"])
+        XCTAssertNil(unconditional.headers["If-Modified-Since"])
+    }
+
+    func testConditionalValidatorsRejectMissingUnsafeAndGenericHeaderValues() {
+        XCTAssertThrowsError(try GitHubHTTPValidators(eTag: nil, lastModified: nil)) {
+            XCTAssertEqual($0 as? GitHubHTTPValidatorError, .missingValidator)
+        }
+        XCTAssertThrowsError(
+            try GitHubHTTPValidators(eTag: "\"etag\"\r\nInjected: true", lastModified: nil)
+        ) {
+            XCTAssertEqual($0 as? GitHubHTTPValidatorError, .invalidETag)
+        }
+        XCTAssertThrowsError(
+            try GitHubHTTPValidators(eTag: nil, lastModified: "unsafe\u{007f}date")
+        ) {
+            XCTAssertEqual($0 as? GitHubHTTPValidatorError, .invalidLastModified)
+        }
+        XCTAssertThrowsError(
+            try GitHubRESTRequest(path: "/user", headers: ["if-none-match": "\"etag\""])
+        ) {
+            XCTAssertEqual(
+                $0 as? GitHubTransportError,
+                .conditionalHeadersRequireTypedValidator
+            )
+        }
     }
 
     func testTransportRejectsNonGitHubAndTraversalPaths() async throws {

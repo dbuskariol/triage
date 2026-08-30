@@ -374,6 +374,9 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
         guard (1...100).contains(page) else {
             throw GitHubIssueSearchError.invalidPage
         }
+        let validators = try ifNoneMatch.map {
+            try GitHubHTTPValidators(eTag: $0, lastModified: nil)
+        }
         return try GitHubRESTRequest(
             path: "/search/issues",
             query: [
@@ -383,7 +386,7 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
                 URLQueryItem(name: "per_page", value: "100"),
                 URLQueryItem(name: "page", value: String(page))
             ],
-            headers: ifNoneMatch.map { ["If-None-Match": $0] } ?? [:]
+            validators: validators
         )
     }
 

@@ -55,7 +55,7 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         }
     }
 
-    func testRepositoryFetchSendsCachedETagAndPreservesNotModifiedState() async throws {
+    func testRepositoryFetchUsesETagPrecedenceAndPreservesNotModifiedState() async throws {
         let session = RepositoryTeamPagingSession(responses: [
             "/orgs/acme/repos?type=all&per_page=100": (Data(), [:], 304)
         ])
@@ -66,13 +66,72 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
             )
         )
 
-        let result = try await client.fetchRepositories(in: "acme", eTag: "\"inventory-v1\"")
+        let result = try await client.fetchRepositories(
+            in: "acme",
+            validators: GitHubHTTPValidators(
+                eTag: "\"inventory-v1\"",
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
 
         guard case .notModified = result else {
             return XCTFail("A 304 must not be interpreted as an empty inventory.")
         }
         let ifNoneMatch = await session.header(named: "If-None-Match")
         XCTAssertEqual(ifNoneMatch, "\"inventory-v1\"")
+        let ifModifiedSince = await session.header(named: "If-Modified-Since")
+        XCTAssertNil(ifModifiedSince)
+    }
+
+    func testRepositoryFetchUsesLastModifiedFallback() async throws {
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": (Data(), [:], 304)
+        ])
+        let client = GitHubRepositoryTeamClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )
+        )
+
+        let result = try await client.fetchRepositories(
+            in: "acme",
+            validators: GitHubHTTPValidators(
+                eTag: nil,
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+
+        guard case .notModified = result else {
+            return XCTFail("A conditional 304 must preserve cached inventory.")
+        }
+        let ifNoneMatch = await session.header(named: "If-None-Match")
+        let ifModifiedSince = await session.header(named: "If-Modified-Since")
+        XCTAssertNil(ifNoneMatch)
+        XCTAssertEqual(
+            ifModifiedSince,
+            "Wed, 21 Oct 2015 07:28:00 GMT"
+        )
+    }
+
+    func testRepositoryFetchRejectsUnsolicitedNotModified() async throws {
+        let client = GitHubRepositoryTeamClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(
+                    session: RepositoryTeamPagingSession(responses: [
+                        "/orgs/acme/repos?type=all&per_page=100": (Data(), [:], 304)
+                    ])
+                ),
+                credential: SecretValue("token")
+            )
+        )
+
+        do {
+            _ = try await client.fetchRepositories(in: "acme", validators: nil)
+            XCTFail("An unsolicited 304 has no cached-state authority.")
+        } catch let error as GitHubRepositoryTeamClientError {
+            XCTAssertEqual(error, .notModifiedWithoutCachedState)
+        }
     }
 
     private func repository(id: UInt64, nodeID: String, name: String) -> String {

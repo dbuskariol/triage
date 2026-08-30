@@ -12,7 +12,10 @@ final class GitHubTimelineClientTests: XCTestCase {
         let result = try await client.firstPage(
             repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
             issueOrPullRequestNumber: 42,
-            ifNoneMatch: "\"timeline-v1\""
+            validators: GitHubHTTPValidators(
+                eTag: "\"timeline-v1\"",
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
         )
 
         guard case let .notModified(ssoHeader) = result else {
@@ -20,7 +23,54 @@ final class GitHubTimelineClientTests: XCTestCase {
         }
         XCTAssertNil(ssoHeader)
         let observedValidator = await session.ifNoneMatch()
+        let observedLastModified = await session.ifModifiedSince()
         XCTAssertEqual(observedValidator, "\"timeline-v1\"")
+        XCTAssertNil(observedLastModified)
+    }
+
+    func testFirstPageUsesLastModifiedFallback() async throws {
+        let session = ConditionalTimelineSession()
+        let client = GitHubTimelineClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token")
+        ))
+
+        let result = try await client.firstPage(
+            repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+            issueOrPullRequestNumber: 42,
+            validators: GitHubHTTPValidators(
+                eTag: nil,
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+
+        guard case .notModified = result else {
+            return XCTFail("A Last-Modified-authorized 304 must retain cached source state.")
+        }
+        let observedETag = await session.ifNoneMatch()
+        let observedLastModified = await session.ifModifiedSince()
+        XCTAssertNil(observedETag)
+        XCTAssertEqual(
+            observedLastModified,
+            "Wed, 21 Oct 2015 07:28:00 GMT"
+        )
+    }
+
+    func testFirstPageRejectsUnsolicitedNotModified() async throws {
+        let client = GitHubTimelineClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: ConditionalTimelineSession()),
+            credential: SecretValue("token")
+        ))
+
+        do {
+            _ = try await client.firstPage(
+                repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+                issueOrPullRequestNumber: 42
+            )
+            XCTFail("An unsolicited 304 has no cached timeline authority.")
+        } catch let error as GitHubTimelineClientError {
+            XCTAssertEqual(error, .unexpectedNotModified)
+        }
     }
 
     func testAllTimelineUsesLinkPaginationAndPreservesEvents() async throws {
@@ -104,9 +154,11 @@ final class GitHubTimelineClientTests: XCTestCase {
 
 private actor ConditionalTimelineSession: HTTPSession {
     private var observedIfNoneMatch: String?
+    private var observedIfModifiedSince: String?
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         observedIfNoneMatch = request.value(forHTTPHeaderField: "If-None-Match")
+        observedIfModifiedSince = request.value(forHTTPHeaderField: "If-Modified-Since")
         return (
             Data(),
             HTTPURLResponse(
@@ -120,6 +172,10 @@ private actor ConditionalTimelineSession: HTTPSession {
 
     func ifNoneMatch() -> String? {
         observedIfNoneMatch
+    }
+
+    func ifModifiedSince() -> String? {
+        observedIfModifiedSince
     }
 }
 
