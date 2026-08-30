@@ -318,7 +318,7 @@ actor GitHubTimelineRefreshService {
         let accountID = scope.accountID
         let organizationID = scope.organizationID
         var ssoHeaders = [GitHubSSOHeader]()
-        var firstPageETag: String?
+        var firstPageValidators: GitHubHTTPValidators?
         var resumedFromCheckpoint = false
         let saved: TimelineSavedPageInventory
         if let checkpoint = try await candidateRepository.checkpoint(
@@ -361,6 +361,10 @@ actor GitHubTimelineRefreshService {
         } else {
             let identity = Self.conditionalRequestIdentity(for: candidate, scope: scope)
             let validator = try await conditionalRequestCacheRepository.validator(for: identity)
+            let requestValidators = try Self.httpValidators(
+                eTag: validator?.eTag,
+                lastModified: validator?.lastModified
+            )
             try Task.checkCancellation()
             guard budget.reservePage() else {
                 throw ControlFlowError.budgetExhausted
@@ -369,7 +373,7 @@ actor GitHubTimelineRefreshService {
                 candidate: candidate,
                 repository: candidate.repository,
                 issueOrPullRequestNumber: candidate.number,
-                ifNoneMatch: validator?.eTag,
+                validators: requestValidators,
                 accountID: accountID,
                 organizationID: organizationID,
                 githubOrganizationID: githubOrganizationID,
@@ -395,7 +399,7 @@ actor GitHubTimelineRefreshService {
                     candidate: candidate,
                     repository: candidate.repository,
                     issueOrPullRequestNumber: candidate.number,
-                    ifNoneMatch: nil,
+                    validators: nil,
                     accountID: accountID,
                     organizationID: organizationID,
                     githubOrganizationID: githubOrganizationID,
@@ -408,7 +412,10 @@ actor GitHubTimelineRefreshService {
             case .notModified:
                 throw GitHubTimelineClientError.unexpectedNotModified
             case let .page(firstPage):
-                firstPageETag = firstPage.etag
+                firstPageValidators = try Self.httpValidators(
+                    eTag: firstPage.etag,
+                    lastModified: firstPage.lastModified
+                )
                 if let ssoHeader = firstPage.ssoHeader {
                     ssoHeaders.append(ssoHeader)
                 }
@@ -499,14 +506,25 @@ actor GitHubTimelineRefreshService {
         }
         let conditionalIdentity = Self.conditionalRequestIdentity(for: candidate, scope: scope)
         let conditionalMutation: ConditionalRequestCacheMutation
-        let currentTraversalETag = firstPageETag
-            ?? (resumedFromCheckpoint ? saved.firstPageETag : nil)
-        if let eTag = currentTraversalETag {
+        let currentTraversalValidators: GitHubHTTPValidators?
+        if let firstPageValidators {
+            currentTraversalValidators = firstPageValidators
+        } else if resumedFromCheckpoint, let eTag = saved.firstPageETag {
+            // Raw timeline checkpoints currently retain ETag provenance only.
+            // Do not combine that new page ETag with an older Last-Modified value.
+            currentTraversalValidators = try GitHubHTTPValidators(
+                eTag: eTag,
+                lastModified: nil
+            )
+        } else {
+            currentTraversalValidators = nil
+        }
+        if let currentTraversalValidators {
             conditionalMutation = .save(
                 ConditionalRequestValidator(
                     identity: conditionalIdentity,
-                    eTag: eTag,
-                    lastModified: nil,
+                    eTag: currentTraversalValidators.eTag,
+                    lastModified: currentTraversalValidators.lastModified,
                     observedAt: observedAt
                 )
             )
@@ -614,7 +632,7 @@ actor GitHubTimelineRefreshService {
         candidate: TimelineCandidate,
         repository: GitHubRepositoryPath,
         issueOrPullRequestNumber: Int,
-        ifNoneMatch: String?,
+        validators: GitHubHTTPValidators?,
         accountID: AccountID,
         organizationID: OrganizationID,
         githubOrganizationID: UInt64,
@@ -625,7 +643,7 @@ actor GitHubTimelineRefreshService {
             return try await client.firstPage(
                 repository: repository,
                 issueOrPullRequestNumber: issueOrPullRequestNumber,
-                ifNoneMatch: ifNoneMatch
+                validators: validators
             )
         } catch let error as GitHubTimelineUndecodablePageError {
             try await preserveRejectedPayload(
@@ -845,5 +863,13 @@ actor GitHubTimelineRefreshService {
             streamID: SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!,
             requestKey: requestKey(for: candidate)
         )
+    }
+
+    private nonisolated static func httpValidators(
+        eTag: String?,
+        lastModified: String?
+    ) throws -> GitHubHTTPValidators? {
+        guard eTag != nil || lastModified != nil else { return nil }
+        return try GitHubHTTPValidators(eTag: eTag, lastModified: lastModified)
     }
 }

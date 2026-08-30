@@ -9,11 +9,19 @@ or an undocumented fallback.
 ## Shared transport rules
 
 All REST sources use an authenticated `GET`, GitHub API version headers, and
-the `Link` header for pagination. When GitHub returns an `ETag`, the next
-incremental request sends `If-None-Match`; a `304` records a successful,
-unchanged interval. REST cursor overlap is five minutes, except the discovery
-searches defined below. REST page and GraphQL connection limits are 100 and
-50 respectively unless a contract states otherwise.
+the `Link` header for pagination. When GitHub returns an `ETag`, the next exact
+incremental request sends `If-None-Match`. If that response has no ETag but
+does have `Last-Modified`, the next exact request may instead send
+`If-Modified-Since`; ETag always takes precedence and the two validators are
+not sent together. A `304` records a successful, unchanged interval only when
+the request carried a current credential/capability-revision validator for the
+same account, organization, feature, stream, endpoint, query, and first-page
+identity and committed normalized state exists. An unsolicited or
+cross-authority `304` fails closed. REST cursor overlap is five minutes, except
+the discovery searches defined below. REST page and GraphQL connection limits
+are 100 and 50 respectively unless a contract states otherwise. Search remains
+ETag-only until its snapshot-bound replay contract explicitly retains
+Last-Modified authority.
 
 All GraphQL documents must be committed under
 `Triage/GitHub/GraphQL/GitHubGraphQLQueries.swift`, use a named `query`

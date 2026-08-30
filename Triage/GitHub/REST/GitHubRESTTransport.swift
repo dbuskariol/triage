@@ -5,6 +5,54 @@ enum GitHubReadMethod: String, Sendable {
     case head = "HEAD"
 }
 
+enum GitHubHTTPValidatorError: Error, Equatable, Sendable {
+    case missingValidator
+    case invalidETag
+    case invalidLastModified
+}
+
+/// Conditional metadata for one exact GitHub REST request.
+///
+/// GitHub ETags are authoritative when available. `Last-Modified` is retained
+/// for an explicit `If-Modified-Since` fallback only when no ETag is present.
+struct GitHubHTTPValidators: Equatable, Sendable {
+    let eTag: String?
+    let lastModified: String?
+
+    init(eTag: String?, lastModified: String?) throws {
+        guard eTag != nil || lastModified != nil else {
+            throw GitHubHTTPValidatorError.missingValidator
+        }
+        guard Self.isValid(eTag) else {
+            throw GitHubHTTPValidatorError.invalidETag
+        }
+        guard Self.isValid(lastModified) else {
+            throw GitHubHTTPValidatorError.invalidLastModified
+        }
+        self.eTag = eTag
+        self.lastModified = lastModified
+    }
+
+    fileprivate var headers: [String: String] {
+        if let eTag {
+            return ["If-None-Match": eTag]
+        }
+        if let lastModified {
+            return ["If-Modified-Since": lastModified]
+        }
+        return [:]
+    }
+
+    private static func isValid(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return !value.isEmpty
+            && value.count <= 2_048
+            && !value.unicodeScalars.contains { scalar in
+                scalar.value < 0x20 || scalar.value == 0x7f
+            }
+    }
+}
+
 struct GitHubRESTRequest: Sendable {
     let method: GitHubReadMethod
     private let path: String?
@@ -16,7 +64,8 @@ struct GitHubRESTRequest: Sendable {
         method: GitHubReadMethod = .get,
         path: String,
         query: [URLQueryItem] = [],
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        validators: GitHubHTTPValidators? = nil
     ) throws {
         guard path.hasPrefix("/"),
               !path.split(separator: "/").contains("..")
@@ -27,13 +76,14 @@ struct GitHubRESTRequest: Sendable {
         self.path = path
         absoluteURL = nil
         self.query = query
-        self.headers = headers
+        self.headers = try Self.merging(headers: headers, validators: validators)
     }
 
     init(
         method: GitHubReadMethod = .get,
         nextPageURL: URL,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        validators: GitHubHTTPValidators? = nil
     ) throws {
         guard nextPageURL.scheme == "https", nextPageURL.host == "api.github.com" else {
             throw GitHubTransportError.invalidBaseURL
@@ -42,7 +92,7 @@ struct GitHubRESTRequest: Sendable {
         path = nil
         absoluteURL = nextPageURL
         query = []
-        self.headers = headers
+        self.headers = try Self.merging(headers: headers, validators: validators)
     }
 
     func resolvedURL(baseURL: URL) throws -> URL {
@@ -61,6 +111,20 @@ struct GitHubRESTRequest: Sendable {
 
     var pathForClassification: String? {
         path ?? absoluteURL?.path
+    }
+
+    private static func merging(
+        headers: [String: String],
+        validators: GitHubHTTPValidators?
+    ) throws -> [String: String] {
+        guard !headers.keys.contains(where: {
+            $0.caseInsensitiveCompare("If-None-Match") == .orderedSame
+                || $0.caseInsensitiveCompare("If-Modified-Since") == .orderedSame
+        }) else {
+            throw GitHubTransportError.conditionalHeadersRequireTypedValidator
+        }
+        guard let validators else { return headers }
+        return headers.merging(validators.headers) { _, validator in validator }
     }
 }
 
@@ -81,6 +145,7 @@ enum GitHubTransportError: Error, Equatable, Sendable {
     case invalidURL
     case unexpectedResponse
     case responseTooLarge
+    case conditionalHeadersRequireTypedValidator
 }
 
 protocol HTTPSession: Sendable {

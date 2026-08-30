@@ -51,6 +51,106 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(sentValidators, [nil, "\"repository-v1\""])
     }
 
+    func testRepositoryLastModifiedFallbackIsPersistedAndReused() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["Last-Modified": lastModified]
+            ),
+            .http(statusCode: 304, body: Data())
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let repositories = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        XCTAssertEqual(repositories.map(\.name), ["repo"])
+        let eTags = await session.validators()
+        let lastModifiedValues = await session.lastModifiedValidators()
+        XCTAssertEqual(eTags, [nil, nil])
+        XCTAssertEqual(lastModifiedValues, [nil, lastModified])
+        let persisted = try await fixture.conditionalValidator(feature: .repositories)
+        XCTAssertNil(persisted?.eTag)
+        XCTAssertEqual(persisted?.lastModified, lastModified)
+    }
+
+    func testRepositoryPersistsBothValidatorsButSendsOnlyETag() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\"", "Last-Modified": lastModified]
+            ),
+            .http(statusCode: 304, body: Data())
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        let eTags = await session.validators()
+        let lastModifiedValues = await session.lastModifiedValidators()
+        XCTAssertEqual(eTags, [nil, "\"repository-v1\""])
+        XCTAssertEqual(lastModifiedValues, [nil, nil])
+        let persisted = try await fixture.conditionalValidator(feature: .repositories)
+        XCTAssertEqual(persisted?.eTag, "\"repository-v1\"")
+        XCTAssertEqual(persisted?.lastModified, lastModified)
+    }
+
+    func testStaleRepositoryLastModifiedIsNotSentDuringFullReconciliation() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["Last-Modified": lastModified]
+            ),
+            .http(statusCode: 200, body: fixture.repositoryPayload())
+        ])
+
+        _ = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        _ = try await fixture.service(
+            session: session,
+            now: fixture.observedAt.addingTimeInterval(
+                OrganizationInventoryRefreshCadence.fullReconciliationInterval + 1
+            )
+        ).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        let eTags = await session.validators()
+        let lastModifiedValues = await session.lastModifiedValidators()
+        let persisted = try await fixture.conditionalValidator(feature: .repositories)
+        XCTAssertEqual(eTags, [nil, nil])
+        XCTAssertEqual(lastModifiedValues, [nil, nil])
+        XCTAssertNil(persisted)
+    }
+
     func testRepositoryValidatorIsCurrentRevisionScopedAndRotatesWithoutReuse() async throws {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
@@ -103,12 +203,13 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
     func testTeamNotModifiedUsesOnlyItsScopedValidatorAndPreservesMembership() async throws {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
         let session = ScriptedInventorySession(responses: [
             .http(statusCode: 200, body: Data("[]".utf8)),
             .http(
                 statusCode: 200,
                 body: fixture.teamPayload(),
-                headers: ["ETag": "\"teams-v1\""]
+                headers: ["ETag": "\"teams-v1\"", "Last-Modified": lastModified]
             ),
             .http(statusCode: 200, body: fixture.activeMembershipPayload()),
             .http(statusCode: 200, body: Data("[]".utf8)),
@@ -133,7 +234,12 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(teams.first?.membershipState, "active")
         XCTAssertEqual(coverage.status, .complete)
         let sentValidators = await session.validators()
+        let sentLastModified = await session.lastModifiedValidators()
         XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
+        XCTAssertEqual(sentLastModified, [nil, nil, nil, nil, nil, nil])
+        let persisted = try await fixture.conditionalValidator(feature: .teams)
+        XCTAssertEqual(persisted?.eTag, "\"teams-v1\"")
+        XCTAssertEqual(persisted?.lastModified, lastModified)
     }
 
     func testRepositorySuccessSurvivesIndependentTeamFailure() async throws {
@@ -371,7 +477,10 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
         )
     }
 
-    func service(session: ScriptedInventorySession) throws -> OrganizationInventoryRefreshService {
+    func service(
+        session: ScriptedInventorySession,
+        now: Date? = nil
+    ) throws -> OrganizationInventoryRefreshService {
         let client = GitHubRepositoryTeamClient(
             client: GitHubRESTClient(
                 transport: try GitHubRESTTransport(session: session),
@@ -382,7 +491,35 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
             vaultRegistry: registry,
             vaultKeyReader: { _ in self.vaultKey },
             repositoryTeamClientFactory: { _, _, _ in client },
-            clock: { self.observedAt }
+            clock: { now ?? self.observedAt }
+        )
+    }
+
+    func conditionalValidator(feature: CoverageFeature) async throws -> ConditionalRequestValidator? {
+        let streamID = SyncStreamID(
+            rawValue: "inventory-\(feature.rawValue)-\(organization.id.rawValue)"
+        )!
+        let requestKey: String
+        switch feature {
+        case .repositories:
+            requestKey = "GET /orgs/\(organization.login)/repos?type=all&per_page=100"
+        case .teams:
+            requestKey = "GET /orgs/\(organization.login)/teams?per_page=100"
+        default:
+            throw OrganizationInventoryFixtureError.unsupportedFeature
+        }
+        return try await ConditionalRequestCacheRepository(vault: vault).validator(
+            for: ConditionalRequestIdentity(
+                scope: SynchronizationScope(
+                    accountID: account.id,
+                    organizationID: organization.id,
+                    credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                    capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+                ),
+                feature: feature,
+                streamID: streamID,
+                requestKey: requestKey
+            )
         )
     }
 
@@ -483,6 +620,7 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
 
 private enum OrganizationInventoryFixtureError: Error {
     case missingCoverage
+    case unsupportedFeature
 }
 
 private actor ScriptedInventorySession: HTTPSession {
@@ -495,6 +633,7 @@ private actor ScriptedInventorySession: HTTPSession {
     private var responses: [Response]
     private var requestedPaths = [String]()
     private var requestedValidators = [String?]()
+    private var requestedLastModifiedValidators = [String?]()
 
     init(responses: [Response]) {
         self.responses = responses
@@ -503,6 +642,9 @@ private actor ScriptedInventorySession: HTTPSession {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requestedPaths.append(request.url!.path)
         requestedValidators.append(request.value(forHTTPHeaderField: "If-None-Match"))
+        requestedLastModifiedValidators.append(
+            request.value(forHTTPHeaderField: "If-Modified-Since")
+        )
         guard !responses.isEmpty else {
             throw GitHubTransportError.unexpectedResponse
         }
@@ -541,5 +683,9 @@ private actor ScriptedInventorySession: HTTPSession {
 
     func validators() -> [String?] {
         requestedValidators
+    }
+
+    func lastModifiedValidators() -> [String?] {
+        requestedLastModifiedValidators
     }
 }

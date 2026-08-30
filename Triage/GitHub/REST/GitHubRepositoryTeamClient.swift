@@ -74,7 +74,7 @@ actor GitHubRepositoryTeamClient {
     func allRepositories(
         in organization: String
     ) async throws -> GitHubRepositoryTeamInventory<GitHubRepositoryDTO> {
-        let result = try await fetchRepositories(in: organization, eTag: nil)
+        let result = try await fetchRepositories(in: organization, validators: nil)
         guard case let .modified(inventory) = result else {
             throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
         }
@@ -83,7 +83,7 @@ actor GitHubRepositoryTeamClient {
 
     func fetchRepositories(
         in organization: String,
-        eTag: String?
+        validators: GitHubHTTPValidators?
     ) async throws -> GitHubRepositoryTeamFetch<GitHubRepositoryDTO> {
         try validateOrganizationLogin(organization)
         let result = try await allPages(
@@ -93,7 +93,7 @@ actor GitHubRepositoryTeamClient {
                 URLQueryItem(name: "type", value: "all"),
                 URLQueryItem(name: "per_page", value: "100")
             ],
-            eTag: eTag,
+            validators: validators,
             validator: { try Self.validate($0, organization: organization) }
         )
         guard case let .modified(inventory) = result else {
@@ -110,7 +110,7 @@ actor GitHubRepositoryTeamClient {
     func allTeams(
         in organization: String
     ) async throws -> GitHubRepositoryTeamInventory<GitHubTeamDTO> {
-        let result = try await fetchTeams(in: organization, eTag: nil)
+        let result = try await fetchTeams(in: organization, validators: nil)
         guard case let .modified(inventory) = result else {
             throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
         }
@@ -119,14 +119,14 @@ actor GitHubRepositoryTeamClient {
 
     func fetchTeams(
         in organization: String,
-        eTag: String?
+        validators: GitHubHTTPValidators?
     ) async throws -> GitHubRepositoryTeamFetch<GitHubTeamDTO> {
         try validateOrganizationLogin(organization)
         let result = try await allPages(
             GitHubTeamDTO.self,
             path: "/orgs/\(organization)/teams",
             query: [URLQueryItem(name: "per_page", value: "100")],
-            eTag: eTag,
+            validators: validators,
             validator: Self.validate
         )
         guard case let .modified(inventory) = result else {
@@ -168,19 +168,22 @@ actor GitHubRepositoryTeamClient {
         _ type: Value.Type,
         path: String,
         query: [URLQueryItem],
-        eTag: String?,
+        validators: GitHubHTTPValidators?,
         validator: (Value) throws -> Void
     ) async throws -> GitHubRepositoryTeamFetch<Value> {
         var endpoint = Self.endpoint(path: path, query: query)
         let initialRequest = try GitHubRESTRequest(
             path: path,
             query: query,
-            headers: eTag.map { ["If-None-Match": $0] } ?? [:]
+            validators: validators
         )
         var page: GitHubPage<Value>
         do {
             page = try await client.getPage(type, request: initialRequest)
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            guard validators != nil else {
+                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
+            }
             return .notModified
         }
         var pages = [GitHubRepositoryTeamPage(page: page, endpoint: endpoint)]
