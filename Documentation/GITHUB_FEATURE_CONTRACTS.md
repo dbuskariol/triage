@@ -42,7 +42,7 @@ produces an empty or complete inbox.
 
 | Contract term | Rule |
 | --- | --- |
-| Cached raw payload | Store only encrypted, bounded snapshots with endpoint/query name, immutable object ID, ETag, parser version, and fetch timestamp. |
+| Cached raw payload | Store only encrypted, bounded snapshots with endpoint/query name, immutable object ID, ETag and Last-Modified evidence, parser version, and fetch timestamp. A raw snapshot authorizes conditional replay only when it also carries the exact current account, organization, feature, stream, request, credential-revision, and capability-revision identity required by that source's replay contract. Legacy or partially scoped raw rows remain evidence only. |
 | REST budget | Maximum 100 objects per page and 2 MiB decoded response. |
 | GraphQL budget | Maximum 50 hydrated nodes, 500 points, and 4 MiB decoded response per request. Shrink the next batch after exceeding either threshold. |
 | Failure fallback | A fallback may provide discovery evidence only unless explicitly marked authoritative. It cannot overwrite authoritative normalized data. |

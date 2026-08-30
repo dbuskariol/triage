@@ -961,7 +961,12 @@ Keep encrypted raw payload snapshots when they are required for:
 - unsupported future fields;
 - diagnostics with user consent.
 
-Raw payloads are bounded and tagged with endpoint, entity ID, ETag, parser version, and fetch date. Old superseded payloads are compacted only after normalized state and testable replay are preserved.
+Raw payloads are bounded and tagged with endpoint, entity ID, ETag and
+Last-Modified evidence, parser version, and fetch date. Conditional replay
+additionally requires an exact source-specific request-authority binding;
+legacy or partially scoped raw rows remain evidence only. Old superseded
+payloads are compacted only after normalized state and testable replay are
+preserved.
 
 ## 13. Synchronization engine
 

@@ -1157,6 +1157,30 @@ enum TriageDatabaseMigrator {
                     CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "031-raw-request-authority",
+            checksum: "5d7c3aa43bbc9a8a962b2bf34625b8e86fc59da3157656e5d1897182b72f5db3"
+        ) { database in
+            // Existing raw rows remain encrypted parser/failure evidence, but
+            // their missing authority columns deliberately prevent them from
+            // authorizing a conditional replay.
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN last_modified TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_organization_id TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_feature TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_stream_id TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_request_key TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_credential_revision TEXT")
+            try database.execute(sql: "ALTER TABLE raw_api_snapshots ADD COLUMN authority_capability_revision TEXT")
+            try database.execute(sql: """
+                CREATE INDEX raw_api_snapshots_request_authority
+                ON raw_api_snapshots (
+                    account_id, authority_organization_id, authority_feature,
+                    authority_stream_id, authority_request_key,
+                    authority_credential_revision, authority_capability_revision,
+                    parser_version, observed_at_ms DESC, id DESC
+                )
+                """)
         }
     ]
 }

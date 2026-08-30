@@ -129,6 +129,7 @@ actor RoleSearchPageReplayRepository {
                            replay.parser_version, replay.last_validated_at_ms,
                            snapshot.github_node_id, snapshot.endpoint AS snapshot_endpoint,
                            snapshot.etag AS snapshot_etag,
+                           snapshot.last_modified AS snapshot_last_modified,
                            snapshot.parser_version AS snapshot_parser_version,
                            snapshot.observed_at_ms, snapshot.payload
                     FROM role_search_page_replays AS replay
@@ -292,6 +293,7 @@ actor RoleSearchPageReplayRepository {
         }
         let rawNodeID: String? = row["github_node_id"]
         let nodeID = rawNodeID.flatMap(GitHubNodeID.init(rawValue:))
+        let snapshotLastModified: String? = row["snapshot_last_modified"]
         guard rawNodeID == nil || nodeID != nil,
               parserVersion == snapshotParserVersion,
               endpoint == snapshotEndpoint,
@@ -322,6 +324,7 @@ actor RoleSearchPageReplayRepository {
                 githubNodeID: nodeID,
                 endpoint: snapshotEndpoint,
                 eTag: eTag,
+                lastModified: snapshotLastModified,
                 parserVersion: snapshotParserVersion,
                 observedAt: date(observedAtMilliseconds),
                 payload: payload
