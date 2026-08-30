@@ -36,6 +36,9 @@ struct PullRequestReviewThreadRefreshResult: Sendable {
     let outcomes: [PullRequestReviewThreadRefreshOutcome]
     /// A bounded inventory is not a complete organization-wide refresh.
     let hasRemainingCandidates: Bool
+    /// Retained known pull requests which are not currently requestable under
+    /// this account's node/repository authority.
+    let hasBlockedKnownCandidates: Bool
 
     var ssoRequirement: GitHubSSOHeader? {
         outcomes.lazy.compactMap { outcome in
@@ -70,6 +73,12 @@ struct PullRequestReviewThreadRefreshResult: Sendable {
             return .init(
                 status: .unavailable,
                 failureDetail: "Some pull request review threads are unavailable to the selected account."
+            )
+        }
+        if hasBlockedKnownCandidates {
+            return .init(
+                status: .unavailable,
+                failureDetail: "Some known pull requests are no longer accessible to the selected account. Restore repository access or refresh the repository inventory."
             )
         }
         if statuses.contains(where: {
@@ -118,14 +127,15 @@ actor PullRequestReviewThreadRefreshService {
         scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         limit: Int = 50,
-        observedAt: Date = .now
+        observedAt: Date = .now,
+        streamID: SyncStreamID
     ) async throws -> PullRequestReviewThreadRefreshResult {
         let accountID = scope.accountID
         let organizationID = scope.organizationID
         try await validateCurrentScope(scope)
-        let inventory = try await candidateRepository.candidates(
-            accountID: accountID,
-            organizationID: organizationID,
+        let inventory = try await selectCandidates(
+            scope: scope,
+            streamID: streamID,
             limit: limit
         )
         try await validateCurrentScope(scope)
@@ -133,29 +143,14 @@ actor PullRequestReviewThreadRefreshService {
         outcomes.reserveCapacity(inventory.candidates.count)
 
         for candidate in inventory.candidates {
+            let threadInventory: GitHubPullRequestReviewThreadInventory
             do {
                 try await validateCurrentScope(scope)
-                let threadInventory = try await fetcher.allReviewThreads(
+                threadInventory = try await fetcher.allReviewThreads(
                     pullRequestNodeID: candidate.nodeID,
                     observedAt: observedAt
                 )
                 try await validateCurrentScope(scope)
-                try await candidateRepository.writeTransaction(accountID: accountID) { database in
-                    try Self.validateCurrentScope(scope, in: database)
-                    try PullRequestReviewThreadRepository.replace(
-                        pullRequestNodeID: candidate.nodeID,
-                        accountID: accountID,
-                        organizationID: organizationID,
-                        repositoryID: candidate.repositoryID,
-                        currentUserNodeID: currentUserNodeID,
-                        records: threadInventory.records,
-                        rawPages: threadInventory.rawPages,
-                        observedAt: observedAt,
-                        in: database
-                    )
-                }
-                try await validateCurrentScope(scope)
-                outcomes.append(outcome(for: candidate, status: .refreshed))
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -170,14 +165,58 @@ actor PullRequestReviewThreadRefreshService {
                         )
                     )
                 )
+                break
             }
+            try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                try Self.validateCurrentScope(scope, in: database)
+                try PullRequestReviewThreadRepository.replace(
+                    pullRequestNodeID: candidate.nodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: candidate.repositoryID,
+                    currentUserNodeID: currentUserNodeID,
+                    records: threadInventory.records,
+                    rawPages: threadInventory.rawPages,
+                    observedAt: observedAt,
+                    in: database
+                )
+                try PullRequestReviewCandidateRepository.advanceFairSchedule(
+                    after: candidate,
+                    scope: scope,
+                    streamID: streamID,
+                    feature: .reviewThreads,
+                    at: observedAt,
+                    in: database
+                )
+            }
+            try await validateCurrentScope(scope)
+            outcomes.append(outcome(for: candidate, status: .refreshed))
         }
 
         try await validateCurrentScope(scope)
         return PullRequestReviewThreadRefreshResult(
             outcomes: outcomes,
-            hasRemainingCandidates: inventory.hasRemainingCandidates
+            hasRemainingCandidates: inventory.hasRemainingCandidates,
+            hasBlockedKnownCandidates: inventory.hasBlockedKnownCandidates
         )
+    }
+
+    private func selectCandidates(
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        limit: Int
+    ) async throws -> PullRequestReviewCandidateInventory {
+        do {
+            return try await candidateRepository.fairCandidates(
+                scope: scope,
+                streamID: streamID,
+                feature: .reviewThreads,
+                limit: limit
+            )
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope,
+                OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
     }
 
     private func validateCurrentScope(_ scope: SynchronizationScope) async throws {

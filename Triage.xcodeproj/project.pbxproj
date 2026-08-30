@@ -20,6 +20,7 @@
 		AA3600010000000000000001 /* PullRequestReviewRefreshServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3600020000000000000002 /* PullRequestReviewRefreshServiceTests.swift */; };
 		AA3700010000000000000001 /* RepositoryInventoryReplayReceiptRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3700020000000000000002 /* RepositoryInventoryReplayReceiptRepository.swift */; };
 		AA3700030000000000000003 /* RepositoryInventoryReplayReceiptRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */; };
+		AA3800010000000000000001 /* PullRequestReviewCandidateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3800020000000000000002 /* PullRequestReviewCandidateRepositoryTests.swift */; };
 		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */; };
 		C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */; };
@@ -472,6 +473,7 @@
 		AA3600020000000000000002 /* PullRequestReviewRefreshServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewRefreshServiceTests.swift; sourceTree = "<group>"; };
 		AA3700020000000000000002 /* RepositoryInventoryReplayReceiptRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryInventoryReplayReceiptRepository.swift; sourceTree = "<group>"; };
 		AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryInventoryReplayReceiptRepositoryTests.swift; sourceTree = "<group>"; };
+		AA3800020000000000000002 /* PullRequestReviewCandidateRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewCandidateRepositoryTests.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
 		A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalRequestCacheRepository.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
@@ -928,6 +930,7 @@
 				8865BA51CDC9CF90758FB2A1 /* PrivateDataArtifactsTests.swift */,
 				6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */,
 				9FF49E3C266981BE31025729 /* PullRequestReviewReconciliationTests.swift */,
+				AA3800020000000000000002 /* PullRequestReviewCandidateRepositoryTests.swift */,
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
 				AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */,
 				DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */,
@@ -1268,6 +1271,7 @@
 				578CC1E89C6D6601B9599CEF /* ProgressAttentionRuleTests.swift in Sources */,
 				9828F7BEBE9B27EF47A8E6C6 /* PullRequestAttentionRuleTests.swift in Sources */,
 				366338D600898F8D3783779C /* PullRequestReviewReconciliationTests.swift in Sources */,
+				AA3800010000000000000001 /* PullRequestReviewCandidateRepositoryTests.swift in Sources */,
 				AA3600010000000000000001 /* PullRequestReviewRefreshServiceTests.swift in Sources */,
 				B199953B049F078EB07FCC7E /* PullRequestReviewThreadRefreshServiceTests.swift in Sources */,
 				16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */,

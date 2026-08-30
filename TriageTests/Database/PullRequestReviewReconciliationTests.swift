@@ -300,7 +300,8 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
                 capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
             ),
             githubOrganizationID: 2,
-            observedAt: fixture.date
+            observedAt: fixture.date,
+            streamID: fixture.reviewStreamID
         )
 
         XCTAssertEqual(result.refreshedPullRequestNodeIDs, [fixture.pullRequest.nodeID])
@@ -346,6 +347,7 @@ private final class Fixture: @unchecked Sendable {
     let date = Date(timeIntervalSinceReferenceDate: 1_000)
     let vault: AccountVault
     let pullRequest: NormalizedGitHubNode
+    let reviewStreamID = SyncStreamID(rawValue: "pull-request-review-reconciliation-test")!
 
     init() async throws {
         directory = FileManager.default.temporaryDirectory
@@ -387,8 +389,22 @@ private final class Fixture: @unchecked Sendable {
             ),
             selectedAt: date
         )
+        try await SyncStreamRepository(vault: vault).save(
+            SyncStream(
+                id: reviewStreamID,
+                accountID: accountID,
+                organizationID: organizationID,
+                feature: .reviews,
+                highWater: nil,
+                lastSuccessfulAt: nil,
+                lastAttemptAt: date,
+                status: .partial,
+                failureDetail: nil
+            )
+        )
         let fixtureRepositoryID = repositoryID
         let fixtureOrganizationID = organizationID
+        let fixtureAccountID = accountID
         let fixtureDate = date
         try await vault.write { database in
             try database.execute(
@@ -406,6 +422,17 @@ private final class Fixture: @unchecked Sendable {
                     "github",
                     "triage",
                     "https://github.com/github/triage",
+                    Int64((fixtureDate.timeIntervalSince1970 * 1_000).rounded())
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
+                    VALUES (?, ?, 'available', ?)
+                    """,
+                arguments: [
+                    fixtureAccountID.rawValue,
+                    fixtureRepositoryID.rawValue,
                     Int64((fixtureDate.timeIntervalSince1970 * 1_000).rounded())
                 ]
             )

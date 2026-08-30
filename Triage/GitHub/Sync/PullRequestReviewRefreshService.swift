@@ -4,6 +4,7 @@ import GRDB
 struct PullRequestReviewRefreshResult: Sendable {
     let refreshedPullRequestNodeIDs: [GitHubNodeID]
     let hasRemainingCandidates: Bool
+    let hasBlockedKnownCandidates: Bool
     let ssoHeaders: [GitHubSSOHeader]
 
     var ssoHeader: GitHubSSOHeader? {
@@ -27,14 +28,14 @@ actor PullRequestReviewRefreshService {
         scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         limit: Int = 50,
-        observedAt: Date = .now
+        observedAt: Date = .now,
+        streamID: SyncStreamID
     ) async throws -> PullRequestReviewRefreshResult {
         let accountID = scope.accountID
-        let organizationID = scope.organizationID
         try await validateCurrentScope(scope)
-        let inventory = try await candidateRepository.candidates(
-            accountID: accountID,
-            organizationID: organizationID,
+        let inventory = try await selectCandidates(
+            scope: scope,
+            streamID: streamID,
             limit: limit
         )
         try await validateCurrentScope(scope)
@@ -59,7 +60,7 @@ actor PullRequestReviewRefreshService {
             }
             ssoHeaders.append(contentsOf: reviews.ssoHeaders)
             if reviews.ssoHeader?.scoped(to: githubOrganizationID) != nil {
-                continue
+                break
             }
             let requestedReviewers: GitHubResponse<GitHubRequestedReviewersDTO>
             do {
@@ -82,7 +83,7 @@ actor PullRequestReviewRefreshService {
                 [reviews.ssoHeader, requestedReviewers.ssoHeader]
             )
             if candidateSSOHeader?.scoped(to: githubOrganizationID) != nil {
-                continue
+                break
             }
             try await candidateRepository.writeTransaction(accountID: accountID) { database in
                 try Self.validateCurrentScope(scope, in: database)
@@ -128,6 +129,14 @@ actor PullRequestReviewRefreshService {
                     observedAtMilliseconds: observedAtMilliseconds,
                     in: database
                 )
+                try PullRequestReviewCandidateRepository.advanceFairSchedule(
+                    after: candidate,
+                    scope: scope,
+                    streamID: streamID,
+                    feature: .reviews,
+                    at: observedAt,
+                    in: database
+                )
             }
             try await validateCurrentScope(scope)
             refreshedPullRequestNodeIDs.append(candidate.nodeID)
@@ -136,8 +145,27 @@ actor PullRequestReviewRefreshService {
         return PullRequestReviewRefreshResult(
             refreshedPullRequestNodeIDs: refreshedPullRequestNodeIDs,
             hasRemainingCandidates: inventory.hasRemainingCandidates,
+            hasBlockedKnownCandidates: inventory.hasBlockedKnownCandidates,
             ssoHeaders: ssoHeaders
         )
+    }
+
+    private func selectCandidates(
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        limit: Int
+    ) async throws -> PullRequestReviewCandidateInventory {
+        do {
+            return try await candidateRepository.fairCandidates(
+                scope: scope,
+                streamID: streamID,
+                feature: .reviews,
+                limit: limit
+            )
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope,
+                OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
     }
 
     private func validateCurrentScope(_ scope: SynchronizationScope) async throws {
