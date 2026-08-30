@@ -16,7 +16,17 @@ enum GitHubDiscussionClientError: Error, Equatable, Sendable {
 
 struct GitHubDiscussionRawPage: Equatable, Sendable {
     let endpoint: String
+    /// Canonical operation and variables for the exact GraphQL request which
+    /// produced this page. It is deliberately distinct from the local page
+    /// storage endpoint so raw evidence cannot be reused across cursors.
+    let requestKey: String
     let payload: Data
+
+    init(endpoint: String, requestKey: String? = nil, payload: Data) {
+        self.endpoint = endpoint
+        self.requestKey = requestKey ?? endpoint
+        self.payload = payload
+    }
 }
 
 struct GitHubDiscussionInventory: Sendable {
@@ -36,9 +46,11 @@ actor GitHubDiscussionClient {
 
     func allDiscussions(
         repositoryNodeID: GitHubNodeID,
-        githubOrganizationID: UInt64
+        githubOrganizationID: UInt64,
+        validateScope: @escaping @Sendable () async throws -> Void
     ) async throws -> GitHubDiscussionInventory {
         try Task.checkCancellation()
+        try await validateScope()
         let query = try GitHubGraphQLQueries.repositoryDiscussions()
         var after: String?
         var cursors = Set<String>()
@@ -48,6 +60,7 @@ actor GitHubDiscussionClient {
         var totalBytes = 0
 
         while true {
+            try await validateScope()
             guard pages.count < Self.maximumPages else {
                 throw GitHubDiscussionClientError.paginationLimitExceeded(pages)
             }
@@ -57,6 +70,7 @@ actor GitHubDiscussionClient {
                 as: GitHubDiscussionPayload.self
             )
             try Task.checkCancellation()
+            try await validateScope()
             let response: GitHubGraphQLResponse<GitHubDiscussionPayload>
             switch decodingResult {
             case let .response(decoded):
@@ -64,6 +78,7 @@ actor GitHubDiscussionClient {
             case let .undecodable(undecodable):
                 let rawPage = GitHubDiscussionRawPage(
                     endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
+                    requestKey: Self.requestKey(repositoryNodeID: repositoryNodeID, after: after),
                     payload: undecodable.payload
                 )
                 if let header = undecodable.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
@@ -73,6 +88,7 @@ actor GitHubDiscussionClient {
             }
             let rawPage = GitHubDiscussionRawPage(
                 endpoint: "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/page=\(pages.count + 1)",
+                requestKey: Self.requestKey(repositoryNodeID: repositoryNodeID, after: after),
                 payload: response.payload
             )
             if let header = response.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
@@ -124,6 +140,15 @@ actor GitHubDiscussionClient {
     private struct CursorVariables: Encodable, Sendable {
         let repositoryID: String
         let after: String?
+    }
+
+    private nonisolated static func requestKey(repositoryNodeID: GitHubNodeID, after: String?) -> String {
+        "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/after=\(cursorComponent(after))"
+    }
+
+    private nonisolated static func cursorComponent(_ cursor: String?) -> String {
+        guard let cursor else { return "none" }
+        return Data(cursor.utf8).base64EncodedString()
     }
 
     private static let maximumPayloadBytes = 4 * 1_024 * 1_024

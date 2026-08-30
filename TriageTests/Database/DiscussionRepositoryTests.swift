@@ -9,15 +9,26 @@ final class DiscussionRepositoryTests: XCTestCase {
         defer { fixture.remove() }
         let repository = DiscussionRepository(vault: fixture.vault)
         let valid = fixture.discussion(id: "D_1", title: "Retained")
-        let raw = GitHubDiscussionRawPage(endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
-                                          payload: Data("{}".utf8))
-        try await repository.replace([valid], rawPages: [raw], accountID: fixture.account.id, organization: fixture.organization,
-                                     repositoryID: fixture.repositoryID, observedAt: fixture.date)
+        let raw = GitHubDiscussionRawPage(
+            endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+            requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none",
+            payload: discussionRawPayload()
+        )
+        try await repository.replace(
+            [valid], rawPages: [raw], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, repositoryID: fixture.repositoryID,
+            repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+            streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, observedAt: fixture.date
+        )
 
         let invalid = fixture.discussion(id: "D_2", title: "")
         await XCTAssertThrowsErrorAsync {
-            try await repository.replace([invalid], rawPages: [raw], accountID: fixture.account.id, organization: fixture.organization,
-                                         repositoryID: fixture.repositoryID, observedAt: fixture.date)
+            try await repository.replace(
+                [invalid], rawPages: [raw], scope: fixture.scope, accountID: fixture.account.id,
+                organization: fixture.organization, repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, observedAt: fixture.date
+            )
         }
         let persisted = try await fixture.vault.read { database in
             (
@@ -34,21 +45,91 @@ final class DiscussionRepositoryTests: XCTestCase {
         defer { fixture.remove() }
         let repository = ProjectV2Repository(vault: fixture.vault)
         let project = fixture.project()
-        let raw = GitHubProjectV2RawPage(endpoint: "graphql:TriageOrganizationProjectsV2/organization=O_2/page=1",
-                                         payload: Data("{}".utf8))
-        try await repository.replaceProjects([project], rawPages: [raw], accountID: fixture.account.id,
-                                             organization: fixture.organization, observedAt: fixture.date)
+        let raw = GitHubProjectV2RawPage(
+            endpoint: "graphql:TriageOrganizationProjectsV2/organization=O_2/page=1",
+            requestKey: "graphql:TriageOrganizationProjectsV2/organization=O_2/after=none",
+            payload: projectInventoryRawPayload()
+        )
+        try await repository.replaceProjects(
+            [project], rawPages: [raw], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
+        )
         let complete = fixture.projectItem(project: project, displayValue: "Ready", complete: true)
-        try await repository.replaceItems([complete], project: project, rawPages: [raw], accountID: fixture.account.id,
-                                          organization: fixture.organization, observedAt: fixture.date)
+        let itemRaw = GitHubProjectV2RawPage(
+            endpoint: "graphql:TriageProjectV2Items/project=P_1/page=1",
+            requestKey: "graphql:TriageProjectV2Items/project=P_1/after=none",
+            payload: projectItemsRawPayload()
+        )
+        let fieldRaw = GitHubProjectV2RawPage(
+            endpoint: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/page=1",
+            requestKey: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/after=none",
+            payload: projectFieldRawPayload()
+        )
+        try await repository.replaceItems(
+            [complete], project: project, rawPages: [itemRaw, fieldRaw], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "project-items-P_1")!, observedAt: fixture.date
+        )
         let incomplete = fixture.projectItem(project: project, displayValue: nil, complete: false)
-        try await repository.replaceItems([incomplete], project: project, rawPages: [raw], accountID: fixture.account.id,
-                                          organization: fixture.organization, observedAt: fixture.date)
+        try await repository.replaceItems(
+            [incomplete], project: project, rawPages: [itemRaw, fieldRaw], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "project-items-P_1")!, observedAt: fixture.date
+        )
 
         let values = try await fixture.vault.read { database in
-            try String.fetchAll(database, sql: "SELECT display_value FROM project_field_values")
+            let row = try Row.fetchOne(
+                database,
+                sql: "SELECT display_value, context FROM project_field_values"
+            )
+            return (
+                row?["display_value"] as String?,
+                (row?["context"] as String?) ?? ""
+            )
         }
-        XCTAssertEqual(values, ["Ready"])
+        XCTAssertEqual(values.0, "Ready")
+        XCTAssertTrue(values.1.contains("provisional collection observation"))
+        XCTAssertTrue(values.1.contains("unsupported union"))
+    }
+
+    func testFreshUnsupportedProjectFieldIsRetainedAsExplicitProvisionalContext() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let project = fixture.project()
+        try await repository.replaceProjects(
+            [project], rawPages: [], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization,
+            streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
+        )
+        let incomplete = fixture.projectItem(project: project, displayValue: "Observed", complete: false)
+        try await repository.replaceItems(
+            [incomplete], project: project,
+            rawPages: [
+                .init(
+                    endpoint: "graphql:TriageProjectV2Items/project=P_1/page=1",
+                    requestKey: "graphql:TriageProjectV2Items/project=P_1/after=none",
+                    payload: projectItemsRawPayload()
+                ),
+                .init(
+                    endpoint: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/page=1",
+                    requestKey: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/after=none",
+                    payload: projectFieldRawPayload()
+                )
+            ],
+            scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization,
+            streamID: SyncStreamID(rawValue: "project-items-P_1")!, observedAt: fixture.date
+        )
+
+        let persisted = try await fixture.vault.read { database in
+            let row = try Row.fetchOne(
+                database,
+                sql: "SELECT display_value, context FROM project_field_values"
+            )
+            return (row?["display_value"] as String?, (row?["context"] as String?) ?? "")
+        }
+        XCTAssertEqual(persisted.0, "Observed")
+        XCTAssertTrue(persisted.1.contains("provisional collection observation"))
+        XCTAssertTrue(persisted.1.contains("unsupported union"))
     }
 
     func testDiscussionReplacementAndCoverageRollbackTogether() async throws {
@@ -66,10 +147,17 @@ final class DiscussionRepositoryTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             try await repository.replace(
                 [fixture.discussion(id: "D_atomic", title: "Must roll back")],
-                rawPages: [.init(endpoint: "graphql:atomic", payload: Data("{}".utf8))],
+                rawPages: [.init(
+                    endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+                    requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none",
+                    payload: discussionRawPayload()
+                )],
+                scope: fixture.scope,
                 accountID: fixture.account.id,
                 organization: fixture.organization,
                 repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!,
                 observedAt: fixture.date,
                 coverageRecords: [coverage]
             )
@@ -85,6 +173,344 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertEqual(counts.0, 0)
         XCTAssertEqual(counts.1, 0)
         XCTAssertEqual(counts.2, 0)
+    }
+
+    func testDiscussionRejectsMalformedRawBindingWithoutReplacingCachedContent() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = DiscussionRepository(vault: fixture.vault)
+        let validRaw = GitHubDiscussionRawPage(
+            endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+            requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none",
+            payload: discussionRawPayload(marker: "first")
+        )
+        try await repository.replace(
+            [fixture.discussion(id: "D_1", title: "Retained")], rawPages: [validRaw], scope: fixture.scope,
+            accountID: fixture.account.id, organization: fixture.organization, repositoryID: fixture.repositoryID,
+            repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+            streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, observedAt: fixture.date
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                [fixture.discussion(id: "D_2", title: "Must not persist")], rawPages: [.init(
+                    endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+                    requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=not-base64",
+                    payload: discussionRawPayload(marker: "second")
+                )], scope: fixture.scope, accountID: fixture.account.id, organization: fixture.organization,
+                repositoryID: fixture.repositoryID, repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, observedAt: fixture.date
+            )
+        }
+        let titles = try await fixture.vault.read { database in
+            try String.fetchAll(database, sql: "SELECT title FROM github_nodes WHERE kind = 'discussion'")
+        }
+        XCTAssertEqual(titles, ["Retained"])
+    }
+
+    func testDiscussionRejectsRepositoryIDAndNodeFromDifferentRepositories() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        _ = try await AccountRepository(vault: fixture.vault).save(
+            repository: .init(
+                id: 4,
+                nodeID: "R_2",
+                name: "other",
+                isPrivate: true,
+                isArchived: false,
+                hasDiscussions: true,
+                htmlURL: URL(string: "https://github.com/acme/other")!,
+                updatedAt: fixture.date,
+                owner: .init(login: "acme")
+            ),
+            organizationID: fixture.organization.id,
+            accountID: fixture.account.id
+        )
+        let repository = DiscussionRepository(vault: fixture.vault)
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                [fixture.discussion(id: "D_cross_repo", title: "Must not persist")],
+                rawPages: [.init(
+                    endpoint: "graphql:TriageRepositoryDiscussions/repository=R_2/page=1",
+                    requestKey: "graphql:TriageRepositoryDiscussions/repository=R_2/after=none",
+                    payload: discussionRawPayload(repositoryNodeID: "R_2")
+                )],
+                scope: fixture.scope,
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_2")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_2")!,
+                observedAt: fixture.date
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? DiscussionRepositoryError, .repositoryScopeMismatch)
+        }
+        let counts = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM discussions")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!
+            )
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+    }
+
+    func testDiscussionRejectsTraversalThatStartsAfterACursor() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let cursor = Data("cursor-1".utf8).base64EncodedString()
+        await XCTAssertThrowsErrorAsync {
+            try await DiscussionRepository(vault: fixture.vault).replace(
+                [fixture.discussion(id: "D_cursor", title: "Must not persist")],
+                rawPages: [.init(
+                    endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+                    requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=\(cursor)",
+                    payload: discussionRawPayload()
+                )],
+                scope: fixture.scope,
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!,
+                observedAt: fixture.date
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? DiscussionRepositoryError, .invalidRawAuthority)
+        }
+    }
+
+    func testDiscussionRawObservationsRemainDistinctAcrossTimesAndIdempotentAtOneTime() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = DiscussionRepository(vault: fixture.vault)
+        let raw = GitHubDiscussionRawPage(
+            endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1",
+            requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none",
+            payload: discussionRawPayload(marker: "same")
+        )
+        let streamID = SyncStreamID(rawValue: "discussions-acme-R_1")!
+        func replace(at observedAt: Date, page: GitHubDiscussionRawPage = raw) async throws {
+            try await repository.replace(
+                [fixture.discussion(id: "D_observation", title: "Retained")], rawPages: [page], scope: fixture.scope,
+                accountID: fixture.account.id, organization: fixture.organization, repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!, streamID: streamID, observedAt: observedAt
+            )
+        }
+
+        try await replace(at: fixture.date)
+        try await replace(at: fixture.date) // exact retry is idempotent
+        try await replace(at: fixture.date.addingTimeInterval(1)) // later observation is retained
+        let persisted = try await fixture.vault.read { database in
+            try Row.fetchAll(database, sql: "SELECT id, observed_at_ms FROM raw_api_snapshots ORDER BY observed_at_ms, id")
+                .map { (($0["id"] as String), ($0["observed_at_ms"] as Int64)) }
+        }
+        XCTAssertEqual(persisted.count, 2)
+        XCTAssertNotEqual(persisted[0].0, persisted[1].0)
+        XCTAssertEqual(persisted.map(\.1), [1_000_000, 1_001_000])
+
+        await XCTAssertThrowsErrorAsync {
+            try await replace(at: fixture.date, page: .init(
+                endpoint: raw.endpoint, requestKey: raw.requestKey,
+                payload: discussionRawPayload(marker: "different")
+            ))
+        } verify: { error in
+            XCTAssertEqual(error as? DiscussionRepositoryError, .conflictingRawPage)
+        }
+        let countAfterConflict = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!
+        }
+        XCTAssertEqual(countAfterConflict, 2)
+    }
+
+    func testProjectReplacementRejectsCrossOrganizationScopeBeforeRawPersistence() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let crossScope = SynchronizationScope(
+            accountID: fixture.account.id,
+            organizationID: OrganizationID(rawValue: "other")!,
+            credentialRevision: fixture.scope.credentialRevision,
+            capabilityRevision: fixture.scope.capabilityRevision
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replaceProjects(
+                [fixture.project()], rawPages: [], scope: crossScope, accountID: fixture.account.id,
+                organization: fixture.organization, streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
+            )
+        }
+        let counts = try await fixture.vault.read { database in
+            (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM projects")!,
+             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!)
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+    }
+
+    func testProjectItemsRejectFieldPageForUnrelatedItem() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let project = fixture.project()
+        try await repository.replaceProjects(
+            [project], rawPages: [], scope: fixture.scope,
+            accountID: fixture.account.id, organization: fixture.organization,
+            streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
+        )
+        let item = fixture.projectItem(project: project)
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replaceItems(
+                [item],
+                project: project,
+                rawPages: [
+                    .init(
+                        endpoint: "graphql:TriageProjectV2Items/project=P_1/page=1",
+                        requestKey: "graphql:TriageProjectV2Items/project=P_1/after=none",
+                        payload: projectItemsRawPayload()
+                    ),
+                    .init(
+                        endpoint: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_OTHER/page=1",
+                        requestKey: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_OTHER/after=none",
+                        payload: projectFieldRawPayload(itemNodeID: "PVTI_OTHER")
+                    )
+                ],
+                scope: fixture.scope,
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                streamID: SyncStreamID(rawValue: "project-items-P_1")!,
+                observedAt: fixture.date
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? ProjectV2RepositoryError, .invalidRawAuthority)
+        }
+        let counts = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM project_items")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!
+            )
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+    }
+
+    func testScopedRawSnapshotRejectsContentNodeFromAnotherOrganization() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let discussionRepository = DiscussionRepository(vault: fixture.vault)
+        try await discussionRepository.replace(
+            [fixture.discussion(id: "D_cross", title: "Source A")], rawPages: [], scope: fixture.scope,
+            accountID: fixture.account.id, organization: fixture.organization, repositoryID: fixture.repositoryID,
+            repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+            streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, observedAt: fixture.date
+        )
+        let otherOrganization = GitHubOrganization(
+            id: OrganizationID(rawValue: "other")!, githubOrganizationID: 44,
+            nodeID: GitHubNodeID(rawValue: "O_44")!, login: "other"
+        )
+        try await AccountRepository(vault: fixture.vault).save(
+            otherOrganization,
+            access: .init(accountID: fixture.account.id, organizationID: otherOrganization.id, state: .available,
+                          capabilityRevision: CapabilityRevision(rawValue: "capability-other")!, capabilities: [], checkedAt: fixture.date)
+        )
+        let otherScope = SynchronizationScope(
+            accountID: fixture.account.id, organizationID: otherOrganization.id,
+            credentialRevision: fixture.scope.credentialRevision,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-other")!
+        )
+        let snapshot = RawAPISnapshot(
+            id: .make(), accountID: fixture.account.id, githubNodeID: GitHubNodeID(rawValue: "D_cross")!,
+            endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1", eTag: nil,
+            parserVersion: 1, observedAt: fixture.date, payload: Data("{}".utf8),
+            requestIdentity: .init(
+                scope: otherScope, feature: .discussions,
+                streamID: SyncStreamID(rawValue: "discussions-other-R_1")!,
+                requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none"
+            )
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await RawAPISnapshotRepository(vault: fixture.vault).save(snapshot)
+        } verify: { error in
+            XCTAssertEqual(error as? RawAPISnapshotRepositoryError, .nodeScopeMismatch)
+        }
+    }
+
+    func testScopedRawSnapshotRejectsRepositoryWithoutAvailableAccess() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE account_repository_access SET access_state = 'inaccessible' WHERE account_id = ? AND repository_id = ?",
+                arguments: [fixture.account.id.rawValue, fixture.repositoryID.rawValue]
+            )
+        }
+        let snapshot = RawAPISnapshot(
+            id: .make(), accountID: fixture.account.id, githubNodeID: GitHubNodeID(rawValue: "R_1")!,
+            endpoint: "graphql:TriageRepositoryDiscussions/repository=R_1/page=1", eTag: nil,
+            parserVersion: 1, observedAt: fixture.date, payload: Data("{}".utf8),
+            requestIdentity: .init(
+                scope: fixture.scope, feature: .discussions,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!,
+                requestKey: "graphql:TriageRepositoryDiscussions/repository=R_1/after=none"
+            )
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await RawAPISnapshotRepository(vault: fixture.vault).save(snapshot)
+        } verify: { error in
+            XCTAssertEqual(error as? RawAPISnapshotRepositoryError, .nodeScopeMismatch)
+        }
+    }
+
+    func testRawSnapshotIDIsImmutableAndExactMillisecondReplayIsIdempotent() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+        let snapshotID = RawAPISnapshotID.make()
+        let observedAt = Date(timeIntervalSince1970: 1_000.0004)
+        let identity = ConditionalRequestIdentity(
+            scope: fixture.scope,
+            feature: .projects,
+            streamID: SyncStreamID(rawValue: "projects-acme")!,
+            requestKey: "graphql:TriageOrganizationProjectsV2/organization=O_2/after=none"
+        )
+        let snapshot = RawAPISnapshot(
+            id: snapshotID,
+            accountID: fixture.account.id,
+            githubNodeID: fixture.organization.nodeID,
+            endpoint: "graphql:TriageOrganizationProjectsV2/organization=O_2/page=1",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: observedAt,
+            payload: projectInventoryRawPayload(marker: "one"),
+            requestIdentity: identity
+        )
+
+        try await repository.save(snapshot)
+        try await repository.save(snapshot)
+        let conflicting = RawAPISnapshot(
+            id: snapshotID,
+            accountID: snapshot.accountID,
+            githubNodeID: snapshot.githubNodeID,
+            endpoint: snapshot.endpoint,
+            eTag: snapshot.eTag,
+            parserVersion: snapshot.parserVersion,
+            observedAt: snapshot.observedAt,
+            payload: projectInventoryRawPayload(marker: "two"),
+            requestIdentity: identity
+        )
+        await XCTAssertThrowsErrorAsync {
+            try await repository.save(conflicting)
+        } verify: { error in
+            XCTAssertEqual(error as? RawAPISnapshotRepositoryError, .immutableSnapshotConflict)
+        }
+        let persisted = try await repository.snapshots(for: fixture.account.id)
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted[0].payload, snapshot.payload)
     }
 
     func testProjectItemLinksOnlyToAnExistingNodeInTheCurrentScope() async throws {
@@ -120,13 +546,13 @@ final class DiscussionRepositoryTests: XCTestCase {
             )
         }
         try await repository.replaceProjects(
-            [project], rawPages: [], accountID: fixture.account.id,
-            organization: fixture.organization, observedAt: fixture.date
+            [project], rawPages: [], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
         )
         let item = fixture.projectItem(project: project, contentNodeID: contentNodeID)
         try await repository.replaceItems(
-            [item], project: project, rawPages: [], accountID: fixture.account.id,
-            organization: fixture.organization, observedAt: fixture.date
+            [item], project: project, rawPages: [], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "project-items-P_1")!, observedAt: fixture.date
         )
 
         let link = try await fixture.vault.read { database in
@@ -222,8 +648,12 @@ final class DiscussionRepositoryTests: XCTestCase {
             updatedAt: fixture.date, state: .open
         )
         try await repository.replaceProjects(
-            [otherProject], rawPages: [], accountID: fixture.account.id,
-            organization: otherOrganization, observedAt: fixture.date
+            [otherProject], rawPages: [], scope: SynchronizationScope(
+                accountID: fixture.account.id, organizationID: otherOrganization.id,
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
+            ), accountID: fixture.account.id,
+            organization: otherOrganization, streamID: SyncStreamID(rawValue: "projects-beta")!, observedAt: fixture.date
         )
         let otherItem = GitHubProjectV2ItemRecord(
             nodeID: GitHubNodeID(rawValue: "PVTI_2")!, projectNodeID: otherProject.nodeID,
@@ -231,8 +661,12 @@ final class DiscussionRepositoryTests: XCTestCase {
             fieldValues: [], fieldValuesComplete: true
         )
         try await repository.replaceItems(
-            [otherItem], project: otherProject, rawPages: [], accountID: fixture.account.id,
-            organization: otherOrganization, observedAt: fixture.date
+            [otherItem], project: otherProject, rawPages: [], scope: SynchronizationScope(
+                accountID: fixture.account.id, organizationID: otherOrganization.id,
+                credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
+            ), accountID: fixture.account.id,
+            organization: otherOrganization, streamID: SyncStreamID(rawValue: "project-items-P_2")!, observedAt: fixture.date
         )
 
         try await repository.resolveContentReferences(
@@ -281,6 +715,39 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertTrue(coverage.isEmpty)
     }
 
+    func testDiscussionScopeRotationBeforeNetworkFailureCancelsWithoutFailureCoverage() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let session = RevisionRotatingDiscussionSession(
+            accounts: AccountRepository(vault: fixture.vault), account: fixture.account,
+            credentialRevision: CredentialRevision(rawValue: "credential-rotated")!
+        )
+        let service = DiscussionSynchronizationService(
+            client: GitHubDiscussionClient(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            ),
+            repository: DiscussionRepository(vault: fixture.vault),
+            coverage: CoverageRepository(vault: fixture.vault)
+        )
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await service.refresh(
+                scope: fixture.scope, organization: fixture.organization, repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: SyncStreamID(rawValue: "discussions-acme-R_1")!, previousHighWater: nil,
+                observedAt: fixture.date
+            )
+        }, verify: { error in
+            XCTAssertTrue(error is CancellationError)
+        })
+        let persisted = try await fixture.vault.read { database in
+            (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records")!,
+             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!)
+        }
+        XCTAssertEqual(persisted.0, 0)
+        XCTAssertEqual(persisted.1, 0)
+    }
+
     func testDiscussionMissingDataRetainsRawFailureWithoutAdvancingHighWater() async throws {
         let fixture = try await DiscussionFixture()
         defer { fixture.remove() }
@@ -312,11 +779,13 @@ final class DiscussionRepositoryTests: XCTestCase {
         let persisted = try await fixture.vault.read { database in
             (
                 try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!,
-                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM normalization_failures")!
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM normalization_failures")!,
+                try String.fetchOne(database, sql: "SELECT github_node_id FROM normalization_failures")
             )
         }
         XCTAssertEqual(persisted.0, 1)
         XCTAssertEqual(persisted.1, 1)
+        XCTAssertEqual(persisted.2, "R_1")
         let coverage = try await CoverageRepository(vault: fixture.vault).records(
             for: fixture.account.id, organizationID: fixture.organization.id
         )
@@ -423,6 +892,91 @@ final class DiscussionRepositoryTests: XCTestCase {
         )
         XCTAssertNil(stream?.highWater)
     }
+}
+
+private func discussionRawPayload(
+    repositoryNodeID: String = "R_1",
+    hasNextPage: Bool = false,
+    endCursor: String? = nil,
+    marker: String = ""
+) -> Data {
+    graphQLRawPayload(
+        nodeID: repositoryNodeID,
+        connection: "discussions",
+        hasNextPage: hasNextPage,
+        endCursor: endCursor,
+        marker: marker
+    )
+}
+
+private func projectInventoryRawPayload(
+    organizationNodeID: String = "O_2",
+    hasNextPage: Bool = false,
+    endCursor: String? = nil,
+    marker: String = ""
+) -> Data {
+    graphQLRawPayload(
+        nodeID: organizationNodeID,
+        connection: "projectsV2",
+        hasNextPage: hasNextPage,
+        endCursor: endCursor,
+        marker: marker
+    )
+}
+
+private func projectItemsRawPayload(
+    projectNodeID: String = "P_1",
+    hasNextPage: Bool = false,
+    endCursor: String? = nil,
+    marker: String = ""
+) -> Data {
+    graphQLRawPayload(
+        nodeID: projectNodeID,
+        connection: "items",
+        hasNextPage: hasNextPage,
+        endCursor: endCursor,
+        marker: marker
+    )
+}
+
+private func projectFieldRawPayload(
+    itemNodeID: String = "PVTI_1",
+    hasNextPage: Bool = false,
+    endCursor: String? = nil,
+    marker: String = ""
+) -> Data {
+    graphQLRawPayload(
+        nodeID: itemNodeID,
+        connection: "fieldValues",
+        hasNextPage: hasNextPage,
+        endCursor: endCursor,
+        marker: marker
+    )
+}
+
+private func graphQLRawPayload(
+    nodeID: String,
+    connection: String,
+    hasNextPage: Bool,
+    endCursor: String?,
+    marker: String
+) -> Data {
+    let pageInfo: [String: Any] = [
+        "hasNextPage": hasNextPage,
+        "endCursor": endCursor ?? NSNull()
+    ]
+    return try! JSONSerialization.data(
+        withJSONObject: [
+            "data": [
+                "node": [
+                    "id": nodeID,
+                    connection: ["pageInfo": pageInfo]
+                ]
+            ],
+            "marker": marker
+        ],
+        options: [.sortedKeys]
+    )
 }
 
 private final class DiscussionFixture: @unchecked Sendable {
@@ -568,6 +1122,23 @@ private actor OneShotDiscussionSession: HTTPSession {
                 url: request.url!, statusCode: 200, httpVersion: nil, headerFields: headers
             )!
         )
+    }
+}
+
+private actor RevisionRotatingDiscussionSession: HTTPSession {
+    private let accounts: AccountRepository
+    private let account: GitHubAccount
+    private let credentialRevision: CredentialRevision
+
+    init(accounts: AccountRepository, account: GitHubAccount, credentialRevision: CredentialRevision) {
+        self.accounts = accounts
+        self.account = account
+        self.credentialRevision = credentialRevision
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await accounts.save(account, credentialRevision: credentialRevision)
+        throw URLError(.cannotConnectToHost)
     }
 }
 
