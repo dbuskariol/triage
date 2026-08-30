@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "035-source-access-observations")
+        XCTAssertEqual(migrations.last?.id, "036-repository-inventory-replay-receipts")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
+            "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
         )
         try await registry.closeAll()
     }
@@ -102,7 +102,8 @@ final class AccountVaultTests: XCTestCase {
                         '032-timeline-replay-receipts',
                         '033-role-search-page-replay-v2',
                         '034-role-search-page-replay-parser-identity',
-                        '035-source-access-observations'
+                        '035-source-access-observations',
+                        '036-repository-inventory-replay-receipts'
                     )
                     ORDER BY id
                     """
@@ -142,7 +143,14 @@ final class AccountVaultTests: XCTestCase {
                     PRIMARY KEY (account_id, organization_id)
                 )
                 """)
-            try database.execute(sql: "CREATE TABLE sync_streams (id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: """
+                CREATE TABLE sync_streams (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    feature TEXT NOT NULL
+                )
+                """)
             try database.execute(sql: """
                 CREATE TABLE raw_api_snapshots (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -273,6 +281,13 @@ final class AccountVaultTests: XCTestCase {
                         SELECT checksum FROM schema_migrations
                         WHERE id = '035-source-access-observations'
                         """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '036-repository-inventory-replay-receipts'
+                        """
                 )
             )
         }
@@ -309,6 +324,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(
             migrated.11,
             "0e3720d9d2f00f2d1cc517da11b4402d9c447bc641b7e3b9fc907fce73c09b6e"
+        )
+        XCTAssertEqual(
+            migrated.12,
+            "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
         )
     }
 
@@ -479,6 +498,7 @@ final class AccountVaultTests: XCTestCase {
         let fixtureRegistry = try VaultRegistry(rootDirectory: directory)
         let fixtureVault = try await fixtureRegistry.open(accountID: accountID, vaultKey: key)
         try await fixtureVault.write { database in
+            try Self.removeMigration036Schema(from: database)
             try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
             try database.execute(
                 sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
@@ -572,6 +592,333 @@ final class AccountVaultTests: XCTestCase {
         try await migratedRegistry.closeAll()
     }
 
+    func testMigration036BuildsDurableRepositoryInventoryReplaySchemaFrom035() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "migration-036-org")!
+        let streamID = SyncStreamID(rawValue: "inventory-repositories-migration-036-org")!
+        let credentialRevision = CredentialRevision(rawValue: "credential-036")!
+        let capabilityRevision = CapabilityRevision(rawValue: "capability-036")!
+        let rawSnapshotID = RawAPISnapshotID(rawValue: "raw-migration-036")!
+        let observedAt = Date(timeIntervalSinceReferenceDate: 3_600)
+        let key = try VaultKey.generate()
+        let fixtureRegistry = try VaultRegistry(rootDirectory: directory)
+        let fixtureVault = try await fixtureRegistry.open(accountID: accountID, vaultKey: key)
+        let account = GitHubAccount(
+            id: accountID,
+            githubUserID: 36,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjM2")!,
+            login: "migration-user",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: observedAt,
+            lastValidatedAt: observedAt
+        )
+        let organization = GitHubOrganization(
+            id: organizationID,
+            githubOrganizationID: 3_600,
+            nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjM2")!,
+            login: "migration-org"
+        )
+        try await AccountRepository(vault: fixtureVault).save(
+            account,
+            credentialRevision: credentialRevision
+        )
+        try await AccountRepository(vault: fixtureVault).save(
+            organization,
+            access: OrganizationAccess(
+                accountID: accountID,
+                organizationID: organizationID,
+                state: .available,
+                capabilityRevision: capabilityRevision,
+                capabilities: [],
+                checkedAt: observedAt
+            ),
+            selectedAt: observedAt
+        )
+        try await CoverageRepository(vault: fixtureVault).save(
+            CoverageRecord(
+                accountID: accountID,
+                organizationID: organizationID,
+                repositoryID: nil,
+                feature: .repositories,
+                streamID: streamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: observedAt,
+                failureDetail: nil
+            ),
+            attemptedAt: observedAt
+        )
+        let requestKey = "GET /orgs/migration-org/repos?type=all&per_page=100"
+        try await RawAPISnapshotRepository(vault: fixtureVault).save(
+            RawAPISnapshot(
+                id: rawSnapshotID,
+                accountID: accountID,
+                githubNodeID: nil,
+                endpoint: "/orgs/migration-org/repos?type=all&per_page=100",
+                eTag: "\"migration-036\"",
+                parserVersion: 1,
+                observedAt: observedAt,
+                payload: Data("[]".utf8),
+                requestIdentity: ConditionalRequestIdentity(
+                    scope: SynchronizationScope(
+                        accountID: accountID,
+                        organizationID: organizationID,
+                        credentialRevision: credentialRevision,
+                        capabilityRevision: capabilityRevision
+                    ),
+                    feature: .repositories,
+                    streamID: streamID,
+                    requestKey: requestKey
+                )
+            )
+        )
+        try await fixtureVault.write { database in
+            try Self.removeMigration036Schema(from: database)
+        }
+        try await fixtureRegistry.closeAll()
+
+        let migratedRegistry = try VaultRegistry(rootDirectory: directory)
+        let migratedVault = try await migratedRegistry.open(accountID: accountID, vaultKey: key)
+        let schema = try await migratedVault.read { database in
+            Migration036SchemaInspection(
+                checksum: try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '036-repository-inventory-replay-receipts'
+                        """
+                ),
+                parentColumns: try Row.fetchAll(
+                    database,
+                    sql: "PRAGMA table_info(repository_inventory_replay_receipts)"
+                ).map { $0["name"] as String },
+                pageColumns: try Row.fetchAll(
+                    database,
+                    sql: "PRAGMA table_info(repository_inventory_replay_receipt_pages)"
+                ).map { $0["name"] as String },
+                parentForeignKeys: try Self.foreignKeyDescriptions(
+                    table: "repository_inventory_replay_receipts",
+                    in: database
+                ),
+                pageForeignKeys: try Self.foreignKeyDescriptions(
+                    table: "repository_inventory_replay_receipt_pages",
+                    in: database
+                ),
+                indexes: try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'index'
+                          AND name IN (
+                              'sync_streams_exact_scope',
+                              'repository_inventory_replay_receipts_current_scope',
+                              'repository_inventory_replay_receipt_pages_snapshot'
+                          )
+                        ORDER BY name
+                        """
+                ),
+                triggers: try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'trigger'
+                          AND name IN (
+                              'repository_inventory_protect_replay_snapshot_delete',
+                              'repository_inventory_protect_replay_snapshot_update'
+                          )
+                        ORDER BY name
+                        """
+                ),
+                parentSQL: try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT sql FROM sqlite_master
+                        WHERE type = 'table'
+                          AND name = 'repository_inventory_replay_receipts'
+                        """
+                ) ?? "",
+                pageSQL: try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT sql FROM sqlite_master
+                        WHERE type = 'table'
+                          AND name = 'repository_inventory_replay_receipt_pages'
+                        """
+                ) ?? ""
+            )
+        }
+
+        XCTAssertEqual(
+            schema.checksum,
+            "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
+        )
+        XCTAssertEqual(
+            schema.parentColumns,
+            [
+                "id", "account_id", "organization_id", "feature", "stream_id",
+                "request_key", "credential_revision", "capability_revision",
+                "raw_source_revision", "etag", "last_modified", "raw_observed_at_ms",
+                "normalized_committed_at_ms", "last_validated_at_ms", "parser_version",
+                "page_count", "normalized_repository_count", "normalized_digest"
+            ]
+        )
+        XCTAssertEqual(
+            schema.pageColumns,
+            [
+                "receipt_id", "page_index", "endpoint", "request_key", "link_header",
+                "next_endpoint", "raw_snapshot_id", "object_count", "raw_payload_digest",
+                "repository_id_digest"
+            ]
+        )
+        for expected in [
+            "account_id:account_organizations.account_id:CASCADE",
+            "organization_id:account_organizations.organization_id:CASCADE",
+            "account_id:sync_streams.account_id:CASCADE",
+            "organization_id:sync_streams.organization_id:CASCADE",
+            "feature:sync_streams.feature:CASCADE",
+            "stream_id:sync_streams.id:CASCADE"
+        ] {
+            XCTAssertTrue(
+                schema.parentForeignKeys.contains(expected),
+                "Parent foreign keys: \(schema.parentForeignKeys)"
+            )
+        }
+        XCTAssertEqual(
+            Set(schema.pageForeignKeys),
+            Set([
+                "receipt_id:repository_inventory_replay_receipts.id:CASCADE",
+                "raw_snapshot_id:raw_api_snapshots.id:CASCADE"
+            ])
+        )
+        XCTAssertEqual(
+            schema.indexes,
+            [
+                "repository_inventory_replay_receipt_pages_snapshot",
+                "repository_inventory_replay_receipts_current_scope",
+                "sync_streams_exact_scope"
+            ]
+        )
+        XCTAssertEqual(
+            schema.triggers,
+            [
+                "repository_inventory_protect_replay_snapshot_delete",
+                "repository_inventory_protect_replay_snapshot_update"
+            ]
+        )
+        XCTAssertTrue(schema.parentSQL.contains("feature TEXT NOT NULL CHECK (feature = 'repositories')"))
+        XCTAssertTrue(schema.parentSQL.contains("page_count BETWEEN 1 AND 100"))
+        XCTAssertTrue(schema.parentSQL.contains("normalized_repository_count BETWEEN 0 AND 10000"))
+        XCTAssertTrue(schema.parentSQL.contains("length(normalized_digest) = 32"))
+        XCTAssertTrue(schema.parentSQL.contains("last_validated_at_ms >= normalized_committed_at_ms"))
+        XCTAssertTrue(schema.pageSQL.contains("request_key = 'GET ' || endpoint"))
+        XCTAssertTrue(schema.pageSQL.contains("length(link_header) BETWEEN 1 AND 8192"))
+        XCTAssertTrue(schema.pageSQL.contains("next_endpoint IS NULL OR link_header IS NOT NULL"))
+
+        try await migratedVault.write { database in
+            try Self.insertMigration036Receipt(
+                accountID: accountID,
+                organizationID: organizationID,
+                streamID: streamID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                rawSnapshotID: rawSnapshotID,
+                requestKey: requestKey,
+                in: database
+            )
+        }
+        do {
+            try await migratedVault.write { database in
+                try database.execute(
+                    sql: "DELETE FROM raw_api_snapshots WHERE id = ?",
+                    arguments: [rawSnapshotID.rawValue]
+                )
+            }
+            XCTFail("A raw snapshot bound to a replay receipt must be durable.")
+        } catch {
+            // Expected: migration 036 protects the raw receipt while its account exists.
+        }
+        do {
+            try await migratedVault.write { database in
+                try database.execute(
+                    sql: "UPDATE raw_api_snapshots SET endpoint = '/changed' WHERE id = ?",
+                    arguments: [rawSnapshotID.rawValue]
+                )
+            }
+            XCTFail("A raw snapshot bound to a replay receipt must be immutable.")
+        } catch {
+            // Expected: migration 036 prevents update/upsert mutation of receipt evidence.
+        }
+        let protectedEndpoint = try await migratedVault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT endpoint FROM raw_api_snapshots WHERE id = ?",
+                arguments: [rawSnapshotID.rawValue]
+            )
+        }
+        XCTAssertEqual(protectedEndpoint, "/orgs/migration-org/repos?type=all&per_page=100")
+
+        try await migratedVault.write { database in
+            try database.execute(
+                sql: """
+                    DELETE FROM account_organizations
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [accountID.rawValue, organizationID.rawValue]
+            )
+        }
+        var counts = try await Self.migration036Counts(
+            vault: migratedVault,
+            rawSnapshotID: rawSnapshotID
+        )
+        XCTAssertEqual(counts, Migration036Counts(receipts: 0, pages: 0, rawSnapshots: 1))
+
+        try await migratedVault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organizations (
+                        account_id, organization_id, access_state, capability_revision,
+                        selected_at_ms, checked_at_ms
+                    ) VALUES (?, ?, 'available', ?, ?, ?)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    organizationID.rawValue,
+                    capabilityRevision.rawValue,
+                    Int64(3_600_000),
+                    Int64(3_600_000)
+                ]
+            )
+            try Self.insertMigration036Receipt(
+                accountID: accountID,
+                organizationID: organizationID,
+                streamID: streamID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                rawSnapshotID: rawSnapshotID,
+                requestKey: requestKey,
+                in: database
+            )
+            try database.execute(
+                sql: "DELETE FROM accounts WHERE id = ?",
+                arguments: [accountID.rawValue]
+            )
+        }
+        counts = try await Self.migration036Counts(
+            vault: migratedVault,
+            rawSnapshotID: rawSnapshotID
+        )
+        XCTAssertEqual(counts, Migration036Counts(receipts: 0, pages: 0, rawSnapshots: 0))
+        try await migratedRegistry.closeAll()
+    }
+
     func testTransactionRollsBackAllWritesWhenItsOperationFails() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -628,6 +975,7 @@ final class AccountVaultTests: XCTestCase {
         let registry = try VaultRegistry(rootDirectory: directory)
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
         try await vault.write { database in
+            try Self.removeMigration036Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -751,6 +1099,7 @@ final class AccountVaultTests: XCTestCase {
             )
         )
         try await vault.write { database in
+            try Self.removeMigration036Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -827,6 +1176,123 @@ final class AccountVaultTests: XCTestCase {
         )
     }
 
+    private nonisolated static func removeMigration036Schema(from database: Database) throws {
+        try database.execute(
+            sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_delete"
+        )
+        try database.execute(
+            sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_update"
+        )
+        try database.execute(
+            sql: "DROP TABLE IF EXISTS repository_inventory_replay_receipt_pages"
+        )
+        try database.execute(
+            sql: "DROP TABLE IF EXISTS repository_inventory_replay_receipts"
+        )
+        try database.execute(sql: "DROP INDEX IF EXISTS sync_streams_exact_scope")
+        try database.execute(
+            sql: """
+                DELETE FROM schema_migrations
+                WHERE id = '036-repository-inventory-replay-receipts'
+                """
+        )
+    }
+
+    private nonisolated static func foreignKeyDescriptions(
+        table: String,
+        in database: Database
+    ) throws -> [String] {
+        try Row.fetchAll(
+            database,
+            sql: "SELECT * FROM pragma_foreign_key_list(?)",
+            arguments: [table]
+        ).map { row in
+            let source: String = row["from"]
+            let parent: String = row["table"]
+            let destination: String = row["to"]
+            let deletion: String = row["on_delete"]
+            return "\(source):\(parent).\(destination):\(deletion)"
+        }
+    }
+
+    private nonisolated static func insertMigration036Receipt(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        streamID: SyncStreamID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
+        rawSnapshotID: RawAPISnapshotID,
+        requestKey: String,
+        in database: Database
+    ) throws {
+        try database.execute(
+            sql: """
+                INSERT INTO repository_inventory_replay_receipts (
+                    id, account_id, organization_id, feature, stream_id, request_key,
+                    credential_revision, capability_revision, raw_source_revision,
+                    etag, last_modified, raw_observed_at_ms, normalized_committed_at_ms,
+                    last_validated_at_ms, parser_version, page_count,
+                    normalized_repository_count, normalized_digest
+                ) VALUES (?, ?, ?, 'repositories', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, 1, 0, ?)
+                """,
+            arguments: [
+                "repository-inventory-receipt-036",
+                accountID.rawValue,
+                organizationID.rawValue,
+                streamID.rawValue,
+                requestKey,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue,
+                "repository-inventory-v1:migration-036",
+                "\"migration-036\"",
+                Int64(3_600_000),
+                Int64(3_600_000),
+                Int64(3_600_000),
+                Data(repeating: 0x36, count: 32)
+            ]
+        )
+        try database.execute(
+            sql: """
+                INSERT INTO repository_inventory_replay_receipt_pages (
+                    receipt_id, page_index, endpoint, request_key, link_header,
+                    next_endpoint, raw_snapshot_id, object_count,
+                    raw_payload_digest, repository_id_digest
+                ) VALUES (?, 1, ?, ?, NULL, NULL, ?, 0, ?, ?)
+                """,
+            arguments: [
+                "repository-inventory-receipt-036",
+                "/orgs/migration-org/repos?type=all&per_page=100",
+                requestKey,
+                rawSnapshotID.rawValue,
+                Data(repeating: 0x37, count: 32),
+                Data(repeating: 0x38, count: 32)
+            ]
+        )
+    }
+
+    private nonisolated static func migration036Counts(
+        vault: AccountVault,
+        rawSnapshotID: RawAPISnapshotID
+    ) async throws -> Migration036Counts {
+        try await vault.read { database in
+            Migration036Counts(
+                receipts: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM repository_inventory_replay_receipts"
+                ) ?? 0,
+                pages: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM repository_inventory_replay_receipt_pages"
+                ) ?? 0,
+                rawSnapshots: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE id = ?",
+                    arguments: [rawSnapshotID.rawValue]
+                ) ?? 0
+            )
+        }
+    }
+
     private func encryptedConfiguration(vaultKey: VaultKey) -> Configuration {
         var configuration = Configuration()
         configuration.readonly = true
@@ -863,6 +1329,24 @@ private struct Migration034Fixture {
     let credentialRevision: CredentialRevision
     let capabilityRevision: CapabilityRevision
     let rawSnapshotID: RawAPISnapshotID
+}
+
+private struct Migration036SchemaInspection: Sendable {
+    let checksum: String?
+    let parentColumns: [String]
+    let pageColumns: [String]
+    let parentForeignKeys: [String]
+    let pageForeignKeys: [String]
+    let indexes: [String]
+    let triggers: [String]
+    let parentSQL: String
+    let pageSQL: String
+}
+
+private struct Migration036Counts: Equatable, Sendable {
+    let receipts: Int
+    let pages: Int
+    let rawSnapshots: Int
 }
 
 private enum TransactionTestError: Error {
