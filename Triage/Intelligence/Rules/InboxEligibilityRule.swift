@@ -25,6 +25,9 @@ struct InboxEligibilityRule: Sendable {
             return .archived
         }
         if workItem.workflow.status == .waiting {
+            if workItem.attentionReasons.contains(where: Self.isWaitingWakeUp) {
+                return .inbox
+            }
             return .waiting
         }
         if workItem.state == .resolved, workItem.openActionItems.isEmpty {
@@ -37,5 +40,10 @@ struct InboxEligibilityRule: Sendable {
             return .inbox
         }
         return .informational
+    }
+
+    private static func isWaitingWakeUp(_ reason: AttentionReason) -> Bool {
+        reason.ruleID == WaitingAttentionRuleID.awaitedActorResponded.rawValue
+            || reason.ruleID == WaitingAttentionRuleID.followUpDue.rawValue
     }
 }

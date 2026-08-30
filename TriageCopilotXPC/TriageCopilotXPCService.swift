@@ -1,10 +1,11 @@
 import Foundation
 
-final class TriageCopilotXPCService: NSObject, TriageCopilotHelper {
-  private let queue = DispatchQueue(
+final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked Sendable {
+  private static let queue = DispatchQueue(
     label: "com.triage.mac.copilot-xpc",
     qos: .userInitiated
   )
+  private let helperProcess = CopilotHelperProcess()
 
   func exchange(
     frame: Data,
@@ -20,10 +21,10 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper {
       return
     }
 
-    queue.async {
+    Self.queue.async {
       do {
         try CopilotXPCFrame.validate(frame, maximumPayloadBytes: 1_048_576)
-        let response = try CopilotHelperProcess().exchange(frame: frame)
+        let response = try self.helperProcess.exchange(frame: frame)
         try CopilotXPCFrame.validate(response, maximumPayloadBytes: 262_144)
         reply(response, nil)
       } catch let error as CopilotXPCServiceError {
@@ -35,7 +36,7 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper {
   }
 
   func cancelActiveProcess() {
-    CopilotHelperProcess.cancelActive()
+    helperProcess.cancel()
   }
 }
 
@@ -49,6 +50,8 @@ enum CopilotXPCServiceError: Int, Error {
   case codeSignatureNotValidated
   case processLaunchFailed
   case processExited
+  case operationCancelled
+  case operationTimedOut
 
   var nsError: NSError {
     NSError(

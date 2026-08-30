@@ -109,6 +109,96 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         XCTAssertEqual(persistedTitle, fixture.pullRequest.title)
     }
 
+    func testReviewThreadReplacementPrunesStaleNodesAndComputesResponseRequirement() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = PullRequestReviewThreadRepository(vault: fixture.vault)
+        let reviewer = ActorSummary(
+            id: ActorID(rawValue: "U_2")!,
+            nodeID: GitHubNodeID(rawValue: "U_2")!,
+            login: "reviewer",
+            displayName: nil,
+            avatarURL: nil
+        )
+        let record = PullRequestReviewThreadRecord(
+            nodeID: GitHubNodeID(rawValue: "T_1")!,
+            isResolved: false,
+            isOutdated: false,
+            comments: [
+                PullRequestReviewThreadCommentRecord(
+                    nodeID: GitHubNodeID(rawValue: "C_1")!,
+                    author: reviewer,
+                    body: "Please update",
+                    createdAt: fixture.date,
+                    updatedAt: fixture.date.addingTimeInterval(1),
+                    url: URL(string: "https://github.com/github/triage/pull/1#discussion_r1")!
+                )
+            ],
+            updatedAt: fixture.date.addingTimeInterval(1)
+        )
+        try await repository.replace(
+            pullRequestNodeID: fixture.pullRequest.nodeID,
+            organizationID: fixture.organizationID,
+            repositoryID: fixture.repositoryID,
+            currentUserNodeID: GitHubNodeID(rawValue: "U_1")!,
+            inventory: .init(
+                records: [record],
+                rawPages: [.init(endpoint: "graphql:TriagePullRequestReviewThreads", payload: Data("{}".utf8))],
+                metrics: .init(pageCount: 1, responseBytes: 2, queryCost: 1)
+            ),
+            observedAt: fixture.date.addingTimeInterval(2)
+        )
+        let initial = try await fixture.vault.read { database in
+            (
+                try Bool.fetchOne(
+                    database,
+                    sql: "SELECT requires_current_user_response FROM review_threads WHERE github_node_id = 'T_1'"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT unresolved_thread_count FROM pull_requests WHERE github_node_id = ?",
+                    arguments: [fixture.pullRequest.nodeID.rawValue]
+                )
+            )
+        }
+        XCTAssertEqual(initial.0, true)
+        XCTAssertEqual(initial.1, 1)
+        try await repository.replace(
+            pullRequestNodeID: fixture.pullRequest.nodeID,
+            organizationID: fixture.organizationID,
+            repositoryID: fixture.repositoryID,
+            currentUserNodeID: GitHubNodeID(rawValue: "U_1")!,
+            inventory: .init(
+                records: [],
+                rawPages: [],
+                metrics: .init(pageCount: 0, responseBytes: 0, queryCost: 0)
+            ),
+            observedAt: fixture.date.addingTimeInterval(3)
+        )
+
+        let persisted = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_threads"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments"),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM github_nodes WHERE github_node_id IN ('T_1', 'C_1')"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT unresolved_thread_count FROM pull_requests WHERE github_node_id = ?",
+                    arguments: [fixture.pullRequest.nodeID.rawValue]
+                ),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")
+            )
+        }
+        XCTAssertEqual(persisted.0, 0)
+        XCTAssertEqual(persisted.1, 0)
+        XCTAssertEqual(persisted.2, 0)
+        XCTAssertEqual(persisted.3, 0)
+        XCTAssertEqual(persisted.4, 1)
+    }
+
     func testRefreshPersistsReviewSourcesAndReconciledStateAtomically() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

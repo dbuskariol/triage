@@ -5,10 +5,11 @@ final class CopilotHelperProcess {
   private static let helperRelativePath =
     "Contents/Resources/TriageCopilotHelper"
   private static let helperIdentifier = "com.triage.mac.copilot-helper"
-  private static let activeProcess = ActiveProcess()
+  private static let maximumRuntime: DispatchTimeInterval = .seconds(60)
+  private let supervisor = CopilotProcessSupervisor()
 
-  static func cancelActive() {
-    activeProcess.cancel()
+  func cancel() {
+    supervisor.cancel()
   }
 
   func exchange(frame: Data) throws -> Data {
@@ -52,23 +53,40 @@ final class CopilotHelperProcess {
     let output = Pipe()
     process.standardInput = input
     process.standardOutput = output
-    process.standardError = nil
+    process.standardError = FileHandle.nullDevice
+    var launched = false
+    defer {
+      input.fileHandleForWriting.closeFile()
+      output.fileHandleForReading.closeFile()
+      if launched, process.isRunning {
+        process.terminate()
+        process.waitUntilExit()
+      }
+    }
 
     do {
-      try process.run()
-      Self.activeProcess.set(process)
-      defer { Self.activeProcess.clear(process) }
+      try supervisor.run(process)
+      launched = true
+      defer { supervisor.finish(process) }
+      let timeout = DispatchSource.makeTimerSource()
+      timeout.schedule(deadline: .now() + Self.maximumRuntime)
+      let supervisor = self.supervisor
+      timeout.setEventHandler {
+        supervisor.timeout()
+      }
+      timeout.resume()
+      defer { timeout.cancel() }
+
+      try supervisor.throwIfStopped()
       try input.fileHandleForWriting.write(contentsOf: frame)
       input.fileHandleForWriting.closeFile()
       let response = try readFrame(from: output.fileHandleForReading)
-      output.fileHandleForReading.closeFile()
       process.waitUntilExit()
+      try supervisor.throwIfStopped()
       return response
     } catch let error as CopilotXPCServiceError {
-      if process.isRunning { process.terminate() }
       throw error
     } catch {
-      if process.isRunning { process.terminate() }
       throw CopilotXPCServiceError.processLaunchFailed
     }
   }
@@ -124,17 +142,26 @@ final class CopilotHelperProcess {
   }
 }
 
-private final class ActiveProcess: @unchecked Sendable {
-  private let lock = NSLock()
-  private var process: Process?
-
-  func set(_ process: Process) {
-    lock.lock()
-    self.process = process
-    lock.unlock()
+private final class CopilotProcessSupervisor: @unchecked Sendable {
+  private enum StopReason: Equatable {
+    case none
+    case cancelled
+    case timedOut
   }
 
-  func clear(_ process: Process) {
+  private let lock = NSLock()
+  private var process: Process?
+  private var stopReason: StopReason = .none
+
+  func run(_ process: Process) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    try throwIfStoppedLocked()
+    try process.run()
+    self.process = process
+  }
+
+  func finish(_ process: Process) {
     lock.lock()
     defer { lock.unlock() }
     guard self.process === process else { return }
@@ -142,11 +169,39 @@ private final class ActiveProcess: @unchecked Sendable {
   }
 
   func cancel() {
+    stop(.cancelled)
+  }
+
+  func timeout() {
+    stop(.timedOut)
+  }
+
+  func throwIfStopped() throws {
     lock.lock()
+    defer { lock.unlock() }
+    try throwIfStoppedLocked()
+  }
+
+  private func stop(_ reason: StopReason) {
+    lock.lock()
+    if stopReason == .none {
+      stopReason = reason
+    }
     let process = process
     lock.unlock()
     if process?.isRunning == true {
       process?.terminate()
+    }
+  }
+
+  private func throwIfStoppedLocked() throws {
+    switch stopReason {
+    case .none:
+      return
+    case .cancelled:
+      throw CopilotXPCServiceError.operationCancelled
+    case .timedOut:
+      throw CopilotXPCServiceError.operationTimedOut
     }
   }
 }
@@ -155,11 +210,16 @@ enum CopilotCodeSignatureValidator {
   static func validate(executableURL: URL, identifier: String) throws {
     guard let teamIdentifier = Bundle.main.object(
       forInfoDictionaryKey: "TriageExpectedTeamIdentifier"
-    ) as? String, !teamIdentifier.isEmpty else {
+    ) as? String,
+      teamIdentifier.range(
+        of: #"^[A-Z0-9]{10}$"#,
+        options: .regularExpression
+      ) != nil
+    else {
       throw CopilotXPCServiceError.codeSignatureNotValidated
     }
     let requirementString =
-      "identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
+      "anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
     var requirement: SecRequirement?
     guard SecRequirementCreateWithString(requirementString as CFString, [], &requirement) == errSecSuccess,
       let requirement

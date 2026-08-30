@@ -100,17 +100,21 @@ actor CopilotHelperClient: TriageCopilotHelping {
       throw CopilotFrameError.payloadTooLarge
     }
 
-    return try await withTaskCancellationHandler {
-      try await readResponse(
-        payload: payload,
-        request: request.header,
-        expectedStatus: expectedStatus,
-        timeout: timeout
-      )
-    } onCancel: {
-      Task {
-        await self.cancelRunningProcess()
+    do {
+      return try await withTaskCancellationHandler {
+        try await readResponse(
+          payload: payload,
+          request: request.header,
+          expectedStatus: expectedStatus,
+          timeout: timeout
+        )
+      } onCancel: {
+        Task {
+          await self.cancelRunningProcess()
+        }
       }
+    } catch is CancellationError {
+      throw CopilotXPCError.operationCancelled
     }
   }
 
@@ -131,14 +135,21 @@ actor CopilotHelperClient: TriageCopilotHelping {
         }
         group.addTask {
           try await Task.sleep(for: .seconds(timeout))
-          await self.cancelRunningProcess()
           throw CopilotXPCError.operationTimedOut
         }
-        guard let result = try await group.next() else {
-          throw CopilotXPCError.helperUnavailable
+        do {
+          guard let result = try await group.next() else {
+            throw CopilotXPCError.helperUnavailable
+          }
+          group.cancelAll()
+          return result
+        } catch {
+          group.cancelAll()
+          if error as? CopilotXPCError == .operationTimedOut {
+            await self.cancelRunningProcess()
+          }
+          throw error
         }
-        group.cancelAll()
-        return result
       }
     }
     return try await performExchange(

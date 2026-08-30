@@ -26,25 +26,46 @@ struct MenuBarView: View {
 
             Divider()
 
-            ForEach(topItems) { item in
-                Button {
-                    navigation.section = .inbox
-                    appModel.selectedWorkItemID = item.id
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                } label: {
-                    Text(item.title)
-                        .lineLimit(1)
+            if appModel.hasConnectedAccount {
+                SynchronizationStatusLabel(
+                    status: presentation.synchronizationStatus,
+                    detail: presentation.synchronizationDetail
+                )
+
+                Menu("Open Work View") {
+                    ForEach(AppSection.allCases) { section in
+                        Button(section.title) {
+                            navigation.section = section
+                            openMainWindow()
+                        }
+                    }
                 }
-            }
-            if !topItems.isEmpty {
+
+                ForEach(topItems) { item in
+                    Button {
+                        navigation.section = .inbox
+                        appModel.selectedWorkItemID = item.id
+                        openMainWindow()
+                    } label: {
+                        Text(item.title)
+                            .lineLimit(1)
+                    }
+                }
+                if !topItems.isEmpty {
+                    Divider()
+                }
+            } else {
+                Label("No GitHub account connected", systemImage: "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(.secondary)
+                Text("Open Triage to connect an account and choose an organization.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Divider()
             }
 
             Button("Open Triage") {
                 navigation.section = .inbox
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                openMainWindow()
             }
             .keyboardShortcut("o")
 
@@ -92,9 +113,30 @@ struct MenuBarView: View {
     }
 
     private var summary: String {
+        guard appModel.hasConnectedAccount else {
+            return "No account connected"
+        }
         let highPriority = inboxItems.filter { $0.workflow.priority == .high }.count
         let organization = appModel.selectedOrganization?.displayName ?? appModel.selectedOrganization?.login
         let counts = "\(highPriority) priority · \(inboxItems.count) inbox"
         return organization.map { "\($0) · \(counts)" } ?? counts
+    }
+
+    private var presentation: WorkspacePresentationState {
+        WorkspacePresentationState(
+            workItems: appModel.workItems,
+            selectedAccountID: appModel.selectedAccountID,
+            selectedOrganizationID: appModel.selectedOrganizationID,
+            organizationAccess: appModel.selectedOrganizationAccess,
+            hasSSOAuthorizationHeader: appModel.ssoAuthorizationHeader != nil,
+            isRefreshing: appModel.isRefreshing,
+            refreshError: appModel.refreshError,
+            now: Date()
+        )
+    }
+
+    private func openMainWindow() {
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
