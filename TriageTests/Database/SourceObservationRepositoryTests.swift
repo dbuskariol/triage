@@ -245,7 +245,7 @@ final class SourceObservationRepositoryTests: XCTestCase {
         XCTAssertEqual(counts, .init(observations: 0, projections: 0))
     }
 
-    func testDeletionRequiresConfirmedFullReconciliationAndPrivateNotFoundRemainsInaccessible() async throws {
+    func testPartialCoverageAndPrivateNotFoundCannotAuthorizeDeletion() async throws {
         let fixture = try await SourceObservationFixture()
         defer { fixture.remove() }
         let repository = SourceAccessObservationRepository(vault: fixture.vault)
@@ -258,93 +258,34 @@ final class SourceObservationRepositoryTests: XCTestCase {
         )
         _ = try await repository.record(inaccessible)
 
-        await assertThrows(.invalidDeletionAuthority) {
-            _ = try await repository.record(
-                fixture.observation(
-                    id: "incremental-delete",
-                    result: .authoritativelyDeleted,
-                    reason: .authoritativeOmission,
-                    authority: .incremental,
-                    confirmation: .confirmed,
-                    observedAt: fixture.date.addingTimeInterval(1)
-                )
-            )
-        }
-        await assertThrows(.invalidDeletionAuthority) {
-            _ = try await repository.record(
-                fixture.observation(
-                    id: "provisional-delete",
-                    result: .authoritativelyDeleted,
-                    reason: .authoritativeOmission,
-                    authority: .fullReconciliation,
-                    confirmation: .provisional,
-                    observedAt: fixture.date.addingTimeInterval(1)
-                )
-            )
-        }
-        let deletionTime = fixture.date.addingTimeInterval(1)
-        let deletedWithoutReceipt = fixture.observation(
-            id: "confirmed-delete",
+        let deletionAttempt = fixture.observation(
+            id: "partial-coverage-delete",
             sourceRevision: "reconciliation-2",
             result: .authoritativelyDeleted,
             reason: .authoritativeOmission,
             authority: .fullReconciliation,
             confirmation: .confirmed,
-            observedAt: deletionTime
+            observedAt: fixture.date.addingTimeInterval(1)
         )
-        await assertThrows(.missingAuthoritativeDeletionReceipt) {
-            _ = try await repository.record(deletedWithoutReceipt)
+        await assertThrows(.authoritativeDeletionContractUnavailable) {
+            _ = try await repository.record(deletionAttempt)
         }
-        let deletionRawSnapshotID = try await fixture.seedRawSnapshot(
-            id: "raw-confirmed-delete",
-            observedAt: deletionTime
+        let projection = try await repository.projection(
+            for: inaccessible.target,
+            feature: inaccessible.feature,
+            streamID: inaccessible.streamID,
+            scope: inaccessible.scope
         )
-        let deleted = fixture.observation(
-            id: "confirmed-delete",
-            sourceRevision: "reconciliation-2",
-            rawSnapshotID: deletionRawSnapshotID,
-            result: .authoritativelyDeleted,
-            reason: .authoritativeOmission,
-            authority: .fullReconciliation,
-            confirmation: .confirmed,
-            observedAt: deletionTime
-        )
-        await assertThrows(.missingAuthoritativeDeletionCoverage) {
-            _ = try await repository.record(deleted)
-        }
-        try await fixture.saveCoverage(
-            status: .complete,
-            lastSuccessfulAt: deleted.observedAt,
-            repositoryID: fixture.repositoryID
-        )
-        await assertThrows(.missingAuthoritativeDeletionCoverage) {
-            _ = try await repository.record(deleted)
-        }
-        try await fixture.saveCoverage(
-            status: .complete,
-            lastSuccessfulAt: deleted.observedAt,
-            intervalStart: fixture.date.addingTimeInterval(-60),
-            intervalEnd: deleted.observedAt
-        )
-        await assertThrows(.missingAuthoritativeDeletionCoverage) {
-            _ = try await repository.record(deleted)
-        }
-        try await fixture.saveCoverage(
-            status: .complete,
-            lastSuccessfulAt: deleted.observedAt
-        )
-        let projection = try await repository.record(deleted)
-
-        XCTAssertEqual(projection.result, .authoritativelyDeleted)
         let history = try await repository.history(
-            for: deleted.target,
-            feature: deleted.feature,
-            streamID: deleted.streamID,
+            for: inaccessible.target,
+            feature: inaccessible.feature,
+            streamID: inaccessible.streamID,
             scope: fixture.scope
         )
         let counts = try await fixture.counts()
-        XCTAssertEqual(history, [deleted, inaccessible])
-        XCTAssertEqual(counts, .init(observations: 2, projections: 1))
+        XCTAssertEqual(projection?.result, .inaccessible)
+        XCTAssertEqual(history, [inaccessible])
+        XCTAssertEqual(counts, .init(observations: 1, projections: 1))
     }
 
     func testInventoryOmissionIsProvisionalUnknownAndNeverDeletion() async throws {
@@ -579,10 +520,12 @@ final class SourceObservationRepositoryTests: XCTestCase {
         XCTAssertEqual(projection?.winningObservationID, observation.id)
     }
 
-    func testAuthoritativeDeletionReceiptCannotBeDeletedOrCompacted() async throws {
+    func testCompleteCoverageAndRawReceiptCannotSupplyDeletionContract() async throws {
         let fixture = try await SourceObservationFixture()
         defer { fixture.remove() }
         let repository = SourceAccessObservationRepository(vault: fixture.vault)
+        let accessible = fixture.observation(id: "prior-access")
+        _ = try await repository.record(accessible)
         let deletionTime = fixture.date.addingTimeInterval(1)
         let receiptID = try await fixture.seedRawSnapshot(
             id: "raw-durable-deletion-receipt",
@@ -602,102 +545,20 @@ final class SourceObservationRepositoryTests: XCTestCase {
             confirmation: .confirmed,
             observedAt: deletionTime
         )
-        _ = try await repository.record(deletion)
-
-        do {
-            try await fixture.vault.write { database in
-                try database.execute(
-                    sql: "DELETE FROM raw_api_snapshots WHERE id = ?",
-                    arguments: [receiptID.rawValue]
-                )
-            }
-            XCTFail("Deleting an authoritative deletion receipt must fail closed.")
-        } catch {
-            // Expected: migration 035 protects authoritative deletion receipts.
+        await assertThrows(.authoritativeDeletionContractUnavailable) {
+            _ = try await repository.record(deletion)
         }
-
-        do {
-            try await RawAPISnapshotRepository(vault: fixture.vault).save(
-                RawAPISnapshot(
-                    id: receiptID,
-                    accountID: fixture.account.id,
-                    githubNodeID: nil,
-                    endpoint: "GET /orgs/acme/teams?per_page=100",
-                    eTag: nil,
-                    parserVersion: 1,
-                    observedAt: deletionTime,
-                    payload: Data("{\"mutated\":true}".utf8),
-                    requestIdentity: ConditionalRequestIdentity(
-                        scope: fixture.scope,
-                        feature: .teams,
-                        streamID: SyncStreamID(rawValue: "mutated-authority")!,
-                        requestKey: "mutated-authority"
-                    )
-                )
-            )
-            XCTFail("Overwriting an authoritative deletion receipt must fail closed.")
-        } catch {
-            // Expected: migration 035 makes authoritative deletion receipts immutable.
-        }
-        let receiptState = try await fixture.vault.read { database in
-            try Row.fetchOne(
-                database,
-                sql: """
-                    SELECT endpoint, payload, authority_feature, authority_stream_id,
-                           authority_request_key, observed_at_ms
-                    FROM raw_api_snapshots WHERE id = ?
-                    """,
-                arguments: [receiptID.rawValue]
-            ).map { row in
-                (
-                    row["endpoint"] as String,
-                    row["payload"] as Data,
-                    row["authority_feature"] as String?,
-                    row["authority_stream_id"] as String?,
-                    row["authority_request_key"] as String?,
-                    row["observed_at_ms"] as Int64
-                )
-            }
-        }
-        XCTAssertEqual(receiptState?.0, "/orgs/acme/repos?type=all&per_page=100")
-        XCTAssertEqual(receiptState?.1, Data("{}".utf8))
-        XCTAssertEqual(receiptState?.2, CoverageFeature.repositories.rawValue)
-        XCTAssertEqual(receiptState?.3, fixture.streamID.rawValue)
-        XCTAssertEqual(
-            receiptState?.4,
-            "GET /orgs/acme/repos?type=all&per_page=100"
+        let projection = try await repository.projection(
+            for: accessible.target,
+            feature: accessible.feature,
+            streamID: accessible.streamID,
+            scope: accessible.scope
         )
-        XCTAssertEqual(
-            receiptState?.5,
-            Int64((deletionTime.timeIntervalSince1970 * 1_000).rounded())
-        )
-
-        let ordinarySnapshotID = try await fixture.seedRawSnapshot(
-            id: "raw-newer-retained",
-            observedAt: deletionTime.addingTimeInterval(1)
-        )
-        try await RawAPISnapshotRepository(vault: fixture.vault).save(
-            RawAPISnapshot(
-                id: ordinarySnapshotID,
-                accountID: fixture.account.id,
-                githubNodeID: nil,
-                endpoint: "/orgs/acme/repos?type=all&per_page=100",
-                eTag: nil,
-                parserVersion: 1,
-                observedAt: deletionTime.addingTimeInterval(1),
-                payload: Data("{\"updated\":true}".utf8),
-                requestIdentity: ConditionalRequestIdentity(
-                    scope: fixture.scope,
-                    feature: .repositories,
-                    streamID: fixture.streamID,
-                    requestKey: "GET /orgs/acme/repos?type=all&per_page=100"
-                )
-            )
-        )
-        let removedCount = try await RawAPISnapshotRepository(vault: fixture.vault).compact(
-            accountID: fixture.account.id,
-            retainingMostRecentPerSource: 1,
-            before: deletionTime.addingTimeInterval(2)
+        let history = try await repository.history(
+            for: accessible.target,
+            feature: accessible.feature,
+            streamID: accessible.streamID,
+            scope: accessible.scope
         )
         let receiptCount = try await fixture.vault.read { database in
             try Int.fetchOne(
@@ -706,33 +567,33 @@ final class SourceObservationRepositoryTests: XCTestCase {
                 arguments: [receiptID.rawValue]
             ) ?? 0
         }
-        let history = try await repository.history(
-            for: deletion.target,
-            feature: deletion.feature,
-            streamID: deletion.streamID,
-            scope: deletion.scope
+        XCTAssertEqual(receiptCount, 1)
+        XCTAssertEqual(projection?.result, .accessible)
+        XCTAssertEqual(history, [accessible])
+        let retainedCounts = try await fixture.counts()
+        XCTAssertEqual(retainedCounts, .init(observations: 1, projections: 1))
+    }
+
+    func testPriorCredentialOrCapabilityRevisionCannotAuthorizeACurrentRawObservation() async throws {
+        let fixture = try await SourceObservationFixture()
+        defer { fixture.remove() }
+        let repository = SourceAccessObservationRepository(vault: fixture.vault)
+        let currentScope = try await fixture.rotateScope(
+            credentialRevision: CredentialRevision(rawValue: "credential-2")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
+        )
+        let observation = fixture.observation(
+            id: "prior-revision-raw",
+            scope: currentScope,
+            rawSnapshotID: fixture.rawSnapshotID
         )
 
-        XCTAssertEqual(removedCount, 1)
-        XCTAssertEqual(receiptCount, 1)
-        XCTAssertEqual(history, [deletion])
+        await assertThrows(.rawSnapshotScopeMismatch) {
+            _ = try await repository.record(observation)
+        }
 
-        try await fixture.vault.write { database in
-            try database.execute(
-                sql: "DELETE FROM accounts WHERE id = ?",
-                arguments: [fixture.account.id.rawValue]
-            )
-        }
-        let erasedCounts = try await fixture.counts()
-        let erasedReceiptCount = try await fixture.vault.read { database in
-            try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM raw_api_snapshots WHERE id = ?",
-                arguments: [receiptID.rawValue]
-            ) ?? 0
-        }
-        XCTAssertEqual(erasedCounts, .init(observations: 0, projections: 0))
-        XCTAssertEqual(erasedReceiptCount, 0)
+        let counts = try await fixture.counts()
+        XCTAssertEqual(counts, .init(observations: 0, projections: 0))
     }
 
     func testFeatureAndStreamAuthoritiesHaveIndependentCurrentProjections() async throws {
