@@ -4,6 +4,60 @@ import XCTest
 @testable import Triage
 
 final class PullRequestReviewRefreshServiceTests: XCTestCase {
+    func testStaleScopeBeforeCandidateSelectionCancelsWithoutSchedulerWrites() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.rotate(.credential)
+
+        do {
+            _ = try await fixture.service(responses: [:]).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                streamID: fixture.streamID
+            )
+            XCTFail("Expected stale scope cancellation.")
+        } catch is CancellationError {
+            // Expected supersession.
+        }
+        let durableState = try await fixture.durableState()
+        XCTAssertEqual(durableState.schedulerShards, 0)
+    }
+
+    func testRevokedRepositoryAccessDoesNotRequestOrAdvanceAndRemainsExplicitlyBlocked() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.setRepositoryAccess(state: "revoked")
+        let before = try await fixture.durableState()
+
+        let result = try await fixture.service(responses: [:]).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertFalse(result.hasRemainingCandidates)
+        XCTAssertTrue(result.hasBlockedKnownCandidates)
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+
+    func testTrueEmptyInventoryHasNoRemainingOrBlockedCandidates() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.removeKnownPullRequest()
+
+        let result = try await fixture.service(responses: [:]).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertFalse(result.hasRemainingCandidates)
+        XCTAssertFalse(result.hasBlockedKnownCandidates)
+    }
+
     func testSelectedOrganizationPartialRequestedReviewersRetainsBothCachedInventories() async throws {
         let fixture = try await PullRequestReviewRefreshFixture()
         defer { fixture.remove() }
@@ -21,7 +75,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         let result = try await service.refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.date.addingTimeInterval(10)
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
         )
 
         XCTAssertEqual(result.refreshedPullRequestNodeIDs, [])
@@ -51,7 +106,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         let result = try await service.refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.date.addingTimeInterval(10)
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
         )
 
         XCTAssertEqual(result.refreshedPullRequestNodeIDs, [fixture.pullRequest.nodeID])
@@ -77,7 +133,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         let result = try await service.refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.date.addingTimeInterval(10)
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
         )
 
         XCTAssertEqual(result.refreshedPullRequestNodeIDs, [fixture.pullRequest.nodeID])
@@ -102,7 +159,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
             _ = try await service.refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
-                observedAt: fixture.date.addingTimeInterval(10)
+                observedAt: fixture.date.addingTimeInterval(10),
+                streamID: fixture.streamID
             )
             XCTFail("Expected the second fetch to fail.")
         } catch let error as URLError {
@@ -127,7 +185,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
             _ = try await service.refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
-                observedAt: fixture.date.addingTimeInterval(10)
+                observedAt: fixture.date.addingTimeInterval(10),
+                streamID: fixture.streamID
             )
             XCTFail("Expected the second fetch to be cancelled.")
         } catch is CancellationError {
@@ -170,7 +229,8 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
             try await service.refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
-                observedAt: fixture.date.addingTimeInterval(10)
+                observedAt: fixture.date.addingTimeInterval(10),
+                streamID: fixture.streamID
             )
         }
 
@@ -199,6 +259,7 @@ private struct PullRequestReviewDurableState: Equatable {
     let rawSnapshots: Int
     let reviews: Int
     let reviewRequests: Int
+    let schedulerShards: Int
 }
 
 private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
@@ -221,6 +282,7 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
     let replacementReviewerNodeID = GitHubNodeID(rawValue: "U_replacement")!
     let secondReviewNodeID = GitHubNodeID(rawValue: "R_second")!
     let secondReviewerNodeID = GitHubNodeID(rawValue: "U_second")!
+    let streamID = SyncStreamID(rawValue: "pull-request-reviews-test")!
 
     var scope: SynchronizationScope {
         SynchronizationScope(
@@ -272,9 +334,24 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
             ),
             selectedAt: date
         )
+        try await SyncStreamRepository(vault: vault).save(
+            SyncStream(
+                id: streamID,
+                accountID: accountID,
+                organizationID: organizationID,
+                feature: .reviews,
+                highWater: nil,
+                lastSuccessfulAt: nil,
+                lastAttemptAt: date,
+                status: .partial,
+                failureDetail: nil
+            )
+        )
         let fixtureRepositoryID = repositoryID
         let fixtureOrganizationID = organizationID
+        let fixtureAccountID = accountID
         let fixtureDate = date
+        let fixtureDateMilliseconds = Int64((fixtureDate.timeIntervalSince1970 * 1_000).rounded())
         try await vault.write { database in
             try database.execute(
                 sql: """
@@ -291,7 +368,18 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                     "github",
                     "triage",
                     "https://github.com/github/triage",
-                    Self.milliseconds(fixtureDate)
+                    fixtureDateMilliseconds
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
+                    VALUES (?, ?, 'available', ?)
+                    """,
+                arguments: [
+                    fixtureAccountID.rawValue,
+                    fixtureRepositoryID.rawValue,
+                    fixtureDateMilliseconds
                 ]
             )
         }
@@ -338,7 +426,8 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                 reviewRequests: try Int.fetchOne(
                     database,
                     sql: "SELECT COUNT(*) FROM review_requests"
-                )!
+                )!,
+                schedulerShards: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_shards")!
             )
         }
     }
@@ -361,6 +450,28 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                     arguments: [accountID.rawValue, organizationID.rawValue]
                 )
             }
+        }
+    }
+
+    func setRepositoryAccess(state: String) async throws {
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE account_repository_access
+                    SET access_state = ?
+                    WHERE account_id = ? AND repository_id = ?
+                    """,
+                arguments: [state, accountID.rawValue, repositoryID.rawValue]
+            )
+        }
+    }
+
+    func removeKnownPullRequest() async throws {
+        try await vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM github_nodes WHERE github_node_id = ?",
+                arguments: [pullRequest.nodeID.rawValue]
+            )
         }
     }
 

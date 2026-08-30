@@ -918,15 +918,20 @@ actor OrganizationWorkRefreshService {
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
             ).refresh(
                 scope: scope,
-                githubOrganizationID: organization.githubOrganizationID
+                githubOrganizationID: organization.githubOrganizationID,
+                streamID: streamID
             )
             try await validateCurrentScope(scope, vault: vault)
             let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
-            let status: CoverageStatus = scopedSSOHeader == nil && !result.hasRemainingCandidates
+            let status: CoverageStatus = scopedSSOHeader == nil
+                && !result.hasRemainingCandidates
+                && !result.hasBlockedKnownCandidates
                 ? .complete
-                : .partial
+                : (result.hasBlockedKnownCandidates ? .unavailable : .partial)
             let failureDetail: String? = if scopedSSOHeader != nil {
                 "GitHub returned partial pull request review results due to SSO."
+            } else if result.hasBlockedKnownCandidates {
+                "Some known pull requests are no longer accessible to the selected account. Restore repository access or refresh the repository inventory."
             } else if result.hasRemainingCandidates {
                 "Additional pull request review candidates remain for the next refresh."
             } else {
@@ -1021,7 +1026,8 @@ actor OrganizationWorkRefreshService {
             ).refresh(
                 scope: scope,
                 githubOrganizationID: organization.githubOrganizationID,
-                observedAt: attemptedAt
+                observedAt: attemptedAt,
+                streamID: streamID
             )
             try await validateCurrentScope(scope, vault: vault)
             let assessment = result.coverageAssessment

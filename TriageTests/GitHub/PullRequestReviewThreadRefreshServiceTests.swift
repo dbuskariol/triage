@@ -4,6 +4,98 @@ import XCTest
 @testable import Triage
 
 final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
+    func testStaleScopeBeforeCandidateSelectionCancelsWithoutSchedulerWrites() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.rotate(.credential)
+
+        do {
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [:])).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                streamID: fixture.streamID
+            )
+            XCTFail("Expected stale scope cancellation.")
+        } catch is CancellationError {
+            // Expected supersession.
+        }
+        let durableState = try await fixture.durableState()
+        XCTAssertEqual(durableState.schedulerShards, 0)
+    }
+
+    func testInaccessibleRetainedPullRequestDoesNotFetchOrAdvanceAndCoverageIsUnavailable() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.setFirstPullRequestAccessibility(.inaccessible)
+        let before = try await fixture.durableState()
+
+        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [:])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.outcomes.isEmpty)
+        XCTAssertFalse(result.hasRemainingCandidates)
+        XCTAssertTrue(result.hasBlockedKnownCandidates)
+        XCTAssertEqual(result.coverageAssessment.status, .unavailable)
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+
+    func testTrueEmptyInventoryRemainsComplete() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.removeFirstPullRequest()
+
+        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [:])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.outcomes.isEmpty)
+        XCTAssertFalse(result.hasRemainingCandidates)
+        XCTAssertFalse(result.hasBlockedKnownCandidates)
+        XCTAssertEqual(result.coverageAssessment.status, .complete)
+    }
+
+    func testLocalReplacementValidationFailureDoesNotAdvanceAndCandidateRemainsSelected() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        let valid = fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+        let invalid = GitHubPullRequestReviewThreadInventory(
+            records: [valid.records[0], valid.records[0]],
+            rawPages: valid.rawPages,
+            metrics: valid.metrics
+        )
+        let before = try await fixture.durableState()
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+                fixture.firstPullRequest.nodeID: .inventory(invalid)
+            ])).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                streamID: fixture.streamID
+            )
+        }) { error in
+            XCTAssertEqual(error as? PullRequestReviewThreadRepositoryError, .duplicateThreadNodeID)
+        }
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+
+        let retry = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(valid)
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            streamID: fixture.streamID
+        )
+        XCTAssertEqual(retry.outcomes.map(\.pullRequestNodeID), [fixture.firstPullRequest.nodeID])
+        XCTAssertEqual(retry.outcomes.map(\.status), [.refreshed])
+    }
+
     func testSuccessfulInventoryPersistsRawProvenanceThreadsAndComments() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
@@ -15,7 +107,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         let result = try await service.refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.observedAt
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
         )
 
         XCTAssertEqual(result.outcomes.count, 1)
@@ -38,7 +131,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         XCTAssertEqual(persisted.3, "Please update this line.")
     }
 
-    func testFailureDoesNotPreventLaterSuccessAndOutcomesRemainInCandidateOrder() async throws {
+    func testRemoteFailureStopsBeforeLaterCandidateAndDoesNotAdvanceWithoutProvenance() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
         let secondPullRequest = try await fixture.addPullRequest(nodeID: "PR_2", number: 2)
@@ -46,36 +139,56 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             fixture.firstPullRequest.nodeID: .failure(.generic),
             secondPullRequest.nodeID: .inventory(fixture.inventory(threadID: "THREAD_2", commentID: "COMMENT_2"))
         ])
+        let before = try await fixture.durableState()
 
         let result = try await fixture.service(fetcher: fetcher).refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.observedAt
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
         )
 
-        XCTAssertEqual(result.outcomes.map(\.pullRequestNodeID), [fixture.firstPullRequest.nodeID, secondPullRequest.nodeID])
-        XCTAssertEqual(result.outcomes.map(\.status), [.failed, .refreshed])
+        XCTAssertEqual(result.outcomes.map(\.pullRequestNodeID), [fixture.firstPullRequest.nodeID])
+        XCTAssertEqual(result.outcomes.map(\.status), [.failed])
         let persistedThreadIDs = try await fixture.vault.read { database in
             try String.fetchAll(database, sql: "SELECT github_node_id FROM review_threads ORDER BY github_node_id")
         }
-        XCTAssertEqual(persistedThreadIDs, ["THREAD_2"])
+        XCTAssertEqual(persistedThreadIDs, [])
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+
+        let retry = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            ),
+            secondPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_2", commentID: "COMMENT_2")
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        XCTAssertEqual(
+            retry.outcomes.map(\.pullRequestNodeID),
+            [fixture.firstPullRequest.nodeID, secondPullRequest.nodeID]
+        )
+        XCTAssertEqual(retry.outcomes.map(\.status), [.refreshed, .refreshed])
     }
 
     func testSSOAndApprovalFailuresAreRedactedAndClassified() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
-        let secondPullRequest = try await fixture.addPullRequest(nodeID: "PR_2", number: 2)
-        let thirdPullRequest = try await fixture.addPullRequest(nodeID: "PR_3", number: 3)
         let fetcher = ReviewThreadFetcher(plans: [
-            fixture.firstPullRequest.nodeID: .failure(.sso),
-            secondPullRequest.nodeID: .failure(.approval),
-            thirdPullRequest.nodeID: .failure(.unrelatedSSO)
+            fixture.firstPullRequest.nodeID: .failure(.sso)
         ])
 
         let result = try await fixture.service(fetcher: fetcher).refresh(
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
-            observedAt: fixture.observedAt
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
         )
 
         guard case let .ssoRequired(header) = result.outcomes[0].status else {
@@ -85,12 +198,27 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             header,
             .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso-secret")!)
         )
-        XCTAssertEqual(result.outcomes[1].status, .approvalRequired)
-        XCTAssertEqual(result.outcomes[2].status, .unavailableOrPermission)
+        XCTAssertEqual(result.outcomes.count, 1)
+        XCTAssertEqual(result.coverageAssessment.status, .requiresSSO)
         let persistedDetail = try XCTUnwrap(result.coverageAssessment.failureDetail)
         XCTAssertFalse(persistedDetail.contains("https://"))
         XCTAssertFalse(persistedDetail.contains("sso-secret"))
-        XCTAssertFalse(persistedDetail.contains("approval-secret"))
+
+        let approvalFixture = try await ReviewThreadRefreshFixture()
+        defer { approvalFixture.remove() }
+        let approval = try await approvalFixture.service(fetcher: ReviewThreadFetcher(plans: [
+            approvalFixture.firstPullRequest.nodeID: .failure(.approval)
+        ])).refresh(
+            scope: approvalFixture.scope,
+            githubOrganizationID: approvalFixture.githubOrganizationID,
+            observedAt: approvalFixture.observedAt,
+            streamID: approvalFixture.streamID
+        )
+        XCTAssertEqual(approval.outcomes.map(\.status), [.approvalRequired])
+        XCTAssertEqual(approval.coverageAssessment.status, .requiresApproval)
+        let approvalDetail = try XCTUnwrap(approval.coverageAssessment.failureDetail)
+        XCTAssertFalse(approvalDetail.contains("https://"))
+        XCTAssertFalse(approvalDetail.contains("approval-secret"))
     }
 
     func testCancellationAfterFetchPreventsReplacementAndPropagates() async throws {
@@ -102,7 +230,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             try await service.refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
-                observedAt: fixture.observedAt
+                observedAt: fixture.observedAt,
+                streamID: fixture.streamID
             )
         }
 
@@ -146,7 +275,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             try await service.refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
-                observedAt: fixture.observedAt
+                observedAt: fixture.observedAt,
+                streamID: fixture.streamID
             )
         }
 
@@ -176,7 +306,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             scope: fixture.scope,
             githubOrganizationID: fixture.githubOrganizationID,
             limit: 1,
-            observedAt: fixture.observedAt
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
         )
 
         XCTAssertEqual(result.outcomes.map(\.status), [.refreshed])
@@ -199,7 +330,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
                         status: status
                     )
                 ],
-                hasRemainingCandidates: hasRemaining
+                hasRemainingCandidates: hasRemaining,
+                hasBlockedKnownCandidates: false
             )
         }
 
@@ -229,6 +361,7 @@ private struct ReviewThreadDurableState: Equatable {
     let reviewRequests: Int
     let reviewThreads: Int
     let comments: Int
+    let schedulerShards: Int
 }
 
 private actor ReviewThreadFetcher: PullRequestReviewThreadFetching {
@@ -339,6 +472,7 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
     let repositoryID = RepositoryID(rawValue: "REPO_1")!
     let observedAt = Date(timeIntervalSince1970: 1_000)
     let vault: AccountVault
+    let streamID = SyncStreamID(rawValue: "pull-request-review-threads-test")!
     private(set) var firstPullRequest: NormalizedGitHubNode! = nil
 
     var scope: SynchronizationScope {
@@ -389,9 +523,24 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
             ),
             selectedAt: observedAt
         )
+        try await SyncStreamRepository(vault: vault).save(
+            SyncStream(
+                id: streamID,
+                accountID: accountID,
+                organizationID: organizationID,
+                feature: .reviewThreads,
+                highWater: nil,
+                lastSuccessfulAt: nil,
+                lastAttemptAt: observedAt,
+                status: .partial,
+                failureDetail: nil
+            )
+        )
         let repositoryID = repositoryID
         let organizationID = organizationID
+        let accountID = accountID
         let observedAt = observedAt
+        let observedAtMilliseconds = Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())
         try await vault.write { database in
             try database.execute(
                 sql: """
@@ -408,7 +557,18 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
                     "acme",
                     "widget",
                     "https://github.com/acme/widget",
-                    Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())
+                    observedAtMilliseconds
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
+                    VALUES (?, ?, 'available', ?)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    repositoryID.rawValue,
+                    observedAtMilliseconds
                 ]
             )
         }
@@ -518,7 +678,8 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
                     database,
                     sql: "SELECT COUNT(*) FROM review_threads"
                 )!,
-                comments: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments")!
+                comments: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments")!,
+                schedulerShards: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_shards")!
             )
         }
     }
@@ -546,6 +707,24 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
 
     func remove() {
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    func setFirstPullRequestAccessibility(_ state: GitHubNodeAccessibility) async throws {
+        try await vault.write { database in
+            try database.execute(
+                sql: "UPDATE github_nodes SET accessibility_state = ? WHERE github_node_id = ?",
+                arguments: [state.rawValue, firstPullRequest.nodeID.rawValue]
+            )
+        }
+    }
+
+    func removeFirstPullRequest() async throws {
+        try await vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM github_nodes WHERE github_node_id = ?",
+                arguments: [firstPullRequest.nodeID.rawValue]
+            )
+        }
     }
 }
 
