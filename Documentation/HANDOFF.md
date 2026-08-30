@@ -1,9 +1,12 @@
 # Triage development handoff
 
-**Handoff state:** paused after the synchronization, deterministic-intelligence,
-native-shell, and XPC hardening batches. This document is intentionally
-specific enough to move the checkout to a different computer without relying
-on the previous agent session.
+**Handoff state:** the original paused synchronization,
+deterministic-intelligence, native-shell, and XPC checkpoint has now been
+continued on a full-Xcode Mac. The latest verified local continuation commit
+is `7aba74f` (`Authorize stream-scoped search replay`) on `main`. Triage remains
+intentionally incomplete; this document records both the original checkpoint
+and the continuation state so another computer does not need prior session
+context.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -12,13 +15,16 @@ boundaries, sequencing, and acceptance criteria.
 
 ## Repository and transfer state
 
-- Repository root: `/Users/dbuskariol/Projects/swift/triage`
-- Primary branch at handoff: `main`
-- Last commit before the paused batch: `b8f1a71 Report bounded review refresh coverage`
+- Original repository root: `/Users/dbuskariol/Projects/swift/triage`
+- Current continuation root: `/Users/nftdannyboy/Documents/Projects/swift/triage`
+- Primary branch: `main`
+- Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
+- Latest verified local continuation commit: `7aba74f`
 - This handoff is committed together with every completed, previously
   uncommitted implementation slice listed below.
-- No remote push occurred before this handoff. The user subsequently requested
-  creation of `dbuskariol/triage` and a push of the complete history.
+- The configured remote is `https://github.com/dbuskariol/triage`. No push,
+  tag, publication, notarization, release finalization, or release-automation
+  change was performed during this continuation.
 - The product is **not complete**. The final acceptance walkthrough and the
   remaining work below are still mandatory.
 
@@ -28,21 +34,21 @@ encrypted vaults, and Sparkle 2.9.4 for updates. It is local-first, read-only
 toward GitHub, and must never add telemetry, diagnostics upload, hosted
 content, local-repository scanning, or GitHub mutations.
 
-## Validation at handoff
+## Validation at current continuation checkpoint
 
 | Check | Result | Notes |
 | --- | --- | --- |
-| `swift build` | Passed | Consolidated SwiftPM app target built successfully after all active agents completed. |
-| `git diff --check` | Passed | No whitespace errors before this handoff was added. |
-| Focused implementation reviews | Passed after fixes | Review-thread pagination, team membership/ETag handling, timeline continuation/cancellation, Project field preservation/date parsing/budgeting, and Waiting wake-up behavior were independently reviewed and corrected. |
-| `swift test` | Blocked by environment | The selected Command Line Tools developer directory does not provide the `XCTest` module. This is not a test success. |
-| `scripts/verify-ci.sh` | Blocked by environment before build/tests | `xcodebuild` fails because `xcode-select` points to `/Library/Developer/CommandLineTools`, not a full Xcode installation. The verifier stops during `xcodebuild -showBuildSettings`. |
-| Xcode tests/release build | Not run | Requires full Xcode selected with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` (or the actual installed full-Xcode path). |
+| Full developer directory | Passed | `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; Xcode 27.0, build `27A5228h`. |
+| Focused handoff and continuation XCTest | Passed | Coordinator, lifecycle/runtime, source integration, conditional authority, timeline replay, role-search replay, migration, cancellation, rollback, and malformed-payload selectors passed. |
+| Historical coordinator crash regression | Passed | `AccountOrganizationCoordinatorTests/testAccessFailureRemainsScopedToItsAccountOrganization` passed 100/100 repetitions; current bounded/index-checked helper already contained the fix. |
+| Consolidated role-search gate | Passed | `AccountVaultTests`, `RoleSearchPageReplayRepositoryTests`, `GitHubIssueSearchTests`, `SearchShardExecutorTests`, and `RoleDiscoveryPlanTests` passed together after the final parser-authority bump. |
+| Independent final reviews | Passed | Security/source-authority and transaction/data-integrity re-audits reported no concrete defects after all fixes. |
+| `git diff --check` | Passed | No whitespace errors before `7aba74f`. |
+| `scripts/verify-ci.sh` | Passed | Full XCTest suite and unsigned universal arm64/x86_64 Release build passed after `7aba74f`; only known vendored GRDB Swift 6 `Any`/`Sendable` warnings remained. |
 
-The package manager emitted cache safety warnings while fetching Sparkle and
-SQLCipher, but completed its app build. Do not “fix” that by changing
-dependencies: use a normal checkout with the existing locked dependencies and
-a correctly configured developer environment.
+The earlier Command Line Tools limitation is resolved on the current machine.
+Keep using the locked Sparkle, GRDB, and SQLCipher dependencies; do not change
+them to suppress package-manager or vendored Swift 6 warnings.
 
 Before resuming implementation, use a full Xcode developer directory and run:
 
@@ -52,8 +58,43 @@ scripts/verify-ci.sh
 ```
 
 Then run focused XCTest selectors for every changed source slice before making
-new changes. The implementation plan requires the full verifier again before
-any candidate release work.
+new changes. This was completed through `7aba74f`; repeat it after subsequent
+slices. The implementation plan requires the full verifier again before any
+candidate release work.
+
+## Continuation commits after `4584275`
+
+The continuation preserved the original integration order and committed each
+verified slice locally. In dependency order, the new commits are:
+
+- organization pipeline, hydration coverage, and source-scoped role
+  discovery: `1e6b76d`, `4ebf9fd`, `f5ff363`;
+- malformed search provenance and durable conditional role-search replay:
+  `e4445b5`, `82cc7f0`, `cdb5c14`;
+- durable scheduler, ownership, revision-safe runtime, and atomic projection
+  integration: `f4a3f89`, `df65d00`, `c90cd30`, `fc0428d`, `e139b81`,
+  `a4c61dd`;
+- hardened Discussion/Projects contracts and organization integration:
+  `ad4654e`, `da7e1bc`;
+- authoritative coverage profiles and access-loss topology preservation:
+  `10885fe`, `8c776d1`;
+- source-authority conditional validation and raw request identity:
+  `e2813da`, `77a5627`, `204b522`;
+- timeline raw-page authority and replay receipts: `24e2e68`, `4c6ebc0`;
+- stream-scoped role-search replay authorization, encrypted destructive
+  migration backups, append-only parser-identity migration `034`, and
+  malformed-page failed coverage: `7aba74f`.
+
+The role-search batch authorizes `304` reuse only for exact account,
+organization, leaf stream, endpoint/query/page, credential revision,
+capability revision, parser version, validator pair, and raw request authority.
+Parser authority is version 2; migration-033 version-1 bindings are retained as
+encrypted evidence but retired before lookup. Control pages do not create
+replay bindings. Any item normalization failure commits raw evidence,
+diagnostics, valid normalized items, replay invalidation, and a failed shard in
+one transaction before propagating failure. Destructive migrations 033 and 034
+now require verified encrypted SQLCipher backups; interrupted migration tests
+prove the prior vault remains readable.
 
 ## Completed foundations before this batch
 
@@ -317,55 +358,70 @@ artifact and release signing identity.
 
 ## Immediate integration order
 
-Do not mark the next large batch complete merely because the isolated source
-clients compile. The following integration order preserves data authority:
+Do not mark the next large batch complete merely because its isolated clients
+or repositories compile. Full Xcode restoration, focused handoff coverage, and
+the original steps through individually scoped organization refresh are
+complete through `7aba74f`. The next integration order preserves data
+authority:
 
-1. Install/select full Xcode, run the verifier, and run all focused tests.
-   Resolve any compile/test failure before additional implementation.
-2. Inspect the single handoff commit with `git show --stat` and keep its
-   source contracts, tests, and migration together.
-3. Extend `OrganizationWorkRefreshService` (or replace it through the new
-   `AccountOrganizationCoordinator`) deliberately. Its current flow is:
-   repository refresh, role discovery, GraphQL hydration, and REST review
-   summary/request refresh. Add streams as individually scoped operations:
-   inventory/team, review threads, timelines, discussions, and Projects V2.
-   Each must produce its own coverage record; one stream failure cannot
-   falsely downgrade discovery or erase another stream’s normalized state.
-4. Run derived intelligence only after the relevant normalized transaction is
-   fully durable, then publish cache/observations. Do not run it from a view.
-5. Implement storage observation streams and production coordinator adapters,
-   then inject them into `TriageAppModel` and the existing SwiftUI shell.
-6. Finish source-specific gaps: review-thread scheduling/coverage; discussion
-   comments/replies; Project cadence and redacted/draft item handling;
-   timeline/review/notification integration; and work-graph reconciliation.
-7. Resume the remaining todo graph and acceptance plan in dependency order.
+1. Audit and implement durable access evidence plus conservative
+   reconciliation. Every relation must retain its source endpoint/query,
+   source node/event, source revision, observation time, confidence, and
+   provisional/confirmed state. Incremental omission must never delete data;
+   private `404` means inaccessible until authoritative reconciliation proves
+   deletion; transient network/rate/auth failures retain cached content.
+2. Finish source-specific normalized inputs without crossing coverage scopes:
+   review-thread scheduling and newer-commit comparison; discussion
+   comments/replies; Project cadence and redacted/draft item handling; and
+   timeline/review/notification work-graph reconciliation. Each stream keeps
+   independent coverage and failure authority.
+3. Run deterministic derived intelligence only after the relevant normalized
+   transaction is fully durable. Persist revision-bound evaluation/candidate
+   evidence and carry freshness, coverage, confidence, and provisional state;
+   never run derivation from a view.
+4. Implement storage observation streams and production coordinator adapters,
+   then inject those explicit dependencies into `TriageAppModel`. Do not add
+   placeholder or hidden fallback services.
+5. Bind the existing native SwiftUI shell to production observations and
+   actions, then finish commands, detail/inspector, toolbar/search, secure
+   Markdown, notifications, restoration, Settings, accessibility, appearance,
+   keyboard, resizing, and UI automation.
+6. Complete deletion/recovery, encrypted persistence, fixture, end-to-end,
+   performance, controlled live GitHub, and security validation in dependency
+   order. Keep Copilot fail-closed until its approved runtime and signing
+   prerequisites exist.
+7. Re-run focused tests after every slice and `scripts/verify-ci.sh` at each
+   integration checkpoint. Commit coherent local slices, but do not push or
+   perform release operations without explicit approval.
 
 ## Remaining todo graph
 
-At pause, 60 of 116 tracked todos were done; 15 were active and 40 pending,
-with the Copilot runtime blocked. The active rows describe partially completed
-or unintegrated tracks and should not be bulk-marked done:
+At the original pause, 60 of 116 tracked todos were done, 15 were active, and
+40 were pending, with the Copilot runtime blocked. The continuation completed
+multiple prerequisites without bulk-closing these broader tracks. The rows
+below describe their current residual work:
 
 | Active track | Handoff status |
 | --- | --- |
-| `copilot-xpc` | Hardened in this commit; the approved runtime, SDK integration, entitlement and policy work remain. |
-| `storage-repositories` | Many repositories exist; complete coverage, observation, deletion/recovery, and persistence tests remain. |
-| `sync-account-org` | Coordinator actor exists; production adapters and app injection remain. |
-| `sync-derived-intelligence` | Coordinator/repository exists; source integration and durable evaluation/candidate schema remain. |
-| `sync-hydration` / `sync-normalization` | Core hydration exists; connect new streams, relations/tombstones, and complete end-to-end tests. |
-| `sync-repositories-teams` | Inventory exists; scheduler/coordinator integration and live validation remain. |
-| `sync-reviews` | REST reviews/requests and thread client/repository exist; thread refresh scheduling, newer-commit comparison, coverage, and derived input wiring remain. |
-| `sync-search-discovery` / `sync-search-sharding` | Foundation exists; finish all role coverage, durable reconciliation, and integrated test matrix. |
-| `ui-app-coordinator`, `ui-onboarding`, `ui-sidebar`, `ui-menu-bar` | Presentation shells exist; bind them to production observation/action services and finish UX validation. |
+| `copilot-xpc` | Transport is hardened and remains fail-closed; the approved runtime, SDK integration, entitlement, consent, signing, and policy work remain blocked on external prerequisites. |
+| `storage-repositories` | Exact request authority, coverage profiles, encrypted migration backups, and multiple repositories are durable; access evidence, observations, deletion/recovery, and complete persistence tests remain. |
+| `sync-account-org` | Revision-safe single-owner coordination, durable scheduling, scoped operations, projections, and lifecycle integration exist; production presentation adapters/injection and remaining stream actions remain. |
+| `sync-derived-intelligence` | Coordinator/repository foundations exist; revision-bound source integration and durable evaluation/candidate evidence remain. |
+| `sync-hydration` / `sync-normalization` | Core hydration plus selected timeline, Discussion, Project, inventory, and search streams are integrated; relation evidence, conservative tombstones, remaining normalization, and end-to-end tests remain. |
+| `sync-repositories-teams` | Inventory participates in organization refresh and preserves topology across access loss; authoritative deletion reconciliation and controlled live validation remain. |
+| `sync-reviews` | REST reviews/requests and thread client/repository exist; thread refresh scheduling, newer-commit comparison, complete coverage, and derived-input wiring remain. |
+| `sync-search-discovery` / `sync-search-sharding` | Search has source-scoped plans, malformed provenance, exact conditional replay, parser authority, cancellation, and migration coverage; finish durable cross-stream reconciliation and the integrated/live matrix. |
+| `ui-app-coordinator`, `ui-onboarding`, `ui-sidebar`, `ui-menu-bar` | Presentation shells exist; bind them to production observation/action services and finish functional and UX validation. |
 | `ui-commands` | Still outstanding. |
 
 All currently pending work remains required. In practical dependency order:
 
-1. `sync-freshness`, `storage-observation`, `sync-relations`, and
-   `sync-scheduler`.
-2. Finish `sync-timelines`, `sync-discussions`, `sync-projects`,
-   `sync-notifications`, and `sync-tests` from the newly added isolated
-   source layers.
+1. Finish `sync-relations` access evidence and authoritative tombstone
+   semantics, then complete `sync-freshness` and `storage-observation` on the
+   now-durable scheduler/coordinator foundation.
+2. Finish the residual `sync-timelines`, `sync-discussions`, `sync-projects`,
+   `sync-reviews`, `sync-notifications`, and `sync-tests` gaps without merging
+   their coverage authority.
 3. Implement functional app coordination, workflow actions, detail/inspector,
    toolbar/commands/search, secure Markdown, notifications, restoration,
    Settings, accessibility, and UI tests.
@@ -393,6 +449,8 @@ All currently pending work remains required. In practical dependency order:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- The current plan still requires full Xcode tests, live controlled GitHub
-  validation, UI accessibility exercise, security/release review, and all
-  final acceptance steps. None are implied by the successful SwiftPM build.
+- Full Xcode tests and the unsigned universal build passed through `7aba74f`,
+  but subsequent changes still require focused and full revalidation. Live
+  controlled GitHub validation, UI accessibility exercise, security/release
+  review, signing/notarization, and all final acceptance steps remain open and
+  are not implied by the current green checkpoint.
