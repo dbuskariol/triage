@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "030-revision-scoped-conditional-requests")
+        XCTAssertEqual(migrations.last?.id, "031-raw-request-authority")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "f742e3ff68ae96471ddeacf0f191fa032cd4c343f353b17f313f005810fe7f02"
+            "5d7c3aa43bbc9a8a962b2bf34625b8e86fc59da3157656e5d1897182b72f5db3"
         )
         try await registry.closeAll()
     }
@@ -96,7 +96,10 @@ final class AccountVaultTests: XCTestCase {
                 sql: """
                     SELECT id, checksum, applied_at_ms
                     FROM schema_migrations
-                    WHERE id <> '030-revision-scoped-conditional-requests'
+                    WHERE id NOT IN (
+                        '030-revision-scoped-conditional-requests',
+                        '031-raw-request-authority'
+                    )
                     ORDER BY id
                     """
             ).map { row in
@@ -137,6 +140,24 @@ final class AccountVaultTests: XCTestCase {
                 """)
             try database.execute(sql: "CREATE TABLE sync_streams (id TEXT PRIMARY KEY NOT NULL)")
             try database.execute(sql: """
+                CREATE TABLE raw_api_snapshots (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL,
+                    github_node_id TEXT,
+                    endpoint TEXT NOT NULL,
+                    etag TEXT,
+                    parser_version INTEGER NOT NULL,
+                    observed_at_ms INTEGER NOT NULL,
+                    payload BLOB NOT NULL
+                )
+                """)
+            try database.execute(
+                sql: "INSERT INTO raw_api_snapshots VALUES (?, ?, NULL, ?, ?, ?, ?, ?)",
+                arguments: [
+                    "legacy-raw", "account", "/legacy", "\"legacy\"", 1, 1, Data("{}".utf8)
+                ]
+            )
+            try database.execute(sql: """
                 CREATE TABLE conditional_request_cache (
                     request_key TEXT PRIMARY KEY NOT NULL,
                     account_id TEXT NOT NULL,
@@ -160,11 +181,32 @@ final class AccountVaultTests: XCTestCase {
                     database,
                     sql: "PRAGMA table_info(conditional_request_cache)"
                 ).map { $0["name"] as String },
+                try Row.fetchAll(
+                    database,
+                    sql: "PRAGMA table_info(raw_api_snapshots)"
+                ).map { $0["name"] as String },
+                try Row.fetchOne(
+                    database,
+                    sql: """
+                        SELECT last_modified, authority_request_key
+                        FROM raw_api_snapshots WHERE id = 'legacy-raw'
+                        """
+                ).map { row in
+                    (row["last_modified"] as String?) == nil
+                        && (row["authority_request_key"] as String?) == nil
+                } ?? false,
                 try String.fetchOne(
                     database,
                     sql: """
                         SELECT checksum FROM schema_migrations
                         WHERE id = '030-revision-scoped-conditional-requests'
+                        """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '031-raw-request-authority'
                         """
                 )
             )
@@ -173,9 +215,16 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertTrue(migrated.1.contains("organization_id"))
         XCTAssertTrue(migrated.1.contains("credential_revision"))
         XCTAssertTrue(migrated.1.contains("capability_revision"))
+        XCTAssertTrue(migrated.2.contains("last_modified"))
+        XCTAssertTrue(migrated.2.contains("authority_request_key"))
+        XCTAssertTrue(migrated.3)
         XCTAssertEqual(
-            migrated.2,
+            migrated.4,
             "f742e3ff68ae96471ddeacf0f191fa032cd4c343f353b17f313f005810fe7f02"
+        )
+        XCTAssertEqual(
+            migrated.5,
+            "5d7c3aa43bbc9a8a962b2bf34625b8e86fc59da3157656e5d1897182b72f5db3"
         )
     }
 

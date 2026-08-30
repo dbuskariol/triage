@@ -192,6 +192,95 @@ final class RoleSearchPageReplayRepositoryTests: XCTestCase {
         )
         XCTAssertNil(removedStaleEntry)
     }
+
+    func testRawSnapshotRoundTripsLastModifiedAndExactRequestAuthority() async throws {
+        let fixture = try await ReplayFixture()
+        defer { fixture.remove() }
+        let scope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        let identity = ConditionalRequestIdentity(
+            scope: scope,
+            feature: .roleDiscovery,
+            streamID: SyncStreamID(rawValue: "role-discovery:test")!,
+            requestKey: "GET /search/issues?q=org%3Agithub&page=1"
+        )
+        let snapshot = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "search-page-authority")!,
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=org%3Agithub&page=1",
+            eTag: "\"search-v1\"",
+            lastModified: "Wed, 21 Oct 2015 07:28:00 GMT",
+            parserVersion: 1,
+            observedAt: fixture.observedAt,
+            payload: Data(#"{"total_count":0,"incomplete_results":false,"items":[]}"#.utf8),
+            requestIdentity: identity
+        )
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+
+        try await repository.save(snapshot)
+
+        let restored = try await repository.snapshots(for: fixture.accountID)
+        XCTAssertEqual(restored, [snapshot])
+    }
+
+    func testRawSnapshotRejectsStaleOrUnsafeRequestAuthority() async throws {
+        let fixture = try await ReplayFixture()
+        defer { fixture.remove() }
+        let staleScope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-stale")!,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        let staleIdentity = ConditionalRequestIdentity(
+            scope: staleScope,
+            feature: .roleDiscovery,
+            streamID: SyncStreamID(rawValue: "role-discovery:test")!,
+            requestKey: "GET /search/issues?q=org%3Agithub&page=1"
+        )
+        let staleSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "search-page-stale")!,
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=org%3Agithub&page=1",
+            eTag: nil,
+            lastModified: "Wed, 21 Oct 2015 07:28:00 GMT",
+            parserVersion: 1,
+            observedAt: fixture.observedAt,
+            payload: Data(),
+            requestIdentity: staleIdentity
+        )
+        let unsafeSnapshot = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "search-page-unsafe")!,
+            accountID: fixture.accountID,
+            githubNodeID: nil,
+            endpoint: "/search/issues?q=org%3Agithub&page=1",
+            eTag: nil,
+            lastModified: "unsafe\r\nheader",
+            parserVersion: 1,
+            observedAt: fixture.observedAt,
+            payload: Data()
+        )
+        let repository = RawAPISnapshotRepository(vault: fixture.vault)
+
+        do {
+            try await repository.save(staleSnapshot)
+            XCTFail("Expected stale raw request authority to be rejected.")
+        } catch let error as RawAPISnapshotRepositoryError {
+            XCTAssertEqual(error, .requestAuthorityScopeMismatch)
+        }
+        do {
+            try await repository.save(unsafeSnapshot)
+            XCTFail("Expected an unsafe raw validator to be rejected.")
+        } catch let error as RawAPISnapshotRepositoryError {
+            XCTAssertEqual(error, .invalidValidator)
+        }
+    }
 }
 
 private final class ReplayFixture: @unchecked Sendable {
