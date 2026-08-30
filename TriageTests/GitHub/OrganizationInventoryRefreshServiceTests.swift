@@ -116,7 +116,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(persisted?.lastModified, lastModified)
     }
 
-    func testStaleRepositoryLastModifiedIsNotSentDuringFullReconciliation() async throws {
+    func testFullReconciliationDoesNotSendCurrentRepositoryValidator() async throws {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
         let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -135,12 +135,11 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         )
         _ = try await fixture.service(
             session: session,
-            now: fixture.observedAt.addingTimeInterval(
-                OrganizationInventoryRefreshCadence.fullReconciliationInterval + 1
-            )
+            now: fixture.observedAt.addingTimeInterval(1)
         ).refreshRepositories(
             account: fixture.account,
-            organization: fixture.organization
+            organization: fixture.organization,
+            reconciliationIntent: .fullReconciliation
         )
 
         let eTags = await session.validators()
@@ -423,6 +422,30 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(coverage.status, .partial)
         XCTAssertNil(coverage.intervalStart)
         XCTAssertNil(coverage.intervalEnd)
+    }
+}
+
+private extension OrganizationInventoryRefreshService {
+    func refreshRepositories(
+        account: GitHubAccount,
+        organization: GitHubOrganization
+    ) async throws -> [RepositorySummary] {
+        try await refreshRepositories(
+            account: account,
+            organization: organization,
+            reconciliationIntent: .incremental
+        )
+    }
+
+    func refreshInventory(
+        account: GitHubAccount,
+        organization: GitHubOrganization
+    ) async throws -> OrganizationInventoryRefreshResult {
+        try await refreshInventory(
+            account: account,
+            organization: organization,
+            reconciliationIntent: .incremental
+        )
     }
 }
 

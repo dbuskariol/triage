@@ -19,8 +19,13 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         try await fixture.saveCoverage(for: current, stream: "current")
         try await fixture.saveCoverage(for: stale, stream: "stale")
         let calls = RuntimePipelineCalls()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority in
-            await calls.append(account: account, organization: organization, priority: priority)
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(
+                account: account,
+                organization: organization,
+                priority: priority,
+                reconciliationIntent: intent
+            )
         }
 
         let result = try await operation.refresh(
@@ -34,6 +39,36 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         XCTAssertEqual(call.account, fixture.account)
         XCTAssertEqual(call.organization, fixture.organization(id: fixture.primaryOrganizationID))
         XCTAssertEqual(call.priority, .selectedOrganizationRefresh)
+        XCTAssertEqual(call.reconciliationIntent, .incremental)
+    }
+
+    func testOperationPassesReconciliationIntentIndependentlyOfTransportPriority() async throws {
+        let fixture = try await RuntimeRefreshFixture()
+        defer { fixture.remove() }
+        let scope = try await fixture.scope()
+        let calls = RuntimePipelineCalls()
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(
+                account: account,
+                organization: organization,
+                priority: priority,
+                reconciliationIntent: intent
+            )
+        }
+
+        _ = try await operation.refresh(
+            fixture.request(
+                for: scope,
+                priority: .fullReconciliation,
+                requestPriority: .selectedOrganizationRefresh,
+                reconciliationIntent: .incremental
+            )
+        )
+
+        let recordedCall = await calls.single()
+        let call = try XCTUnwrap(recordedCall)
+        XCTAssertEqual(call.priority, .selectedOrganizationRefresh)
+        XCTAssertEqual(call.reconciliationIntent, .incremental)
     }
 
     func testOperationRejectsAccountAndOrganizationScopeMismatchesBeforePipeline() async throws {
@@ -41,8 +76,8 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         defer { fixture.remove() }
         let scope = try await fixture.scope()
         let calls = RuntimePipelineCalls()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority in
-            await calls.append(account: account, organization: organization, priority: priority)
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(account: account, organization: organization, priority: priority, reconciliationIntent: intent)
         }
 
         var mismatchedAccountRequest = fixture.request(for: scope, priority: .manual)
@@ -54,7 +89,8 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
             ),
             token: mismatchedAccountRequest.token,
             priority: mismatchedAccountRequest.priority,
-            requestPriority: mismatchedAccountRequest.requestPriority
+            requestPriority: mismatchedAccountRequest.requestPriority,
+            reconciliationIntent: mismatchedAccountRequest.reconciliationIntent
         )
         await assertRefreshOperationError(
             .accountScopeMismatch,
@@ -83,8 +119,8 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         let obsoleteScope = try await fixture.scope()
         try await fixture.setCredentialRevision(CredentialRevision(rawValue: "credential-new")!)
         let calls = RuntimePipelineCalls()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority in
-            await calls.append(account: account, organization: organization, priority: priority)
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(account: account, organization: organization, priority: priority, reconciliationIntent: intent)
         }
 
         await assertCancellation(from: operation, request: fixture.request(for: obsoleteScope, priority: .manual))
@@ -98,8 +134,8 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         let obsoleteScope = try await fixture.scope()
         try await fixture.saveCoverage(for: obsoleteScope, stream: "before-revision-change")
         let calls = RuntimePipelineCalls()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority in
-            await calls.append(account: account, organization: organization, priority: priority)
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(account: account, organization: organization, priority: priority, reconciliationIntent: intent)
             try await fixture.setCredentialRevision(CredentialRevision(rawValue: "credential-new")!)
         }
 
@@ -119,7 +155,7 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         let fixture = try await RuntimeRefreshFixture()
         defer { fixture.remove() }
         let obsoleteScope = try await fixture.scope()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { _, _, _ in
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { _, _, _, _ in
             try await fixture.setCredentialRevision(CredentialRevision(rawValue: "credential-new")!)
         }
         let runtime = AccountOrganizationRefreshRuntime(
@@ -152,8 +188,8 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         defer { fixture.remove() }
         let scope = try await fixture.scope()
         let calls = RuntimePipelineCalls()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority in
-            await calls.append(account: account, organization: organization, priority: priority)
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { account, organization, priority, intent in
+            await calls.append(account: account, organization: organization, priority: priority, reconciliationIntent: intent)
         }
 
         _ = try await operation.refresh(fixture.request(for: scope, priority: .selectedOrganization))
@@ -170,7 +206,7 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         let fixture = try await RuntimeRefreshFixture()
         defer { fixture.remove() }
         let scope = try await fixture.scope()
-        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { _, _, _ in
+        let operation = AccountOrganizationRefreshOperation(vault: fixture.vault) { _, _, _, _ in
             try await fixture.saveCoverage(for: scope, stream: "runtime-success")
         }
         let runtime = AccountOrganizationRefreshRuntime(
@@ -394,10 +430,10 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         }
         let firstScope = try await firstFixture.scope()
         let secondScope = try await secondFixture.scope()
-        let firstOperation = AccountOrganizationRefreshOperation(vault: firstFixture.vault) { _, _, _ in
+        let firstOperation = AccountOrganizationRefreshOperation(vault: firstFixture.vault) { _, _, _, _ in
             try await firstFixture.saveCoverage(for: firstScope, stream: "first-account")
         }
-        let secondOperation = AccountOrganizationRefreshOperation(vault: secondFixture.vault) { _, _, _ in
+        let secondOperation = AccountOrganizationRefreshOperation(vault: secondFixture.vault) { _, _, _, _ in
             try await secondFixture.saveCoverage(for: secondScope, stream: "second-account")
         }
         let firstRuntime = AccountOrganizationRefreshRuntime(
@@ -520,7 +556,9 @@ private final class RuntimeRefreshFixture: @unchecked Sendable {
 
     func request(
         for scope: SynchronizationScope,
-        priority: AccountOrganizationRefreshPriority
+        priority: AccountOrganizationRefreshPriority,
+        requestPriority: GitHubRequestPriority? = nil,
+        reconciliationIntent: SynchronizationReconciliationIntent? = nil
     ) -> AccountOrganizationRefreshRequest {
         AccountOrganizationRefreshRequest(
             synchronizationScope: scope,
@@ -530,7 +568,9 @@ private final class RuntimeRefreshFixture: @unchecked Sendable {
             ),
             token: AccountOrganizationRequestToken(rawValue: 1),
             priority: priority,
-            requestPriority: priority.requestPriority
+            requestPriority: requestPriority ?? priority.requestPriority,
+            reconciliationIntent: reconciliationIntent
+                ?? (priority == .fullReconciliation ? .fullReconciliation : .incremental)
         )
     }
 
@@ -588,12 +628,25 @@ private actor RuntimePipelineCalls {
         let account: GitHubAccount
         let organization: GitHubOrganization
         let priority: GitHubRequestPriority
+        let reconciliationIntent: SynchronizationReconciliationIntent
     }
 
     private var values: [Call] = []
 
-    func append(account: GitHubAccount, organization: GitHubOrganization, priority: GitHubRequestPriority) {
-        values.append(Call(account: account, organization: organization, priority: priority))
+    func append(
+        account: GitHubAccount,
+        organization: GitHubOrganization,
+        priority: GitHubRequestPriority,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) {
+        values.append(
+            Call(
+                account: account,
+                organization: organization,
+                priority: priority,
+                reconciliationIntent: reconciliationIntent
+            )
+        )
     }
 
     func count() -> Int { values.count }

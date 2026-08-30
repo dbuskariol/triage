@@ -5,7 +5,7 @@ import XCTest
 final class OrganizationContextRefreshServiceTests: XCTestCase {
     func testFullReconciliationPolicyWidensButKeepsCandidateSetsBounded() {
         XCTAssertEqual(
-            OrganizationContextSelectionPolicy.policy(for: .selectedOrganizationRefresh),
+            OrganizationContextSelectionPolicy.policy(for: .incremental),
             .init(maximumDiscussionRepositories: 25, maximumProjects: 25)
         )
         XCTAssertEqual(

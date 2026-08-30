@@ -9,8 +9,8 @@ struct OrganizationContextSelectionPolicy: Equatable, Sendable {
         self.maximumProjects = max(1, maximumProjects)
     }
 
-    static func policy(for priority: GitHubRequestPriority) -> Self {
-        if priority == .fullReconciliation {
+    static func policy(for reconciliationIntent: SynchronizationReconciliationIntent) -> Self {
+        if reconciliationIntent == .fullReconciliation {
             // Full reconciliation widens the bounded candidate window; it does
             // not create an unbounded in-memory queue. Repeated reconciliations
             // rotate oldest/unattempted candidates until the inventory drains.

@@ -1,5 +1,10 @@
 import Foundation
 
+enum SynchronizationReconciliationIntent: Equatable, Sendable {
+    case incremental
+    case fullReconciliation
+}
+
 enum OrganizationRefreshScheduleTrigger: Equatable, Sendable {
     case selectedOrganization
     case manual
@@ -18,6 +23,10 @@ enum OrganizationRefreshScheduleTrigger: Equatable, Sendable {
 
     var performsFullReconciliation: Bool {
         self == .fullReconciliation
+    }
+
+    var reconciliationIntent: SynchronizationReconciliationIntent {
+        performsFullReconciliation ? .fullReconciliation : .incremental
     }
 }
 
