@@ -295,6 +295,7 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         let result = try await service.refresh(
             accountID: fixture.accountID,
             organizationID: fixture.organizationID,
+            githubOrganizationID: 2,
             observedAt: fixture.date
         )
 

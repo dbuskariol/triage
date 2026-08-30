@@ -835,7 +835,8 @@ actor OrganizationWorkRefreshService {
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
             ).refresh(
                 accountID: scope.accountID,
-                organizationID: scope.organizationID
+                organizationID: scope.organizationID,
+                githubOrganizationID: organization.githubOrganizationID
             )
             let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
             let status: CoverageStatus = scopedSSOHeader == nil && !result.hasRemainingCandidates

@@ -25,6 +25,7 @@ actor PullRequestReviewRefreshService {
     func refresh(
         accountID: AccountID,
         organizationID: OrganizationID,
+        githubOrganizationID: UInt64,
         limit: Int = 50,
         observedAt: Date = .now
     ) async throws -> PullRequestReviewRefreshResult {
@@ -44,11 +45,24 @@ actor PullRequestReviewRefreshService {
                 number: candidate.number
             )
             try Task.checkCancellation()
+            ssoHeaders.append(contentsOf: reviews.ssoHeaders)
+            if reviews.ssoHeader?.scoped(to: githubOrganizationID) != nil {
+                continue
+            }
             let requestedReviewers = try await client.requestedReviewers(
                 repository: candidate.repository,
                 number: candidate.number
             )
             try Task.checkCancellation()
+            if let ssoHeader = requestedReviewers.ssoHeader {
+                ssoHeaders.append(ssoHeader)
+            }
+            let candidateSSOHeader = GitHubSSOHeader.combined(
+                [reviews.ssoHeader, requestedReviewers.ssoHeader]
+            )
+            if candidateSSOHeader?.scoped(to: githubOrganizationID) != nil {
+                continue
+            }
             try await candidateRepository.writeTransaction(accountID: accountID) { database in
                 for (index, page) in reviews.pages.enumerated() {
                     try RawAPISnapshotRepository.save(
@@ -95,10 +109,6 @@ actor PullRequestReviewRefreshService {
             }
             try Task.checkCancellation()
             refreshedPullRequestNodeIDs.append(candidate.nodeID)
-            ssoHeaders.append(contentsOf: reviews.ssoHeaders)
-            if let ssoHeader = requestedReviewers.ssoHeader {
-                ssoHeaders.append(ssoHeader)
-            }
         }
         return PullRequestReviewRefreshResult(
             refreshedPullRequestNodeIDs: refreshedPullRequestNodeIDs,
