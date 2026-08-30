@@ -6,6 +6,91 @@ enum GitHubNodeHydrationServiceError: Error, Equatable, Sendable {
     case queryCostExceeded(Int)
 }
 
+enum GitHubGraphQLPartialFailureKind: String, Equatable, Hashable, Sendable {
+    case forbidden
+    case notFound
+    case rateLimited
+    case unauthorized
+    case internalFailure
+    case unknown
+}
+
+enum GitHubNodeHydrationOutcomeStatus: Equatable, Sendable {
+    case refreshed
+    case partialGraphQL([GitHubGraphQLPartialFailureKind])
+    case invalidResponse
+    case missingData
+    case normalizationFailed
+    case queryCostExceeded
+    case responseTooLarge
+    case ssoRequired(GitHubSSOHeader)
+    case approvalRequired
+    case authenticationRequired
+    case rateLimited(retryAt: Date?)
+    case unavailableOrPermission
+    case failed
+    case deferred
+}
+
+struct GitHubNodeHydrationOutcome: Equatable, Sendable {
+    let candidate: GitHubHydrationCandidate
+    let status: GitHubNodeHydrationOutcomeStatus
+}
+
+struct GitHubNodeHydrationCoverageAssessment: Equatable, Sendable {
+    let status: CoverageStatus
+    let failureDetail: String?
+}
+
+struct GitHubNodeHydrationRefreshResult: Equatable, Sendable {
+    let outcomes: [GitHubNodeHydrationOutcome]
+
+    var isComplete: Bool {
+        outcomes.allSatisfy { $0.status == .refreshed }
+    }
+
+    func coverageAssessment(
+        repositoryID: RepositoryID? = nil,
+        kind: GitHubContentKind
+    ) -> GitHubNodeHydrationCoverageAssessment {
+        let statuses = outcomes.filter {
+            $0.candidate.kind == kind
+                && (repositoryID == nil || $0.candidate.repositoryID == repositoryID)
+        }.map(\.status)
+        if statuses.contains(where: {
+            if case .ssoRequired = $0 { return true }
+            return false
+        }) {
+            return .init(
+                status: .requiresSSO,
+                failureDetail: "GitHub organization SSO authorization is required for current fields."
+            )
+        }
+        if statuses.contains(.approvalRequired) {
+            return .init(
+                status: .requiresApproval,
+                failureDetail: "GitHub organization approval is required for current fields."
+            )
+        }
+        if statuses.contains(.authenticationRequired) || statuses.contains(.failed) {
+            return .init(status: .failed, failureDetail: "Current field hydration failed.")
+        }
+        if statuses.contains(.unavailableOrPermission) {
+            return .init(
+                status: .unavailable,
+                failureDetail: "Some current fields are unavailable to the selected account."
+            )
+        }
+        if statuses.contains(where: { $0 != .refreshed }) {
+            return .init(
+                status: .partial,
+                failureDetail: "Some current fields remain incomplete."
+            )
+        }
+        return .init(status: .complete, failureDetail: nil)
+    }
+}
+
 actor GitHubNodeHydrationService {
     private let client: GitHubGraphQLClient
     private let detailsRepository: GitHubNodeDetailsRepository
@@ -34,13 +119,23 @@ actor GitHubNodeHydrationService {
         nodeIDs: Set<GitHubNodeID>,
         accountID: AccountID,
         organizationID: OrganizationID,
+        githubOrganizationID: UInt64? = nil,
         repositoryID: @escaping @Sendable (GitHubNodeHydrationPayload.Repository) -> RepositoryID?
-    ) async throws {
-        guard !nodeIDs.isEmpty else { return }
+    ) async throws -> GitHubNodeHydrationRefreshResult {
+        guard !nodeIDs.isEmpty else {
+            return GitHubNodeHydrationRefreshResult(outcomes: [])
+        }
+        let candidates = try await detailsRepository.hydrationCandidates(
+            nodeIDs: nodeIDs,
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        let candidatesByNodeID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.nodeID, $0) })
         let query = try GitHubGraphQLQueries.hydrateNodes()
         let sortedNodeIDs = nodeIDs.sorted { $0.rawValue < $1.rawValue }
         var nextIndex = 0
         var batchSize = GitHubHydrationBatchPlanner.initialBatchSize
+        var outcomes = [GitHubNodeHydrationOutcome]()
         while nextIndex < sortedNodeIDs.count {
             try Task.checkCancellation()
             let endIndex = min(nextIndex + batchSize, sortedNodeIDs.count)
@@ -48,9 +143,9 @@ actor GitHubNodeHydrationService {
             guard batch.count <= GitHubHydrationBatchPlanner.maximumBatchSize else {
                 throw GitHubNodeHydrationServiceError.batchTooLarge
             }
-            let response: GitHubGraphQLResponse<GitHubNodeHydrationPayload>
+            let decodingResult: GitHubGraphQLDecodingResult<GitHubNodeHydrationPayload>
             do {
-                response = try await client.execute(
+                decodingResult = try await client.executePreservingUndecodableResponse(
                     query,
                     variables: Variables(ids: batch.map(\.rawValue)),
                     as: GitHubNodeHydrationPayload.self
@@ -59,22 +154,81 @@ actor GitHubNodeHydrationService {
                 guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
                     for: batch.count
                 ) else {
-                    throw GitHubGraphQLError.responseTooLarge
+                    Self.appendTerminalOutcomes(
+                        status: .responseTooLarge,
+                        batch: batch,
+                        remaining: Array(sortedNodeIDs[endIndex...]),
+                        candidatesByNodeID: candidatesByNodeID,
+                        outcomes: &outcomes
+                    )
+                    return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
                 }
                 batchSize = reducedBatchSize
                 continue
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as GitHubGraphQLError {
+                let status = Self.status(
+                    for: error,
+                    githubOrganizationID: githubOrganizationID,
+                    observedAt: clock()
+                )
+                Self.appendTerminalOutcomes(
+                    status: status,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
+            } catch {
+                Self.appendTerminalOutcomes(
+                    status: .failed,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
             try Task.checkCancellation()
             let observedAt = clock()
-            let snapshot = RawAPISnapshot(
-                id: RawAPISnapshotID.make(),
+            let response: GitHubGraphQLResponse<GitHubNodeHydrationPayload>
+            switch decodingResult {
+            case let .response(decoded):
+                response = decoded
+            case let .undecodable(rejected):
+                let snapshot = Self.snapshot(
+                    payload: rejected.payload,
+                    accountID: accountID,
+                    observedAt: observedAt
+                )
+                try await recordRejectedResponse(
+                    snapshot,
+                    accountID: accountID,
+                    observedAt: observedAt,
+                    diagnostic: "Hydration response could not be decoded."
+                )
+                let status = Self.status(
+                    for: rejected.errors,
+                    metadata: rejected.metadata,
+                    githubOrganizationID: githubOrganizationID,
+                    observedAt: observedAt,
+                    default: .invalidResponse
+                )
+                Self.appendTerminalOutcomes(
+                    status: status,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
+            }
+            let snapshot = Self.snapshot(
+                payload: response.payload,
                 accountID: accountID,
-                githubNodeID: nil,
-                endpoint: "graphql:TriageHydrateNodes",
-                eTag: nil,
-                parserVersion: 2,
-                observedAt: observedAt,
-                payload: response.payload
+                observedAt: observedAt
             )
             guard let payload = response.data else {
                 try await recordRejectedResponse(
@@ -83,7 +237,23 @@ actor GitHubNodeHydrationService {
                     observedAt: observedAt,
                     diagnostic: "Hydration response omitted its data payload."
                 )
-                throw GitHubGraphQLError.partialResponse
+                let status = Self.status(
+                    for: response.errors,
+                    metadata: response.metadata,
+                    githubOrganizationID: githubOrganizationID,
+                    observedAt: observedAt,
+                    default: response.errors.isEmpty
+                        ? .missingData
+                        : .partialGraphQL(Self.partialKinds(response.errors))
+                )
+                Self.appendTerminalOutcomes(
+                    status: status,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
             try await batchMetricRepository.record(
                 GitHubHydrationBatchMetric(
@@ -104,7 +274,21 @@ actor GitHubNodeHydrationService {
                     observedAt: observedAt,
                     diagnostic: "Hydration response contained partial GraphQL errors."
                 )
-                throw GitHubGraphQLError.partialResponse
+                let status = Self.status(
+                    for: response.errors,
+                    metadata: response.metadata,
+                    githubOrganizationID: githubOrganizationID,
+                    observedAt: observedAt,
+                    default: .partialGraphQL(Self.partialKinds(response.errors))
+                )
+                Self.appendTerminalOutcomes(
+                    status: status,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
             guard payload.rateLimit.cost <= GitHubHydrationBatchPlanner.maximumQueryCost else {
                 try await rawSnapshotRepository.save(snapshot)
@@ -112,7 +296,20 @@ actor GitHubNodeHydrationService {
                 guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
                     for: batch.count
                 ) else {
-                    throw GitHubNodeHydrationServiceError.queryCostExceeded(payload.rateLimit.cost)
+                    try await recordRejectedResponse(
+                        snapshot,
+                        accountID: accountID,
+                        observedAt: observedAt,
+                        diagnostic: "Hydration query exceeded the supported cost limit."
+                    )
+                    Self.appendTerminalOutcomes(
+                        status: .queryCostExceeded,
+                        batch: batch,
+                        remaining: Array(sortedNodeIDs[endIndex...]),
+                        candidatesByNodeID: candidatesByNodeID,
+                        outcomes: &outcomes
+                    )
+                    return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
                 }
                 batchSize = reducedBatchSize
                 continue
@@ -145,7 +342,14 @@ actor GitHubNodeHydrationService {
                         in: database
                     )
                 }
-                throw error
+                Self.appendTerminalOutcomes(
+                    status: .normalizationFailed,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
             try Task.checkCancellation()
             let payloadActors = Self.actors(in: payload)
@@ -178,8 +382,15 @@ actor GitHubNodeHydrationService {
                 queryCost: payload.rateLimit.cost,
                 responseBytes: response.payload.count
             )
+            outcomes.append(contentsOf: batch.map { nodeID in
+                GitHubNodeHydrationOutcome(
+                    candidate: candidatesByNodeID[nodeID]!,
+                    status: .refreshed
+                )
+            })
             nextIndex = endIndex
         }
+        return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
     }
 
     private func recordRejectedResponse(
@@ -206,6 +417,139 @@ actor GitHubNodeHydrationService {
             )
         }
         try Task.checkCancellation()
+    }
+
+    private nonisolated static func appendTerminalOutcomes(
+        status: GitHubNodeHydrationOutcomeStatus,
+        batch: [GitHubNodeID],
+        remaining: [GitHubNodeID],
+        candidatesByNodeID: [GitHubNodeID: GitHubHydrationCandidate],
+        outcomes: inout [GitHubNodeHydrationOutcome]
+    ) {
+        outcomes.append(contentsOf: batch.compactMap { nodeID in
+            candidatesByNodeID[nodeID].map {
+                GitHubNodeHydrationOutcome(candidate: $0, status: status)
+            }
+        })
+        outcomes.append(contentsOf: remaining.compactMap { nodeID in
+            candidatesByNodeID[nodeID].map {
+                GitHubNodeHydrationOutcome(candidate: $0, status: .deferred)
+            }
+        })
+    }
+
+    private nonisolated static func status(
+        for error: GitHubGraphQLError,
+        githubOrganizationID: UInt64?,
+        observedAt: Date
+    ) -> GitHubNodeHydrationOutcomeStatus {
+        guard case let .requestFailed(failure) = error else {
+            return switch error {
+            case .responseTooLarge: .responseTooLarge
+            case .partialResponse: .partialGraphQL([.unknown])
+            case .missingData: .missingData
+            case .invalidResponse: .invalidResponse
+            case .mutationRejected, .invalidQuery, .requestFailed: .failed
+            }
+        }
+        if let header = scopedSSOHeader(
+            failure.ssoHeader,
+            githubOrganizationID: githubOrganizationID
+        ) {
+            return .ssoRequired(header)
+        }
+        if let restriction = failure.accessRestriction {
+            return switch restriction {
+            case .organizationApprovalRequired, .oauthApplicationApprovalRequired:
+                .approvalRequired
+            case .organizationPolicyBlocked:
+                .unavailableOrPermission
+            }
+        }
+        return switch failure.kind {
+        case .unauthorized:
+            .authenticationRequired
+        case .rateLimited, .secondaryRateLimited:
+            .rateLimited(retryAt: failure.retryAfter.map { observedAt.addingTimeInterval($0) })
+        case .forbidden, .notFound:
+            .unavailableOrPermission
+        case .serverFailure, .unexpectedResponse:
+            .failed
+        }
+    }
+
+    private nonisolated static func status(
+        for errors: [GitHubGraphQLPartialError],
+        metadata: GitHubGraphQLResponseMetadata,
+        githubOrganizationID: UInt64?,
+        observedAt: Date,
+        default defaultStatus: GitHubNodeHydrationOutcomeStatus
+    ) -> GitHubNodeHydrationOutcomeStatus {
+        if let header = scopedSSOHeader(
+            metadata.ssoHeader,
+            githubOrganizationID: githubOrganizationID
+        ) {
+            return .ssoRequired(header)
+        }
+        let kinds = partialKinds(errors)
+        if kinds.contains(.unauthorized) {
+            return .authenticationRequired
+        }
+        if kinds.contains(.rateLimited) {
+            return .rateLimited(
+                retryAt: metadata.retryAfter.map { observedAt.addingTimeInterval($0) }
+            )
+        }
+        if kinds.contains(.forbidden) || kinds.contains(.notFound) {
+            return .unavailableOrPermission
+        }
+        return defaultStatus
+    }
+
+    private nonisolated static func partialKinds(
+        _ errors: [GitHubGraphQLPartialError]
+    ) -> [GitHubGraphQLPartialFailureKind] {
+        let kinds = Set(errors.map { error -> GitHubGraphQLPartialFailureKind in
+            let value = error.extensions?.code ?? error.extensions?.type ?? error.type
+            return switch value?.uppercased() {
+            case "FORBIDDEN": .forbidden
+            case "NOT_FOUND": .notFound
+            case "RATE_LIMITED": .rateLimited
+            case "UNAUTHORIZED": .unauthorized
+            case "INTERNAL", "INTERNAL_SERVER_ERROR": .internalFailure
+            default: .unknown
+            }
+        })
+        return kinds.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    private nonisolated static func scopedSSOHeader(
+        _ header: GitHubSSOHeader?,
+        githubOrganizationID: UInt64?
+    ) -> GitHubSSOHeader? {
+        guard let header else { return nil }
+        guard let githubOrganizationID else {
+            if case .authorizationRequired = header { return header }
+            return nil
+        }
+        return header.scoped(to: githubOrganizationID)
+    }
+
+    private nonisolated static func snapshot(
+        payload: Data,
+        accountID: AccountID,
+        observedAt: Date
+    ) -> RawAPISnapshot {
+        RawAPISnapshot(
+            id: RawAPISnapshotID.make(),
+            accountID: accountID,
+            githubNodeID: nil,
+            endpoint: "graphql:TriageHydrateNodes",
+            eTag: nil,
+            parserVersion: 2,
+            observedAt: observedAt,
+            payload: payload
+        )
     }
 
     private struct Variables: Encodable, Sendable {

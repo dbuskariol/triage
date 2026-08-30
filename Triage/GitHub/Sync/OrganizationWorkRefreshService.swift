@@ -61,6 +61,7 @@ actor OrganizationWorkRefreshService {
         let searchClient = GitHubIssueSearchClient(client: restClient)
         var searchRange: SearchTimeRange?
         var deferredSSORequirement: GitHubSSOHeader?
+        var roleDiscoveryCompleted = false
         let refreshedWorkItemIDs: [WorkItemID]
         do {
             let serverObservedAt = try await searchClient.serverTime()
@@ -136,21 +137,31 @@ actor OrganizationWorkRefreshService {
                 accessibleRepositoryNames: inventory.map(\.fullName),
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] }
             )
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: synchronizationScope,
+                    streamID: streamID,
+                    interval: range,
+                    status: .complete,
+                    lastSuccessfulAt: serverObservedAt,
+                    failureDetail: nil
+                ),
+                attemptedAt: attemptedAt
+            )
+            roleDiscoveryCompleted = true
             let graphqlClient = GitHubGraphQLClient(
                 credential: token,
                 rateLimitController: rateLimitController,
                 requestPriority: requestPriority
             )
-            try await GitHubNodeHydrationService(
-                client: graphqlClient,
-                detailsRepository: GitHubNodeDetailsRepository(vault: vault),
-                rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
-                normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
-                batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault)
-            ).hydrate(
+            try await refreshHydration(
+                graphqlClient: graphqlClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
                 nodeIDs: discoveryResult.candidateNodeIDs,
-                accountID: account.id,
-                organizationID: organization.id,
+                coverageRepository: coverageRepository,
+                attemptedAt: attemptedAt,
                 repositoryID: { repository in
                     repositoryIDsByNodeID[repository.id]
                 }
@@ -190,106 +201,282 @@ actor OrganizationWorkRefreshService {
                 deferredSSORequirement,
                 reviewThreadSSORequirement
             ])
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: range,
-                    status: .complete,
-                    lastSuccessfulAt: Date(),
-                    failureDetail: nil
-                ),
-                attemptedAt: attemptedAt
-            )
             refreshedWorkItemIDs = discoveryResult.workItemIDs
         } catch let failure as GitHubFailure {
             if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) {
+                if !roleDiscoveryCompleted {
+                    try await coverageRepository.save(
+                        coverageRecord(
+                            scope: synchronizationScope,
+                            streamID: streamID,
+                            interval: searchRange,
+                            status: .requiresSSO,
+                            lastSuccessfulAt: nil,
+                            failureDetail: "GitHub organization SSO authorization is required."
+                        ),
+                        attemptedAt: attemptedAt
+                    )
+                }
+                throw OrganizationRefreshError.ssoRequirement(ssoHeader)
+            }
+            if !roleDiscoveryCompleted {
                 try await coverageRepository.save(
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
                         interval: searchRange,
-                        status: .requiresSSO,
+                        status: .failed,
                         lastSuccessfulAt: nil,
-                        failureDetail: "GitHub organization SSO authorization is required."
+                        failureDetail: "GitHub request failed: \(failure.kind.rawValue)."
                     ),
                     attemptedAt: attemptedAt
                 )
-                throw OrganizationRefreshError.ssoRequirement(ssoHeader)
             }
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: searchRange,
-                    status: .failed,
-                    lastSuccessfulAt: nil,
-                    failureDetail: "GitHub request failed: \(failure.kind.rawValue)."
-                ),
-                attemptedAt: attemptedAt
-            )
             throw failure
         } catch let failure as OrganizationRefreshError {
             let status: CoverageStatus = switch failure {
             case .ssoRequirement:
                 .requiresSSO
             }
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: searchRange,
-                    status: status,
-                    lastSuccessfulAt: nil,
-                    failureDetail: "GitHub organization SSO authorization is required."
-                ),
-                attemptedAt: attemptedAt
-            )
+            if !roleDiscoveryCompleted {
+                try await coverageRepository.save(
+                    coverageRecord(
+                        scope: synchronizationScope,
+                        streamID: streamID,
+                        interval: searchRange,
+                        status: status,
+                        lastSuccessfulAt: nil,
+                        failureDetail: "GitHub organization SSO authorization is required."
+                    ),
+                    attemptedAt: attemptedAt
+                )
+            }
             throw failure
         } catch let failure as AccountOrganizationRefreshFailure {
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: searchRange,
-                    status: coverageStatus(for: failure),
-                    lastSuccessfulAt: nil,
-                    failureDetail: failure.freshness.detail
-                ),
-                attemptedAt: attemptedAt
-            )
+            if !roleDiscoveryCompleted {
+                try await coverageRepository.save(
+                    coverageRecord(
+                        scope: synchronizationScope,
+                        streamID: streamID,
+                        interval: searchRange,
+                        status: coverageStatus(for: failure),
+                        lastSuccessfulAt: nil,
+                        failureDetail: failure.freshness.detail
+                    ),
+                    attemptedAt: attemptedAt
+                )
+            }
             throw failure
         } catch is CancellationError {
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: searchRange,
-                    status: .partial,
-                    lastSuccessfulAt: nil,
-                    failureDetail: "Refresh was cancelled before completion."
-                ),
-                attemptedAt: attemptedAt
-            )
+            if !roleDiscoveryCompleted {
+                try await coverageRepository.save(
+                    coverageRecord(
+                        scope: synchronizationScope,
+                        streamID: streamID,
+                        interval: searchRange,
+                        status: .partial,
+                        lastSuccessfulAt: nil,
+                        failureDetail: "Refresh was cancelled before completion."
+                    ),
+                    attemptedAt: attemptedAt
+                )
+            }
             throw CancellationError()
         } catch {
-            try await coverageRepository.save(
-                coverageRecord(
-                    scope: synchronizationScope,
-                    streamID: streamID,
-                    interval: searchRange,
-                    status: .failed,
-                    lastSuccessfulAt: nil,
-                    failureDetail: "Refresh failed: \(String(reflecting: type(of: error)))."
-                ),
-                attemptedAt: attemptedAt
-            )
+            if !roleDiscoveryCompleted {
+                try await coverageRepository.save(
+                    coverageRecord(
+                        scope: synchronizationScope,
+                        streamID: streamID,
+                        interval: searchRange,
+                        status: .failed,
+                        lastSuccessfulAt: nil,
+                        failureDetail: "Refresh failed: \(String(reflecting: type(of: error)))."
+                    ),
+                    attemptedAt: attemptedAt
+                )
+            }
             throw error
         }
         if let deferredSSORequirement {
             throw OrganizationRefreshError.ssoRequirement(deferredSSORequirement)
         }
         return refreshedWorkItemIDs
+    }
+
+    private func refreshHydration(
+        graphqlClient: GitHubGraphQLClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        nodeIDs: Set<GitHubNodeID>,
+        coverageRepository: CoverageRepository,
+        attemptedAt: Date,
+        repositoryID: @escaping @Sendable (GitHubNodeHydrationPayload.Repository) -> RepositoryID?
+    ) async throws {
+        let detailsRepository = GitHubNodeDetailsRepository(vault: vault)
+        let candidates = try await detailsRepository.hydrationCandidates(
+            nodeIDs: nodeIDs,
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
+        let kinds: [GitHubContentKind] = [.issue, .pullRequest]
+        let initialRecords = kinds.flatMap { kind -> [CoverageRecord] in
+            let repositoryIDs = Set(
+                candidates.filter { $0.kind == kind }.map(\.repositoryID)
+            ).sorted { $0.rawValue < $1.rawValue }
+            let repositoryRecords = repositoryIDs.map { repositoryID in
+                hydrationCoverageRecord(
+                    scope: scope,
+                    organizationID: organization.id,
+                    kind: kind,
+                    repositoryID: repositoryID,
+                    status: .partial,
+                    lastSuccessfulAt: nil,
+                    failureDetail: nil
+                )
+            }
+            return repositoryRecords + [hydrationCoverageRecord(
+                scope: scope,
+                organizationID: organization.id,
+                kind: kind,
+                repositoryID: nil,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            )]
+        }
+        try await vault.write { database in
+            for record in initialRecords {
+                try CoverageRepository.save(
+                    record,
+                    attemptedAt: attemptedAt,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            }
+        }
+        try Task.checkCancellation()
+
+        let result = try await GitHubNodeHydrationService(
+            client: graphqlClient,
+            detailsRepository: detailsRepository,
+            rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+            batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault)
+        ).hydrate(
+            nodeIDs: nodeIDs,
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            githubOrganizationID: organization.githubOrganizationID,
+            repositoryID: repositoryID
+        )
+        try Task.checkCancellation()
+
+        let finalRecords = kinds.flatMap { kind -> [CoverageRecord] in
+            let repositoryIDs = Set(
+                candidates.filter { $0.kind == kind }.map(\.repositoryID)
+            ).sorted { $0.rawValue < $1.rawValue }
+            let repositoryRecords = repositoryIDs.map { repositoryID in
+                let assessment = result.coverageAssessment(repositoryID: repositoryID, kind: kind)
+                return hydrationCoverageRecord(
+                    scope: scope,
+                    organizationID: organization.id,
+                    kind: kind,
+                    repositoryID: repositoryID,
+                    status: assessment.status,
+                    lastSuccessfulAt: assessment.status == .complete ? attemptedAt : nil,
+                    failureDetail: assessment.failureDetail
+                )
+            }
+            let aggregate = result.coverageAssessment(kind: kind)
+            return repositoryRecords + [hydrationCoverageRecord(
+                scope: scope,
+                organizationID: organization.id,
+                kind: kind,
+                repositoryID: nil,
+                status: aggregate.status,
+                lastSuccessfulAt: aggregate.status == .complete ? attemptedAt : nil,
+                failureDetail: aggregate.failureDetail
+            )]
+        }
+        try await vault.write { database in
+            for record in finalRecords {
+                try CoverageRepository.save(
+                    record,
+                    attemptedAt: attemptedAt,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            }
+        }
+        try Task.checkCancellation()
+        guard !result.isComplete else { return }
+
+        let statuses = result.outcomes.map(\.status)
+        if let header = statuses.compactMap({ status -> GitHubSSOHeader? in
+            guard case let .ssoRequired(header) = status else { return nil }
+            return header
+        }).first {
+            throw OrganizationRefreshError.ssoRequirement(header)
+        }
+        if statuses.contains(.approvalRequired) {
+            throw AccountOrganizationRefreshFailure.approvalRequired(
+                detail: "GitHub organization approval is required for current issue and pull request fields."
+            )
+        }
+        if statuses.contains(.authenticationRequired) {
+            throw AccountOrganizationRefreshFailure.authenticationRequired(
+                detail: "GitHub authentication is required for current issue and pull request fields."
+            )
+        }
+        let retryDates = statuses.compactMap { status -> Date? in
+            guard case let .rateLimited(retryAt) = status else { return nil }
+            return retryAt
+        }
+        if statuses.contains(where: {
+            if case .rateLimited = $0 { return true }
+            return false
+        }) {
+            throw AccountOrganizationRefreshFailure.rateLimited(
+                retryAt: retryDates.max(),
+                detail: "GitHub rate limiting left current issue and pull request fields incomplete."
+            )
+        }
+        if statuses.contains(.unavailableOrPermission) {
+            throw AccountOrganizationRefreshFailure.unavailable(
+                detail: "Some current issue and pull request fields are unavailable to this account."
+            )
+        }
+        throw AccountOrganizationRefreshFailure.failed(
+            detail: "Current issue and pull request field hydration is incomplete."
+        )
+    }
+
+    private func hydrationCoverageRecord(
+        scope: SynchronizationScope,
+        organizationID: OrganizationID,
+        kind: GitHubContentKind,
+        repositoryID: RepositoryID?,
+        status: CoverageStatus,
+        lastSuccessfulAt: Date?,
+        failureDetail: String?
+    ) -> CoverageRecord {
+        let feature: CoverageFeature = kind == .issue ? .issues : .pullRequests
+        let kindComponent = kind == .issue ? "issues" : "pull-requests"
+        let repositoryComponent = repositoryID.map { "-\($0.rawValue)" } ?? ""
+        return coverageRecord(
+            scope: scope,
+            streamID: SyncStreamID(
+                rawValue: "hydration-\(kindComponent)-\(organizationID.rawValue)\(repositoryComponent)"
+            )!,
+            interval: nil,
+            status: status,
+            lastSuccessfulAt: lastSuccessfulAt,
+            failureDetail: failureDetail,
+            feature: feature,
+            repositoryID: repositoryID
+        )
     }
 
     private func coverageRecord(
