@@ -8,6 +8,10 @@ enum SearchShardExecutorError: Error, Equatable, Sendable {
     case invalidPersistedCursor
 }
 
+struct GitHubIssueSearchUndecodableResponseError: Error, Equatable, Sendable {
+    let ssoHeader: GitHubSSOHeader?
+}
+
 struct PreparedSearchShardPageWrite: Sendable {
     let write: @Sendable (Database) throws -> Void
     let didCommit: @Sendable () async -> Void
@@ -21,6 +25,12 @@ struct PreparedSearchShardPageWrite: Sendable {
 actor SearchShardExecutor {
     typealias PagePreparer = @Sendable (
         GitHubResponse<GitHubIssueSearchPage>,
+        GitHubIssueSearchQuery,
+        Int
+    ) async throws -> PreparedSearchShardPageWrite
+
+    typealias UndecodablePagePreparer = @Sendable (
+        GitHubUndecodableResponse,
         GitHubIssueSearchQuery,
         Int
     ) async throws -> PreparedSearchShardPageWrite
@@ -49,6 +59,7 @@ actor SearchShardExecutor {
         accountID: AccountID,
         accessibleRepositoryNames: [String],
         prepareControlPage: @escaping PagePreparer = { _, _, _ in .empty },
+        prepareUndecodablePage: @escaping UndecodablePagePreparer = { _, _, _ in .empty },
         preparePage: @escaping PagePreparer
     ) async throws {
         let boundedQuery = try query.bounded(to: range)
@@ -59,6 +70,7 @@ actor SearchShardExecutor {
             accountID: accountID,
             accessibleRepositoryNames: accessibleRepositoryNames,
             prepareControlPage: prepareControlPage,
+            prepareUndecodablePage: prepareUndecodablePage,
             preparePage: preparePage
         )
     }
@@ -70,6 +82,7 @@ actor SearchShardExecutor {
         accountID: AccountID,
         accessibleRepositoryNames: [String],
         prepareControlPage: @escaping PagePreparer,
+        prepareUndecodablePage: @escaping UndecodablePagePreparer,
         preparePage: @escaping PagePreparer
     ) async throws {
         try Task.checkCancellation()
@@ -101,7 +114,14 @@ actor SearchShardExecutor {
         try await shardRepository.save(shard, accountID: accountID)
 
         do {
-            let firstResponse = try await client.searchResponse(query, page: 1)
+            let firstResponse = try await response(
+                for: try await client.searchResult(query, page: 1),
+                query: query,
+                page: 1,
+                shard: &shard,
+                accountID: accountID,
+                prepareUndecodablePage: prepareUndecodablePage
+            )
             try Task.checkCancellation()
             let firstPage = firstResponse.value
             switch planner.nextPlan(
@@ -132,7 +152,14 @@ actor SearchShardExecutor {
                 }
                 for page in max(2, resumePage)...pageCount {
                     try Task.checkCancellation()
-                    let response = try await client.searchResponse(query, page: page)
+                    let response = try await response(
+                        for: try await client.searchResult(query, page: page),
+                        query: query,
+                        page: page,
+                        shard: &shard,
+                        accountID: accountID,
+                        prepareUndecodablePage: prepareUndecodablePage
+                    )
                     try Task.checkCancellation()
                     if response.value.incompleteResults {
                         shard = try await executePartitions(
@@ -150,6 +177,7 @@ actor SearchShardExecutor {
                             accessibleRepositoryNames: accessibleRepositoryNames,
                             shard: shard,
                             prepareControlPage: prepareControlPage,
+                            prepareUndecodablePage: prepareUndecodablePage,
                             preparePage: preparePage
                         )
                         return
@@ -181,6 +209,7 @@ actor SearchShardExecutor {
                     accessibleRepositoryNames: accessibleRepositoryNames,
                     shard: shard,
                     prepareControlPage: prepareControlPage,
+                    prepareUndecodablePage: prepareUndecodablePage,
                     preparePage: preparePage
                 )
             }
@@ -204,6 +233,7 @@ actor SearchShardExecutor {
         accessibleRepositoryNames: [String],
         shard: SyncShard,
         prepareControlPage: @escaping PagePreparer,
+        prepareUndecodablePage: @escaping UndecodablePagePreparer,
         preparePage: @escaping PagePreparer
     ) async throws -> SyncShard {
         var parent = running(shard, cursor: "partitioned")
@@ -221,6 +251,7 @@ actor SearchShardExecutor {
                 accountID: accountID,
                 accessibleRepositoryNames: accessibleRepositoryNames,
                 prepareControlPage: prepareControlPage,
+                prepareUndecodablePage: prepareUndecodablePage,
                 preparePage: preparePage
             )
             try Task.checkCancellation()
@@ -231,6 +262,7 @@ actor SearchShardExecutor {
                 accountID: accountID,
                 accessibleRepositoryNames: accessibleRepositoryNames,
                 prepareControlPage: prepareControlPage,
+                prepareUndecodablePage: prepareUndecodablePage,
                 preparePage: preparePage
             )
         case .repositoryPartitionRequired:
@@ -246,6 +278,7 @@ actor SearchShardExecutor {
                     accountID: accountID,
                     accessibleRepositoryNames: [],
                     prepareControlPage: prepareControlPage,
+                    prepareUndecodablePage: prepareUndecodablePage,
                     preparePage: preparePage
                 )
             }
@@ -256,6 +289,29 @@ actor SearchShardExecutor {
         parent = completed(parent, cursor: "partitioned")
         try await shardRepository.save(parent, accountID: accountID)
         return parent
+    }
+
+    private func response(
+        for result: GitHubIssueSearchResult,
+        query: GitHubIssueSearchQuery,
+        page: Int,
+        shard: inout SyncShard,
+        accountID: AccountID,
+        prepareUndecodablePage: @escaping UndecodablePagePreparer
+    ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
+        switch result {
+        case let .response(response):
+            return response
+        case let .undecodable(response):
+            let failedShard = failed(shard)
+            try await persistPage(
+                try await prepareUndecodablePage(response, query, page),
+                advancing: failedShard,
+                accountID: accountID
+            )
+            shard = failedShard
+            throw GitHubIssueSearchUndecodableResponseError(ssoHeader: response.ssoHeader)
+        }
     }
 
     private func running(_ shard: SyncShard, cursor: String?) -> SyncShard {
