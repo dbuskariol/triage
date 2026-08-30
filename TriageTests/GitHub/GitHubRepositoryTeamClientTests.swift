@@ -76,6 +76,20 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         }
     }
 
+    func testRepositoryPaginationRejectsSkippedPageBeforeSecondRequest() async throws {
+        let skippedPageLinks = [
+            "https://api.github.com/orgs/acme/repos?page=3&type=all&per_page=100",
+            "https://api.github.com/orgs/acme/repos?per_page=100&page=3&type=all",
+            "https://api.github.com/orgs/acme/repos?type=all&per_page=100&page=%33"
+        ]
+        for link in skippedPageLinks {
+            try await assertInvalidRepositoryNextLink(
+                link,
+                expectedError: .paginationLoop
+            )
+        }
+    }
+
     func testRepositoryPaginationRejectsCrossScopeTargetsBeforeSecondRequest() async throws {
         let invalidLinks = [
             "https://api.github.com/orgs/other/repos?page=2&type=all&per_page=100",
@@ -120,17 +134,17 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
     }
 
     func testRepositoryPaginationRejectsANonForwardPageBeforeThirdRequest() async throws {
-        let pageThree = "https://api.github.com/orgs/acme/repos?per_page=100&page=3&type=all"
+        let pageOne = "https://api.github.com/orgs/acme/repos?per_page=100&page=1&type=all"
         let pageTwo = "https://api.github.com/orgs/acme/repos?type=all&per_page=100&page=2"
         let session = RepositoryTeamPagingSession(responses: [
             "/orgs/acme/repos?type=all&per_page=100": (
                 Data("[\(repository(id: 1, nodeID: "R_1", name: "one"))]".utf8),
-                ["Link": "<\(pageThree)>; rel=\"next\""],
+                ["Link": "<\(pageTwo)>; rel=\"next\""],
                 200
             ),
-            "/orgs/acme/repos?per_page=100&page=3&type=all": (
-                Data("[\(repository(id: 3, nodeID: "R_3", name: "three"))]".utf8),
-                ["Link": "<\(pageTwo)>; rel=\"next\""],
+            "/orgs/acme/repos?type=all&per_page=100&page=2": (
+                Data("[\(repository(id: 2, nodeID: "R_2", name: "two"))]".utf8),
+                ["Link": "<\(pageOne)>; rel=\"next\""],
                 200
             )
         ])

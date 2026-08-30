@@ -359,7 +359,7 @@ actor GitHubRepositoryTeamClient {
         guard pageNumber <= maximumPages else {
             throw GitHubRepositoryTeamClientError.paginationLimitExceeded
         }
-        guard pageNumber > currentPageNumber else {
+        guard pageNumber == currentPageNumber + 1 else {
             throw GitHubRepositoryTeamClientError.paginationLoop
         }
         return pageNumber
