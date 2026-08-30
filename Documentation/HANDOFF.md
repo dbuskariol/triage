@@ -2,11 +2,12 @@
 
 **Handoff state:** the original paused synchronization,
 deterministic-intelligence, native-shell, and XPC checkpoint has now been
-continued on a full-Xcode Mac. The latest verified local continuation commit
-is `7aba74f` (`Authorize stream-scoped search replay`) on `main`. Triage remains
-intentionally incomplete; this document records both the original checkpoint
-and the continuation state so another computer does not need prior session
-context.
+continued on a full-Xcode Mac. The latest verified implementation checkpoint
+is `e320532` (`Bind discussions and projects to immutable source authority`)
+on `main`; this handoff update is committed immediately after it. Triage
+remains intentionally incomplete. This document records both the original
+checkpoint and the current continuation state so another session does not
+need prior context.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -19,7 +20,7 @@ boundaries, sequencing, and acceptance criteria.
 - Current continuation root: `/Users/nftdannyboy/Documents/Projects/swift/triage`
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
-- Latest verified local continuation commit: `7aba74f`
+- Latest verified implementation checkpoint: `e320532`
 - This handoff is committed together with every completed, previously
   uncommitted implementation slice listed below.
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
@@ -40,11 +41,18 @@ content, local-repository scanning, or GitHub mutations.
 | --- | --- | --- |
 | Full developer directory | Passed | `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; Xcode 27.0, build `27A5228h`. |
 | Focused handoff and continuation XCTest | Passed | Coordinator, lifecycle/runtime, source integration, conditional authority, timeline replay, role-search replay, migration, cancellation, rollback, and malformed-payload selectors passed. |
+| 2026-08-31 source-authority checkpoint | Passed | Fresh combined full-Xcode run passed 132/132: discussion/project, timeline, relation, migrations, review scheduling/reconciliation, and the inventory crash regression. Result: `/tmp/TriageSafeCheckpoint-r2-20260831.xcresult`. |
+| Focused checkpoint slices | Passed | Timeline 32/32 (`/tmp/TriageTimelineCheckpoint-r4-20260831.xcresult`); review/thread 22/22 (`/tmp/TriageThreadCheckpoint-r4-20260831.xcresult`); relation 19/19; discussion failure provenance 3/3 (`/tmp/TriageDiscussionFailure-r7-20260831.xcresult`). |
 | Historical coordinator crash regression | Passed | `AccountOrganizationCoordinatorTests/testAccessFailureRemainsScopedToItsAccountOrganization` passed 100/100 repetitions; current bounded/index-checked helper already contained the fix. |
 | Consolidated role-search gate | Passed | `AccountVaultTests`, `RoleSearchPageReplayRepositoryTests`, `GitHubIssueSearchTests`, `SearchShardExecutorTests`, and `RoleDiscoveryPlanTests` passed together after the final parser-authority bump. |
 | Independent final reviews | Passed | Security/source-authority and transaction/data-integrity re-audits reported no concrete defects after all fixes. |
-| `git diff --check` | Passed | No whitespace errors before `7aba74f`. |
+| `git diff --check` | Passed | No whitespace errors through the `e320532` implementation checkpoint or this handoff edit. |
 | `scripts/verify-ci.sh` | Passed | Full XCTest suite and unsigned universal arm64/x86_64 Release build passed after `7aba74f`; only known vendored GRDB Swift 6 `Any`/`Sendable` warnings remained. |
+
+The full verifier has not been repeated after `e320532`; the fresh 132-test
+checkpoint above is the current proof. Repeat `scripts/verify-ci.sh` before
+starting the next broad integration wave or treating the checkout as a full
+CI checkpoint.
 
 The earlier Command Line Tools limitation is resolved on the current machine.
 Keep using the locked Sparkle, GRDB, and SQLCipher dependencies; do not change
@@ -58,9 +66,10 @@ scripts/verify-ci.sh
 ```
 
 Then run focused XCTest selectors for every changed source slice before making
-new changes. This was completed through `7aba74f`; repeat it after subsequent
-slices. The implementation plan requires the full verifier again before any
-candidate release work.
+new changes. The baseline full verifier was completed through `7aba74f`, and
+focused source-authority coverage was repeated through `e320532`; repeat the
+full verifier before the next broad integration wave. The implementation plan
+requires it again before any candidate release work.
 
 ## Continuation commits after `4584275`
 
@@ -84,6 +93,29 @@ verified slice locally. In dependency order, the new commits are:
 - stream-scoped role-search replay authorization, encrypted destructive
   migration backups, append-only parser-identity migration `034`, and
   malformed-page failed coverage: `7aba74f`.
+
+Subsequent local continuation commits, also on `main`, are:
+
+- continuation handoff and conservative inventory authority: `4811423`,
+  `b48ea7f`, `dc1a53b`, `a7ded33`, `ac7bec2`, `59ea12c`, `26b99ac`,
+  `235b147`, `4a11d1c`, `bc23e13`, `ee647a9`, `6885173`, `3546b96`,
+  and `5217b01`;
+- source-scoped relation evidence and deletion fail-closed behavior:
+  `0d42fa7`, `64b15b1`;
+- exact fair review scheduling, blocked-known candidate coverage, and
+  conservative no-cursor-advance failure behavior: `e7396b2`;
+- append-only migration `039`, exact staged/current timeline page membership,
+  atomic publication, immutable raw history, and page-bound relation
+  replacement: `3ae4072`;
+- immutable discussion/Project raw authority, canonical traversal checks,
+  partial Project field retention, and exact normalization-failure source
+  binding: `e320532`.
+
+The crash reports supplied during this checkpoint both describe the same old
+`OrganizationInventoryRefreshService.validateCurrentScope` GRDB row-subscript
+trap from `testEmptyThenNonemptyRepositoryRevisionAtSameMillisecondFailsClosed`.
+Commit `5217b01` replaced that unchecked decoding path; the exact regression
+test is included in the 132/132 green checkpoint.
 
 The role-search batch authorizes `304` reuse only for exact account,
 organization, leaf stream, endpoint/query/page, credential revision,
@@ -184,11 +216,13 @@ node/comment records, writes `review_threads`, and updates
 user response” is true only when a thread is unresolved, not outdated, has a
 known latest comment author, and that author is not the current user.
 
-**Still required:** create a dedicated review-thread refresh service (or extend
-the existing review refresh safely) and invoke it from the organization
-orchestration. It must persist raw failure provenance, map GraphQL SSO/approval
-errors to scoped review-thread coverage, and avoid publishing completion until
-the bounded candidate inventory is drained.
+`PullRequestReviewThreadRefreshService` is now invoked from organization work
+refresh with durable fair candidate scheduling, scoped blocked/inaccessible
+signals, redacted GraphQL SSO/approval classification, and conservative
+coverage. **Still required:** persist durable raw/classified failure provenance
+for failed candidate traversals. Until that exists, remote/SSO/approval failure
+stops the pass without advancing its durable cursor, so retry selects the same
+candidate. Newer-commit comparison and final derived-input wiring also remain.
 
 ### REST timeline synchronization
 
@@ -214,10 +248,14 @@ Malformed or cross-scope pages cannot erase prior events or mark coverage
 complete; corrected final pages can recover. Cancellation is checked after
 network/persistence boundaries and before final completion publication.
 
-**Still required:** call `GitHubTimelineRefreshService` from normal
-organization synchronization, translate its results into `.timelines`
-coverage, and ensure the stream’s durable cursor/high-water is selected with
-the organization’s lifecycle scheduler.
+`GitHubTimelineRefreshService` is now called from normal organization work
+synchronization and its repository and aggregate assessments are translated to
+`.timelines` coverage. Migration `039` publishes exact current raw-page
+membership atomically from staged traversal state; a 2-page to 1-page shrink
+does not retain stale membership, while immutable raw history remains bounded
+and protected when authoritative. **Still required:** finish the integrated
+cadence/live matrix, remaining source-specific tombstone behavior, and final
+coordinator/derived-observation acceptance.
 
 ### Discussions and Projects V2
 
@@ -253,10 +291,15 @@ Discussion comments/replies intentionally remain `.unavailable` until their
 own independently paginated source contract and implementation exist. This is
 not an empty discussion-comment result.
 
-**Still required:** wire `DiscussionSynchronizationService` and
-`ProjectV2SynchronizationService` into the account/organization scheduler,
-define candidate/repository/project selection and daily/incremental cadence,
-and add independently paginated discussion-comment/reply synchronization.
+`OrganizationContextRefreshService` now invokes
+`DiscussionSynchronizationService` and `ProjectV2SynchronizationService`, and
+organization work refresh invokes that context service. Raw pages are
+immutable and exact-scope bound; traversal is canonical; partial Project field
+collections retain prior authoritative values plus explicit provisional
+context. **Still required:** finish candidate/project cadence and redacted or
+draft item behavior, add independently paginated discussion-comment/reply
+synchronization, and complete production coordinator/derived-observation
+acceptance.
 
 ### Deterministic derived intelligence
 
@@ -359,38 +402,41 @@ artifact and release signing identity.
 ## Immediate integration order
 
 Do not mark the next large batch complete merely because its isolated clients
-or repositories compile. Full Xcode restoration, focused handoff coverage, and
-the original steps through individually scoped organization refresh are
-complete through `7aba74f`. The next integration order preserves data
-authority:
+or repositories compile. Full Xcode restoration, focused handoff coverage,
+exact organization scope propagation, fair review scheduling, timeline page
+membership, source-scoped relation evidence, and the current discussion/
+Project authority hardening are complete through `e320532`. The next
+integration order preserves data authority:
 
-1. Audit and implement durable access evidence plus conservative
-   reconciliation. Every relation must retain its source endpoint/query,
-   source node/event, source revision, observation time, confidence, and
-   provisional/confirmed state. Incremental omission must never delete data;
-   private `404` means inaccessible until authoritative reconciliation proves
-   deletion; transient network/rate/auth failures retain cached content.
+1. Add durable raw/classified accumulated failure provenance for REST reviews
+   and GraphQL review threads before allowing any failed candidate cursor to
+   advance. The current implementation deliberately stops at the first
+   unproven remote/SSO/approval failure and retries the same candidate.
 2. Finish source-specific normalized inputs without crossing coverage scopes:
-   review-thread scheduling and newer-commit comparison; discussion
-   comments/replies; Project cadence and redacted/draft item handling; and
-   timeline/review/notification work-graph reconciliation. Each stream keeps
-   independent coverage and failure authority.
-3. Run deterministic derived intelligence only after the relevant normalized
+   discussion comments/replies; remaining Project cadence and redacted/draft
+   item behavior; newer-commit review comparison; notification reconciliation;
+   and authoritative source-specific tombstones. Each stream keeps independent
+   coverage and failure authority.
+3. Wire the now-hardened source streams into the production organization
+   coordinator in dependency order. Preserve staged/download state, validate
+   scope after every suspension, and publish coverage only with its normalized
+   transaction. Do not introduce placeholder or hidden fallback services.
+4. Run deterministic derived intelligence only after the relevant normalized
    transaction is fully durable. Persist revision-bound evaluation/candidate
    evidence and carry freshness, coverage, confidence, and provisional state;
    never run derivation from a view.
-4. Implement storage observation streams and production coordinator adapters,
+5. Implement storage observation streams and production coordinator adapters,
    then inject those explicit dependencies into `TriageAppModel`. Do not add
    placeholder or hidden fallback services.
-5. Bind the existing native SwiftUI shell to production observations and
+6. Bind the existing native SwiftUI shell to production observations and
    actions, then finish commands, detail/inspector, toolbar/search, secure
    Markdown, notifications, restoration, Settings, accessibility, appearance,
    keyboard, resizing, and UI automation.
-6. Complete deletion/recovery, encrypted persistence, fixture, end-to-end,
+7. Complete deletion/recovery, encrypted persistence, fixture, end-to-end,
    performance, controlled live GitHub, and security validation in dependency
    order. Keep Copilot fail-closed until its approved runtime and signing
    prerequisites exist.
-7. Re-run focused tests after every slice and `scripts/verify-ci.sh` at each
+8. Re-run focused tests after every slice and `scripts/verify-ci.sh` at each
    integration checkpoint. Commit coherent local slices, but do not push or
    perform release operations without explicit approval.
 
@@ -404,24 +450,25 @@ below describe their current residual work:
 | Active track | Handoff status |
 | --- | --- |
 | `copilot-xpc` | Transport is hardened and remains fail-closed; the approved runtime, SDK integration, entitlement, consent, signing, and policy work remain blocked on external prerequisites. |
-| `storage-repositories` | Exact request authority, coverage profiles, encrypted migration backups, and multiple repositories are durable; access evidence, observations, deletion/recovery, and complete persistence tests remain. |
+| `storage-repositories` | Exact request authority, coverage profiles, encrypted migration backups, source-scoped relation evidence, immutable raw rows, and exact timeline membership are durable; observations, deletion/recovery, and complete persistence tests remain. |
 | `sync-account-org` | Revision-safe single-owner coordination, durable scheduling, scoped operations, projections, and lifecycle integration exist; production presentation adapters/injection and remaining stream actions remain. |
 | `sync-derived-intelligence` | Coordinator/repository foundations exist; revision-bound source integration and durable evaluation/candidate evidence remain. |
-| `sync-hydration` / `sync-normalization` | Core hydration plus selected timeline, Discussion, Project, inventory, and search streams are integrated; relation evidence, conservative tombstones, remaining normalization, and end-to-end tests remain. |
+| `sync-hydration` / `sync-normalization` | Core hydration plus selected timeline, Discussion, Project, inventory, and search streams are integrated; relation evidence is raw-bound and source-scoped; authoritative tombstones, remaining normalization, and end-to-end tests remain. |
 | `sync-repositories-teams` | Inventory participates in organization refresh and preserves topology across access loss; authoritative deletion reconciliation and controlled live validation remain. |
-| `sync-reviews` | REST reviews/requests and thread client/repository exist; thread refresh scheduling, newer-commit comparison, complete coverage, and derived-input wiring remain. |
+| `sync-reviews` | REST reviews/requests and thread refresh use durable fair scheduling with explicit blocked-known candidates. Durable raw failure envelopes, newer-commit comparison, final complete-coverage publication, and derived-input wiring remain. |
 | `sync-search-discovery` / `sync-search-sharding` | Search has source-scoped plans, malformed provenance, exact conditional replay, parser authority, cancellation, and migration coverage; finish durable cross-stream reconciliation and the integrated/live matrix. |
 | `ui-app-coordinator`, `ui-onboarding`, `ui-sidebar`, `ui-menu-bar` | Presentation shells exist; bind them to production observation/action services and finish functional and UX validation. |
 | `ui-commands` | Still outstanding. |
 
 All currently pending work remains required. In practical dependency order:
 
-1. Finish `sync-relations` access evidence and authoritative tombstone
-   semantics, then complete `sync-freshness` and `storage-observation` on the
-   now-durable scheduler/coordinator foundation.
-2. Finish the residual `sync-timelines`, `sync-discussions`, `sync-projects`,
-   `sync-reviews`, `sync-notifications`, and `sync-tests` gaps without merging
-   their coverage authority.
+1. Add review/review-thread accumulated failure provenance, then finish the
+   residual `sync-discussions`, `sync-projects`, `sync-reviews`,
+   `sync-notifications`, authoritative tombstones, and `sync-tests` gaps
+   without merging their coverage authority.
+2. Wire the completed source streams into production organization coordination,
+   then complete `sync-freshness`, derived intelligence, and
+   `storage-observation` on the durable scheduler/coordinator foundation.
 3. Implement functional app coordination, workflow actions, detail/inspector,
    toolbar/commands/search, secure Markdown, notifications, restoration,
    Settings, accessibility, and UI tests.
@@ -449,8 +496,9 @@ All currently pending work remains required. In practical dependency order:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- Full Xcode tests and the unsigned universal build passed through `7aba74f`,
-  but subsequent changes still require focused and full revalidation. Live
+- Full Xcode tests and the unsigned universal build passed through `7aba74f`;
+  a focused 132-test full-Xcode checkpoint passed through `e320532`, but the
+  subsequent changes still require a full verifier rerun. Live
   controlled GitHub validation, UI accessibility exercise, security/release
   review, signing/notarization, and all final acceptance steps remain open and
   are not implied by the current green checkpoint.
