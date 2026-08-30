@@ -42,33 +42,6 @@ actor RepositoryInventoryRepository {
         return try await vault.writeTransaction(operation)
     }
 
-    func cachedETag(
-        accountID: AccountID,
-        organization: GitHubOrganization,
-        fullReconciliationCutoff: Date
-    ) async throws -> String? {
-        try ensureAccountScope(accountID)
-        return try await vault.read { database in
-            try Self.validateOrganizationScope(accountID: accountID, organization: organization, in: database)
-            return try String.fetchOne(
-                database,
-                sql: """
-                    SELECT etag
-                    FROM raw_api_snapshots
-                    WHERE account_id = ? AND endpoint = ? AND etag IS NOT NULL
-                      AND observed_at_ms >= ?
-                    ORDER BY observed_at_ms DESC, id DESC
-                    LIMIT 1
-                    """,
-                arguments: [
-                    accountID.rawValue,
-                    "/orgs/\(organization.login)/repos?type=all&per_page=100",
-                    Self.milliseconds(fullReconciliationCutoff)
-                ]
-            )
-        }
-    }
-
     func repositories(
         accountID: AccountID,
         organization: GitHubOrganization

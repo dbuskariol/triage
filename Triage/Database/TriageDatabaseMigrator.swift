@@ -1120,6 +1120,43 @@ enum TriageDatabaseMigrator {
                 ADD COLUMN has_discussions_known INTEGER NOT NULL DEFAULT 0
                     CHECK (has_discussions_known IN (0, 1))
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "030-revision-scoped-conditional-requests",
+            checksum: "f742e3ff68ae96471ddeacf0f191fa032cd4c343f353b17f313f005810fe7f02"
+        ) { database in
+            // Legacy rows did not identify organization, source stream, or
+            // credential/capability authority. They cannot safely authorize a
+            // 304 after migration, so invalidate them instead of guessing.
+            try database.execute(sql: "DROP TABLE conditional_request_cache")
+            try database.execute(sql: """
+                CREATE TABLE conditional_request_cache (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL,
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL CHECK (
+                        length(request_key) BETWEEN 1 AND 2048
+                    ),
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    etag TEXT CHECK (
+                        etag IS NULL OR length(etag) BETWEEN 1 AND 2048
+                    ),
+                    last_modified TEXT CHECK (
+                        last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048
+                    ),
+                    observed_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id, request_key,
+                        credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
+                )
+                """)
         }
     ]
 }

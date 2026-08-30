@@ -265,8 +265,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -320,8 +319,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -372,8 +370,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let failed = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -404,8 +401,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
             conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: fixture.vault)
         )
         let recovered = try await recoveredService.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -422,11 +418,26 @@ final class TimelineEventRepositoryTests: XCTestCase {
     func testPageLevelNotModifiedIsFollowedByUnconditionalAuthoritativeTraversal() async throws {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
-        let requestKey = "GET /repos/github/triage/issues/1/timeline?per_page=100&page=1"
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: fixture.scope.accountID,
+                organizationID: fixture.scope.organizationID,
+                repositoryID: fixture.repositoryID,
+                feature: .timelines,
+                streamID: fixture.timelineStreamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: fixture.scope.credentialRevision,
+                capabilityRevision: fixture.scope.capabilityRevision,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.observedAt
+        )
         try await ConditionalRequestCacheRepository(vault: fixture.vault).save(
             ConditionalRequestValidator(
-                requestKey: requestKey,
-                accountID: fixture.accountID,
+                identity: fixture.conditionalRequestIdentity,
                 eTag: "old-etag",
                 lastModified: nil,
                 observedAt: fixture.observedAt
@@ -445,8 +456,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -460,6 +470,70 @@ final class TimelineEventRepositoryTests: XCTestCase {
             try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events")
         }
         XCTAssertEqual(eventIDs, ["authoritative-event"])
+    }
+
+    func testFreshTimelineWithoutETagAtomicallyRemovesPriorValidator() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: fixture.scope.accountID,
+                organizationID: fixture.scope.organizationID,
+                repositoryID: fixture.repositoryID,
+                feature: .timelines,
+                streamID: fixture.timelineStreamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: fixture.scope.credentialRevision,
+                capabilityRevision: fixture.scope.capabilityRevision,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.observedAt
+        )
+        let conditionalRequests = ConditionalRequestCacheRepository(vault: fixture.vault)
+        try await conditionalRequests.save(
+            ConditionalRequestValidator(
+                identity: fixture.conditionalRequestIdentity,
+                eTag: "old-etag",
+                lastModified: nil,
+                observedAt: fixture.observedAt
+            )
+        )
+        let service = GitHubTimelineRefreshService(
+            client: GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
+                    "/repos/github/triage/issues/1/timeline?per_page=100&page=1": (
+                        Data(#"[{"id":"fresh-event","event":"mentioned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
+                        [:]
+                    )
+                ])),
+                credential: SecretValue("token")
+            )),
+            candidateRepository: TimelineCandidateRepository(vault: fixture.vault),
+            eventRepository: TimelineEventRepository(vault: fixture.vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: fixture.vault),
+            conditionalRequestCacheRepository: conditionalRequests
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: 2,
+            currentUserID: ActorID(rawValue: "U_current")!,
+            candidates: [fixture.candidate],
+            observedAt: fixture.observedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(result.outcomes.map(\.status), [.refreshed])
+        let retainedValidator = try await conditionalRequests.validator(
+            for: fixture.conditionalRequestIdentity
+        )
+        XCTAssertNil(retainedValidator)
+        let eventIDs = try await fixture.vault.read { database in
+            try String.fetchAll(database, sql: "SELECT github_event_id FROM timeline_events")
+        }
+        XCTAssertEqual(eventIDs, ["fresh-event"])
     }
 
     func testUndecodableTransportPayloadIsRetainedWithRedactedFailure() async throws {
@@ -491,8 +565,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -558,8 +631,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -612,8 +684,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
             conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: fixture.vault)
         )
         let recovered = try await recoveredService.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -666,8 +737,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -705,8 +775,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -755,8 +824,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
 
         let result = try await service.refresh(
-            accountID: fixture.accountID,
-            organizationID: fixture.organizationID,
+            scope: fixture.scope,
             githubOrganizationID: 2,
             currentUserID: ActorID(rawValue: "U_current")!,
             candidates: [fixture.candidate],
@@ -798,8 +866,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         )
         let refreshTask = Task {
             try await service.refresh(
-                accountID: fixture.accountID,
-                organizationID: fixture.organizationID,
+                scope: fixture.scope,
                 githubOrganizationID: 2,
                 currentUserID: ActorID(rawValue: "U_current")!,
                 candidates: [fixture.candidate],
@@ -835,6 +902,28 @@ private final class TimelineFixture: @unchecked Sendable {
     let observedAt = Date(timeIntervalSince1970: 1_767_225_600)
     let vault: AccountVault
     let candidate: TimelineCandidate
+
+    var scope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+    }
+
+    var timelineStreamID: SyncStreamID {
+        SyncStreamID(rawValue: "timeline:\(nodeID.rawValue)")!
+    }
+
+    var conditionalRequestIdentity: ConditionalRequestIdentity {
+        ConditionalRequestIdentity(
+            scope: scope,
+            feature: .timelines,
+            streamID: timelineStreamID,
+            requestKey: "GET /repos/github/triage/issues/1/timeline?per_page=100&page=1"
+        )
+    }
 
     init() async throws {
         directory = FileManager.default.temporaryDirectory

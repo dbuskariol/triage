@@ -335,34 +335,182 @@ final class WorkRelationRepositoryTests: XCTestCase {
         }
     }
 
-    func testConditionalRequestValidatorsRoundTripAndAreAccountScoped() async throws {
+    func testConditionalRequestValidatorsRoundTripOnlyForExactCurrentAuthorityScope() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
 
-        let validator = ConditionalRequestValidator(
-            requestKey: "GET /repos/github/triage/issues?state=open",
+        let streamID = SyncStreamID(rawValue: "timeline-github-repo-1")!
+        let scope = SynchronizationScope(
             accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+        try await CoverageRepository(vault: fixture.vault).save(
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .timelines,
+                streamID: streamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: fixture.date
+        )
+        let identity = ConditionalRequestIdentity(
+            scope: scope,
+            feature: .timelines,
+            streamID: streamID,
+            requestKey: "GET /repos/github/triage/issues/1/timeline?per_page=100&page=1"
+        )
+        let validator = ConditionalRequestValidator(
+            identity: identity,
             eTag: "\"revision-1\"",
             lastModified: "Fri, 28 Aug 2026 00:00:00 GMT",
             observedAt: fixture.date
         )
         let repository = ConditionalRequestCacheRepository(vault: fixture.vault)
         try await repository.save(validator)
-        let restoredValidator = try await repository.validator(
-            for: validator.requestKey,
-            accountID: fixture.accountID
-        )
+        let restoredValidator = try await repository.validator(for: identity)
         XCTAssertEqual(restoredValidator, validator)
+        let differentRequest = ConditionalRequestIdentity(
+            scope: scope,
+            feature: identity.feature,
+            streamID: identity.streamID,
+            requestKey: identity.requestKey + "&page=2"
+        )
+        let differentRequestValidator = try await repository.validator(for: differentRequest)
+        XCTAssertNil(differentRequestValidator)
+        try await repository.remove(for: differentRequest)
+        let retainedValidator = try await repository.validator(for: identity)
+        XCTAssertEqual(retainedValidator, validator)
 
         do {
-            _ = try await repository.validator(
-                for: validator.requestKey,
-                accountID: AccountID.make()
-            )
+            _ = try await repository.validator(for: ConditionalRequestIdentity(
+                scope: SynchronizationScope(
+                    accountID: AccountID.make(),
+                    organizationID: scope.organizationID,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision
+                ),
+                feature: identity.feature,
+                streamID: identity.streamID,
+                requestKey: identity.requestKey
+            ))
             XCTFail("Expected an account scope mismatch.")
         } catch {
             XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .accountScopeMismatch)
         }
+
+        do {
+            _ = try await repository.validator(for: ConditionalRequestIdentity(
+                scope: SynchronizationScope(
+                    accountID: scope.accountID,
+                    organizationID: scope.organizationID,
+                    credentialRevision: CredentialRevision(rawValue: "credential-2")!,
+                    capabilityRevision: scope.capabilityRevision
+                ),
+                feature: identity.feature,
+                streamID: identity.streamID,
+                requestKey: identity.requestKey
+            ))
+            XCTFail("Expected a credential authority mismatch.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .authorityScopeMismatch)
+        }
+
+        do {
+            try await repository.save(
+                ConditionalRequestValidator(
+                    identity: ConditionalRequestIdentity(
+                        scope: scope,
+                        feature: .reviews,
+                        streamID: streamID,
+                        requestKey: identity.requestKey
+                    ),
+                    eTag: "\"foreign-stream\"",
+                    lastModified: nil,
+                    observedAt: fixture.date
+                )
+            )
+            XCTFail("Expected a stream scope mismatch.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .streamScopeMismatch)
+        }
+
+        do {
+            _ = try await repository.validator(for: ConditionalRequestIdentity(
+                scope: scope,
+                feature: .reviews,
+                streamID: streamID,
+                requestKey: identity.requestKey
+            ))
+            XCTFail("Expected a stream scope mismatch on lookup.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .streamScopeMismatch)
+        }
+
+        do {
+            _ = try await repository.validator(for: ConditionalRequestIdentity(
+                scope: scope,
+                feature: identity.feature,
+                streamID: streamID,
+                requestKey: identity.requestKey + "\nInjected: true"
+            ))
+            XCTFail("Expected a control-character request key rejection.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .invalidRequestKey)
+        }
+
+        do {
+            try await repository.save(
+                ConditionalRequestValidator(
+                    identity: identity,
+                    eTag: "invalid\u{001f}validator",
+                    lastModified: nil,
+                    observedAt: fixture.date
+                )
+            )
+            XCTFail("Expected a control-character validator rejection.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .invalidValidator)
+        }
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE account_organizations
+                    SET capability_revision = 'capability-2'
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            )
+        }
+        do {
+            _ = try await repository.validator(for: identity)
+            XCTFail("Expected a capability authority mismatch.")
+        } catch {
+            XCTAssertEqual(error as? ConditionalRequestCacheRepositoryError, .authorityScopeMismatch)
+        }
+        let currentCapabilityIdentity = ConditionalRequestIdentity(
+            scope: SynchronizationScope(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
+            ),
+            feature: identity.feature,
+            streamID: identity.streamID,
+            requestKey: identity.requestKey
+        )
+        let currentCapabilityValidator = try await repository.validator(for: currentCapabilityIdentity)
+        XCTAssertNil(currentCapabilityValidator)
     }
 
     func testSyncShardsRequireAnAccountOwnedParentStream() async throws {
