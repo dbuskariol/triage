@@ -215,6 +215,35 @@ final class InventoryRepositoryTests: XCTestCase {
         XCTAssertEqual(existingRepositories.map(\.name), ["retained"])
     }
 
+    func testUnavailableRepositoryAccessIsExcludedFromRefreshCandidates() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        try await repository.replace(
+            [fixture.repository(id: 1, nodeID: "R_1", name: "revoked")],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE account_repository_access
+                    SET access_state = 'unavailable'
+                    WHERE account_id = ? AND repository_id = ?
+                    """,
+                arguments: [fixture.account.id.rawValue, "R_1"]
+            )
+        }
+
+        let candidates = try await repository.repositories(
+            accountID: fixture.account.id,
+            organization: fixture.organization
+        )
+
+        XCTAssertTrue(candidates.isEmpty)
+    }
+
     func testOmittedDiscussionCapabilityRemainsExplicitlyUnknown() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }

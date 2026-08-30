@@ -9,6 +9,7 @@ enum GitHubProjectV2ClientError: Error, Equatable, Sendable {
     case missingData([GitHubProjectV2RawPage])
     case undecodableResponse([GitHubProjectV2RawPage])
     case partialResponse([GitHubProjectV2RawPage])
+    case ssoResponse([GitHubProjectV2RawPage], GitHubSSOHeader)
     case normalizationFailed([GitHubProjectV2RawPage])
     case aggregateLimitExceeded([GitHubProjectV2RawPage])
     case duplicateItem([GitHubProjectV2RawPage])
@@ -38,7 +39,10 @@ actor GitHubProjectV2Client {
         self.client = client
     }
 
-    func allProjects(organizationNodeID: GitHubNodeID) async throws -> GitHubProjectV2Inventory {
+    func allProjects(
+        organizationNodeID: GitHubNodeID,
+        githubOrganizationID: UInt64
+    ) async throws -> GitHubProjectV2Inventory {
         try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.organizationProjectsV2()
         var pages = [GitHubProjectV2RawPage]()
@@ -56,9 +60,15 @@ actor GitHubProjectV2Client {
                 endpoint: "graphql:TriageOrganizationProjectsV2/organization=\(organizationNodeID.rawValue)",
                 page: pages.count + 1,
                 priorPages: pages,
+                githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2InventoryPayload.self
             )
             try Task.checkCancellation()
+            try validateSSO(
+                response.response.metadata.ssoHeader,
+                githubOrganizationID: githubOrganizationID,
+                pages: pages + [response.raw]
+            )
             let payload: GitHubProjectV2InventoryPayload = try completed(response, priorPages: pages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: pages)
             pages.append(response.raw)
@@ -87,7 +97,10 @@ actor GitHubProjectV2Client {
         }
     }
 
-    func allItems(projectNodeID: GitHubNodeID) async throws -> GitHubProjectV2Items {
+    func allItems(
+        projectNodeID: GitHubNodeID,
+        githubOrganizationID: UInt64
+    ) async throws -> GitHubProjectV2Items {
         try Task.checkCancellation()
         let query = try GitHubGraphQLQueries.projectV2Items()
         var rawPages = [GitHubProjectV2RawPage]()
@@ -105,9 +118,15 @@ actor GitHubProjectV2Client {
                 endpoint: "graphql:TriageProjectV2Items/project=\(projectNodeID.rawValue)",
                 page: rawPages.count + 1,
                 priorPages: rawPages,
+                githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2ItemPayload.self
             )
             try Task.checkCancellation()
+            try validateSSO(
+                response.response.metadata.ssoHeader,
+                githubOrganizationID: githubOrganizationID,
+                pages: rawPages + [response.raw]
+            )
             let payload: GitHubProjectV2ItemPayload = try completed(response, priorPages: rawPages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: rawPages)
             rawPages.append(response.raw)
@@ -133,7 +152,12 @@ actor GitHubProjectV2Client {
         var normalized = [GitHubProjectV2ItemRecord]()
         for (item, itemID) in zip(items, itemIDs) {
             try Task.checkCancellation()
-            let values = try await allFieldValues(itemNodeID: itemID, rawPages: &rawPages, budget: &budget)
+            let values = try await allFieldValues(
+                itemNodeID: itemID,
+                githubOrganizationID: githubOrganizationID,
+                rawPages: &rawPages,
+                budget: &budget
+            )
             do {
                 normalized.append(try GitHubProjectV2Normalizer.item(item, projectNodeID: projectNodeID, fieldValues: values))
             } catch {
@@ -145,6 +169,7 @@ actor GitHubProjectV2Client {
 
     private func allFieldValues(
         itemNodeID: GitHubNodeID,
+        githubOrganizationID: UInt64,
         rawPages: inout [GitHubProjectV2RawPage],
         budget: inout AggregateBudget
     ) async throws -> [GitHubProjectV2FieldValuePayload.Value] {
@@ -163,9 +188,15 @@ actor GitHubProjectV2Client {
                 endpoint: "graphql:TriageProjectV2ItemFieldValues/item=\(itemNodeID.rawValue)",
                 page: pageCount + 1,
                 priorPages: rawPages,
+                githubOrganizationID: githubOrganizationID,
                 as: GitHubProjectV2FieldValuePayload.self
             )
             try Task.checkCancellation()
+            try validateSSO(
+                response.response.metadata.ssoHeader,
+                githubOrganizationID: githubOrganizationID,
+                pages: rawPages + [response.raw]
+            )
             let payload: GitHubProjectV2FieldValuePayload = try completed(response, priorPages: rawPages)
             try budget.consume(response.raw, cost: payload.rateLimit.cost, priorPages: rawPages)
             rawPages.append(response.raw)
@@ -197,6 +228,7 @@ actor GitHubProjectV2Client {
         endpoint: String,
         page: Int,
         priorPages: [GitHubProjectV2RawPage],
+        githubOrganizationID: UInt64,
         as type: Value.Type
     ) async throws -> (response: GitHubGraphQLResponse<Value>, raw: GitHubProjectV2RawPage) {
         let decodingResult = try await client.executePreservingUndecodableResponse(
@@ -212,6 +244,9 @@ actor GitHubProjectV2Client {
                 endpoint: "\(endpoint)/page=\(page)",
                 payload: undecodable.payload
             )
+            if let header = undecodable.metadata.ssoHeader?.scoped(to: githubOrganizationID) {
+                throw GitHubProjectV2ClientError.ssoResponse(priorPages + [rawPage], header)
+            }
             throw GitHubProjectV2ClientError.undecodableResponse(priorPages + [rawPage])
         }
     }
@@ -229,6 +264,15 @@ actor GitHubProjectV2Client {
               cost >= 0, cost <= Self.maximumQueryCost
         else { throw GitHubProjectV2ClientError.queryCostExceeded(pages) }
         return data
+    }
+
+    private func validateSSO(
+        _ header: GitHubSSOHeader?,
+        githubOrganizationID: UInt64,
+        pages: [GitHubProjectV2RawPage]
+    ) throws {
+        guard let scoped = header?.scoped(to: githubOrganizationID) else { return }
+        throw GitHubProjectV2ClientError.ssoResponse(pages, scoped)
     }
 
     private func uniqueItemIDs(

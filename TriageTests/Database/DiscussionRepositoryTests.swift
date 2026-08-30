@@ -327,6 +327,54 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertNil(stream?.highWater)
     }
 
+    func testDiscussionPartialResultsRetainRawEvidenceAndPersistPartialCoverage() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let header = "partial-results; organizations=\(fixture.organization.githubOrganizationID)"
+        let session = OneShotDiscussionSession(
+            .response(discussionInventoryResponse(), ["X-GitHub-SSO": header])
+        )
+        let streamID = SyncStreamID(rawValue: "discussions-acme-R_1")!
+        let service = DiscussionSynchronizationService(
+            client: GitHubDiscussionClient(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            ),
+            repository: DiscussionRepository(vault: fixture.vault),
+            coverage: CoverageRepository(vault: fixture.vault)
+        )
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await service.refresh(
+                scope: fixture.scope,
+                organization: fixture.organization,
+                repositoryID: fixture.repositoryID,
+                repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                streamID: streamID,
+                previousHighWater: nil,
+                observedAt: fixture.date
+            )
+        }, verify: { error in
+            guard case let GitHubDiscussionClientError.ssoResponse(pages, parsedHeader) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(parsedHeader, GitHubSSOHeader(value: header))
+            XCTAssertEqual(pages.count, 1)
+        })
+
+        let persisted = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!
+        }
+        XCTAssertEqual(persisted, 1)
+        let coverage = try await CoverageRepository(vault: fixture.vault).records(
+            for: fixture.account.id,
+            organizationID: fixture.organization.id
+        )
+        XCTAssertEqual(coverage.first?.status, .partial)
+        let stream = try await SyncStreamRepository(vault: fixture.vault)
+            .stream(withID: streamID, accountID: fixture.account.id)
+        XCTAssertNil(stream?.highWater)
+    }
+
     func testDiscussionUndecodableResponseRetainsRawFailureWithoutAdvancingHighWater() async throws {
         let fixture = try await DiscussionFixture()
         defer { fixture.remove() }
@@ -490,6 +538,7 @@ private func XCTAssertThrowsErrorAsync(
 
 private enum OneShotDiscussionResult: Sendable {
     case data(Data)
+    case response(Data, [String: String])
     case cancellation
 }
 
@@ -502,16 +551,21 @@ private actor OneShotDiscussionSession: HTTPSession {
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let data: Data
+        let headers: [String: String]?
         switch result {
         case let .data(value):
             data = value
+            headers = nil
+        case let .response(value, responseHeaders):
+            data = value
+            headers = responseHeaders
         case .cancellation:
             throw CancellationError()
         }
         return (
             data,
             HTTPURLResponse(
-                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: headers
             )!
         )
     }
