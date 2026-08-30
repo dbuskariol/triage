@@ -1,6 +1,6 @@
 import Foundation
 
-struct CoverageRequirement: Sendable {
+struct CoverageRequirement: Codable, Equatable, Hashable, Sendable {
     let feature: CoverageFeature
     let repositoryID: RepositoryID?
     let streamID: SyncStreamID

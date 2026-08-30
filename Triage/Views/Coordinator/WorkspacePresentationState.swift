@@ -59,6 +59,7 @@ struct WorkspacePresentationState: Equatable {
         hasSSOAuthorizationHeader: Bool,
         isRefreshing: Bool,
         refreshError: String?,
+        workspaceFreshness: FreshnessState? = nil,
         now: Date
     ) {
         self.selectedAccountID = selectedAccountID
@@ -75,7 +76,8 @@ struct WorkspacePresentationState: Equatable {
             organizationAccess: organizationAccess,
             hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
             isRefreshing: isRefreshing,
-            refreshError: refreshError
+            refreshError: refreshError,
+            workspaceFreshness: workspaceFreshness
         )
         synchronizationStatus = status.status
         synchronizationDetail = status.detail
@@ -113,7 +115,8 @@ struct WorkspacePresentationState: Equatable {
         organizationAccess: OrganizationAccess?,
         hasSSOAuthorizationHeader: Bool,
         isRefreshing: Bool,
-        refreshError: String?
+        refreshError: String?,
+        workspaceFreshness: FreshnessState?
     ) -> (status: SynchronizationStatus, detail: String?) {
         if isRefreshing {
             return (.refreshing, "Updating work for the selected organization.")
@@ -138,6 +141,10 @@ struct WorkspacePresentationState: Equatable {
 
         if hasSSOAuthorizationHeader {
             return (.ssoRequired, "Authorize this account with your organization to refresh its work.")
+        }
+
+        if let workspaceFreshness {
+            return status(for: workspaceFreshness, refreshError: refreshError)
         }
 
         if let offlineItem = workItems.first(where: { $0.freshness.status == .offline }) {
@@ -165,10 +172,34 @@ struct WorkspacePresentationState: Equatable {
             return (.signInRequired, refreshError ?? "Account access is required before work can refresh.")
         }
 
-        if workItems.contains(where: { $0.freshness.status == .fresh }) {
-            return (.upToDate, nil)
-        }
-
         return (.unavailable, refreshError)
+    }
+
+    private static func status(
+        for freshness: FreshnessState,
+        refreshError: String?
+    ) -> (status: SynchronizationStatus, detail: String?) {
+        switch freshness.status {
+        case .fresh:
+            return (.upToDate, freshness.detail)
+        case .refreshing:
+            return (.refreshing, freshness.detail ?? "Updating work for the selected organization.")
+        case .stale:
+            return (.partial, freshness.detail ?? "Cached work may be out of date.")
+        case .partial:
+            return (.partial, freshness.detail ?? refreshError ?? "Some work could not be refreshed.")
+        case .offline:
+            return (.offline, freshness.detail ?? "Showing the most recent local work.")
+        case .authenticationRequired:
+            return (.signInRequired, freshness.detail ?? "Account access is required before work can refresh.")
+        case .ssoRequired:
+            return (.ssoRequired, freshness.detail ?? "Authorize this account with your organization to refresh its work.")
+        case .approvalRequired:
+            return (.approvalRequired, freshness.detail ?? "Your organization must approve this account or application before all work can sync.")
+        case .rateLimited:
+            return (.partial, freshness.detail ?? "GitHub is temporarily limiting synchronization requests.")
+        case .failed:
+            return (.partial, freshness.detail ?? refreshError ?? "Some work could not be refreshed.")
+        }
     }
 }

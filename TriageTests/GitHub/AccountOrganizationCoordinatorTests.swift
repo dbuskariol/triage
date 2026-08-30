@@ -107,7 +107,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         let accessibleState = await fixture.coordinator.state(for: accessible)
         XCTAssertEqual(inaccessibleState?.freshness.status, .ssoRequired)
         XCTAssertFalse(inaccessibleState?.freshness.detail?.contains("https://") ?? true)
-        XCTAssertEqual(accessibleState?.freshness.status, .fresh)
+        XCTAssertEqual(accessibleState?.freshness.status, .partial)
     }
 
     func testAttachedPriorityRegressionUsesContinuationReceiptRatherThanArrayIndexing() async throws {
@@ -623,7 +623,7 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
             snapshot.durableState?.cachedState?.lastSuccessfulSyncAt,
             fixture.date(2)
         )
-        XCTAssertEqual(snapshot.durableState?.freshness.status, .fresh)
+        XCTAssertEqual(snapshot.durableState?.freshness.status, .partial)
         XCTAssertNil(snapshot.schedulerState?.activeAttemptID)
         XCTAssertNotNil(snapshot.schedulerState?.lastCompletedAt)
     }

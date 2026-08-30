@@ -403,9 +403,21 @@ actor AccountOrganizationDurableStateRepository {
         }.sorted {
             coverageSignature($0) < coverageSignature($1)
         }
+        let sortedRequirements = cachedState.coverageRequirements?.map { requirement in
+            CoverageRequirement(
+                feature: requirement.feature,
+                repositoryID: requirement.repositoryID,
+                streamID: requirement.streamID,
+                intervalStart: canonicalDate(requirement.intervalStart),
+                intervalEnd: canonicalDate(requirement.intervalEnd)
+            )
+        }.sorted {
+            coverageRequirementIdentity($0) < coverageRequirementIdentity($1)
+        }
         let canonicalState = AccountOrganizationDurableState(
             cachedState: AccountOrganizationCachedState(
                 coverage: sortedCoverage,
+                coverageRequirements: sortedRequirements,
                 lastSuccessfulSyncAt: canonicalDate(cachedState.lastSuccessfulSyncAt)
             ),
             freshness: canonicalFreshness
@@ -450,6 +462,7 @@ actor AccountOrganizationDurableStateRepository {
             AccountOrganizationDurableState(
                 cachedState: AccountOrganizationCachedState(
                     coverage: persistedCoverage,
+                    coverageRequirements: candidate.cachedState?.coverageRequirements,
                     lastSuccessfulSyncAt: latestSuccessfulAt
                 ),
                 freshness: FreshnessState(
@@ -483,6 +496,7 @@ actor AccountOrganizationDurableStateRepository {
             return
         }
         guard cachedState.coverage.count <= maximumCoverageRecordCount,
+              (cachedState.coverageRequirements?.count ?? 0) <= maximumCoverageRecordCount,
               valid(cachedState.lastSuccessfulSyncAt)
         else {
             throw AccountOrganizationDurableStateRepositoryError.invalidProjection
@@ -515,6 +529,21 @@ actor AccountOrganizationDurableStateRepository {
         let identities = cachedState.coverage.map(coverageIdentity)
         guard Set(identities).count == identities.count else {
             throw AccountOrganizationDurableStateRepositoryError.invalidProjection
+        }
+        if let requirements = cachedState.coverageRequirements {
+            for requirement in requirements {
+                guard (requirement.intervalStart == nil) == (requirement.intervalEnd == nil),
+                      requirement.intervalStart.map({ $0 <= requirement.intervalEnd! }) ?? true,
+                      valid(requirement.intervalStart),
+                      valid(requirement.intervalEnd)
+                else {
+                    throw AccountOrganizationDurableStateRepositoryError.invalidProjection
+                }
+            }
+            let requirementIdentities = requirements.map(coverageRequirementIdentity)
+            guard Set(requirementIdentities).count == requirementIdentities.count else {
+                throw AccountOrganizationDurableStateRepositoryError.invalidProjection
+            }
         }
         let latestCoverageSuccess = cachedState.coverage
             .compactMap(\.lastSuccessfulAt)
@@ -629,6 +658,18 @@ actor AccountOrganizationDurableStateRepository {
             record.status.rawValue,
             record.lastSuccessfulAt.flatMap(canonicalMilliseconds).map(String.init) ?? "",
             record.failureDetail ?? ""
+        ])
+    }
+
+    private nonisolated static func coverageRequirementIdentity(
+        _ requirement: CoverageRequirement
+    ) -> String {
+        canonicalFields([
+            requirement.repositoryID?.rawValue ?? "",
+            requirement.feature.rawValue,
+            requirement.streamID.rawValue,
+            requirement.intervalStart.flatMap(canonicalMilliseconds).map(String.init) ?? "",
+            requirement.intervalEnd.flatMap(canonicalMilliseconds).map(String.init) ?? ""
         ])
     }
 

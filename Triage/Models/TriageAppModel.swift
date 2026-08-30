@@ -37,12 +37,12 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var isConnecting = false
     @Published private(set) var restorationError: String?
     @Published private(set) var ssoAuthorizationHeader: GitHubSSOHeader?
+    @Published private(set) var selectedOrganizationFreshness: FreshnessState?
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
     private let inactiveRefreshScheduler = ActiveRefreshScheduler()
     private let capabilityRefreshScheduler = ActiveRefreshScheduler()
-    private let organizationSyncCoordinator = OrganizationSyncCoordinator()
     private let defaults: UserDefaults
     private let vaultRegistry: VaultRegistry?
     private let vaultRegistryInitializationError: Error?
@@ -54,7 +54,11 @@ final class TriageAppModel: ObservableObject {
     private var foregroundRefreshTasksAwaitingCredentialMutation: [Task<ForegroundRefreshResult, Never>] = []
     private var foregroundRefreshTasksAwaitingAccountRemoval: [AccountID: [Task<ForegroundRefreshResult, Never>]] = [:]
     private var isCredentialMutationInProgress = false
+    private var isShuttingDown = false
     private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
+    private var organizationRefreshRuntimes: [AccountID: AccountOrganizationRefreshRuntime] = [:]
+    private var organizationRefreshRuntimeGenerations: [AccountID: UInt64] = [:]
+    private var organizationRefreshRuntimesBeingTornDown: Set<AccountID> = []
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
     var organizations: [GitHubOrganization] {
@@ -177,7 +181,7 @@ final class TriageAppModel: ObservableObject {
             await cancelForegroundRefresh()
         }
         await cancelForegroundRefreshes(for: accountID)
-        await cancelInactiveRefreshes(for: accountID)
+        try await cancelInactiveRefreshes(for: accountID)
         let fileManager = FileManager.default
         let applicationSupportDirectory = try fileManager.url(
             for: .applicationSupportDirectory,
@@ -198,6 +202,7 @@ final class TriageAppModel: ObservableObject {
             cachesDirectory: cachesDirectory
         ).removeAllPrivateData(for: accountID)
         await GitHubRateLimitControllerRegistry.shared.removeController(for: accountID)
+        organizationRefreshRuntimes[accountID] = nil
 
         accounts.removeAll { $0.id == accountID }
         organizationsByAccount[accountID] = nil
@@ -304,7 +309,7 @@ final class TriageAppModel: ObservableObject {
             }
             isCredentialMutationInProgress = true
             invalidateBackgroundRefreshScheduling()
-            await cancelInactiveRefreshes(for: account.id)
+            try await cancelInactiveRefreshes(for: account.id)
             await cancelForegroundRefresh()
             await cancelForegroundRefreshes(for: account.id)
             let configuration = try RuntimeOAuthConfiguration()
@@ -366,7 +371,7 @@ final class TriageAppModel: ObservableObject {
             }
             isCredentialMutationInProgress = true
             invalidateBackgroundRefreshScheduling()
-            await cancelInactiveRefreshes(for: account.id)
+            try await cancelInactiveRefreshes(for: account.id)
             await cancelForegroundRefresh()
             await cancelForegroundRefreshes(for: account.id)
             let replacement = try await AccountCredentialReplacementService(
@@ -409,6 +414,7 @@ final class TriageAppModel: ObservableObject {
     }
 
     func startAutomaticRefreshes() async {
+        guard !isShuttingDown else { return }
         await refreshScheduler.start { [weak self] in
             await self?.refreshSelectedOrganizationAfterAccessCheck()
         }
@@ -417,6 +423,35 @@ final class TriageAppModel: ObservableObject {
         }
         await capabilityRefreshScheduler.start(cadence: .dailyCapabilityProbe) { [weak self] in
             await self?.refreshSelectedOrganizationAfterAccessCheck()
+        }
+    }
+
+    func shutdown() async {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        invalidateBackgroundRefreshScheduling()
+        await refreshScheduler.stop()
+        await inactiveRefreshScheduler.stop()
+        await capabilityRefreshScheduler.stop()
+        await cancelForegroundRefresh()
+
+        let accountIDs = Set(organizationRefreshRuntimes.keys)
+            .union(foregroundRefreshTasksAwaitingAccountRemoval.keys)
+            .sorted { $0.rawValue < $1.rawValue }
+        for accountID in accountIDs {
+            await cancelForegroundRefreshes(for: accountID)
+            do {
+                try await cancelInactiveRefreshes(for: accountID)
+            } catch {
+                // Process termination remains authoritative even if a damaged
+                // vault cannot retain the final interruption projection.
+            }
+        }
+        organizationRefreshRuntimes.removeAll()
+        do {
+            try await vaultRegistry?.closeAll()
+        } catch {
+            // SQLCipher file handles are also closed by process termination.
         }
     }
 
@@ -459,7 +494,6 @@ final class TriageAppModel: ObservableObject {
         else {
             return
         }
-        await organizationSyncCoordinator.cancelAccount(accountID: accountID)
         if let existingTask = foregroundRefreshTask {
             existingTask.cancel()
             _ = await existingTask.value
@@ -492,7 +526,12 @@ final class TriageAppModel: ObservableObject {
             return
         }
 
-        await organizationSyncCoordinator.cancelAccount(accountID: initialAccount.id)
+        do {
+            try await cancelInactiveRefreshes(for: initialAccount.id)
+        } catch {
+            refreshError = "Triage could not safely stop the previous organization refresh. Try again."
+            return
+        }
         if let existingTask = foregroundRefreshTask {
             existingTask.cancel()
             _ = await existingTask.value
@@ -706,20 +745,18 @@ final class TriageAppModel: ObservableObject {
                 return
             }
             let secretStore = KeychainSecretStore()
-            await organizationSyncCoordinator.startAccount(
-                accountID: account.id,
-                priority: .background
-            ) { [weak self] in
-                guard await self?.canRunInactiveRefresh(
+            do {
+                guard canRunInactiveRefresh(
                     for: account.id,
                     expectedGeneration: generation
-                ) == true
+                )
                 else {
                     throw CancellationError()
                 }
                 let refreshedAccount: GitHubAccount
                 if account.authenticationKind == .oauth,
                    CredentialLifecycle.status(for: account, at: .now) == .expiring {
+                    try await cancelInactiveRefreshes(for: account.id)
                     let configuration = try RuntimeOAuthConfiguration()
                     refreshedAccount = try await OAuthCredentialRefreshService(
                         brokerURL: configuration.brokerURL,
@@ -727,29 +764,31 @@ final class TriageAppModel: ObservableObject {
                         vaultRegistry: vaultRegistry
                     ).refreshIfNeeded(account)
                     try Task.checkCancellation()
-                    guard await self?.installInactiveRefreshedAccount(
+                    guard installInactiveRefreshedAccount(
                         refreshedAccount,
                         expectedGeneration: generation
-                    ) == true else {
+                    ) else {
                         throw CancellationError()
                     }
                 } else {
                     refreshedAccount = account
                 }
                 for organization in organizations {
-                    guard await self?.canRunInactiveRefresh(
+                    guard canRunInactiveRefresh(
                         for: refreshedAccount.id,
                         expectedGeneration: generation
-                    ) == true else {
+                    ) else {
                         throw CancellationError()
                     }
                     do {
-                        _ = try await OrganizationWorkRefreshService(
-                            credentialReader: AccountCredentialReader(secretStore: secretStore),
-                            vaultRegistry: vaultRegistry,
-                            secretStore: secretStore,
-                            requestPriority: .inactiveAccountRefresh
-                        ).refresh(account: refreshedAccount, organization: organization)
+                        let runtime = try await organizationRefreshRuntime(
+                            for: refreshedAccount.id,
+                            secretStore: secretStore
+                        )
+                        _ = try await runtime.refresh(
+                            organizationID: organization.id,
+                            priority: .inactiveAccount
+                        )
                         try Task.checkCancellation()
                         guard let vaultKey = try await secretStore.readVaultKey(for: refreshedAccount.id) else {
                             throw AccountCredentialReaderError.missingAccessToken
@@ -760,7 +799,7 @@ final class TriageAppModel: ObservableObject {
                             organizationID: organization.id
                         )
                     } catch let error as OrganizationRefreshError {
-                        await self?.recordOrganizationRefreshFailure(
+                        await recordOrganizationRefreshFailure(
                             error,
                             for: refreshedAccount,
                             organization: organization
@@ -768,6 +807,12 @@ final class TriageAppModel: ObservableObject {
                         continue
                     }
                 }
+            } catch is CancellationError {
+                return
+            } catch {
+                // The coordinator retains the exact account/organization failure
+                // and freshness state in the encrypted vault. Inactive work never
+                // replaces the selected workspace's user-facing error.
             }
         }
     }
@@ -809,6 +854,7 @@ final class TriageAppModel: ObservableObject {
                 return
             } else if initialAccount.authenticationKind == .oauth,
                       lifecycleStatus == .expiring {
+                try await cancelInactiveRefreshes(for: initialAccount.id)
                 let runtimeConfiguration = try RuntimeOAuthConfiguration()
                 account = try await OAuthCredentialRefreshService(
                     brokerURL: runtimeConfiguration.brokerURL,
@@ -821,11 +867,11 @@ final class TriageAppModel: ObservableObject {
             } else {
                 account = initialAccount
             }
-            _ = try await OrganizationWorkRefreshService(
-                credentialReader: AccountCredentialReader(secretStore: secretStore),
-                vaultRegistry: vaultRegistry,
+            let runtime = try await organizationRefreshRuntime(
+                for: account.id,
                 secretStore: secretStore
-            ).refresh(account: account, organization: organization)
+            )
+            let coordinatorState = try await runtime.select(organizationID: organization.id)
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
@@ -842,6 +888,7 @@ final class TriageAppModel: ObservableObject {
             else {
                 return
             }
+            selectedOrganizationFreshness = coordinatorState?.freshness
             install(
                 workItems: workItems,
                 accountID: account.id,
@@ -898,6 +945,7 @@ final class TriageAppModel: ObservableObject {
         foregroundRefreshTaskID = nil
         ssoAuthorizationHeader = nil
         refreshError = nil
+        selectedOrganizationFreshness = nil
         isRefreshing = false
     }
 
@@ -905,8 +953,12 @@ final class TriageAppModel: ObservableObject {
         backgroundRefreshGeneration &+= 1
     }
 
-    private func cancelInactiveRefreshes(for accountID: AccountID) async {
-        await organizationSyncCoordinator.cancelAccount(accountID: accountID)
+    private func cancelInactiveRefreshes(for accountID: AccountID) async throws {
+        organizationRefreshRuntimeGenerations[accountID, default: 0] &+= 1
+        organizationRefreshRuntimesBeingTornDown.insert(accountID)
+        let runtime = organizationRefreshRuntimes.removeValue(forKey: accountID)
+        defer { organizationRefreshRuntimesBeingTornDown.remove(accountID) }
+        try await runtime?.cancelAll()
     }
 
     private func cancelForegroundRefreshes(for accountID: AccountID) async {
@@ -971,6 +1023,7 @@ final class TriageAppModel: ObservableObject {
         isRefreshing = false
         ssoAuthorizationHeader = nil
         refreshError = nil
+        selectedOrganizationFreshness = nil
     }
 
     private func pauseForegroundRefreshForCredentialMutation() {
@@ -984,6 +1037,7 @@ final class TriageAppModel: ObservableObject {
         isRefreshing = false
         ssoAuthorizationHeader = nil
         refreshError = nil
+        selectedOrganizationFreshness = nil
     }
 
     private func installUpdatedAccount(_ updatedAccount: GitHubAccount) {
@@ -1232,6 +1286,68 @@ final class TriageAppModel: ObservableObject {
             return vaultRegistry
         }
         throw vaultRegistryInitializationError ?? VaultError.missingApplicationSupportDirectory
+    }
+
+    private func organizationRefreshRuntime(
+        for accountID: AccountID,
+        secretStore: KeychainSecretStore
+    ) async throws -> AccountOrganizationRefreshRuntime {
+        guard !isShuttingDown,
+              !accountsBeingRemoved.contains(accountID),
+              !organizationRefreshRuntimesBeingTornDown.contains(accountID)
+        else {
+            throw CancellationError()
+        }
+        if let runtime = organizationRefreshRuntimes[accountID] {
+            return runtime
+        }
+        let generation = organizationRefreshRuntimeGenerations[accountID, default: 0]
+        guard let vaultKey = try await secretStore.readVaultKey(for: accountID) else {
+            throw AccountCredentialReaderError.missingAccessToken
+        }
+        let vaultRegistry = try requiredVaultRegistry()
+        let vault = try await vaultRegistry.open(accountID: accountID, vaultKey: vaultKey)
+        guard organizationRefreshRuntimeGenerations[accountID, default: 0] == generation,
+              !isShuttingDown,
+              !accountsBeingRemoved.contains(accountID),
+              !organizationRefreshRuntimesBeingTornDown.contains(accountID)
+        else {
+            throw CancellationError()
+        }
+        // Main-actor methods are reentrant at the Keychain and vault awaits
+        // above. Another caller may have installed the account's sole runtime
+        // while this call was suspended; always adopt that owner rather than
+        // creating a second coordinator for the same encrypted vault.
+        if let runtime = organizationRefreshRuntimes[accountID] {
+            return runtime
+        }
+        let runtime = AccountOrganizationRefreshRuntime(
+            accountID: accountID,
+            vault: vault,
+            credentialReader: AccountCredentialReader(secretStore: secretStore),
+            vaultRegistry: vaultRegistry,
+            secretStore: secretStore,
+            activateCachedState: { [weak self] scope, durableState in
+                await self?.activateCoordinatorCachedState(
+                    scope: scope,
+                    durableState: durableState
+                )
+            }
+        )
+        organizationRefreshRuntimes[accountID] = runtime
+        return runtime
+    }
+
+    private func activateCoordinatorCachedState(
+        scope: AccountOrganizationScope,
+        durableState: AccountOrganizationDurableState
+    ) {
+        guard selectedAccountID == scope.accountID,
+              selectedOrganizationID == scope.organizationID
+        else {
+            return
+        }
+        selectedOrganizationFreshness = durableState.freshness
     }
 
     private func requiredVaultKey(
