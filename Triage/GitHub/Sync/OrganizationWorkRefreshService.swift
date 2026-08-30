@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 actor OrganizationWorkRefreshService {
     private let credentialReader: AccountCredentialReader
@@ -43,14 +44,18 @@ actor OrganizationWorkRefreshService {
         guard currentScope == synchronizationScope else {
             throw CancellationError()
         }
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         let token = try await credentialReader.accessToken(for: account)
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         let coverageRepository = CoverageRepository(vault: vault)
         let streamID = SyncStreamID(rawValue: "role-discovery-\(organization.id.rawValue)")!
         let attemptedAt = Date()
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         let rateLimitController = try await rateLimitControllers.controller(
             for: account.id,
             vault: vault
         )
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(),
             credential: token,
@@ -64,10 +69,13 @@ actor OrganizationWorkRefreshService {
         var roleDiscoveryCompleted = false
         let refreshedWorkItemIDs: [WorkItemID]
         do {
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let serverObservedAt = try await searchClient.serverTime()
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let previousHighWater = try await SyncStreamRepository(vault: vault)
                 .stream(withID: streamID, accountID: account.id)?
                 .highWater
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let incompleteRange = try await coverageRepository.records(
                 for: account.id,
                 organizationID: organization.id
@@ -84,6 +92,7 @@ actor OrganizationWorkRefreshService {
                 }
                 return SearchTimeRange(start: start, end: end)
             }.max { $0.end < $1.end }
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let overlapStart = previousHighWater.map {
                 max($0.addingTimeInterval(-10 * 60), Date(timeIntervalSince1970: 0))
             }
@@ -100,7 +109,9 @@ actor OrganizationWorkRefreshService {
                 lastSuccessfulAt: nil,
                 failureDetail: nil
             )
+            try Task.checkCancellation()
             try await vault.write { database in
+                try Self.validateCurrentScope(synchronizationScope, in: database)
                 try CoverageRepository.removeUnboundedRecord(
                     accountID: synchronizationScope.accountID,
                     organizationID: synchronizationScope.organizationID,
@@ -116,6 +127,7 @@ actor OrganizationWorkRefreshService {
                     in: database
                 )
             }
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let inventoryResult = try await OrganizationInventoryRefreshService(
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
@@ -127,6 +139,7 @@ actor OrganizationWorkRefreshService {
                 requestPriority: requestPriority,
                 reconciliationIntent: reconciliationIntent
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let inventory: [RepositorySummary]
             switch inventoryResult.repositories {
             case let .success(summaries, _):
@@ -177,19 +190,16 @@ actor OrganizationWorkRefreshService {
                     failureDetail: isUnavailableTeamStream ? teamDiscoveryFailureDetail : nil
                 )
             }
-            try await vault.write { database in
-                for record in roleStreamRecords {
-                    try CoverageRepository.save(
-                        record,
-                        attemptedAt: attemptedAt,
-                        expectedAccountID: synchronizationScope.accountID,
-                        in: database
-                    )
-                }
-            }
+            try await saveCoverage(
+                roleStreamRecords,
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: synchronizationScope
+            )
             let executableStreams = plan.streams.filter {
                 $0.kind != .openTeamReviewRequested || teamDiscoveryStatus == .complete
             }
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let discoveryResult = try await RoleDiscoverySynchronizer(
                 searchClient: searchClient,
                 workItemRepository: WorkItemRepository(vault: vault),
@@ -205,7 +215,7 @@ actor OrganizationWorkRefreshService {
                 repositoryID: { repositoryIDsByAPIURL[$0.repositoryURL] },
                 streams: executableStreams,
                 recordStreamOutcome: { stream, outcome in
-                    try await coverageRepository.save(
+                    try await self.saveCoverage(
                         self.roleDiscoveryCoverageRecord(
                             scope: synchronizationScope,
                             parentStreamID: streamID,
@@ -215,14 +225,17 @@ actor OrganizationWorkRefreshService {
                             lastSuccessfulAt: outcome.status == .complete ? serverObservedAt : nil,
                             failureDetail: outcome.failureDetail
                         ),
-                        attemptedAt: attemptedAt
+                        attemptedAt: attemptedAt,
+                        vault: vault,
+                        scope: synchronizationScope
                     )
                 }
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let aggregateRoleStatus = teamDiscoveryStatus == .complete
                 ? CoverageStatus.complete
                 : teamDiscoveryStatus
-            try await coverageRepository.save(
+            try await saveCoverage(
                 coverageRecord(
                     scope: synchronizationScope,
                     streamID: streamID,
@@ -231,7 +244,9 @@ actor OrganizationWorkRefreshService {
                     lastSuccessfulAt: aggregateRoleStatus == .complete ? serverObservedAt : nil,
                     failureDetail: teamDiscoveryFailureDetail
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: synchronizationScope
             )
             roleDiscoveryCompleted = true
             let graphqlClient = GitHubGraphQLClient(
@@ -239,18 +254,19 @@ actor OrganizationWorkRefreshService {
                 rateLimitController: rateLimitController,
                 requestPriority: requestPriority
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             try await refreshHydration(
                 graphqlClient: graphqlClient,
                 vault: vault,
                 scope: synchronizationScope,
                 organization: organization,
                 nodeIDs: discoveryResult.candidateNodeIDs,
-                coverageRepository: coverageRepository,
                 attemptedAt: attemptedAt,
                 repositoryID: { repository in
                     repositoryIDsByNodeID[repository.id]
                 }
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let contextOutcome = try await OrganizationContextRefreshService(
                 vault: vault,
                 graphQLClient: graphqlClient,
@@ -261,11 +277,13 @@ actor OrganizationWorkRefreshService {
                 repositories: inventory,
                 observedAt: serverObservedAt
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             contextRecovery = contextOutcome.recovery
             deferredSSORequirement = GitHubSSOHeader.combined([
                 deferredSSORequirement,
                 contextRecovery.ssoRequirement?.scoped(to: organization.githubOrganizationID)
             ])
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let timelineSSORequirement = try await refreshTimelines(
                 restClient: restClient,
                 vault: vault,
@@ -273,39 +291,41 @@ actor OrganizationWorkRefreshService {
                 organization: organization,
                 repositoryIDs: inventory.map(\.id),
                 currentUserNodeID: account.nodeID,
-                coverageRepository: coverageRepository,
                 attemptedAt: attemptedAt
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             deferredSSORequirement = GitHubSSOHeader.combined([
                 deferredSSORequirement,
                 timelineSSORequirement
             ])
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             try await refreshPullRequestReviews(
                 restClient: restClient,
                 vault: vault,
                 scope: synchronizationScope,
                 organization: organization,
-                coverageRepository: coverageRepository,
                 attemptedAt: attemptedAt
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let reviewThreadSSORequirement = try await refreshPullRequestReviewThreads(
                 graphqlClient: graphqlClient,
                 vault: vault,
                 scope: synchronizationScope,
                 organization: organization,
                 currentUserNodeID: account.nodeID,
-                coverageRepository: coverageRepository,
                 attemptedAt: attemptedAt
             )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             deferredSSORequirement = GitHubSSOHeader.combined([
                 deferredSSORequirement,
                 reviewThreadSSORequirement
             ])
             refreshedWorkItemIDs = discoveryResult.workItemIDs
         } catch let failure as GitHubFailure {
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) {
                 if !roleDiscoveryCompleted {
-                    try await coverageRepository.save(
+                    try await saveCoverage(
                         coverageRecord(
                             scope: synchronizationScope,
                             streamID: streamID,
@@ -314,13 +334,15 @@ actor OrganizationWorkRefreshService {
                             lastSuccessfulAt: nil,
                             failureDetail: "GitHub organization SSO authorization is required."
                         ),
-                        attemptedAt: attemptedAt
+                        attemptedAt: attemptedAt,
+                        vault: vault,
+                        scope: synchronizationScope
                     )
                 }
                 throw OrganizationRefreshError.ssoRequirement(ssoHeader)
             }
             if !roleDiscoveryCompleted {
-                try await coverageRepository.save(
+                try await saveCoverage(
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
@@ -329,17 +351,20 @@ actor OrganizationWorkRefreshService {
                         lastSuccessfulAt: nil,
                         failureDetail: "GitHub request failed: \(failure.kind.rawValue)."
                     ),
-                    attemptedAt: attemptedAt
+                    attemptedAt: attemptedAt,
+                    vault: vault,
+                    scope: synchronizationScope
                 )
             }
             throw failure
         } catch let failure as OrganizationRefreshError {
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             let status: CoverageStatus = switch failure {
             case .ssoRequirement:
                 .requiresSSO
             }
             if !roleDiscoveryCompleted {
-                try await coverageRepository.save(
+                try await saveCoverage(
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
@@ -348,13 +373,16 @@ actor OrganizationWorkRefreshService {
                         lastSuccessfulAt: nil,
                         failureDetail: "GitHub organization SSO authorization is required."
                     ),
-                    attemptedAt: attemptedAt
+                    attemptedAt: attemptedAt,
+                    vault: vault,
+                    scope: synchronizationScope
                 )
             }
             throw failure
         } catch let failure as AccountOrganizationRefreshFailure {
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             if !roleDiscoveryCompleted {
-                try await coverageRepository.save(
+                try await saveCoverage(
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
@@ -363,28 +391,18 @@ actor OrganizationWorkRefreshService {
                         lastSuccessfulAt: nil,
                         failureDetail: failure.freshness.detail
                     ),
-                    attemptedAt: attemptedAt
+                    attemptedAt: attemptedAt,
+                    vault: vault,
+                    scope: synchronizationScope
                 )
             }
             throw failure
         } catch is CancellationError {
-            if !roleDiscoveryCompleted {
-                try await coverageRepository.save(
-                    coverageRecord(
-                        scope: synchronizationScope,
-                        streamID: streamID,
-                        interval: searchRange,
-                        status: .partial,
-                        lastSuccessfulAt: nil,
-                        failureDetail: "Refresh was cancelled before completion."
-                    ),
-                    attemptedAt: attemptedAt
-                )
-            }
             throw CancellationError()
         } catch {
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             if !roleDiscoveryCompleted {
-                try await coverageRepository.save(
+                try await saveCoverage(
                     coverageRecord(
                         scope: synchronizationScope,
                         streamID: streamID,
@@ -393,11 +411,14 @@ actor OrganizationWorkRefreshService {
                         lastSuccessfulAt: nil,
                         failureDetail: "Organization work refresh did not complete."
                     ),
-                    attemptedAt: attemptedAt
+                    attemptedAt: attemptedAt,
+                    vault: vault,
+                    scope: synchronizationScope
                 )
             }
             throw error
         }
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         if let deferredSSORequirement {
             throw OrganizationRefreshError.ssoRequirement(deferredSSORequirement)
         }
@@ -430,22 +451,87 @@ actor OrganizationWorkRefreshService {
         return refreshedWorkItemIDs
     }
 
+    private func saveCoverage(
+        _ record: CoverageRecord,
+        attemptedAt: Date,
+        vault: AccountVault,
+        scope: SynchronizationScope
+    ) async throws {
+        try await saveCoverage(
+            [record],
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
+        )
+    }
+
+    private func saveCoverage(
+        _ records: [CoverageRecord],
+        attemptedAt: Date,
+        vault: AccountVault,
+        scope: SynchronizationScope
+    ) async throws {
+        guard !records.isEmpty else { return }
+        try Task.checkCancellation()
+        try await vault.write { database in
+            try Self.validateCurrentScope(scope, in: database)
+            for record in records {
+                try CoverageRepository.save(
+                    record,
+                    attemptedAt: attemptedAt,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            }
+        }
+        try await validateCurrentScope(scope, vault: vault)
+    }
+
+    private func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        vault: AccountVault
+    ) async throws {
+        try Task.checkCancellation()
+        do {
+            try await vault.read { database in
+                try Self.validateCurrentScope(scope, in: database)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private nonisolated static func validateCurrentScope(
+        _ scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        do {
+            try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
+        } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope {
+            throw CancellationError()
+        } catch OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
+            throw CancellationError()
+        }
+    }
+
     private func refreshHydration(
         graphqlClient: GitHubGraphQLClient,
         vault: AccountVault,
         scope: SynchronizationScope,
         organization: GitHubOrganization,
         nodeIDs: Set<GitHubNodeID>,
-        coverageRepository: CoverageRepository,
         attemptedAt: Date,
         repositoryID: @escaping @Sendable (GitHubNodeHydrationPayload.Repository) -> RepositoryID?
     ) async throws {
         let detailsRepository = GitHubNodeDetailsRepository(vault: vault)
+        try await validateCurrentScope(scope, vault: vault)
         let candidates = try await detailsRepository.hydrationCandidates(
             nodeIDs: nodeIDs,
             accountID: scope.accountID,
             organizationID: scope.organizationID
         )
+        try await validateCurrentScope(scope, vault: vault)
         let kinds: [GitHubContentKind] = [.issue, .pullRequest]
         let initialRecords = kinds.flatMap { kind -> [CoverageRecord] in
             let repositoryIDs = Set(
@@ -472,18 +558,14 @@ actor OrganizationWorkRefreshService {
                 failureDetail: nil
             )]
         }
-        try await vault.write { database in
-            for record in initialRecords {
-                try CoverageRepository.save(
-                    record,
-                    attemptedAt: attemptedAt,
-                    expectedAccountID: scope.accountID,
-                    in: database
-                )
-            }
-        }
-        try Task.checkCancellation()
+        try await saveCoverage(
+            initialRecords,
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
+        )
 
+        try await validateCurrentScope(scope, vault: vault)
         let result = try await GitHubNodeHydrationService(
             client: graphqlClient,
             detailsRepository: detailsRepository,
@@ -496,7 +578,7 @@ actor OrganizationWorkRefreshService {
             githubOrganizationID: organization.githubOrganizationID,
             repositoryID: repositoryID
         )
-        try Task.checkCancellation()
+        try await validateCurrentScope(scope, vault: vault)
 
         let finalRecords = kinds.flatMap { kind -> [CoverageRecord] in
             let repositoryIDs = Set(
@@ -525,17 +607,12 @@ actor OrganizationWorkRefreshService {
                 failureDetail: aggregate.failureDetail
             )]
         }
-        try await vault.write { database in
-            for record in finalRecords {
-                try CoverageRepository.save(
-                    record,
-                    attemptedAt: attemptedAt,
-                    expectedAccountID: scope.accountID,
-                    in: database
-                )
-            }
-        }
-        try Task.checkCancellation()
+        try await saveCoverage(
+            finalRecords,
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
+        )
         guard !result.isComplete else { return }
 
         let statuses = result.outcomes.map(\.status)
@@ -707,7 +784,6 @@ actor OrganizationWorkRefreshService {
         organization: GitHubOrganization,
         repositoryIDs requestedRepositoryIDs: [RepositoryID],
         currentUserNodeID: GitHubNodeID,
-        coverageRepository: CoverageRepository,
         attemptedAt: Date
     ) async throws -> GitHubSSOHeader? {
         let aggregateStreamID = SyncStreamID(rawValue: "timelines-\(organization.id.rawValue)")!
@@ -736,18 +812,14 @@ actor OrganizationWorkRefreshService {
             feature: .timelines
         )
         let initialRecords = initialRepositoryRecords + [initialAggregateRecord]
-        try await vault.write { database in
-            for record in initialRecords {
-                try CoverageRepository.save(
-                    record,
-                    attemptedAt: attemptedAt,
-                    expectedAccountID: scope.accountID,
-                    in: database
-                )
-            }
-        }
-        try Task.checkCancellation()
+        try await saveCoverage(
+            initialRecords,
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
+        )
         do {
+            try await validateCurrentScope(scope, vault: vault)
             let result = try await GitHubTimelineRefreshService(
                 client: GitHubTimelineClient(client: restClient),
                 candidateRepository: TimelineCandidateRepository(vault: vault),
@@ -760,7 +832,7 @@ actor OrganizationWorkRefreshService {
                 currentUserID: ActorID(rawValue: currentUserNodeID.rawValue)!,
                 observedAt: attemptedAt
             )
-            try Task.checkCancellation()
+            try await validateCurrentScope(scope, vault: vault)
             let repositoryRecords = repositoryIDs.map { repositoryID in
                 let assessment = result.coverageAssessment(for: repositoryID)
                 return coverageRecord(
@@ -787,22 +859,18 @@ actor OrganizationWorkRefreshService {
                 feature: .timelines
             )
             let records = repositoryRecords + [aggregateRecord]
-            try await vault.write { database in
-                for record in records {
-                    try CoverageRepository.save(
-                        record,
-                        attemptedAt: attemptedAt,
-                        expectedAccountID: scope.accountID,
-                        in: database
-                    )
-                }
-            }
-            try Task.checkCancellation()
+            try await saveCoverage(
+                records,
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
+            )
             return result.ssoHeader
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            try await coverageRepository.save(
+            try await validateCurrentScope(scope, vault: vault)
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: aggregateStreamID,
@@ -812,7 +880,9 @@ actor OrganizationWorkRefreshService {
                     failureDetail: "Timeline refresh did not complete.",
                     feature: .timelines
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
             return nil
         }
@@ -823,11 +893,10 @@ actor OrganizationWorkRefreshService {
         vault: AccountVault,
         scope: SynchronizationScope,
         organization: GitHubOrganization,
-        coverageRepository: CoverageRepository,
         attemptedAt: Date
     ) async throws {
         let streamID = SyncStreamID(rawValue: "pull-request-reviews-\(organization.id.rawValue)")!
-        try await coverageRepository.save(
+        try await saveCoverage(
             coverageRecord(
                 scope: scope,
                 streamID: streamID,
@@ -837,9 +906,12 @@ actor OrganizationWorkRefreshService {
                 failureDetail: nil,
                 feature: .reviews
             ),
-            attemptedAt: attemptedAt
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
         )
         do {
+            try await validateCurrentScope(scope, vault: vault)
             let result = try await PullRequestReviewRefreshService(
                 client: GitHubPullRequestClient(client: restClient),
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
@@ -848,6 +920,7 @@ actor OrganizationWorkRefreshService {
                 organizationID: scope.organizationID,
                 githubOrganizationID: organization.githubOrganizationID
             )
+            try await validateCurrentScope(scope, vault: vault)
             let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
             let status: CoverageStatus = scopedSSOHeader == nil && !result.hasRemainingCandidates
                 ? .complete
@@ -859,7 +932,7 @@ actor OrganizationWorkRefreshService {
             } else {
                 nil
             }
-            try await coverageRepository.save(
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: streamID,
@@ -869,15 +942,18 @@ actor OrganizationWorkRefreshService {
                     failureDetail: failureDetail,
                     feature: .reviews
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch let failure as GitHubFailure {
+            try await validateCurrentScope(scope, vault: vault)
             let status: CoverageStatus = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) == nil
                 ? .failed
                 : .requiresSSO
-            try await coverageRepository.save(
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: streamID,
@@ -889,10 +965,13 @@ actor OrganizationWorkRefreshService {
                         : "GitHub pull request review request failed: \(failure.kind.rawValue).",
                     feature: .reviews
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
         } catch {
-            try await coverageRepository.save(
+            try await validateCurrentScope(scope, vault: vault)
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: streamID,
@@ -902,7 +981,9 @@ actor OrganizationWorkRefreshService {
                     failureDetail: "Pull request review refresh did not complete.",
                     feature: .reviews
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
         }
     }
@@ -913,11 +994,10 @@ actor OrganizationWorkRefreshService {
         scope: SynchronizationScope,
         organization: GitHubOrganization,
         currentUserNodeID: GitHubNodeID,
-        coverageRepository: CoverageRepository,
         attemptedAt: Date
     ) async throws -> GitHubSSOHeader? {
         let streamID = SyncStreamID(rawValue: "pull-request-review-threads-\(organization.id.rawValue)")!
-        try await coverageRepository.save(
+        try await saveCoverage(
             coverageRecord(
                 scope: scope,
                 streamID: streamID,
@@ -927,9 +1007,12 @@ actor OrganizationWorkRefreshService {
                 failureDetail: nil,
                 feature: .reviewThreads
             ),
-            attemptedAt: attemptedAt
+            attemptedAt: attemptedAt,
+            vault: vault,
+            scope: scope
         )
         do {
+            try await validateCurrentScope(scope, vault: vault)
             let result = try await PullRequestReviewThreadRefreshService(
                 fetcher: GitHubPullRequestReviewThreadClient(client: graphqlClient),
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
@@ -941,8 +1024,9 @@ actor OrganizationWorkRefreshService {
                 githubOrganizationID: organization.githubOrganizationID,
                 observedAt: attemptedAt
             )
+            try await validateCurrentScope(scope, vault: vault)
             let assessment = result.coverageAssessment
-            try await coverageRepository.save(
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: streamID,
@@ -952,13 +1036,16 @@ actor OrganizationWorkRefreshService {
                     failureDetail: assessment.failureDetail,
                     feature: .reviewThreads
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
             return result.ssoRequirement
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            try await coverageRepository.save(
+            try await validateCurrentScope(scope, vault: vault)
+            try await saveCoverage(
                 coverageRecord(
                     scope: scope,
                     streamID: streamID,
@@ -968,7 +1055,9 @@ actor OrganizationWorkRefreshService {
                     failureDetail: "Pull request review-thread refresh did not complete.",
                     feature: .reviewThreads
                 ),
-                attemptedAt: attemptedAt
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
             )
             return nil
         }
