@@ -1694,6 +1694,49 @@ enum TriageDatabaseMigrator {
                     SELECT RAISE(ABORT, 'repository inventory replay receipt is immutable');
                 END
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "037-repository-inventory-replay-snapshot-idempotency",
+            checksum: "49c98f3a558dda06ff7205416691c1cb02cc002c0752f8c4ed36a2d58a5db4fb"
+        ) { database in
+            // Migration 036 rejected every UPDATE, including byte-identical
+            // UPSERT replays. Receipt evidence must remain immutable while its
+            // account exists, but exact replay persistence is intentionally
+            // idempotent.
+            try database.execute(
+                sql: "DROP TRIGGER repository_inventory_protect_replay_snapshot_update"
+            )
+            try database.execute(sql: """
+                CREATE TRIGGER repository_inventory_protect_replay_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM repository_inventory_replay_receipt_pages
+                    WHERE raw_snapshot_id = OLD.id
+                )
+                AND EXISTS (
+                    SELECT 1 FROM accounts WHERE id = OLD.account_id
+                )
+                AND (
+                    OLD.id IS NOT NEW.id
+                    OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id
+                    OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag
+                    OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version
+                    OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'repository inventory replay receipt is immutable');
+                END
+                """)
         }
     ]
 }

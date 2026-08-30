@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "036-repository-inventory-replay-receipts")
+        XCTAssertEqual(migrations.last?.id, "037-repository-inventory-replay-snapshot-idempotency")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
+            "49c98f3a558dda06ff7205416691c1cb02cc002c0752f8c4ed36a2d58a5db4fb"
         )
         try await registry.closeAll()
     }
@@ -103,7 +103,8 @@ final class AccountVaultTests: XCTestCase {
                         '033-role-search-page-replay-v2',
                         '034-role-search-page-replay-parser-identity',
                         '035-source-access-observations',
-                        '036-repository-inventory-replay-receipts'
+                        '036-repository-inventory-replay-receipts',
+                        '037-repository-inventory-replay-snapshot-idempotency'
                     )
                     ORDER BY id
                     """
@@ -498,7 +499,7 @@ final class AccountVaultTests: XCTestCase {
         let fixtureRegistry = try VaultRegistry(rootDirectory: directory)
         let fixtureVault = try await fixtureRegistry.open(accountID: accountID, vaultKey: key)
         try await fixtureVault.write { database in
-            try Self.removeMigration036Schema(from: database)
+            try Self.removeMigration036And037Schema(from: database)
             try database.execute(sql: "DROP TRIGGER source_access_protect_deletion_receipt")
             try database.execute(
                 sql: "DROP TRIGGER source_access_protect_deletion_receipt_update"
@@ -592,7 +593,7 @@ final class AccountVaultTests: XCTestCase {
         try await migratedRegistry.closeAll()
     }
 
-    func testMigration036BuildsDurableRepositoryInventoryReplaySchemaFrom035() async throws {
+    func testMigration036And037BuildDurableIdempotentRepositoryInventoryReplaySchema() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -681,7 +682,7 @@ final class AccountVaultTests: XCTestCase {
             )
         )
         try await fixtureVault.write { database in
-            try Self.removeMigration036Schema(from: database)
+            try Self.removeMigration036And037Schema(from: database)
         }
         try await fixtureRegistry.closeAll()
 
@@ -694,6 +695,13 @@ final class AccountVaultTests: XCTestCase {
                     sql: """
                         SELECT checksum FROM schema_migrations
                         WHERE id = '036-repository-inventory-replay-receipts'
+                        """
+                ),
+                replaySnapshotUpdateChecksum: try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '037-repository-inventory-replay-snapshot-idempotency'
                         """
                 ),
                 parentColumns: try Row.fetchAll(
@@ -752,6 +760,14 @@ final class AccountVaultTests: XCTestCase {
                         WHERE type = 'table'
                           AND name = 'repository_inventory_replay_receipt_pages'
                         """
+                ) ?? "",
+                replaySnapshotUpdateTriggerSQL: try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT sql FROM sqlite_master
+                        WHERE type = 'trigger'
+                          AND name = 'repository_inventory_protect_replay_snapshot_update'
+                        """
                 ) ?? ""
             )
         }
@@ -759,6 +775,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(
             schema.checksum,
             "a5aaff89b48f88fba57988ab8f6fde3d7bdfde58d1e9ada4d51c2c1179c19a52"
+        )
+        XCTAssertEqual(
+            schema.replaySnapshotUpdateChecksum,
+            "49c98f3a558dda06ff7205416691c1cb02cc002c0752f8c4ed36a2d58a5db4fb"
         )
         XCTAssertEqual(
             schema.parentColumns,
@@ -821,6 +841,17 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertTrue(schema.pageSQL.contains("request_key = 'GET ' || endpoint"))
         XCTAssertTrue(schema.pageSQL.contains("length(link_header) BETWEEN 1 AND 8192"))
         XCTAssertTrue(schema.pageSQL.contains("next_endpoint IS NULL OR link_header IS NOT NULL"))
+        for column in [
+            "id", "account_id", "github_node_id", "endpoint", "etag", "last_modified",
+            "authority_organization_id", "authority_feature", "authority_stream_id",
+            "authority_request_key", "authority_credential_revision",
+            "authority_capability_revision", "parser_version", "observed_at_ms", "payload"
+        ] {
+            XCTAssertTrue(
+                schema.replaySnapshotUpdateTriggerSQL.contains("OLD.\(column) IS NOT NEW.\(column)"),
+                "037 update trigger must compare \(column) with NULL-safe identity semantics."
+            )
+        }
 
         try await migratedVault.write { database in
             try Self.insertMigration036Receipt(
@@ -833,6 +864,25 @@ final class AccountVaultTests: XCTestCase {
                 requestKey: requestKey,
                 in: database
             )
+            try database.execute(
+                sql: "UPDATE raw_api_snapshots SET endpoint = endpoint WHERE id = ?",
+                arguments: [rawSnapshotID.rawValue]
+            )
+            try database.execute(sql: """
+                INSERT INTO raw_api_snapshots (
+                    id, account_id, github_node_id, endpoint, etag, parser_version,
+                    observed_at_ms, payload, last_modified, authority_organization_id,
+                    authority_feature, authority_stream_id, authority_request_key,
+                    authority_credential_revision, authority_capability_revision
+                )
+                SELECT id, account_id, github_node_id, endpoint, etag, parser_version,
+                       observed_at_ms, payload, last_modified, authority_organization_id,
+                       authority_feature, authority_stream_id, authority_request_key,
+                       authority_credential_revision, authority_capability_revision
+                FROM raw_api_snapshots
+                WHERE id = ?
+                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload
+                """, arguments: [rawSnapshotID.rawValue])
         }
         do {
             try await migratedVault.write { database in
@@ -854,7 +904,29 @@ final class AccountVaultTests: XCTestCase {
             }
             XCTFail("A raw snapshot bound to a replay receipt must be immutable.")
         } catch {
-            // Expected: migration 036 prevents update/upsert mutation of receipt evidence.
+            // Expected: migration 037 rejects material receipt-evidence mutation.
+        }
+        do {
+            try await migratedVault.write { database in
+                try database.execute(
+                    sql: "UPDATE raw_api_snapshots SET last_modified = ? WHERE id = ?",
+                    arguments: ["Wed, 21 Oct 2015 07:28:00 GMT", rawSnapshotID.rawValue]
+                )
+            }
+            XCTFail("A NULL-to-value replay snapshot update must be rejected.")
+        } catch {
+            // Expected: migration 037 uses NULL-safe material comparisons.
+        }
+        do {
+            try await migratedVault.write { database in
+                try database.execute(
+                    sql: "UPDATE raw_api_snapshots SET payload = ? WHERE id = ?",
+                    arguments: [Data("[1]".utf8), rawSnapshotID.rawValue]
+                )
+            }
+            XCTFail("A payload mutation of a receipt-bound raw snapshot must be rejected.")
+        } catch {
+            // Expected: migration 037 protects raw receipt bytes.
         }
         let protectedEndpoint = try await migratedVault.read { database in
             try String.fetchOne(
@@ -975,7 +1047,7 @@ final class AccountVaultTests: XCTestCase {
         let registry = try VaultRegistry(rootDirectory: directory)
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
         try await vault.write { database in
-            try Self.removeMigration036Schema(from: database)
+            try Self.removeMigration036And037Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -1099,7 +1171,7 @@ final class AccountVaultTests: XCTestCase {
             )
         )
         try await vault.write { database in
-            try Self.removeMigration036Schema(from: database)
+            try Self.removeMigration036And037Schema(from: database)
             try database.execute(
                 sql: "DELETE FROM schema_migrations WHERE id = '035-source-access-observations'"
             )
@@ -1176,12 +1248,15 @@ final class AccountVaultTests: XCTestCase {
         )
     }
 
-    private nonisolated static func removeMigration036Schema(from database: Database) throws {
-        try database.execute(
-            sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_delete"
-        )
+    private nonisolated static func removeMigration036And037Schema(from database: Database) throws {
         try database.execute(
             sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_update"
+        )
+        try database.execute(
+            sql: "DELETE FROM schema_migrations WHERE id = '037-repository-inventory-replay-snapshot-idempotency'"
+        )
+        try database.execute(
+            sql: "DROP TRIGGER IF EXISTS repository_inventory_protect_replay_snapshot_delete"
         )
         try database.execute(
             sql: "DROP TABLE IF EXISTS repository_inventory_replay_receipt_pages"
@@ -1333,6 +1408,7 @@ private struct Migration034Fixture {
 
 private struct Migration036SchemaInspection: Sendable {
     let checksum: String?
+    let replaySnapshotUpdateChecksum: String?
     let parentColumns: [String]
     let pageColumns: [String]
     let parentForeignKeys: [String]
@@ -1341,6 +1417,7 @@ private struct Migration036SchemaInspection: Sendable {
     let triggers: [String]
     let parentSQL: String
     let pageSQL: String
+    let replaySnapshotUpdateTriggerSQL: String
 }
 
 private struct Migration036Counts: Equatable, Sendable {
