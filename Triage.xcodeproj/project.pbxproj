@@ -10,6 +10,8 @@
 		79DF0167B41F46E19A195AF3 /* OrganizationSchedulerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */; };
 		5D33C2CA6A6243CC93ABACA9 /* OrganizationSchedulerStateRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */; };
 		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */; };
+		C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */; };
 		36C5F1202883423CA707AA0C /* RoleSearchPageReplayRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */; };
 		C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */; };
 		D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */; };
@@ -281,6 +283,8 @@
 		D1ABA4EB6F9442D68B05E1AC /* OrganizationSchedulerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerState.swift; sourceTree = "<group>"; };
 		435C564E181F4F40A773970A /* OrganizationSchedulerStateRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepository.swift; sourceTree = "<group>"; };
 		6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationSchedulerStateRepositoryTests.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationRefreshSchedulingPolicy.swift; sourceTree = "<group>"; };
+		D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationRefreshSchedulingPolicyTests.swift; sourceTree = "<group>"; };
 		98A32F4B85024678B9AF2F57 /* RoleSearchPageReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplay.swift; sourceTree = "<group>"; };
 		B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepository.swift; sourceTree = "<group>"; };
 		DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleSearchPageReplayRepositoryTests.swift; sourceTree = "<group>"; };
@@ -747,6 +751,7 @@
 			isa = PBXGroup;
 			children = (
 				8DD199E21F7A7883D5296DC9 /* AccountOrganizationCoordinatorTests.swift */,
+				D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */,
 				ECE005ED78C89A3413C402A8 /* DiscussionProjectV2GraphQLTests.swift */,
 				A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */,
 				1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */,
@@ -848,6 +853,7 @@
 			isa = PBXGroup;
 			children = (
 				2393FE70094021B29CD96790 /* AccountOrganizationCoordinator.swift */,
+				B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */,
 				132CEF157B32FD5DB4560686 /* DiscussionProjectV2Synchronization.swift */,
 				8B5F161C63C3CCF14DE4BEDE /* GitHubHydrationBatchMetric.swift */,
 				7443B9424599ADCB985AEEA5 /* GitHubNodeHydrationService.swift */,
@@ -1209,6 +1215,7 @@
 				F1B233E72F3E02889F3B3F4F /* PersonalAccessTokenTests.swift in Sources */,
 					C9673714F09883C23D6A1415 /* PrivateDataArtifactsTests.swift in Sources */,
 					A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */,
+					C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */,
 				578CC1E89C6D6601B9599CEF /* ProgressAttentionRuleTests.swift in Sources */,
 				9828F7BEBE9B27EF47A8E6C6 /* PullRequestAttentionRuleTests.swift in Sources */,
 				366338D600898F8D3783779C /* PullRequestReviewReconciliationTests.swift in Sources */,
@@ -1359,6 +1366,7 @@
 				C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */,
 				D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */,
 				20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */,
 				73A98E6C8B750A0E1D258A1E /* RepositoryInventoryRepository.swift in Sources */,
 				B3FDE6FE018FC2B4DD87C517 /* RoleDiscoveryPlan.swift in Sources */,
 				E6581FEDB74600C101B1E376 /* RoleDiscoverySynchronizer.swift in Sources */,

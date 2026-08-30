@@ -24,6 +24,11 @@ struct RefreshCadence: Sendable {
         maximumJitter: 60 * 60
     )
 
+    static let dailyFullReconciliation = RefreshCadence(
+        baseInterval: 24 * 60 * 60,
+        maximumJitter: 60 * 60
+    )
+
     func nextInterval(randomUnit: Double) -> TimeInterval {
         let boundedRandomUnit = min(max(randomUnit, 0), 1)
         return baseInterval + (boundedRandomUnit * maximumJitter)

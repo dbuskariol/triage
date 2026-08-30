@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "026-organization-refresh-schedules")
+        XCTAssertEqual(migrations.last?.id, "027-organization-scheduler-cancelled-attempts")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "b3fef9ead04a411d230992182a61efae48f7c5b6b7d4575cc87ab51d1803d5f4"
+            "a989337fe48737cb48e606df087eb83b5add6bbde807a530bbea3d94ddd4147c"
         )
         try await registry.closeAll()
     }

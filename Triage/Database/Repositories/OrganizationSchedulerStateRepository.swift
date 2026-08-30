@@ -101,12 +101,14 @@ actor OrganizationSchedulerStateRepository {
 
     func replace(
         _ state: OrganizationSchedulerState,
-        ifOwnedBy expectedAttemptID: UUID
+        ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64
     ) async throws -> Bool {
         try await vault.write { database in
             try Self.replace(
                 state,
                 ifOwnedBy: expectedAttemptID,
+                generation: expectedGeneration,
                 expectedAccountID: vault.accountID,
                 in: database
             )
@@ -116,10 +118,14 @@ actor OrganizationSchedulerStateRepository {
     nonisolated static func replace(
         _ state: OrganizationSchedulerState,
         ifOwnedBy expectedAttemptID: UUID,
+        generation expectedGeneration: UInt64,
         expectedAccountID: AccountID,
         in database: Database
     ) throws -> Bool {
         try validate(state, expectedAccountID: expectedAccountID, in: database)
+        guard state.generation == expectedGeneration else {
+            throw OrganizationSchedulerStateRepositoryError.staleGeneration
+        }
         try database.execute(
             sql: """
                 UPDATE organization_scheduler_states SET
@@ -129,7 +135,8 @@ actor OrganizationSchedulerStateRepository {
                     blocked_reason = ?, consecutive_transient_failure_count = ?,
                     active_attempt_id = ?, last_attempt_at_ms = ?, last_completed_at_ms = ?,
                     generation = ?, updated_at_ms = ?
-                WHERE account_id = ? AND organization_id = ? AND active_attempt_id = ?
+                WHERE account_id = ? AND organization_id = ?
+                  AND active_attempt_id = ? AND generation = ?
                 """,
             arguments: [
                 state.credentialRevision.rawValue,
@@ -146,7 +153,8 @@ actor OrganizationSchedulerStateRepository {
                 try milliseconds(state.updatedAt),
                 state.accountID.rawValue,
                 state.organizationID.rawValue,
-                expectedAttemptID.uuidString.lowercased()
+                expectedAttemptID.uuidString.lowercased(),
+                try persistedGeneration(expectedGeneration)
             ]
         )
         return database.changesCount == 1
@@ -201,14 +209,11 @@ actor OrganizationSchedulerStateRepository {
         if state.activeAttemptID != nil, state.lastAttemptAt == nil {
             throw OrganizationSchedulerStateRepositoryError.invalidTimestampOrder
         }
-        if let lastAttemptAt = state.lastAttemptAt,
-           let lastCompletedAt = state.lastCompletedAt {
-            if state.activeAttemptID == nil, lastCompletedAt < lastAttemptAt {
-                throw OrganizationSchedulerStateRepositoryError.invalidTimestampOrder
-            }
-            if state.activeAttemptID != nil, lastCompletedAt > lastAttemptAt {
-                throw OrganizationSchedulerStateRepositoryError.invalidTimestampOrder
-            }
+        if state.activeAttemptID != nil,
+           let lastAttemptAt = state.lastAttemptAt,
+           let lastCompletedAt = state.lastCompletedAt,
+           lastCompletedAt > lastAttemptAt {
+            throw OrganizationSchedulerStateRepositoryError.invalidTimestampOrder
         }
         let latestObservation = [state.lastAttemptAt, state.lastCompletedAt].compactMap { $0 }.max()
         if let latestObservation, state.updatedAt < latestObservation {
@@ -347,14 +352,11 @@ actor OrganizationSchedulerStateRepository {
         if state.activeAttemptID != nil, state.lastAttemptAt == nil {
             throw OrganizationSchedulerStateRepositoryError.invalidPersistedData
         }
-        if let lastAttemptAt = state.lastAttemptAt,
-           let lastCompletedAt = state.lastCompletedAt {
-            if state.activeAttemptID == nil, lastCompletedAt < lastAttemptAt {
-                throw OrganizationSchedulerStateRepositoryError.invalidPersistedData
-            }
-            if state.activeAttemptID != nil, lastCompletedAt > lastAttemptAt {
-                throw OrganizationSchedulerStateRepositoryError.invalidPersistedData
-            }
+        if state.activeAttemptID != nil,
+           let lastAttemptAt = state.lastAttemptAt,
+           let lastCompletedAt = state.lastCompletedAt,
+           lastCompletedAt > lastAttemptAt {
+            throw OrganizationSchedulerStateRepositoryError.invalidPersistedData
         }
         let latestObservation = [state.lastAttemptAt, state.lastCompletedAt].compactMap { $0 }.max()
         if let latestObservation, state.updatedAt < latestObservation {
