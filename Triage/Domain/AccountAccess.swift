@@ -40,6 +40,21 @@ enum OrganizationAccessState: String, Codable, Sendable {
     case unknown
 }
 
+/// Account-scoped visibility of a repository that Triage has previously
+/// observed. An inventory omission is `unknown`, never proof that the GitHub
+/// repository was deleted.
+enum RepositoryAccessState: String, Codable, CaseIterable, Sendable {
+    case available
+    case unknown
+    case unavailable
+    case requiresSSO
+    case requiresApproval
+    case revoked
+    case notFound
+    case forbidden
+    case partial
+}
+
 enum GitHubAccessRestriction: Equatable, Sendable {
     case organizationApprovalRequired
     case oauthApplicationApprovalRequired

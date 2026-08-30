@@ -139,7 +139,7 @@ enum CoverageRequirementProfile {
         }
 
         let maximumRepositoryCount = (maximumRequirementCount - requirements.count) / 4
-        let repositoryIDs = try availableRepositoryIDs(
+        let repositoryIDs = try knownRepositoryIDs(
             for: scope,
             maximumCount: maximumRepositoryCount,
             in: database
@@ -268,21 +268,23 @@ enum CoverageRequirementProfile {
         )
     }
 
-    private nonisolated static func availableRepositoryIDs(
+    /// Includes retained non-available topology. Candidate scheduling may use
+    /// only `available`, but a permission change must not make known private
+    /// sources disappear from the completeness contract.
+    private nonisolated static func knownRepositoryIDs(
         for scope: SynchronizationScope,
         maximumCount: Int,
         in database: Database
     ) throws -> [RepositoryID] {
-        let identifiers = try String.fetchAll(
+        let rows = try Row.fetchAll(
             database,
             sql: """
-                SELECT repositories.id
+                SELECT repositories.id, account_repository_access.access_state
                 FROM repositories
                 JOIN account_repository_access
                   ON account_repository_access.repository_id = repositories.id
                 WHERE repositories.organization_id = ?
                   AND account_repository_access.account_id = ?
-                  AND account_repository_access.access_state = 'available'
                 ORDER BY repositories.id
                 LIMIT ?
                 """,
@@ -292,11 +294,14 @@ enum CoverageRequirementProfile {
                 maximumCount + 1
             ]
         )
-        guard identifiers.count <= maximumCount else {
+        guard rows.count <= maximumCount else {
             throw CoverageRequirementProfileError.tooManyRequirements
         }
-        return try identifiers.map {
-            guard let repositoryID = RepositoryID(rawValue: $0) else {
+        return try rows.map { row in
+            guard let repositoryID = RepositoryID(rawValue: row["id"]),
+                  let rawAccessState: String = row["access_state"],
+                  RepositoryAccessState(rawValue: rawAccessState) != nil
+            else {
                 throw CoverageRequirementProfileError.invalidPersistedTopology
             }
             return repositoryID
