@@ -18,6 +18,8 @@
 		AA3500030000000000000003 /* SourceObservationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3500040000000000000004 /* SourceObservationRepository.swift */; };
 		AA3500050000000000000005 /* SourceObservationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */; };
 		AA3600010000000000000001 /* PullRequestReviewRefreshServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3600020000000000000002 /* PullRequestReviewRefreshServiceTests.swift */; };
+		AA3700010000000000000001 /* RepositoryInventoryReplayReceiptRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3700020000000000000002 /* RepositoryInventoryReplayReceiptRepository.swift */; };
+		AA3700030000000000000003 /* RepositoryInventoryReplayReceiptRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */; };
 		A027937EAB564005A38A7383 /* OrganizationSchedulerStateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* OrganizationRefreshSchedulingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* OrganizationRefreshSchedulingPolicy.swift */; };
 		C1D2E3F40516273849A5B6C7 /* OrganizationRefreshSchedulingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* OrganizationRefreshSchedulingPolicyTests.swift */; };
@@ -468,6 +470,8 @@
 		AA3500040000000000000004 /* SourceObservationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceObservationRepository.swift; sourceTree = "<group>"; };
 		AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceObservationRepositoryTests.swift; sourceTree = "<group>"; };
 		AA3600020000000000000002 /* PullRequestReviewRefreshServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestReviewRefreshServiceTests.swift; sourceTree = "<group>"; };
+		AA3700020000000000000002 /* RepositoryInventoryReplayReceiptRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryInventoryReplayReceiptRepository.swift; sourceTree = "<group>"; };
+		AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryInventoryReplayReceiptRepositoryTests.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
 		A21FAE2DCB8EB1D2DC0242C8 /* ConditionalRequestCacheRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConditionalRequestCacheRepository.swift; sourceTree = "<group>"; };
 		A5BD859E7511B7EFC7592713 /* GitHubDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDiagnosticsTests.swift; sourceTree = "<group>"; };
@@ -840,6 +844,7 @@
 				738A7187EF795179516FEBB9 /* PullRequestReviewThreadRepository.swift */,
 				649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */,
 				4743EF24A2F45917C1247B68 /* RawAPISnapshotRepository.swift */,
+				AA3700020000000000000002 /* RepositoryInventoryReplayReceiptRepository.swift */,
 				B59EA6EBEC634308AA03737F /* RoleSearchPageReplayRepository.swift */,
 				E1E4F30FD608369F336EF545 /* RepositoryInventoryRepository.swift */,
 				850788277C525AE27A2B89B1 /* SearchRepository.swift */,
@@ -924,6 +929,7 @@
 				6AF9EFAEA739469593B84801 /* OrganizationSchedulerStateRepositoryTests.swift */,
 				9FF49E3C266981BE31025729 /* PullRequestReviewReconciliationTests.swift */,
 				FF4B2BF2211EF6FBAA846B5F /* RepositoryAccountScopeTests.swift */,
+				AA3700040000000000000004 /* RepositoryInventoryReplayReceiptRepositoryTests.swift */,
 				DF6C4CD65FB143578C21DD90 /* RoleSearchPageReplayRepositoryTests.swift */,
 				BF6E9C38995198FB05144A47 /* SearchRepositoryTests.swift */,
 				AA3500060000000000000006 /* SourceObservationRepositoryTests.swift */,
@@ -1266,6 +1272,7 @@
 				B199953B049F078EB07FCC7E /* PullRequestReviewThreadRefreshServiceTests.swift in Sources */,
 				16A14DD9C8DFD46131F8DCBA /* RefreshCadenceTests.swift in Sources */,
 				9F09C8BB8D28AA90F9543606 /* RepositoryAccountScopeTests.swift in Sources */,
+				AA3700030000000000000003 /* RepositoryInventoryReplayReceiptRepositoryTests.swift in Sources */,
 				36C5F1202883423CA707AA0C /* RoleSearchPageReplayRepositoryTests.swift in Sources */,
 				B275753FD7DE29E6FEF00C62 /* RoleDiscoveryPlanTests.swift in Sources */,
 				97F8959323022C21953C3CEE /* SSOAuthorizationCoordinatorTests.swift in Sources */,
@@ -1413,6 +1420,7 @@
 				3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */,
 				DF26F1B11AE871C9C1CD0D1C /* RawAPISnapshot.swift in Sources */,
 				D6BD3ECF42418E448DD9E462 /* RawAPISnapshotRepository.swift in Sources */,
+				AA3700010000000000000001 /* RepositoryInventoryReplayReceiptRepository.swift in Sources */,
 				C022EA0F82444C78B6D86CF3 /* RoleSearchPageReplay.swift in Sources */,
 				D67195D96F444D25AEA2FCB8 /* RoleSearchPageReplayRepository.swift in Sources */,
 				20E927C0554D4003FD24C461 /* RefreshCadence.swift in Sources */,

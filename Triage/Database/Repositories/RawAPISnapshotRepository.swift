@@ -205,6 +205,12 @@ actor RawAPISnapshotRepository {
                       )
                       AND NOT EXISTS (
                           SELECT 1
+                          FROM repository_inventory_replay_receipt_pages
+                          WHERE repository_inventory_replay_receipt_pages.raw_snapshot_id
+                              = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
                           FROM source_access_observations
                           WHERE source_access_observations.raw_snapshot_id = raw_api_snapshots.id
                             AND source_access_observations.result = 'authoritativelyDeleted'
