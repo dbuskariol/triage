@@ -144,7 +144,7 @@ final class GitHubIssueSearchTests: XCTestCase {
         XCTAssertEqual(response.ssoHeader, .partialResults(Set([1])))
     }
 
-    func testConditionalSearchSendsETagAndReturnsSSOBearingNotModified() async throws {
+    func testConditionalSearchSendsETagOnlyAndReturnsSSOBearingNotModified() async throws {
         let session = SearchSession(
             body: Data(),
             headers: ["X-GitHub-SSO": "partial-results; organizations=1"],
@@ -166,7 +166,10 @@ final class GitHubIssueSearchTests: XCTestCase {
         let result = try await client.searchResult(
             query,
             page: 2,
-            ifNoneMatch: "\"search-v1\""
+            validators: try GitHubHTTPValidators(
+                eTag: "\"search-v1\"",
+                lastModified: nil
+            )
         )
 
         guard case let .notModified(ssoHeader) = result else {
@@ -176,11 +179,81 @@ final class GitHubIssueSearchTests: XCTestCase {
         let recordedRequest = await session.lastRequest()
         let request = try XCTUnwrap(recordedRequest)
         XCTAssertEqual(request.value(forHTTPHeaderField: "If-None-Match"), "\"search-v1\"")
+        XCTAssertNil(request.value(forHTTPHeaderField: "If-Modified-Since"))
         XCTAssertEqual(request.url?.path, "/search/issues")
         let components = try XCTUnwrap(
             URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
         )
         XCTAssertEqual(components.queryItems?.first { $0.name == "page" }?.value, "2")
+    }
+
+    func testConditionalSearchSendsLastModifiedWhenETagIsUnavailable() async throws {
+        let session = SearchSession(body: Data(), headers: [:], statusCode: 304)
+        let client = GitHubIssueSearchClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+
+        let result = try await client.searchResult(
+            query,
+            page: 1,
+            validators: try GitHubHTTPValidators(
+                eTag: nil,
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+
+        guard case .notModified = result else {
+            return XCTFail("Expected a conditional search to preserve not-modified state.")
+        }
+        let recordedRequest = await session.lastRequest()
+        let request = try XCTUnwrap(recordedRequest)
+        XCTAssertNil(request.value(forHTTPHeaderField: "If-None-Match"))
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "If-Modified-Since"),
+            "Wed, 21 Oct 2015 07:28:00 GMT"
+        )
+    }
+
+    func testConditionalSearchPrefersETagWhenBothValidatorsAreAvailable() async throws {
+        let session = SearchSession(body: Data(), headers: [:], statusCode: 304)
+        let client = GitHubIssueSearchClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )
+        )
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .involves
+        )
+
+        let result = try await client.searchResult(
+            query,
+            page: 1,
+            validators: try GitHubHTTPValidators(
+                eTag: "\"search-v2\"",
+                lastModified: "Wed, 21 Oct 2015 07:28:00 GMT"
+            )
+        )
+
+        guard case .notModified = result else {
+            return XCTFail("Expected a conditional search to preserve not-modified state.")
+        }
+        let recordedRequest = await session.lastRequest()
+        let request = try XCTUnwrap(recordedRequest)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "If-None-Match"), "\"search-v2\"")
+        XCTAssertNil(request.value(forHTTPHeaderField: "If-Modified-Since"))
     }
 
     func testSearchRequestIdentityIsExactAndRevisionScoped() throws {
@@ -196,10 +269,33 @@ final class GitHubIssueSearchTests: XCTestCase {
             credentialRevision: CredentialRevision(rawValue: "credential-1")!,
             capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
         )
+        let firstStream = SyncStreamID(rawValue: "stream-1")!
+        let otherStream = SyncStreamID(rawValue: "stream-2")!
 
-        let first = try GitHubIssueSearchRequestIdentity(query: query, page: 1, scope: scope)
-        let same = try GitHubIssueSearchRequestIdentity(query: query, page: 1, scope: scope)
-        let laterPage = try GitHubIssueSearchRequestIdentity(query: query, page: 2, scope: scope)
+        let first = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: 1,
+            scope: scope,
+            streamID: firstStream
+        )
+        let same = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: 1,
+            scope: scope,
+            streamID: firstStream
+        )
+        let laterPage = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: 2,
+            scope: scope,
+            streamID: firstStream
+        )
+        let distinctStream = try GitHubIssueSearchRequestIdentity(
+            query: query,
+            page: 1,
+            scope: scope,
+            streamID: otherStream
+        )
         let newCredential = try GitHubIssueSearchRequestIdentity(
             query: query,
             page: 1,
@@ -208,7 +304,8 @@ final class GitHubIssueSearchTests: XCTestCase {
                 organizationID: scope.organizationID,
                 credentialRevision: CredentialRevision(rawValue: "credential-2")!,
                 capabilityRevision: scope.capabilityRevision
-            )
+            ),
+            streamID: firstStream
         )
         let newCapability = try GitHubIssueSearchRequestIdentity(
             query: query,
@@ -218,7 +315,8 @@ final class GitHubIssueSearchTests: XCTestCase {
                 organizationID: scope.organizationID,
                 credentialRevision: scope.credentialRevision,
                 capabilityRevision: CapabilityRevision(rawValue: "capability-2")!
-            )
+            ),
+            streamID: firstStream
         )
         let otherOrganization = try GitHubIssueSearchRequestIdentity(
             query: query,
@@ -228,11 +326,14 @@ final class GitHubIssueSearchTests: XCTestCase {
                 organizationID: OrganizationID(rawValue: "organization-2")!,
                 credentialRevision: scope.credentialRevision,
                 capabilityRevision: scope.capabilityRevision
-            )
+            ),
+            streamID: firstStream
         )
 
         XCTAssertEqual(first, same)
+        XCTAssertEqual(first.requestKey, same.requestKey)
         XCTAssertNotEqual(first.requestKey, laterPage.requestKey)
+        XCTAssertNotEqual(first.requestKey, distinctStream.requestKey)
         XCTAssertNotEqual(first.requestKey, newCredential.requestKey)
         XCTAssertNotEqual(first.requestKey, newCapability.requestKey)
         XCTAssertNotEqual(first.requestKey, otherOrganization.requestKey)

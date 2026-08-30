@@ -4,13 +4,15 @@ struct RoleSearchPageReplay: Equatable, Sendable {
     let requestKey: String
     let accountID: AccountID
     let organizationID: OrganizationID
+    let streamID: SyncStreamID
     let queryValue: String
     let page: Int
     let endpoint: String
     let credentialRevision: CredentialRevision
     let capabilityRevision: CapabilityRevision
     let rawSnapshotID: RawAPISnapshotID
-    let eTag: String
+    let eTag: String?
+    let lastModified: String?
     let parserVersion: Int
     let lastValidatedAt: Date
 }

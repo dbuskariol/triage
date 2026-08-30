@@ -6,17 +6,22 @@ enum VaultError: Error, Equatable, Sendable {
     case sqlCipherUnavailable
     case missingApplicationSupportDirectory
     case accountBeingRemoved
+    case unsupportedDestructiveMigration(String)
+    case invalidMigrationBackup
 }
 
 struct VaultPaths: Equatable, Sendable {
     let directory: URL
     let database: URL
+    let migrationBackups: URL
 
     init(rootDirectory: URL, accountID: AccountID) {
         directory = rootDirectory
             .appendingPathComponent("Vaults", isDirectory: true)
             .appendingPathComponent(accountID.rawValue, isDirectory: true)
         database = directory.appendingPathComponent("triage.sqlite", isDirectory: false)
+        migrationBackups = directory
+            .appendingPathComponent("MigrationBackups", isDirectory: true)
     }
 
     static func defaultRootDirectory() throws -> URL {
@@ -36,6 +41,7 @@ actor AccountVault {
     let paths: VaultPaths
 
     private let databasePool: DatabasePool
+    private let vaultKey: VaultKey
 
     init(
         accountID: AccountID,
@@ -43,6 +49,7 @@ actor AccountVault {
         rootDirectory: URL? = nil
     ) throws {
         self.accountID = accountID
+        self.vaultKey = vaultKey
         let root = try rootDirectory ?? VaultPaths.defaultRootDirectory()
         paths = VaultPaths(rootDirectory: root, accountID: accountID)
 
@@ -52,18 +59,10 @@ actor AccountVault {
             attributes: [.posixPermissions: 0o700]
         )
 
-        var configuration = Configuration()
-        configuration.label = "Triage.AccountVault"
-        configuration.foreignKeysEnabled = true
-        configuration.journalMode = .wal
-        configuration.busyMode = .timeout(5)
-        configuration.prepareDatabase { database in
-            try database.usePassphrase(vaultKey.data)
-            try database.execute(sql: "PRAGMA cipher_memory_security = ON")
-            try database.execute(sql: "PRAGMA secure_delete = ON")
-        }
-
-        databasePool = try DatabasePool(path: paths.database.path, configuration: configuration)
+        databasePool = try DatabasePool(
+            path: paths.database.path,
+            configuration: Self.configuration(vaultKey: vaultKey)
+        )
         try Self.verify(databasePool)
     }
 
@@ -94,7 +93,143 @@ actor AccountVault {
     }
 
     func applyMigrations() throws {
-        try TriageDatabaseMigrator.migrate(databasePool)
+        let databasePool = databasePool
+        let vaultKey = vaultKey
+        let paths = paths
+        try TriageDatabaseMigrator.migrate(
+            databasePool,
+            beforeDestructiveMigration: { migrationID in
+                try Self.createVerifiedMigrationBackup(
+                    for: migrationID,
+                    from: databasePool,
+                    vaultKey: vaultKey,
+                    paths: paths
+                )
+            }
+        )
+    }
+
+    private static func configuration(
+        vaultKey: VaultKey,
+        readonly: Bool = false
+    ) -> Configuration {
+        var configuration = Configuration()
+        configuration.label = "Triage.AccountVault"
+        configuration.foreignKeysEnabled = true
+        configuration.readonly = readonly
+        if !readonly {
+            configuration.journalMode = .wal
+        }
+        configuration.busyMode = .timeout(5)
+        configuration.prepareDatabase { database in
+            try database.usePassphrase(vaultKey.data)
+            try database.execute(sql: "PRAGMA cipher_memory_security = ON")
+            if !readonly {
+                try database.execute(sql: "PRAGMA secure_delete = ON")
+            }
+        }
+        return configuration
+    }
+
+    private static func createVerifiedMigrationBackup(
+        for migrationID: String,
+        from source: DatabasePool,
+        vaultKey: VaultKey,
+        paths: VaultPaths
+    ) throws {
+        guard [
+            "033-role-search-page-replay-v2",
+            "034-role-search-page-replay-parser-identity"
+        ].contains(migrationID) else {
+            throw VaultError.unsupportedDestructiveMigration(migrationID)
+        }
+        let sourceReplayCount = try source.read { database in
+            guard try database.tableExists("role_search_page_replays"),
+                  try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                    arguments: [migrationID]
+                  ) == nil
+            else {
+                throw VaultError.invalidMigrationBackup
+            }
+            return try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM role_search_page_replays"
+            ) ?? 0
+        }
+
+        try FileManager.default.createDirectory(
+            at: paths.migrationBackups,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let backup = paths.migrationBackups
+            .appendingPathComponent("\(migrationID).sqlite", isDirectory: false)
+        let temporaryBackup = paths.migrationBackups
+            .appendingPathComponent(".\(migrationID).\(UUID().uuidString).partial", isDirectory: false)
+        let temporaryArtifacts = [
+            temporaryBackup,
+            URL(fileURLWithPath: temporaryBackup.path + "-journal"),
+            URL(fileURLWithPath: temporaryBackup.path + "-shm"),
+            URL(fileURLWithPath: temporaryBackup.path + "-wal")
+        ]
+        defer {
+            for artifact in temporaryArtifacts {
+                try? FileManager.default.removeItem(at: artifact)
+            }
+        }
+
+        var backupConfiguration = configuration(vaultKey: vaultKey)
+        // A queue defaults to a rollback journal, avoiding durable WAL/SHM
+        // sidecars for a temporary migration backup.
+        backupConfiguration.journalMode = .default
+        let destination = try DatabaseQueue(
+            path: temporaryBackup.path,
+            configuration: backupConfiguration
+        )
+        try source.backup(to: destination)
+        try destination.close()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: temporaryBackup.path
+        )
+
+        let verificationPool = try DatabasePool(
+            path: temporaryBackup.path,
+            configuration: configuration(vaultKey: vaultKey, readonly: true)
+        )
+        defer { try? verificationPool.close() }
+        try verify(verificationPool)
+        let verified = try verificationPool.read { database in
+            guard try database.tableExists("role_search_page_replays"),
+                  try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                    arguments: [migrationID]
+                  ) == nil
+            else {
+                return false
+            }
+            return (try Int.fetchOne(
+                database,
+                sql: "SELECT COUNT(*) FROM role_search_page_replays"
+            ) ?? 0) == sourceReplayCount
+        }
+        guard verified else {
+            throw VaultError.invalidMigrationBackup
+        }
+
+        if FileManager.default.fileExists(atPath: backup.path) {
+            _ = try FileManager.default.replaceItemAt(
+                backup,
+                withItemAt: temporaryBackup,
+                backupItemName: nil,
+                options: []
+            )
+        } else {
+            try FileManager.default.moveItem(at: temporaryBackup, to: backup)
+        }
     }
 
     private static func verify(_ databasePool: DatabasePool) throws {

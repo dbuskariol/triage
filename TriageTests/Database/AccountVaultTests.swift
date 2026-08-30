@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "032-timeline-replay-receipts")
+        XCTAssertEqual(migrations.last?.id, "034-role-search-page-replay-parser-identity")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "7df5b7b72474a35f4ec6fe1e3c850661553c3ecd8ab05a502347d2013b89db88"
+            "2cd58affc40f404812fdc6a4a32ee8ec50116fd0e813a8af3eddfee9b99a6170"
         )
         try await registry.closeAll()
     }
@@ -99,7 +99,9 @@ final class AccountVaultTests: XCTestCase {
                     WHERE id NOT IN (
                         '030-revision-scoped-conditional-requests',
                         '031-raw-request-authority',
-                        '032-timeline-replay-receipts'
+                        '032-timeline-replay-receipts',
+                        '033-role-search-page-replay-v2',
+                        '034-role-search-page-replay-parser-identity'
                     )
                     ORDER BY id
                     """
@@ -159,6 +161,31 @@ final class AccountVaultTests: XCTestCase {
                 ]
             )
             try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    query_value TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL,
+                    etag TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, request_key)
+                )
+                """)
+            try database.execute(
+                sql: "INSERT INTO role_search_page_replays VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: [
+                    "account", "organization", "legacy-search", "org:legacy", 1,
+                    "/legacy", "credential", "capability", "legacy-raw",
+                    "\"legacy\"", 1, 1
+                ]
+            )
+            try database.execute(sql: """
                 CREATE TABLE conditional_request_cache (
                     request_key TEXT PRIMARY KEY NOT NULL,
                     account_id TEXT NOT NULL,
@@ -173,7 +200,10 @@ final class AccountVaultTests: XCTestCase {
             )
         }
 
-        try TriageDatabaseMigrator.migrate(legacyPool)
+        try TriageDatabaseMigrator.migrate(
+            legacyPool,
+            beforeDestructiveMigration: { _ in }
+        )
 
         let migrated = try await legacyPool.read { database in
             (
@@ -216,6 +246,25 @@ final class AccountVaultTests: XCTestCase {
                         SELECT checksum FROM schema_migrations
                         WHERE id = '032-timeline-replay-receipts'
                         """
+                ),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays"),
+                try Row.fetchAll(
+                    database,
+                    sql: "PRAGMA table_info(role_search_page_replays)"
+                ).map { $0["name"] as String },
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '033-role-search-page-replay-v2'
+                        """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '034-role-search-page-replay-parser-identity'
+                        """
                 )
             )
         }
@@ -238,6 +287,175 @@ final class AccountVaultTests: XCTestCase {
             migrated.6,
             "7df5b7b72474a35f4ec6fe1e3c850661553c3ecd8ab05a502347d2013b89db88"
         )
+        XCTAssertEqual(migrated.7, 0)
+        XCTAssertTrue(migrated.8.contains("stream_id"))
+        XCTAssertTrue(migrated.8.contains("last_modified"))
+        XCTAssertEqual(
+            migrated.9,
+            "3567bf0a5bf1e6fd2edb7b0ed017db386b9ed39b29a2533540b81de5197a2f12"
+        )
+        XCTAssertEqual(
+            migrated.10,
+            "2cd58affc40f404812fdc6a4a32ee8ec50116fd0e813a8af3eddfee9b99a6170"
+        )
+    }
+
+    func testMigration033CreatesVerifiedEncryptedBackupBeforeDroppingLegacyReplayMetadata() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let paths = try await makePre033LegacyRoleReplayVault(
+            directory: directory,
+            accountID: accountID,
+            key: key
+        )
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        let liveReplayCount = try await vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays")
+        }
+        XCTAssertEqual(liveReplayCount, 0)
+        try await registry.closeAll()
+
+        let backup = paths.migrationBackups
+            .appendingPathComponent("033-role-search-page-replay-v2.sqlite")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        let backupBytes = try Data(contentsOf: backup)
+        XCTAssertFalse(backupBytes.starts(with: Data("SQLite format 3\0".utf8)))
+
+        do {
+            _ = try await readRoleReplayCount(at: backup, configuration: .init())
+            XCTFail("A SQLCipher backup must not be readable without its vault key.")
+        } catch {
+            // Expected.
+        }
+        do {
+            _ = try await readRoleReplayCount(
+                at: backup,
+                configuration: encryptedConfiguration(vaultKey: try VaultKey.generate())
+            )
+            XCTFail("A SQLCipher backup must reject an unrelated vault key.")
+        } catch {
+            // Expected.
+        }
+
+        let verifiedBackup = try DatabasePool(
+            path: backup.path,
+            configuration: encryptedConfiguration(vaultKey: key)
+        )
+        defer { try? verifiedBackup.close() }
+        let backupState = try await verifiedBackup.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT query_value FROM role_search_page_replays"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = '033-role-search-page-replay-v2'"
+                )
+            )
+        }
+        XCTAssertEqual(backupState.0, "org:legacy is:open")
+        XCTAssertNil(backupState.1)
+    }
+
+    func testFailedMigration033LeavesPreMigrationEncryptedDatabaseReadable() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let paths = try await makePre033LegacyRoleReplayVault(
+            directory: directory,
+            accountID: accountID,
+            key: key
+        )
+        let vault = try AccountVault(
+            accountID: accountID,
+            vaultKey: key,
+            rootDirectory: directory
+        )
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE migration_033_conflict (value TEXT NOT NULL)")
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON migration_033_conflict (value)
+                """)
+        }
+        await XCTAssertThrowsErrorAsync {
+            try await vault.applyMigrations()
+        }
+        let preservedState = try await vault.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT query_value FROM role_search_page_replays"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = '033-role-search-page-replay-v2'"
+                )
+            )
+        }
+        XCTAssertEqual(preservedState.0, "org:legacy is:open")
+        XCTAssertNil(preservedState.1)
+        let backup = paths.migrationBackups
+            .appendingPathComponent("033-role-search-page-replay-v2.sqlite")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        try await vault.close()
+
+        let reopened = try AccountVault(
+            accountID: accountID,
+            vaultKey: key,
+            rootDirectory: directory
+        )
+        let replayCount = try await reopened.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays")
+        }
+        XCTAssertEqual(replayCount, 1)
+        try await reopened.close()
+    }
+
+    func testMigration034PreservesMigration033RowsAndDistinguishesParserVersions() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let key = try VaultKey.generate()
+        let fixture = try await makeMigration033ReplayVault(directory: directory, key: key)
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: fixture.accountID, vaultKey: key)
+        let migratedCount = try await vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays")
+        }
+        XCTAssertEqual(migratedCount, 1)
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO role_search_page_replays VALUES
+                    (?, ?, 'roleDiscovery', ?, 'parser-v2', 'org:legacy is:open', 1,
+                     '/search/issues?legacy', ?, ?, ?, '\"legacy-v2\"', NULL, 2, 2)
+                    """,
+                arguments: [
+                    fixture.accountID.rawValue,
+                    fixture.organizationID.rawValue,
+                    fixture.streamID.rawValue,
+                    fixture.credentialRevision.rawValue,
+                    fixture.capabilityRevision.rawValue,
+                    fixture.rawSnapshotID.rawValue
+                ]
+            )
+        }
+        let parserVersions = try await vault.read { database in
+            try Int.fetchAll(
+                database,
+                sql: "SELECT parser_version FROM role_search_page_replays ORDER BY parser_version"
+            )
+        }
+        XCTAssertEqual(parserVersions, [1, 2])
+        try await registry.closeAll()
     }
 
     func testTransactionRollsBackAllWritesWhenItsOperationFails() async throws {
@@ -288,12 +506,231 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.directory.path))
     }
 
+    private func makePre033LegacyRoleReplayVault(
+        directory: URL,
+        accountID: AccountID,
+        key: VaultKey
+    ) async throws -> VaultPaths {
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        try await vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '033-role-search-page-replay-v2'"
+            )
+            try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '034-role-search-page-replay-parser-identity'"
+            )
+            try database.execute(sql: "DROP TABLE role_search_page_replays")
+            try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    query_value TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL,
+                    etag TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, request_key)
+                )
+                """)
+            try database.execute(
+                sql: """
+                    INSERT INTO role_search_page_replays VALUES
+                    ('account', 'organization', 'legacy-role-search', 'org:legacy is:open',
+                     1, '/search/issues?legacy', 'credential', 'capability', 'legacy-raw',
+                     '\"legacy\"', 1, 1)
+                    """
+            )
+        }
+        try await registry.closeAll()
+        return VaultPaths(rootDirectory: directory, accountID: accountID)
+    }
+
+    private func makeMigration033ReplayVault(
+        directory: URL,
+        key: VaultKey
+    ) async throws -> Migration034Fixture {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "legacy-org")!
+        let streamID = SyncStreamID(rawValue: "legacy-role-discovery")!
+        let credentialRevision = CredentialRevision(rawValue: "credential-1")!
+        let capabilityRevision = CapabilityRevision(rawValue: "capability-1")!
+        let observedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let rawSnapshotID = RawAPISnapshotID.make()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        let account = GitHubAccount(
+            id: accountID,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!,
+            login: "octocat",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: observedAt,
+            lastValidatedAt: observedAt
+        )
+        let organization = GitHubOrganization(
+            id: organizationID,
+            githubOrganizationID: 2,
+            nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjE=")!,
+            login: "legacy-org"
+        )
+        let access = OrganizationAccess(
+            accountID: accountID,
+            organizationID: organizationID,
+            state: .available,
+            capabilityRevision: capabilityRevision,
+            capabilities: [],
+            checkedAt: observedAt
+        )
+        try await AccountRepository(vault: vault).save(
+            account,
+            credentialRevision: credentialRevision
+        )
+        try await AccountRepository(vault: vault).save(
+            organization,
+            access: access,
+            selectedAt: observedAt
+        )
+        try await CoverageRepository(vault: vault).save(
+            CoverageRecord(
+                accountID: accountID,
+                organizationID: organizationID,
+                repositoryID: nil,
+                feature: .roleDiscovery,
+                streamID: streamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil
+            ),
+            attemptedAt: observedAt
+        )
+        try await RawAPISnapshotRepository(vault: vault).save(
+            RawAPISnapshot(
+                id: rawSnapshotID,
+                accountID: accountID,
+                githubNodeID: nil,
+                endpoint: "/search/issues?legacy",
+                eTag: "\"legacy\"",
+                parserVersion: 1,
+                observedAt: observedAt,
+                payload: Data("{}".utf8)
+            )
+        )
+        try await vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM schema_migrations WHERE id = '034-role-search-page-replay-parser-identity'"
+            )
+            try database.execute(sql: "DROP INDEX role_search_page_replays_snapshot")
+            try database.execute(sql: "DROP TABLE role_search_page_replays")
+            try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'roleDiscovery'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL,
+                    query_value TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    etag TEXT,
+                    last_modified TEXT,
+                    parser_version INTEGER NOT NULL,
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id, request_key,
+                        credential_revision, capability_revision
+                    ),
+                    UNIQUE (
+                        account_id, organization_id, feature, stream_id, endpoint,
+                        credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(
+                sql: """
+                    INSERT INTO role_search_page_replays VALUES
+                    (?, ?, 'roleDiscovery', ?, 'parser-v1', 'org:legacy is:open', 1,
+                     '/search/issues?legacy', ?, ?, ?, '\"legacy\"', NULL, 1, 1)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    organizationID.rawValue,
+                    streamID.rawValue,
+                    credentialRevision.rawValue,
+                    capabilityRevision.rawValue,
+                    rawSnapshotID.rawValue
+                ]
+            )
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON role_search_page_replays (raw_snapshot_id)
+                """)
+        }
+        try await registry.closeAll()
+        return Migration034Fixture(
+            accountID: accountID,
+            organizationID: organizationID,
+            streamID: streamID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision,
+            rawSnapshotID: rawSnapshotID
+        )
+    }
+
+    private func encryptedConfiguration(vaultKey: VaultKey) -> Configuration {
+        var configuration = Configuration()
+        configuration.readonly = true
+        configuration.prepareDatabase { database in
+            try database.usePassphrase(vaultKey.data)
+            try database.execute(sql: "PRAGMA cipher_memory_security = ON")
+        }
+        return configuration
+    }
+
+    private func readRoleReplayCount(
+        at url: URL,
+        configuration: Configuration
+    ) async throws -> Int {
+        let pool = try DatabasePool(path: url.path, configuration: configuration)
+        defer { try? pool.close() }
+        return try await pool.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays") ?? 0
+        }
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
+}
+
+private struct Migration034Fixture {
+    let accountID: AccountID
+    let organizationID: OrganizationID
+    let streamID: SyncStreamID
+    let credentialRevision: CredentialRevision
+    let capabilityRevision: CapabilityRevision
+    let rawSnapshotID: RawAPISnapshotID
 }
 
 private enum TransactionTestError: Error {

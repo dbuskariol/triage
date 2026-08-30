@@ -19,9 +19,7 @@ same account, organization, feature, stream, endpoint, query, and first-page
 identity and committed normalized state exists. An unsolicited or
 cross-authority `304` fails closed. REST cursor overlap is five minutes, except
 the discovery searches defined below. REST page and GraphQL connection limits
-are 100 and 50 respectively unless a contract states otherwise. Search remains
-ETag-only until its snapshot-bound replay contract explicitly retains
-Last-Modified authority.
+are 100 and 50 respectively unless a contract states otherwise.
 
 All GraphQL documents must be committed under
 `Triage/GitHub/GraphQL/GitHubGraphQLQueries.swift`, use a named `query`
@@ -62,7 +60,7 @@ produces an empty or complete inbox.
 
 | Feature | Authoritative source and normalizer | Minimum access | Pagination and incremental strategy | ETag / budget | Fallback and coverage on failure |
 | --- | --- | --- | --- | --- | --- |
-| Issue and pull request discovery | `GET /search/issues`; `GitHubIssueSearchClient`, then `GitHubSearchNormalizer` | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | REST page numbers. Partition each relationship into open plus closed/merged in the preceding 90 days. Snapshot time before search; bisect updated ranges when a shard is incomplete or reaches the result cap. | Search ETags when supplied; 100 results/page, 30 requests/minute search budget | Repository/time-range shards may replace a too-large organization shard. Notifications are discovery evidence only. Any unresolved shard leaves issue/PR search coverage incomplete. |
+| Issue and pull request discovery | `GET /search/issues`; `GitHubIssueSearchClient`, then `GitHubSearchNormalizer` | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | REST page numbers. Partition each relationship into open plus closed/merged in the preceding 90 days. Snapshot time before search; bisect updated ranges when a shard is incomplete or reaches the result cap. | Search ETag or Last-Modified; 100 results/page, 30 requests/minute search budget | Repository/time-range shards may replace a too-large organization shard. Notifications are discovery evidence only. Any unresolved shard leaves issue/PR search coverage incomplete. |
 | Current issue and PR fields | `TriageHydrateNodes` GraphQL query; `GitHubGraphQLQueries.hydrateNodes`, then node normalizer | OAuth/classic `repo`; fine-grained Issues read and Pull requests read | `nodes(ids:)`; 25-50 IDs, five-minute updated-at overlap | No ETag; 500 points / 4 MiB | REST search supplies candidate identity only. Missing node, partial GraphQL error, or query budget exhaustion leaves the field and repository coverage incomplete. |
 | Private repository membership | Repository inventory plus hydrated `Repository.isPrivate` | Same as repository inventory | Same inventory/reconciliation cadence | Inventory budget | No fallback. A hidden repository is inaccessible, not absent. |
 | Issue timeline | `GET /repos/{owner}/{repo}/issues/{number}/timeline`; `GitHubTimelineClient`, then `GitHubTimelineNormalizer` | OAuth/classic `repo`; fine-grained Issues read or Pull requests read | `Link`; first page on candidate update, then continue from durable page cursor | ETag or Last-Modified; 2 MiB/page | No alternate source. Timeline events are REST-authoritative; a failure downgrades only timeline coverage. |
@@ -80,6 +78,18 @@ the server returned `304` but local receipt validation fails, the timeline
 client may make one explicit unconditional request to that same endpoint; it
 must not use another GitHub source, treat the stale state as current, or mark
 coverage complete from the `304` alone.
+
+Search `304` reuse additionally requires one encrypted page binding whose v2
+identity covers the exact current account, organization, role-discovery leaf
+stream, `GET`, canonical percent-encoded endpoint/query/page, credential and
+capability revisions, and parser version. The binding and its raw snapshot
+must retain the same safe ETag/Last-Modified pair and exact request authority;
+ETag takes precedence when both are present. A raw page referenced by a
+normalization failure cannot authorize replay. Legacy, missing, stale,
+cross-stream, malformed, or corrupt evidence is invalidated only for that
+exact binding and causes one explicit unconditional request to the same search
+page. Cancellation prevents that invalidation and retry. No `304` may create
+an empty success or complete coverage without its bound normalized page write.
 
 ## Context features
 

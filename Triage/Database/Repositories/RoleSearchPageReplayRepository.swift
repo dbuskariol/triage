@@ -4,13 +4,18 @@ import GRDB
 enum RoleSearchPageReplayRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
     case organizationScopeMismatch
+    case streamScopeMismatch
     case snapshotScopeMismatch
-    case snapshotETagMismatch
+    case snapshotEndpointMismatch
+    case snapshotParserMismatch
+    case snapshotRequestAuthorityMismatch
+    case snapshotHasNormalizationFailure
+    case snapshotValidatorMismatch
     case invalidRequestKey
     case invalidQuery
     case invalidPage
     case invalidEndpoint
-    case invalidETag
+    case invalidValidator
     case invalidParserVersion
     case invalidPersistedData
 }
@@ -43,8 +48,7 @@ actor RoleSearchPageReplayRepository {
         let organizationCount = try Int.fetchOne(
             database,
             sql: """
-                SELECT COUNT(*)
-                FROM account_organizations
+                SELECT COUNT(*) FROM account_organizations
                 WHERE account_id = ? AND organization_id = ?
                 """,
             arguments: [replay.accountID.rawValue, replay.organizationID.rawValue]
@@ -52,46 +56,80 @@ actor RoleSearchPageReplayRepository {
         guard organizationCount == 1 else {
             throw RoleSearchPageReplayRepositoryError.organizationScopeMismatch
         }
+        guard try hasCurrentAuthority(for: replay, in: database) else {
+            throw RoleSearchPageReplayRepositoryError.streamScopeMismatch
+        }
         guard let snapshotRow = try Row.fetchOne(
             database,
-            sql: "SELECT account_id, endpoint, etag FROM raw_api_snapshots WHERE id = ?",
+            sql: """
+                SELECT id, account_id, github_node_id, endpoint, etag, last_modified,
+                       authority_organization_id, authority_feature, authority_stream_id,
+                       authority_request_key, authority_credential_revision,
+                       authority_capability_revision, parser_version, observed_at_ms, payload
+                FROM raw_api_snapshots
+                WHERE id = ?
+                """,
             arguments: [replay.rawSnapshotID.rawValue]
-        ), let snapshotAccountID = AccountID(rawValue: snapshotRow["account_id"])
+        ) else {
+            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
+        }
+        let snapshot: RawAPISnapshot
+        do {
+            snapshot = try RawAPISnapshotRepository.snapshot(from: snapshotRow)
+        } catch {
+            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
+        }
+        guard snapshot.accountID == replay.accountID, snapshot.githubNodeID == nil else {
+            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
+        }
+        guard snapshot.endpoint == replay.endpoint else {
+            throw RoleSearchPageReplayRepositoryError.snapshotEndpointMismatch
+        }
+        guard snapshot.parserVersion == replay.parserVersion else {
+            throw RoleSearchPageReplayRepositoryError.snapshotParserMismatch
+        }
+        guard snapshot.requestIdentity == requestIdentity(for: replay) else {
+            throw RoleSearchPageReplayRepositoryError.snapshotRequestAuthorityMismatch
+        }
+        guard snapshot.eTag == replay.eTag,
+              snapshot.lastModified == replay.lastModified
         else {
-            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
+            throw RoleSearchPageReplayRepositoryError.snapshotValidatorMismatch
         }
-        guard snapshotAccountID == replay.accountID else {
-            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
+        let normalizationFailureCount = try Int.fetchOne(
+            database,
+            sql: "SELECT COUNT(*) FROM normalization_failures WHERE raw_snapshot_id = ?",
+            arguments: [replay.rawSnapshotID.rawValue]
+        ) ?? 0
+        guard normalizationFailureCount == 0 else {
+            throw RoleSearchPageReplayRepositoryError.snapshotHasNormalizationFailure
         }
-        let snapshotETag: String? = snapshotRow["etag"]
-        guard snapshotETag == replay.eTag else {
-            throw RoleSearchPageReplayRepositoryError.snapshotETagMismatch
-        }
-        let snapshotEndpoint: String? = snapshotRow["endpoint"]
-        guard snapshotEndpoint == replay.endpoint else {
-            throw RoleSearchPageReplayRepositoryError.snapshotScopeMismatch
-        }
+
         try database.execute(
             sql: """
                 INSERT INTO role_search_page_replays (
-                    account_id, organization_id, request_key, query_value, page, endpoint,
-                    credential_revision, capability_revision, raw_snapshot_id, etag,
-                    parser_version, last_validated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account_id, organization_id, request_key) DO UPDATE SET
+                    account_id, organization_id, feature, stream_id, request_key,
+                    query_value, page, endpoint, credential_revision, capability_revision,
+                    raw_snapshot_id, etag, last_modified, parser_version,
+                    last_validated_at_ms
+                ) VALUES (?, ?, 'roleDiscovery', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    account_id, organization_id, feature, stream_id, request_key,
+                    credential_revision, capability_revision
+                ) DO UPDATE SET
                     query_value = excluded.query_value,
                     page = excluded.page,
                     endpoint = excluded.endpoint,
-                    credential_revision = excluded.credential_revision,
-                    capability_revision = excluded.capability_revision,
                     raw_snapshot_id = excluded.raw_snapshot_id,
                     etag = excluded.etag,
+                    last_modified = excluded.last_modified,
                     parser_version = excluded.parser_version,
                     last_validated_at_ms = excluded.last_validated_at_ms
                 """,
             arguments: [
                 replay.accountID.rawValue,
                 replay.organizationID.rawValue,
+                replay.streamID.rawValue,
                 replay.requestKey,
                 replay.queryValue,
                 replay.page,
@@ -100,6 +138,7 @@ actor RoleSearchPageReplayRepository {
                 replay.capabilityRevision.rawValue,
                 replay.rawSnapshotID.rawValue,
                 replay.eTag,
+                replay.lastModified,
                 replay.parserVersion,
                 milliseconds(replay.lastValidatedAt)
             ]
@@ -108,6 +147,7 @@ actor RoleSearchPageReplayRepository {
 
     func entry(
         requestKey: String,
+        streamID: SyncStreamID,
         accountID: AccountID,
         organizationID: OrganizationID,
         credentialRevision: CredentialRevision,
@@ -120,29 +160,56 @@ actor RoleSearchPageReplayRepository {
             throw RoleSearchPageReplayRepositoryError.invalidRequestKey
         }
         return try await vault.read { database in
+            guard try Self.hasCurrentAuthority(
+                accountID: accountID,
+                organizationID: organizationID,
+                streamID: streamID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                in: database
+            ) else {
+                return nil
+            }
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
-                    SELECT replay.account_id, replay.organization_id, replay.request_key,
-                           replay.query_value, replay.page, replay.endpoint, replay.credential_revision,
-                           replay.capability_revision, replay.raw_snapshot_id, replay.etag,
-                           replay.parser_version, replay.last_validated_at_ms,
-                           snapshot.github_node_id, snapshot.endpoint AS snapshot_endpoint,
-                           snapshot.etag AS snapshot_etag,
-                           snapshot.last_modified AS snapshot_last_modified,
-                           snapshot.parser_version AS snapshot_parser_version,
-                           snapshot.observed_at_ms, snapshot.payload
+                    SELECT replay.request_key AS replay_request_key,
+                           replay.account_id AS replay_account_id,
+                           replay.organization_id AS replay_organization_id,
+                           replay.stream_id AS replay_stream_id,
+                           replay.query_value AS replay_query_value,
+                           replay.page AS replay_page,
+                           replay.endpoint AS replay_endpoint,
+                           replay.credential_revision AS replay_credential_revision,
+                           replay.capability_revision AS replay_capability_revision,
+                           replay.raw_snapshot_id AS replay_raw_snapshot_id,
+                           replay.etag AS replay_etag,
+                           replay.last_modified AS replay_last_modified,
+                           replay.parser_version AS replay_parser_version,
+                           replay.last_validated_at_ms AS replay_last_validated_at_ms,
+                           snapshot.id, snapshot.account_id, snapshot.github_node_id,
+                           snapshot.endpoint, snapshot.etag, snapshot.last_modified,
+                           snapshot.authority_organization_id, snapshot.authority_feature,
+                           snapshot.authority_stream_id, snapshot.authority_request_key,
+                           snapshot.authority_credential_revision,
+                           snapshot.authority_capability_revision,
+                           snapshot.parser_version, snapshot.observed_at_ms, snapshot.payload,
+                           EXISTS (
+                               SELECT 1 FROM normalization_failures
+                               WHERE normalization_failures.raw_snapshot_id = snapshot.id
+                           ) AS has_normalization_failure
                     FROM role_search_page_replays AS replay
                     JOIN raw_api_snapshots AS snapshot
                       ON snapshot.id = replay.raw_snapshot_id
-                     AND snapshot.account_id = replay.account_id
                     WHERE replay.account_id = ? AND replay.organization_id = ?
+                      AND replay.feature = 'roleDiscovery' AND replay.stream_id = ?
                       AND replay.request_key = ? AND replay.credential_revision = ?
                       AND replay.capability_revision = ?
                     """,
                 arguments: [
                     accountID.rawValue,
                     organizationID.rawValue,
+                    streamID.rawValue,
                     requestKey,
                     credentialRevision.rawValue,
                     capabilityRevision.rawValue
@@ -156,20 +223,23 @@ actor RoleSearchPageReplayRepository {
 
     func remove(
         requestKey: String,
+        streamID: SyncStreamID,
         accountID: AccountID,
-        organizationID: OrganizationID
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision
     ) async throws {
         guard accountID == vault.accountID else {
             throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
         }
-        guard Self.isValidRequestKey(requestKey) else {
-            throw RoleSearchPageReplayRepositoryError.invalidRequestKey
-        }
         try await vault.write { database in
             try Self.remove(
                 requestKey: requestKey,
+                streamID: streamID,
                 accountID: accountID,
                 organizationID: organizationID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
                 expectedAccountID: vault.accountID,
                 in: database
             )
@@ -178,8 +248,11 @@ actor RoleSearchPageReplayRepository {
 
     nonisolated static func remove(
         requestKey: String,
+        streamID: SyncStreamID,
         accountID: AccountID,
         organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
         expectedAccountID: AccountID,
         in database: Database
     ) throws {
@@ -192,9 +265,19 @@ actor RoleSearchPageReplayRepository {
         try database.execute(
             sql: """
                 DELETE FROM role_search_page_replays
-                WHERE account_id = ? AND organization_id = ? AND request_key = ?
+                WHERE account_id = ? AND organization_id = ?
+                  AND feature = 'roleDiscovery' AND stream_id = ?
+                  AND request_key = ? AND credential_revision = ?
+                  AND capability_revision = ?
                 """,
-            arguments: [accountID.rawValue, organizationID.rawValue, requestKey]
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                streamID.rawValue,
+                requestKey,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue
+            ]
         )
     }
 
@@ -230,10 +313,23 @@ actor RoleSearchPageReplayRepository {
         guard accountID == expectedAccountID else {
             throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
         }
+        // A synchronizer can outlive a credential or capability change. Its
+        // stale scope must not be allowed to evict bindings created by the
+        // replacement synchronizer.
+        guard try hasCurrentRevisionAuthority(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision,
+            in: database
+        ) else {
+            return
+        }
         try database.execute(
             sql: """
                 DELETE FROM role_search_page_replays
                 WHERE account_id = ? AND organization_id = ?
+                  AND feature = 'roleDiscovery'
                   AND (credential_revision <> ? OR capability_revision <> ?)
                 """,
             arguments: [
@@ -242,6 +338,162 @@ actor RoleSearchPageReplayRepository {
                 credentialRevision.rawValue,
                 capabilityRevision.rawValue
             ]
+        )
+    }
+
+    func removeStaleParserVersions(
+        streamID: SyncStreamID,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision
+    ) async throws {
+        guard accountID == vault.accountID else {
+            throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
+        }
+        try await vault.write { database in
+            try Self.removeStaleParserVersions(
+                streamID: streamID,
+                accountID: accountID,
+                organizationID: organizationID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                expectedAccountID: vault.accountID,
+                in: database
+            )
+        }
+    }
+
+    nonisolated static func removeStaleParserVersions(
+        streamID: SyncStreamID,
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws {
+        guard accountID == expectedAccountID else {
+            throw RoleSearchPageReplayRepositoryError.accountScopeMismatch
+        }
+        guard try hasCurrentAuthority(
+            accountID: accountID,
+            organizationID: organizationID,
+            streamID: streamID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision,
+            in: database
+        ) else {
+            return
+        }
+        try database.execute(
+            sql: """
+                DELETE FROM role_search_page_replays
+                WHERE account_id = ? AND organization_id = ?
+                  AND feature = 'roleDiscovery' AND stream_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND parser_version <> ?
+                """,
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                streamID.rawValue,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue,
+                GitHubIssueSearchRequestIdentity.parserVersion
+            ]
+        )
+    }
+
+    private nonisolated static func hasCurrentAuthority(
+        for replay: RoleSearchPageReplay,
+        in database: Database
+    ) throws -> Bool {
+        try hasCurrentAuthority(
+            accountID: replay.accountID,
+            organizationID: replay.organizationID,
+            streamID: replay.streamID,
+            credentialRevision: replay.credentialRevision,
+            capabilityRevision: replay.capabilityRevision,
+            in: database
+        )
+    }
+
+    private nonisolated static func hasCurrentAuthority(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        streamID: SyncStreamID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
+        in database: Database
+    ) throws -> Bool {
+        let count = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*)
+                FROM accounts
+                JOIN account_organizations
+                  ON account_organizations.account_id = accounts.id
+                JOIN sync_streams
+                  ON sync_streams.account_id = account_organizations.account_id
+                 AND sync_streams.organization_id = account_organizations.organization_id
+                WHERE accounts.id = ? AND account_organizations.organization_id = ?
+                  AND sync_streams.id = ? AND sync_streams.feature = 'roleDiscovery'
+                  AND accounts.credential_revision = ?
+                  AND account_organizations.capability_revision = ?
+                """,
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                streamID.rawValue,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue
+            ]
+        ) ?? 0
+        return count == 1
+    }
+
+    private nonisolated static func hasCurrentRevisionAuthority(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credentialRevision: CredentialRevision,
+        capabilityRevision: CapabilityRevision,
+        in database: Database
+    ) throws -> Bool {
+        let count = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*)
+                FROM accounts
+                JOIN account_organizations
+                  ON account_organizations.account_id = accounts.id
+                WHERE accounts.id = ? AND account_organizations.organization_id = ?
+                  AND accounts.credential_revision = ?
+                  AND account_organizations.capability_revision = ?
+                """,
+            arguments: [
+                accountID.rawValue,
+                organizationID.rawValue,
+                credentialRevision.rawValue,
+                capabilityRevision.rawValue
+            ]
+        ) ?? 0
+        return count == 1
+    }
+
+    private nonisolated static func requestIdentity(
+        for replay: RoleSearchPageReplay
+    ) -> ConditionalRequestIdentity {
+        ConditionalRequestIdentity(
+            scope: SynchronizationScope(
+                accountID: replay.accountID,
+                organizationID: replay.organizationID,
+                credentialRevision: replay.credentialRevision,
+                capabilityRevision: replay.capabilityRevision
+            ),
+            feature: .roleDiscovery,
+            streamID: replay.streamID,
+            requestKey: replay.requestKey
         )
     }
 
@@ -258,10 +510,15 @@ actor RoleSearchPageReplayRepository {
         guard !replay.endpoint.isEmpty, replay.endpoint.count <= 2_048 else {
             throw RoleSearchPageReplayRepositoryError.invalidEndpoint
         }
-        guard !replay.eTag.isEmpty, replay.eTag.count <= 2_048 else {
-            throw RoleSearchPageReplayRepositoryError.invalidETag
+        do {
+            _ = try GitHubHTTPValidators(
+                eTag: replay.eTag,
+                lastModified: replay.lastModified
+            )
+        } catch {
+            throw RoleSearchPageReplayRepositoryError.invalidValidator
         }
-        guard replay.parserVersion > 0 else {
+        guard replay.parserVersion == GitHubIssueSearchRequestIdentity.parserVersion else {
             throw RoleSearchPageReplayRepositoryError.invalidParserVersion
         }
     }
@@ -271,65 +528,59 @@ actor RoleSearchPageReplayRepository {
     }
 
     private nonisolated static func entry(from row: Row) throws -> RoleSearchPageReplayEntry {
-        guard let accountID = AccountID(rawValue: row["account_id"]),
-              let organizationID = OrganizationID(rawValue: row["organization_id"]),
-              let requestKey: String = row["request_key"],
-              let queryValue: String = row["query_value"],
-              let page: Int = row["page"],
-              let endpoint: String = row["endpoint"],
-              let credentialRevision = CredentialRevision(rawValue: row["credential_revision"]),
-              let capabilityRevision = CapabilityRevision(rawValue: row["capability_revision"]),
-              let snapshotID = RawAPISnapshotID(rawValue: row["raw_snapshot_id"]),
-              let eTag: String = row["etag"],
-              let parserVersion: Int = row["parser_version"],
-              let lastValidatedAtMilliseconds: Int64 = row["last_validated_at_ms"],
-              let snapshotEndpoint: String = row["snapshot_endpoint"],
-              let snapshotETag: String = row["snapshot_etag"],
-              let snapshotParserVersion: Int = row["snapshot_parser_version"],
-              let observedAtMilliseconds: Int64 = row["observed_at_ms"],
-              let payload: Data = row["payload"]
+        guard let requestKey: String = row["replay_request_key"],
+              let accountID = AccountID(rawValue: row["replay_account_id"]),
+              let organizationID = OrganizationID(rawValue: row["replay_organization_id"]),
+              let streamID = SyncStreamID(rawValue: row["replay_stream_id"]),
+              let queryValue: String = row["replay_query_value"],
+              let page: Int = row["replay_page"],
+              let endpoint: String = row["replay_endpoint"],
+              let credentialRevision = CredentialRevision(rawValue: row["replay_credential_revision"]),
+              let capabilityRevision = CapabilityRevision(rawValue: row["replay_capability_revision"]),
+              let rawSnapshotID = RawAPISnapshotID(rawValue: row["replay_raw_snapshot_id"]),
+              let parserVersion: Int = row["replay_parser_version"],
+              let lastValidatedAtMilliseconds: Int64 = row["replay_last_validated_at_ms"],
+              let hasNormalizationFailure: Bool = row["has_normalization_failure"],
+              !hasNormalizationFailure
         else {
             throw RoleSearchPageReplayRepositoryError.invalidPersistedData
         }
-        let rawNodeID: String? = row["github_node_id"]
-        let nodeID = rawNodeID.flatMap(GitHubNodeID.init(rawValue:))
-        let snapshotLastModified: String? = row["snapshot_last_modified"]
-        guard rawNodeID == nil || nodeID != nil,
-              parserVersion == snapshotParserVersion,
-              endpoint == snapshotEndpoint,
-              eTag == snapshotETag
-        else {
-            throw RoleSearchPageReplayRepositoryError.invalidPersistedData
-        }
+        let eTag: String? = row["replay_etag"]
+        let lastModified: String? = row["replay_last_modified"]
         let replay = RoleSearchPageReplay(
             requestKey: requestKey,
             accountID: accountID,
             organizationID: organizationID,
+            streamID: streamID,
             queryValue: queryValue,
             page: page,
             endpoint: endpoint,
             credentialRevision: credentialRevision,
             capabilityRevision: capabilityRevision,
-            rawSnapshotID: snapshotID,
+            rawSnapshotID: rawSnapshotID,
             eTag: eTag,
+            lastModified: lastModified,
             parserVersion: parserVersion,
             lastValidatedAt: date(lastValidatedAtMilliseconds)
         )
-        try validate(replay)
-        return RoleSearchPageReplayEntry(
-            replay: replay,
-            snapshot: RawAPISnapshot(
-                id: snapshotID,
-                accountID: accountID,
-                githubNodeID: nodeID,
-                endpoint: snapshotEndpoint,
-                eTag: eTag,
-                lastModified: snapshotLastModified,
-                parserVersion: snapshotParserVersion,
-                observedAt: date(observedAtMilliseconds),
-                payload: payload
-            )
-        )
+        do {
+            try validate(replay)
+            let snapshot = try RawAPISnapshotRepository.snapshot(from: row)
+            guard snapshot.id == rawSnapshotID,
+                  snapshot.accountID == accountID,
+                  snapshot.githubNodeID == nil,
+                  snapshot.endpoint == endpoint,
+                  snapshot.eTag == eTag,
+                  snapshot.lastModified == lastModified,
+                  snapshot.parserVersion == parserVersion,
+                  snapshot.requestIdentity == requestIdentity(for: replay)
+            else {
+                throw RoleSearchPageReplayRepositoryError.invalidPersistedData
+            }
+            return RoleSearchPageReplayEntry(replay: replay, snapshot: snapshot)
+        } catch {
+            throw RoleSearchPageReplayRepositoryError.invalidPersistedData
+        }
     }
 
     private nonisolated static func milliseconds(_ date: Date) -> Int64 {
@@ -345,6 +596,7 @@ actor RoleSearchPageReplayCache {
     private let repository: RoleSearchPageReplayRepository
     let scope: SynchronizationScope
     private var didRemoveStaleRevisions = false
+    private var parserVersionPrunedStreams: Set<SyncStreamID> = []
 
     init(repository: RoleSearchPageReplayRepository, scope: SynchronizationScope) {
         self.repository = repository
@@ -353,7 +605,8 @@ actor RoleSearchPageReplayCache {
 
     func entry(
         for query: GitHubIssueSearchQuery,
-        page: Int
+        page: Int,
+        streamID: SyncStreamID
     ) async throws -> RoleSearchPageReplayEntry? {
         if !didRemoveStaleRevisions {
             try await repository.removeStaleRevisions(
@@ -364,28 +617,42 @@ actor RoleSearchPageReplayCache {
             )
             didRemoveStaleRevisions = true
         }
+        if !parserVersionPrunedStreams.contains(streamID) {
+            try await repository.removeStaleParserVersions(
+                streamID: streamID,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision
+            )
+            parserVersionPrunedStreams.insert(streamID)
+        }
         let identity = try GitHubIssueSearchRequestIdentity(
             query: query,
             page: page,
-            scope: scope
+            scope: scope,
+            streamID: streamID
         )
         let entry: RoleSearchPageReplayEntry?
         do {
             entry = try await repository.entry(
                 requestKey: identity.requestKey,
+                streamID: streamID,
                 accountID: scope.accountID,
                 organizationID: scope.organizationID,
                 credentialRevision: scope.credentialRevision,
                 capabilityRevision: scope.capabilityRevision
             )
         } catch RoleSearchPageReplayRepositoryError.invalidPersistedData {
-            try await invalidate(identity)
+            try Task.checkCancellation()
+            try await invalidate(identity, streamID: streamID)
             return nil
         }
         guard let entry else {
             return nil
         }
         guard entry.replay.requestKey == identity.requestKey,
+              entry.replay.streamID == streamID,
               entry.replay.queryValue == identity.queryValue,
               entry.replay.page == identity.page,
               entry.replay.endpoint == identity.endpoint,
@@ -394,7 +661,8 @@ actor RoleSearchPageReplayCache {
               entry.replay.credentialRevision == scope.credentialRevision,
               entry.replay.capabilityRevision == scope.capabilityRevision
         else {
-            try await invalidate(identity)
+            try Task.checkCancellation()
+            try await invalidate(identity, streamID: streamID)
             return nil
         }
         return entry
@@ -402,18 +670,31 @@ actor RoleSearchPageReplayCache {
 
     func invalidate(
         query: GitHubIssueSearchQuery,
-        page: Int
+        page: Int,
+        streamID: SyncStreamID
     ) async throws {
         try await invalidate(
-            GitHubIssueSearchRequestIdentity(query: query, page: page, scope: scope)
+            GitHubIssueSearchRequestIdentity(
+                query: query,
+                page: page,
+                scope: scope,
+                streamID: streamID
+            ),
+            streamID: streamID
         )
     }
 
-    private func invalidate(_ identity: GitHubIssueSearchRequestIdentity) async throws {
+    private func invalidate(
+        _ identity: GitHubIssueSearchRequestIdentity,
+        streamID: SyncStreamID
+    ) async throws {
         try await repository.remove(
             requestKey: identity.requestKey,
+            streamID: streamID,
             accountID: scope.accountID,
-            organizationID: scope.organizationID
+            organizationID: scope.organizationID,
+            credentialRevision: scope.credentialRevision,
+            capabilityRevision: scope.capabilityRevision
         )
     }
 }

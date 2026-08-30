@@ -7,6 +7,7 @@ enum SearchShardExecutorError: Error, Equatable, Sendable {
     case incompleteSearchPage
     case invalidPersistedCursor
     case notModifiedWithoutReplay
+    case normalizationFailure
 }
 
 struct GitHubIssueSearchUndecodableResponseError: Error, Equatable, Sendable {
@@ -16,10 +17,25 @@ struct GitHubIssueSearchUndecodableResponseError: Error, Equatable, Sendable {
 struct PreparedSearchShardPageWrite: Sendable {
     let write: @Sendable (Database) throws -> Void
     let didCommit: @Sendable () async -> Void
+    /// Reported only after the transactional page write succeeds. This lets a
+    /// source retain its raw evidence and normalization diagnostics while
+    /// preventing the shard from being marked complete.
+    let postCommitFailure: SearchShardExecutorError?
+
+    init(
+        write: @escaping @Sendable (Database) throws -> Void,
+        didCommit: @escaping @Sendable () async -> Void,
+        postCommitFailure: SearchShardExecutorError? = nil
+    ) {
+        self.write = write
+        self.didCommit = didCommit
+        self.postCommitFailure = postCommitFailure
+    }
 
     static let empty = PreparedSearchShardPageWrite(
         write: { _ in },
-        didCommit: {}
+        didCommit: {},
+        postCommitFailure: nil
     )
 }
 
@@ -121,6 +137,7 @@ actor SearchShardExecutor {
             let firstResponse = try await response(
                 query: query,
                 page: 1,
+                streamID: streamID,
                 shard: &shard,
                 accountID: accountID,
                 prepareUndecodablePage: prepareUndecodablePage
@@ -140,12 +157,19 @@ actor SearchShardExecutor {
                         ? completed(shard, cursor: "1")
                         : running(shard, cursor: "1"))
                     : shard
+                let preparedPage = try await preparePage(firstResponse, query, 1)
+                let committedShard = shardAfterPreparing(
+                    preparedPage,
+                    from: shard,
+                    advancing: firstTargetShard
+                )
                 try await persistPage(
-                    try await preparePage(firstResponse, query, 1),
-                    advancing: firstTargetShard,
+                    preparedPage,
+                    advancing: committedShard,
                     accountID: accountID
                 )
-                shard = firstTargetShard
+                shard = committedShard
+                try throwPostCommitFailure(from: preparedPage)
                 if pageCount == 1 {
                     if shard.state != .completed || shard.pageCursor != "1" {
                         shard = completed(shard, cursor: "1")
@@ -158,6 +182,7 @@ actor SearchShardExecutor {
                     let response = try await response(
                         query: query,
                         page: page,
+                        streamID: streamID,
                         shard: &shard,
                         accountID: accountID,
                         prepareUndecodablePage: prepareUndecodablePage
@@ -192,12 +217,19 @@ actor SearchShardExecutor {
                     } else {
                         targetShard = running(shard, cursor: String(page))
                     }
+                    let preparedPage = try await preparePage(response, query, page)
+                    let committedShard = shardAfterPreparing(
+                        preparedPage,
+                        from: shard,
+                        advancing: targetShard
+                    )
                     try await persistPage(
-                        try await preparePage(response, query, page),
-                        advancing: targetShard,
+                        preparedPage,
+                        advancing: committedShard,
                         accountID: accountID
                     )
-                    shard = targetShard
+                    shard = committedShard
+                    try throwPostCommitFailure(from: preparedPage)
                 }
                 if shard.state != .completed {
                     shard = completed(shard, cursor: String(pageCount))
@@ -305,15 +337,29 @@ actor SearchShardExecutor {
     private func response(
         query: GitHubIssueSearchQuery,
         page: Int,
+        streamID: SyncStreamID,
         shard: inout SyncShard,
         accountID: AccountID,
         prepareUndecodablePage: @escaping UndecodablePagePreparer
     ) async throws -> GitHubResponse<GitHubIssueSearchPage> {
-        let cachedEntry = try await replayCache?.entry(for: query, page: page)
+        try Task.checkCancellation()
+        let cachedEntry = try await replayCache?.entry(
+            for: query,
+            page: page,
+            streamID: streamID
+        )
+        try Task.checkCancellation()
+        let validators = try cachedEntry.map {
+            try GitHubHTTPValidators(
+                eTag: $0.replay.eTag,
+                lastModified: $0.replay.lastModified
+            )
+        }
+        try Task.checkCancellation()
         let result = try await client.searchResult(
             query,
             page: page,
-            ifNoneMatch: cachedEntry?.replay.eTag
+            validators: validators
         )
         switch result {
         case let .response(response):
@@ -338,16 +384,22 @@ actor SearchShardExecutor {
                     ),
                     payload: cachedEntry.snapshot.payload,
                     etag: cachedEntry.replay.eTag,
-                    lastModified: nil,
+                    lastModified: cachedEntry.replay.lastModified,
                     ssoHeader: ssoHeader,
                     source: .replay(cachedEntry.snapshot.id)
                 )
             } catch {
-                try await replayCache?.invalidate(query: query, page: page)
+                try Task.checkCancellation()
+                try await replayCache?.invalidate(
+                    query: query,
+                    page: page,
+                    streamID: streamID
+                )
+                try Task.checkCancellation()
                 let retry = try await client.searchResult(
                     query,
                     page: page,
-                    ifNoneMatch: nil
+                    validators: nil
                 )
                 switch retry {
                 case let .response(response):
@@ -409,6 +461,25 @@ actor SearchShardExecutor {
             try SyncShardRepository.save(shard, accountID: accountID, in: database)
         }
         await preparedWrite.didCommit()
+    }
+
+    private func shardAfterPreparing(
+        _ preparedWrite: PreparedSearchShardPageWrite,
+        from currentShard: SyncShard,
+        advancing targetShard: SyncShard
+    ) -> SyncShard {
+        guard preparedWrite.postCommitFailure == nil else {
+            return failed(currentShard)
+        }
+        return targetShard
+    }
+
+    private func throwPostCommitFailure(
+        from preparedWrite: PreparedSearchShardPageWrite
+    ) throws {
+        if let failure = preparedWrite.postCommitFailure {
+            throw failure
+        }
     }
 
     private func completed(_ shard: SyncShard, cursor: String?) -> SyncShard {

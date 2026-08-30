@@ -271,9 +271,11 @@ final class RoleDiscoveryPlanTests: XCTestCase {
             """.utf8
         )
         let roleSearchETag = "\"role-search-v1\""
+        let roleSearchLastModified = "Tue, 01 Sep 2026 00:00:00 GMT"
         let roleSearchSession = RoleSearchSession(
             body: body,
             eTag: roleSearchETag,
+            lastModified: roleSearchLastModified,
             returnsNotModifiedForMatchingETag: true
         )
         let searchClient = GitHubIssueSearchClient(
@@ -289,6 +291,7 @@ final class RoleDiscoveryPlanTests: XCTestCase {
             credentialRevision: credentialRevision,
             capabilityRevision: capabilityRevision
         )
+        let roleStreamID = stream.streamID(parent: parentStreamID)
 
         let result = try await RoleDiscoverySynchronizer(
             searchClient: searchClient,
@@ -318,6 +321,29 @@ final class RoleDiscoveryPlanTests: XCTestCase {
         XCTAssertFalse(workItem.isVisibleInInbox(at: observedAt))
         let snapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
         XCTAssertEqual(snapshots.count, 1)
+        let initialSnapshot = try XCTUnwrap(snapshots.first)
+        let boundedQuery = try XCTUnwrap(stream.queries.first).bounded(to: range)
+        let replayIdentity = try GitHubIssueSearchRequestIdentity(
+            query: boundedQuery,
+            page: 1,
+            scope: synchronizationScope,
+            streamID: roleStreamID
+        )
+        let conditionalIdentity = ConditionalRequestIdentity(
+            scope: synchronizationScope,
+            feature: .roleDiscovery,
+            streamID: roleStreamID,
+            requestKey: replayIdentity.requestKey
+        )
+        XCTAssertEqual(initialSnapshot.requestIdentity, conditionalIdentity)
+        XCTAssertEqual(initialSnapshot.eTag, roleSearchETag)
+        XCTAssertEqual(initialSnapshot.lastModified, roleSearchLastModified)
+        let persistedRoleStream = try await SyncStreamRepository(vault: vault).stream(
+            withID: roleStreamID,
+            accountID: accountID
+        )
+        XCTAssertEqual(persistedRoleStream?.organizationID, organizationID)
+        XCTAssertEqual(persistedRoleStream?.feature, .roleDiscovery)
 
         let replayedResult = try await RoleDiscoverySynchronizer(
             searchClient: searchClient,
@@ -342,21 +368,28 @@ final class RoleDiscoveryPlanTests: XCTestCase {
         )
         XCTAssertEqual(retainedReplaySnapshots.map(\.id), snapshots.map(\.id))
         let recordedValidators = await roleSearchSession.validators()
-        XCTAssertEqual(recordedValidators, [nil, roleSearchETag])
-        let boundedQuery = try XCTUnwrap(stream.queries.first).bounded(to: range)
-        let replayIdentity = try GitHubIssueSearchRequestIdentity(
-            query: boundedQuery,
-            page: 1,
-            scope: synchronizationScope
+        XCTAssertEqual(
+            recordedValidators,
+            [
+                RoleSearchRequestValidators(eTag: nil, lastModified: nil),
+                RoleSearchRequestValidators(eTag: roleSearchETag, lastModified: nil)
+            ]
         )
         let replayEntry = try await replayRepository.entry(
             requestKey: replayIdentity.requestKey,
+            streamID: roleStreamID,
             accountID: accountID,
             organizationID: organizationID,
             credentialRevision: credentialRevision,
             capabilityRevision: capabilityRevision
         )
         XCTAssertEqual(replayEntry?.snapshot.id, snapshots.first?.id)
+        XCTAssertEqual(replayEntry?.snapshot.requestIdentity, conditionalIdentity)
+        XCTAssertEqual(replayEntry?.snapshot.eTag, roleSearchETag)
+        XCTAssertEqual(replayEntry?.snapshot.lastModified, roleSearchLastModified)
+        XCTAssertEqual(replayEntry?.replay.streamID, roleStreamID)
+        XCTAssertEqual(replayEntry?.replay.eTag, roleSearchETag)
+        XCTAssertEqual(replayEntry?.replay.lastModified, roleSearchLastModified)
         XCTAssertEqual(replayEntry?.replay.lastValidatedAt, observedAt.addingTimeInterval(1))
 
         await roleSearchSession.setNotModifiedSSOHeader(
@@ -447,6 +480,7 @@ final class RoleDiscoveryPlanTests: XCTestCase {
         )
         let removedReplayEntry = try await replayRepository.entry(
             requestKey: replayIdentity.requestKey,
+            streamID: roleStreamID,
             accountID: accountID,
             organizationID: organizationID,
             credentialRevision: credentialRevision,
@@ -458,6 +492,104 @@ final class RoleDiscoveryPlanTests: XCTestCase {
             organizationID: organizationID
         )
         XCTAssertEqual(preservedItems.map(\.primaryNodeID), [GitHubNodeID(rawValue: "I_1")!])
+
+        // Re-establish a valid binding, then prove that a single malformed item
+        // retains the page's valid discovery evidence but cannot complete or
+        // authorize replay for the stream.
+        _ = try await RoleDiscoverySynchronizer(
+            searchClient: searchClient,
+            workItemRepository: WorkItemRepository(vault: vault),
+            shardRepository: SyncShardRepository(vault: vault),
+            replayRepository: replayRepository,
+            clock: { observedAt.addingTimeInterval(3) }
+        ).synchronize(
+            plan: plan,
+            scope: synchronizationScope,
+            githubOrganizationID: organization.githubOrganizationID,
+            streamID: parentStreamID,
+            searchRange: range,
+            accessibleRepositoryNames: ["github/triage"],
+            repositoryID: { _ in repositoryID },
+            streams: [stream]
+        )
+        let reboundReplay = try await replayRepository.entry(
+            requestKey: replayIdentity.requestKey,
+            streamID: roleStreamID,
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision
+        )
+        XCTAssertNotNil(reboundReplay)
+
+        let mixedPayload = Data(
+            """
+            {"total_count":2,"incomplete_results":false,"items":[{"id":2,"node_id":"I_2","number":2,"title":"Valid candidate","state":"open","html_url":"https://github.com/github/triage/issues/2","created_at":"1970-01-01T00:16:40Z","updated_at":"1970-01-01T00:33:20Z","closed_at":null,"repository_url":"https://api.github.com/repos/github/triage"},{"id":3,"node_id":"I_3","number":3,"title":"Invalid candidate","state":"unsupported","html_url":"https://github.com/github/triage/issues/3","created_at":"1970-01-01T00:16:40Z","updated_at":"1970-01-01T00:33:20Z","closed_at":null,"repository_url":"https://api.github.com/repos/github/triage"}]}
+            """.utf8
+        )
+        let mixedClient = GitHubIssueSearchClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(
+                    session: RoleSearchSession(body: mixedPayload, eTag: "\"mixed-page\"")
+                ),
+                credential: SecretValue("token")
+            )
+        )
+        let normalizationRecorder = RoleOutcomeRecorder()
+        do {
+            _ = try await RoleDiscoverySynchronizer(
+                searchClient: mixedClient,
+                workItemRepository: WorkItemRepository(vault: vault),
+                shardRepository: SyncShardRepository(vault: vault),
+                replayRepository: replayRepository,
+                clock: { observedAt.addingTimeInterval(4) }
+            ).synchronize(
+                plan: plan,
+                scope: synchronizationScope,
+                githubOrganizationID: organization.githubOrganizationID,
+                streamID: parentStreamID,
+                searchRange: range,
+                accessibleRepositoryNames: ["github/triage"],
+                repositoryID: { _ in repositoryID },
+                streams: [stream],
+                recordStreamOutcome: { stream, outcome in
+                    await normalizationRecorder.record(stream: stream.kind, outcome: outcome)
+                }
+            )
+            XCTFail("A per-item normalization failure must leave the stream incomplete.")
+        } catch let error as SearchShardExecutorError {
+            XCTAssertEqual(error, .normalizationFailure)
+        }
+
+        let normalizationOutcomes = await normalizationRecorder.outcomes()
+        XCTAssertEqual(normalizationOutcomes.map(\.outcome.status), [.failed])
+        let mixedSnapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
+        let mixedSnapshot = try XCTUnwrap(mixedSnapshots.first { $0.payload == mixedPayload })
+        let mixedFailures = try await NormalizationFailureRepository(vault: vault).failures(for: accountID)
+        XCTAssertTrue(mixedFailures.contains { $0.rawSnapshotID == mixedSnapshot.id })
+        let invalidatedReplay = try await replayRepository.entry(
+            requestKey: replayIdentity.requestKey,
+            streamID: roleStreamID,
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: credentialRevision,
+            capabilityRevision: capabilityRevision
+        )
+        XCTAssertNil(invalidatedReplay)
+        let mixedShards = try await SyncShardRepository(vault: vault).shards(
+            for: roleStreamID,
+            accountID: accountID
+        )
+        XCTAssertEqual(mixedShards.map(\.state), [.failed])
+        XCTAssertNil(mixedShards.first?.pageCursor)
+        let mixedItems = try await WorkItemRepository(vault: vault).fetch(
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        XCTAssertEqual(
+            Set(mixedItems.map(\.primaryNodeID)),
+            Set([GitHubNodeID(rawValue: "I_1")!, GitHubNodeID(rawValue: "I_2")!])
+        )
     }
 }
 
@@ -486,28 +618,42 @@ private func insertRoleDiscoveryRepository(
     }
 }
 
+private struct RoleSearchRequestValidators: Equatable, Sendable {
+    let eTag: String?
+    let lastModified: String?
+}
+
 private actor RoleSearchSession: HTTPSession {
     let body: Data
     let eTag: String?
+    let lastModified: String?
     let returnsNotModifiedForMatchingETag: Bool
-    private var recordedValidators = [String?]()
+    private var recordedValidators = [RoleSearchRequestValidators]()
     private var notModifiedSSOHeader: String?
 
     init(
         body: Data,
         eTag: String? = nil,
+        lastModified: String? = nil,
         returnsNotModifiedForMatchingETag: Bool = false
     ) {
         self.body = body
         self.eTag = eTag
+        self.lastModified = lastModified
         self.returnsNotModifiedForMatchingETag = returnsNotModifiedForMatchingETag
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let validator = request.value(forHTTPHeaderField: "If-None-Match")
-        recordedValidators.append(validator)
-        let isNotModified = returnsNotModifiedForMatchingETag && validator == eTag
+        let validators = RoleSearchRequestValidators(
+            eTag: request.value(forHTTPHeaderField: "If-None-Match"),
+            lastModified: request.value(forHTTPHeaderField: "If-Modified-Since")
+        )
+        recordedValidators.append(validators)
+        let isNotModified = returnsNotModifiedForMatchingETag && validators.eTag == eTag
         var headers = eTag.map { ["ETag": $0] } ?? [:]
+        if let lastModified {
+            headers["Last-Modified"] = lastModified
+        }
         if isNotModified, let notModifiedSSOHeader {
             headers["X-GitHub-SSO"] = notModifiedSSOHeader
         }
@@ -522,7 +668,7 @@ private actor RoleSearchSession: HTTPSession {
         )
     }
 
-    func validators() -> [String?] {
+    func validators() -> [RoleSearchRequestValidators] {
         recordedValidators
     }
 
@@ -536,7 +682,8 @@ private actor RoleIsolationSearchClient: GitHubIssueSearchExecuting {
 
     func searchResult(
         _ query: GitHubIssueSearchQuery,
-        page _: Int
+        page _: Int,
+        validators _: GitHubHTTPValidators?
     ) async throws -> GitHubIssueSearchResult {
         relationships.append(query.relationship)
         if case .assigned = query.relationship {

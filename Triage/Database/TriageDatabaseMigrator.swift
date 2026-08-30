@@ -8,13 +8,29 @@ enum TriageDatabaseMigrationError: Error, Equatable, Sendable {
 private struct TriageDatabaseMigration: Sendable {
     let id: String
     let checksum: String
+    let requiresVerifiedBackup: Bool
     let apply: @Sendable (Database) throws -> Void
+
+    init(
+        id: String,
+        checksum: String,
+        requiresVerifiedBackup: Bool = false,
+        apply: @escaping @Sendable (Database) throws -> Void
+    ) {
+        self.id = id
+        self.checksum = checksum
+        self.requiresVerifiedBackup = requiresVerifiedBackup
+        self.apply = apply
+    }
 }
 
 enum TriageDatabaseMigrator {
     static var migrationCount: Int { migrations.count }
 
-    static func migrate(_ databasePool: DatabasePool) throws {
+    static func migrate(
+        _ databasePool: DatabasePool,
+        beforeDestructiveMigration: @escaping @Sendable (String) throws -> Void
+    ) throws {
         try databasePool.write { database in
             try database.execute(sql: """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -26,6 +42,16 @@ enum TriageDatabaseMigrator {
         }
 
         for migration in migrations {
+            let isApplied = try databasePool.read { database in
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                    arguments: [migration.id]
+                ) != nil
+            }
+            if !isApplied, migration.requiresVerifiedBackup {
+                try beforeDestructiveMigration(migration.id)
+            }
             try databasePool.write { database in
                 // DatabasePool.write already wraps this closure in a transaction.
                 // Keeping the migration body and checksum record in that transaction
@@ -1244,6 +1270,129 @@ enum TriageDatabaseMigrator {
             try database.execute(sql: """
                 CREATE INDEX timeline_replay_receipt_pages_snapshot
                 ON timeline_replay_receipt_pages (raw_snapshot_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "033-role-search-page-replay-v2",
+            checksum: "3567bf0a5bf1e6fd2edb7b0ed017db386b9ed39b29a2533540b81de5197a2f12",
+            requiresVerifiedBackup: true
+        ) { database in
+            // Migration 025 bindings did not identify their role stream or
+            // retain full raw request authority. They are conditional cache
+            // metadata, not source observations, and must not authorize 304s.
+            // Raw snapshots remain encrypted evidence under their own policy.
+            try database.execute(sql: "DROP TABLE role_search_page_replays")
+            try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'roleDiscovery'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL CHECK (
+                        length(request_key) BETWEEN 1 AND 2048
+                    ),
+                    query_value TEXT NOT NULL CHECK (
+                        length(query_value) BETWEEN 1 AND 2048
+                    ),
+                    page INTEGER NOT NULL CHECK (page BETWEEN 1 AND 100),
+                    endpoint TEXT NOT NULL CHECK (
+                        length(endpoint) BETWEEN 1 AND 2048
+                    ),
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    etag TEXT CHECK (
+                        etag IS NULL OR length(etag) BETWEEN 1 AND 2048
+                    ),
+                    last_modified TEXT CHECK (
+                        last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048
+                    ),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id, request_key,
+                        credential_revision, capability_revision
+                    ),
+                    UNIQUE (
+                        account_id, organization_id, feature, stream_id, endpoint,
+                        credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON role_search_page_replays (raw_snapshot_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "034-role-search-page-replay-parser-identity",
+            checksum: "2cd58affc40f404812fdc6a4a32ee8ec50116fd0e813a8af3eddfee9b99a6170",
+            requiresVerifiedBackup: true
+        ) { database in
+            try database.execute(sql: "DROP INDEX role_search_page_replays_snapshot")
+            try database.execute(sql: "ALTER TABLE role_search_page_replays RENAME TO role_search_page_replays_v2")
+            try database.execute(sql: """
+                CREATE TABLE role_search_page_replays (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'roleDiscovery'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL CHECK (
+                        length(request_key) BETWEEN 1 AND 2048
+                    ),
+                    query_value TEXT NOT NULL CHECK (
+                        length(query_value) BETWEEN 1 AND 2048
+                    ),
+                    page INTEGER NOT NULL CHECK (page BETWEEN 1 AND 100),
+                    endpoint TEXT NOT NULL CHECK (
+                        length(endpoint) BETWEEN 1 AND 2048
+                    ),
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    etag TEXT CHECK (
+                        etag IS NULL OR length(etag) BETWEEN 1 AND 2048
+                    ),
+                    last_modified TEXT CHECK (
+                        last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048
+                    ),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    last_validated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id, request_key,
+                        credential_revision, capability_revision
+                    ),
+                    UNIQUE (
+                        account_id, organization_id, feature, stream_id, endpoint,
+                        parser_version, credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
+                )
+                """)
+            try database.execute(sql: """
+                INSERT INTO role_search_page_replays (
+                    account_id, organization_id, feature, stream_id, request_key,
+                    query_value, page, endpoint, credential_revision, capability_revision,
+                    raw_snapshot_id, etag, last_modified, parser_version, last_validated_at_ms
+                )
+                SELECT account_id, organization_id, feature, stream_id, request_key,
+                       query_value, page, endpoint, credential_revision, capability_revision,
+                       raw_snapshot_id, etag, last_modified, parser_version, last_validated_at_ms
+                FROM role_search_page_replays_v2
+                """)
+            try database.execute(sql: "DROP TABLE role_search_page_replays_v2")
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON role_search_page_replays (raw_snapshot_id)
                 """)
         }
     ]
