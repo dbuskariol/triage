@@ -139,6 +139,10 @@ enum GitHubTimelineClientError: Error, Equatable, Sendable {
     case invalidPaginationLink
 }
 
+struct GitHubTimelineUndecodablePageError: Error, Equatable, Sendable {
+    let page: GitHubUndecodablePage
+}
+
 enum GitHubTimelinePageResult: Sendable {
     case page(GitHubPage<GitHubTimelineEventDTO>)
     case notModified(ssoHeader: GitHubSSOHeader?)
@@ -191,7 +195,7 @@ actor GitHubTimelineClient {
         }
         let headers = ifNoneMatch.map { ["If-None-Match": $0] } ?? [:]
         do {
-            let result = try await client.getPage(
+            let decodingResult = try await client.getPagePreservingUndecodablePayload(
                 GitHubTimelineEventDTO.self,
                 request: GitHubRESTRequest(
                     path: "\(repository.path)/issues/\(issueOrPullRequestNumber)/timeline",
@@ -202,6 +206,12 @@ actor GitHubTimelineClient {
                     headers: headers
                 )
             )
+            guard case let .page(result) = decodingResult else {
+                if case let .undecodable(page) = decodingResult {
+                    throw GitHubTimelineUndecodablePageError(page: page)
+                }
+                throw GitHubRESTClientError.invalidJSON
+            }
             try Self.validatePaginationLink(
                 result.nextPageURL,
                 rawLinkHeader: result.linkHeader,
@@ -224,10 +234,16 @@ actor GitHubTimelineClient {
             repository: repository,
             issueOrPullRequestNumber: issueOrPullRequestNumber
         )
-        let result = try await client.getPage(
+        let decodingResult = try await client.getPagePreservingUndecodablePayload(
             GitHubTimelineEventDTO.self,
             request: GitHubRESTRequest(nextPageURL: url)
         )
+        guard case let .page(result) = decodingResult else {
+            if case let .undecodable(page) = decodingResult {
+                throw GitHubTimelineUndecodablePageError(page: page)
+            }
+            throw GitHubRESTClientError.invalidJSON
+        }
         try Self.validatePaginationLink(
             result.nextPageURL,
             rawLinkHeader: result.linkHeader,

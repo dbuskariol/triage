@@ -98,10 +98,8 @@ final class AuthBrokerClientTests: XCTestCase {
 
         _ = try await client.refresh(AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh")))
 
-        XCTAssertEqual(
-            await session.maximumResponseBodyBytes(),
-            AuthBrokerProtocol.maximumResponseBodyBytes
-        )
+        let maximumResponseBodyBytes = await session.maximumResponseBodyBytes()
+        XCTAssertEqual(maximumResponseBodyBytes, AuthBrokerProtocol.maximumResponseBodyBytes)
     }
 }
 

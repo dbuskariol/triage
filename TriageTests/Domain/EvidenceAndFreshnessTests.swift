@@ -18,7 +18,7 @@ final class EvidenceAndFreshnessTests: XCTestCase {
         XCTAssertEqual(evidence.excerpt, "@octocat Please review this.")
     }
 
-    func testCoverageIsScopedByAccountOrganizationFeatureAndStream() {
+    func testCoverageIsScopedByAccountOrganizationFeatureAndStream() throws {
         let coverage = CoverageRecord(
             accountID: AccountID.make(),
             organizationID: OrganizationID(rawValue: "github")!,

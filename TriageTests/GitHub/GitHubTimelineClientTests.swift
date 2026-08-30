@@ -2,6 +2,27 @@ import XCTest
 @testable import Triage
 
 final class GitHubTimelineClientTests: XCTestCase {
+    func testFirstPageSendsConditionalValidatorAndReturnsNotModifiedWithoutInventingEvents() async throws {
+        let session = ConditionalTimelineSession()
+        let client = GitHubTimelineClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token")
+        ))
+
+        let result = try await client.firstPage(
+            repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+            issueOrPullRequestNumber: 42,
+            ifNoneMatch: "\"timeline-v1\""
+        )
+
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("A 304 response must retain cached source state instead of inventing an empty page.")
+        }
+        XCTAssertNil(ssoHeader)
+        let observedValidator = await session.ifNoneMatch()
+        XCTAssertEqual(observedValidator, "\"timeline-v1\"")
+    }
+
     func testAllTimelineUsesLinkPaginationAndPreservesEvents() async throws {
         let secondPage = URL(
             string: "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2"
@@ -78,6 +99,27 @@ final class GitHubTimelineClientTests: XCTestCase {
         } verify: { error in
             XCTAssertEqual(error as? GitHubTimelineClientError, .invalidPaginationLink)
         }
+    }
+}
+
+private actor ConditionalTimelineSession: HTTPSession {
+    private var observedIfNoneMatch: String?
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        observedIfNoneMatch = request.value(forHTTPHeaderField: "If-None-Match")
+        return (
+            Data(),
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 304,
+                httpVersion: nil,
+                headerFields: [:]
+            )!
+        )
+    }
+
+    func ifNoneMatch() -> String? {
+        observedIfNoneMatch
     }
 }
 

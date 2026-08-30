@@ -28,6 +28,19 @@ struct GitHubPage<Value: Sendable>: Sendable {
     }
 }
 
+struct GitHubUndecodablePage: Equatable, Sendable {
+    let payload: Data
+    let linkHeader: String?
+    let etag: String?
+    let lastModified: String?
+    let ssoHeader: GitHubSSOHeader?
+}
+
+enum GitHubPageDecodingResult<Value: Sendable>: Sendable {
+    case page(GitHubPage<Value>)
+    case undecodable(GitHubUndecodablePage)
+}
+
 struct GitHubResponse<Value: Sendable>: Sendable {
     let value: Value
     let payload: Data
@@ -110,23 +123,45 @@ actor GitHubRESTClient {
         _ type: Value.Type,
         request: GitHubRESTRequest
     ) async throws -> GitHubPage<Value> {
+        switch try await getPagePreservingUndecodablePayload(type, request: request) {
+        case let .page(page):
+            return page
+        case .undecodable:
+            throw GitHubRESTClientError.invalidJSON
+        }
+    }
+
+    func getPagePreservingUndecodablePayload<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        request: GitHubRESTRequest
+    ) async throws -> GitHubPageDecodingResult<Value> {
         let response = try await send(request)
         if let failure = GitHubFailureClassifier.classify(response) {
             GitHubDiagnostics.record(failure)
             throw failure
         }
         do {
-            return GitHubPage(
-                values: try JSONDecoder.github.decode([Value].self, from: response.body),
-                payload: response.body,
-                nextPageURL: GitHubLinkHeader(response.header(named: "Link"))?.nextPageURL,
-                linkHeader: response.header(named: "Link"),
-                etag: response.header(named: "ETag"),
-                lastModified: response.header(named: "Last-Modified"),
-                ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+            return .page(
+                GitHubPage(
+                    values: try JSONDecoder.github.decode([Value].self, from: response.body),
+                    payload: response.body,
+                    nextPageURL: GitHubLinkHeader(response.header(named: "Link"))?.nextPageURL,
+                    linkHeader: response.header(named: "Link"),
+                    etag: response.header(named: "ETag"),
+                    lastModified: response.header(named: "Last-Modified"),
+                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+                )
             )
         } catch {
-            throw GitHubRESTClientError.invalidJSON
+            return .undecodable(
+                GitHubUndecodablePage(
+                    payload: response.body,
+                    linkHeader: response.header(named: "Link"),
+                    etag: response.header(named: "ETag"),
+                    lastModified: response.header(named: "Last-Modified"),
+                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+                )
+            )
         }
     }
 

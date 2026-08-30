@@ -132,7 +132,8 @@ final class SearchShardExecutorTests: XCTestCase {
         XCTAssertEqual(shards.count, 1)
         XCTAssertEqual(shards[0].pageCursor, nil)
         XCTAssertEqual(shards[0].state, .failed)
-        XCTAssertFalse(await recorder.didCommit())
+        let didCommit = await recorder.didCommit()
+        XCTAssertFalse(didCommit)
     }
 
     func testSuccessfulPreparedPageWritePersistsSnapshotBeforeCommitPublication() async throws {
@@ -233,7 +234,8 @@ final class SearchShardExecutorTests: XCTestCase {
         XCTAssertEqual(shards.count, 1)
         XCTAssertEqual(shards[0].pageCursor, "1")
         XCTAssertEqual(shards[0].state, .completed)
-        XCTAssertTrue(await recorder.didCommit())
+        let didCommit = await recorder.didCommit()
+        XCTAssertTrue(didCommit)
     }
 }
 

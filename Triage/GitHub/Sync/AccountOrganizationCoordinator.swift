@@ -145,6 +145,7 @@ enum AccountOrganizationRefreshFailure: Error, Equatable, Sendable {
     case authenticationRequired(detail: String?)
     case ssoRequired(detail: String?)
     case approvalRequired(detail: String?)
+    case rateLimited(retryAt: Date?, detail: String?)
     case unavailable(detail: String?)
     case failed(detail: String?)
 
@@ -158,6 +159,8 @@ enum AccountOrganizationRefreshFailure: Error, Equatable, Sendable {
             FreshnessState(status: .ssoRequired, detail: detail)
         case let .approvalRequired(detail):
             FreshnessState(status: .approvalRequired, detail: detail)
+        case let .rateLimited(retryAt, detail):
+            FreshnessState(status: .rateLimited, nextRetryAt: retryAt, detail: detail)
         case let .unavailable(detail):
             FreshnessState(status: .partial, detail: detail)
         case let .failed(detail):

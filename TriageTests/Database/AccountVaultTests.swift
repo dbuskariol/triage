@@ -1,3 +1,4 @@
+import GRDB
 import XCTest
 @testable import Triage
 
@@ -59,15 +60,19 @@ final class AccountVaultTests: XCTestCase {
         try await vault.applyMigrations()
         try await vault.applyMigrations()
 
-        let migrations = try await vault.read { database in
+        let migrations = try await vault.read { database -> [(id: String, checksum: String)] in
             try Row.fetchAll(
                 database,
                 sql: "SELECT id, checksum FROM schema_migrations ORDER BY id"
-            )
+            ).map { row in
+                let id: String = row["id"]
+                let checksum: String = row["checksum"]
+                return (id, checksum)
+            }
         }
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
-        XCTAssertEqual(migrations[0]["id"] as String, "001-vault-metadata")
-        XCTAssertFalse((migrations[0]["checksum"] as String).isEmpty)
+        XCTAssertEqual(migrations[0].id, "001-vault-metadata")
+        XCTAssertFalse(migrations[0].checksum.isEmpty)
         try await registry.closeAll()
     }
 

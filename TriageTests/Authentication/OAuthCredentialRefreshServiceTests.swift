@@ -27,7 +27,8 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             broker: RejectingBroker()
         )
 
-        XCTAssertEqual(try await service.refreshIfNeeded(account), account)
+        let refreshedAccount = try await service.refreshIfNeeded(account)
+        XCTAssertEqual(refreshedAccount, account)
     }
 
     func testRefreshServiceValidatesBrokerURLEvenWithAnInjectedBroker() throws {
@@ -100,27 +101,22 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         XCTAssertEqual(refreshed.accessTokenExpiresAt, now.addingTimeInterval(3_600))
         XCTAssertEqual(refreshed.refreshTokenExpiresAt, now.addingTimeInterval(7_200))
         XCTAssertEqual(refreshed.lastValidatedAt, now)
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthAccessToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("access-rotated".utf8)
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthRefreshToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("refresh-rotated".utf8)
+        XCTAssertEqual(accessToken, Data("access-rotated".utf8))
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertEqual(try await repository.accounts(), [refreshed])
-        XCTAssertEqual(
-            await broker.requests(),
-            [AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh-original"))]
-        )
+        XCTAssertEqual(refreshToken, Data("refresh-rotated".utf8))
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [refreshed])
+        let brokerRequests = await broker.requests()
+        XCTAssertEqual(brokerRequests, [AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh-original"))])
     }
 
     func testBrokerFailureLeavesCredentialSecretsAndVaultRecordUnchanged() async throws {
@@ -169,8 +165,10 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             XCTAssertEqual(error, failure)
         }
 
-        XCTAssertEqual(await secrets.writeCount(), 0)
-        XCTAssertEqual(try await repository.accounts(), [account])
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [account])
     }
 
     func testCancellationFromBrokerLeavesCredentialSecretsAndVaultRecordUnchanged() async throws {
@@ -211,8 +209,10 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             // Cancellation must not mutate the active credential set.
         }
 
-        XCTAssertEqual(await secrets.writeCount(), 0)
-        XCTAssertEqual(try await repository.accounts(), [account])
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [account])
     }
 
     func testMalformedRefreshTokenFailsBeforeBrokerRequest() async throws {
@@ -255,8 +255,10 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             XCTAssertEqual(error, .refreshTokenEncodingInvalid)
         }
 
-        XCTAssertEqual(await broker.requests(), [])
-        XCTAssertEqual(await secrets.writeCount(), 0)
+        let brokerRequests = await broker.requests()
+        XCTAssertEqual(brokerRequests, [])
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
     }
 
     func testMissingVaultKeyFailsBeforeBrokerRequest() async throws {
@@ -299,8 +301,10 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             XCTAssertEqual(error, .vaultKeyUnavailable)
         }
 
-        XCTAssertEqual(await broker.requests(), [])
-        XCTAssertEqual(await secrets.writeCount(), 0)
+        let brokerRequests = await broker.requests()
+        XCTAssertEqual(brokerRequests, [])
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
     }
 
     func testAlreadyCancelledRefreshSkipsSecretAndBrokerAccess() async throws {
@@ -343,8 +347,10 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         }.value
 
         XCTAssertTrue(wasCancelled)
-        XCTAssertEqual(await broker.requests(), [])
-        XCTAssertEqual(await secrets.writeCount(), 0)
+        let brokerRequests = await broker.requests()
+        XCTAssertEqual(brokerRequests, [])
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
     }
 
     func testCancellationAfterBrokerResponseLeavesPersistedCredentialStateUnchanged() async throws {
@@ -407,23 +413,20 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             // Cancellation after the broker returns must not rotate local credentials.
         }
 
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthAccessToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("access-original".utf8)
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthRefreshToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("refresh-original".utf8)
+        XCTAssertEqual(accessToken, Data("access-original".utf8))
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertEqual(try await repository.accounts(), [account])
+        XCTAssertEqual(refreshToken, Data("refresh-original".utf8))
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [account])
     }
 
     func testAccessTokenWriteFailurePreservesRotatedRefreshToken() async throws {
@@ -476,22 +479,18 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             // The rotated refresh token remains recoverable after the local write failure.
         }
 
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthAccessToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("access-original".utf8)
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthRefreshToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            ),
-            Data("refresh-rotated".utf8)
+        XCTAssertEqual(accessToken, Data("access-original".utf8))
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
+        XCTAssertEqual(refreshToken, Data("refresh-rotated".utf8))
     }
 
     private func makeExpiringOAuthAccount(now: Date) -> GitHubAccount {

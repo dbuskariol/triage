@@ -60,6 +60,8 @@ actor OrganizationWorkRefreshService {
         )
         let searchClient = GitHubIssueSearchClient(client: restClient)
         var searchRange: SearchTimeRange?
+        var deferredSSORequirement: GitHubSSOHeader?
+        let refreshedWorkItemIDs: [WorkItemID]
         do {
             let serverObservedAt = try await searchClient.serverTime()
             let previousHighWater = try await SyncStreamRepository(vault: vault)
@@ -86,16 +88,26 @@ actor OrganizationWorkRefreshService {
                 end: serverObservedAt
             )
             searchRange = range
-            let inventory = try await OrganizationInventoryRefreshService(
+            let inventoryResult = try await OrganizationInventoryRefreshService(
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore
-            ).refreshRepositories(
+            ).refreshInventory(
                 account: account,
                 organization: organization,
                 rateLimitController: rateLimitController,
                 requestPriority: requestPriority
             )
+            let inventory: [RepositorySummary]
+            switch inventoryResult.repositories {
+            case let .success(summaries, _):
+                inventory = summaries
+            case let .failure(failure, _):
+                throw requiredRepositoryInventoryFailure(failure)
+            }
+            if case let .failure(.ssoRequired(header), _) = inventoryResult.teams {
+                deferredSSORequirement = header
+            }
             let repositoryIDsByAPIURL = Dictionary(
                 uniqueKeysWithValues: inventory.map {
                     (URL(string: "https://api.github.com/repos/\($0.fullName)")!, $0.id)
@@ -126,7 +138,8 @@ actor OrganizationWorkRefreshService {
             )
             let graphqlClient = GitHubGraphQLClient(
                 credential: token,
-                rateLimitController: rateLimitController
+                rateLimitController: rateLimitController,
+                requestPriority: requestPriority
             )
             try await GitHubNodeHydrationService(
                 client: graphqlClient,
@@ -142,6 +155,20 @@ actor OrganizationWorkRefreshService {
                     repositoryIDsByNodeID[repository.id]
                 }
             )
+            let timelineSSORequirement = try await refreshTimelines(
+                restClient: restClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
+                repositoryIDs: inventory.map(\.id),
+                currentUserNodeID: account.nodeID,
+                coverageRepository: coverageRepository,
+                attemptedAt: attemptedAt
+            )
+            deferredSSORequirement = GitHubSSOHeader.combined([
+                deferredSSORequirement,
+                timelineSSORequirement
+            ])
             try await refreshPullRequestReviews(
                 restClient: restClient,
                 vault: vault,
@@ -150,6 +177,19 @@ actor OrganizationWorkRefreshService {
                 coverageRepository: coverageRepository,
                 attemptedAt: attemptedAt
             )
+            let reviewThreadSSORequirement = try await refreshPullRequestReviewThreads(
+                graphqlClient: graphqlClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
+                currentUserNodeID: account.nodeID,
+                coverageRepository: coverageRepository,
+                attemptedAt: attemptedAt
+            )
+            deferredSSORequirement = GitHubSSOHeader.combined([
+                deferredSSORequirement,
+                reviewThreadSSORequirement
+            ])
             try await coverageRepository.save(
                 coverageRecord(
                     scope: synchronizationScope,
@@ -161,7 +201,7 @@ actor OrganizationWorkRefreshService {
                 ),
                 attemptedAt: attemptedAt
             )
-            return discoveryResult.workItemIDs
+            refreshedWorkItemIDs = discoveryResult.workItemIDs
         } catch let failure as GitHubFailure {
             if let ssoHeader = failure.ssoHeader?.scoped(to: organization.githubOrganizationID) {
                 try await coverageRepository.save(
@@ -206,6 +246,19 @@ actor OrganizationWorkRefreshService {
                 attemptedAt: attemptedAt
             )
             throw failure
+        } catch let failure as AccountOrganizationRefreshFailure {
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: synchronizationScope,
+                    streamID: streamID,
+                    interval: searchRange,
+                    status: coverageStatus(for: failure),
+                    lastSuccessfulAt: nil,
+                    failureDetail: failure.freshness.detail
+                ),
+                attemptedAt: attemptedAt
+            )
+            throw failure
         } catch is CancellationError {
             try await coverageRepository.save(
                 coverageRecord(
@@ -233,6 +286,10 @@ actor OrganizationWorkRefreshService {
             )
             throw error
         }
+        if let deferredSSORequirement {
+            throw OrganizationRefreshError.ssoRequirement(deferredSSORequirement)
+        }
+        return refreshedWorkItemIDs
     }
 
     private func coverageRecord(
@@ -242,12 +299,13 @@ actor OrganizationWorkRefreshService {
         status: CoverageStatus,
         lastSuccessfulAt: Date?,
         failureDetail: String?,
-        feature: CoverageFeature = .roleDiscovery
+        feature: CoverageFeature = .roleDiscovery,
+        repositoryID: RepositoryID? = nil
     ) -> CoverageRecord {
         CoverageRecord(
             accountID: scope.accountID,
             organizationID: scope.organizationID,
-            repositoryID: nil,
+            repositoryID: repositoryID,
             feature: feature,
             streamID: streamID,
             intervalStart: interval?.start,
@@ -258,6 +316,176 @@ actor OrganizationWorkRefreshService {
             lastSuccessfulAt: lastSuccessfulAt,
             failureDetail: failureDetail
         )
+    }
+
+    private func requiredRepositoryInventoryFailure(
+        _ failure: OrganizationInventoryRefreshFailure
+    ) -> any Error {
+        switch failure {
+        case let .ssoRequired(header):
+            OrganizationRefreshError.ssoRequirement(header)
+        case .approvalRequired:
+            AccountOrganizationRefreshFailure.approvalRequired(
+                detail: "GitHub organization approval is required for repository inventory."
+            )
+        case .authenticationRequired:
+            AccountOrganizationRefreshFailure.authenticationRequired(
+                detail: "GitHub authentication is required for repository inventory."
+            )
+        case let .rateLimited(retryAt):
+            AccountOrganizationRefreshFailure.rateLimited(
+                retryAt: retryAt,
+                detail: "GitHub rate limiting left repository inventory incomplete."
+            )
+        case .unavailableOrPermission:
+            AccountOrganizationRefreshFailure.unavailable(
+                detail: "Repository inventory is unavailable to the selected account."
+            )
+        case .partial:
+            AccountOrganizationRefreshFailure.unavailable(
+                detail: "Repository inventory is partial and cannot safely scope role discovery."
+            )
+        case .failed:
+            AccountOrganizationRefreshFailure.failed(
+                detail: "Repository inventory could not be refreshed."
+            )
+        }
+    }
+
+    private func coverageStatus(
+        for failure: AccountOrganizationRefreshFailure
+    ) -> CoverageStatus {
+        switch failure {
+        case .ssoRequired:
+            .requiresSSO
+        case .approvalRequired:
+            .requiresApproval
+        case .unavailable:
+            .unavailable
+        case .rateLimited:
+            .partial
+        case .offline, .authenticationRequired, .failed:
+            .failed
+        }
+    }
+
+    private func refreshTimelines(
+        restClient: GitHubRESTClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        repositoryIDs requestedRepositoryIDs: [RepositoryID],
+        currentUserNodeID: GitHubNodeID,
+        coverageRepository: CoverageRepository,
+        attemptedAt: Date
+    ) async throws -> GitHubSSOHeader? {
+        let aggregateStreamID = SyncStreamID(rawValue: "timelines-\(organization.id.rawValue)")!
+        let repositoryIDs = Set(requestedRepositoryIDs).sorted { $0.rawValue < $1.rawValue }
+        let initialRepositoryRecords = repositoryIDs.map { repositoryID in
+            coverageRecord(
+                scope: scope,
+                streamID: SyncStreamID(
+                    rawValue: "timelines-\(organization.id.rawValue)-\(repositoryID.rawValue)"
+                )!,
+                interval: nil,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil,
+                feature: .timelines,
+                repositoryID: repositoryID
+            )
+        }
+        let initialAggregateRecord = coverageRecord(
+            scope: scope,
+            streamID: aggregateStreamID,
+            interval: nil,
+            status: .partial,
+            lastSuccessfulAt: nil,
+            failureDetail: nil,
+            feature: .timelines
+        )
+        let initialRecords = initialRepositoryRecords + [initialAggregateRecord]
+        try await vault.write { database in
+            for record in initialRecords {
+                try CoverageRepository.save(
+                    record,
+                    attemptedAt: attemptedAt,
+                    expectedAccountID: scope.accountID,
+                    in: database
+                )
+            }
+        }
+        try Task.checkCancellation()
+        do {
+            let result = try await GitHubTimelineRefreshService(
+                client: GitHubTimelineClient(client: restClient),
+                candidateRepository: TimelineCandidateRepository(vault: vault),
+                eventRepository: TimelineEventRepository(vault: vault),
+                normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+                conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: vault)
+            ).refresh(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                githubOrganizationID: organization.githubOrganizationID,
+                currentUserID: ActorID(rawValue: currentUserNodeID.rawValue)!,
+                observedAt: attemptedAt
+            )
+            try Task.checkCancellation()
+            let repositoryRecords = repositoryIDs.map { repositoryID in
+                let assessment = result.coverageAssessment(for: repositoryID)
+                return coverageRecord(
+                    scope: scope,
+                    streamID: SyncStreamID(
+                        rawValue: "timelines-\(organization.id.rawValue)-\(repositoryID.rawValue)"
+                    )!,
+                    interval: nil,
+                    status: assessment.status,
+                    lastSuccessfulAt: assessment.status == .complete ? attemptedAt : nil,
+                    failureDetail: assessment.failureDetail,
+                    feature: .timelines,
+                    repositoryID: repositoryID
+                )
+            }
+            let aggregateAssessment = result.coverageAssessment
+            let aggregateRecord = coverageRecord(
+                scope: scope,
+                streamID: aggregateStreamID,
+                interval: nil,
+                status: aggregateAssessment.status,
+                lastSuccessfulAt: aggregateAssessment.status == .complete ? attemptedAt : nil,
+                failureDetail: aggregateAssessment.failureDetail,
+                feature: .timelines
+            )
+            let records = repositoryRecords + [aggregateRecord]
+            try await vault.write { database in
+                for record in records {
+                    try CoverageRepository.save(
+                        record,
+                        attemptedAt: attemptedAt,
+                        expectedAccountID: scope.accountID,
+                        in: database
+                    )
+                }
+            }
+            try Task.checkCancellation()
+            return result.ssoHeader
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: aggregateStreamID,
+                    interval: nil,
+                    status: .failed,
+                    lastSuccessfulAt: nil,
+                    failureDetail: "Timeline refresh did not complete.",
+                    feature: .timelines
+                ),
+                attemptedAt: attemptedAt
+            )
+            return nil
+        }
     }
 
     private func refreshPullRequestReviews(
@@ -345,6 +573,73 @@ actor OrganizationWorkRefreshService {
                 ),
                 attemptedAt: attemptedAt
             )
+        }
+    }
+
+    private func refreshPullRequestReviewThreads(
+        graphqlClient: GitHubGraphQLClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        currentUserNodeID: GitHubNodeID,
+        coverageRepository: CoverageRepository,
+        attemptedAt: Date
+    ) async throws -> GitHubSSOHeader? {
+        let streamID = SyncStreamID(rawValue: "pull-request-review-threads-\(organization.id.rawValue)")!
+        try await coverageRepository.save(
+            coverageRecord(
+                scope: scope,
+                streamID: streamID,
+                interval: nil,
+                status: .partial,
+                lastSuccessfulAt: nil,
+                failureDetail: nil,
+                feature: .reviewThreads
+            ),
+            attemptedAt: attemptedAt
+        )
+        do {
+            let result = try await PullRequestReviewThreadRefreshService(
+                fetcher: GitHubPullRequestReviewThreadClient(client: graphqlClient),
+                candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
+                threadRepository: PullRequestReviewThreadRepository(vault: vault),
+                currentUserNodeID: currentUserNodeID
+            ).refresh(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                githubOrganizationID: organization.githubOrganizationID,
+                observedAt: attemptedAt
+            )
+            let assessment = result.coverageAssessment
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: assessment.status,
+                    lastSuccessfulAt: assessment.status == .complete ? Date() : nil,
+                    failureDetail: assessment.failureDetail,
+                    feature: .reviewThreads
+                ),
+                attemptedAt: attemptedAt
+            )
+            return result.ssoRequirement
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try await coverageRepository.save(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: .failed,
+                    lastSuccessfulAt: nil,
+                    failureDetail: "Pull request review-thread refresh did not complete.",
+                    feature: .reviewThreads
+                ),
+                attemptedAt: attemptedAt
+            )
+            return nil
         }
     }
 }

@@ -1,3 +1,4 @@
+import GRDB
 import XCTest
 @testable import Triage
 
@@ -115,44 +116,55 @@ final class WorkRelationRepositoryTests: XCTestCase {
                 observedAt: fixture.date
             )
 
-            let issue = try await fixture.vault.read { database in
-                try Row.fetchOne(
+            let issue = try await fixture.vault.read { database -> (Int?, Int?, Data?, Data?) in
+                let row = try Row.fetchOne(
                     database,
                     sql: """
                         SELECT locked, comments_count, assignee_node_ids_json, label_names_json
                         FROM issues
                         WHERE github_node_id = ?
-                        """,
+                    """,
                     arguments: [fixture.node.nodeID.rawValue]
                 )
+                let locked: Int? = row?["locked"]
+                let commentsCount: Int? = row?["comments_count"]
+                let assigneeNodeIDs: Data? = row?["assignee_node_ids_json"]
+                let labelNames: Data? = row?["label_names_json"]
+                return (locked, commentsCount, assigneeNodeIDs, labelNames)
             }
-            XCTAssertEqual(issue?["locked"], 1)
-            XCTAssertEqual(issue?["comments_count"], 3)
+            XCTAssertEqual(issue.0, 1)
+            XCTAssertEqual(issue.1, 3)
             XCTAssertEqual(
-                try JSONDecoder().decode([String].self, from: issue!["assignee_node_ids_json"]),
+                try JSONDecoder().decode([String].self, from: try XCTUnwrap(issue.2)),
                 ["MDQ6VXNlcjE="]
             )
             XCTAssertEqual(
-                try JSONDecoder().decode([String].self, from: issue!["label_names_json"]),
+                try JSONDecoder().decode([String].self, from: try XCTUnwrap(issue.3)),
                 ["bug"]
             )
-            let pullRequestRow = try await fixture.vault.read { database in
-                try Row.fetchOne(
+            let pullRequestRow = try await fixture.vault.read { database -> (String?, String?, String?, String?, Data?) in
+                let row = try Row.fetchOne(
                     database,
                     sql: """
                         SELECT mergeable_state, head_ref, base_ref, review_decision, label_names_json
                         FROM pull_requests
                         WHERE github_node_id = ?
-                        """,
+                    """,
                     arguments: [pullRequest.nodeID.rawValue]
                 )
+                let mergeableState: String? = row?["mergeable_state"]
+                let headRef: String? = row?["head_ref"]
+                let baseRef: String? = row?["base_ref"]
+                let reviewDecision: String? = row?["review_decision"]
+                let labelNames: Data? = row?["label_names_json"]
+                return (mergeableState, headRef, baseRef, reviewDecision, labelNames)
             }
-            XCTAssertEqual(pullRequestRow?["mergeable_state"], "MERGEABLE")
-            XCTAssertEqual(pullRequestRow?["head_ref"], "feature")
-            XCTAssertEqual(pullRequestRow?["base_ref"], "main")
-            XCTAssertEqual(pullRequestRow?["review_decision"], "APPROVED")
+            XCTAssertEqual(pullRequestRow.0, "MERGEABLE")
+            XCTAssertEqual(pullRequestRow.1, "feature")
+            XCTAssertEqual(pullRequestRow.2, "main")
+            XCTAssertEqual(pullRequestRow.3, "APPROVED")
             XCTAssertEqual(
-                try JSONDecoder().decode([String].self, from: pullRequestRow!["label_names_json"]),
+                try JSONDecoder().decode([String].self, from: try XCTUnwrap(pullRequestRow.4)),
                 ["documentation"]
             )
     }
@@ -190,10 +202,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         let repository = RawAPISnapshotRepository(vault: fixture.vault)
         try await repository.save(snapshot)
 
-        XCTAssertEqual(
-            try await repository.snapshots(for: fixture.accountID),
-            [snapshot]
-        )
+        let snapshots = try await repository.snapshots(for: fixture.accountID)
+        XCTAssertEqual(snapshots, [snapshot])
 
         do {
             try await repository.save(
@@ -266,17 +276,13 @@ final class WorkRelationRepositoryTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(
-            try await repository.compact(
-                accountID: fixture.accountID,
-                before: fixture.date.addingTimeInterval(180)
-            ),
-            1
+        let compactedCount = try await repository.compact(
+            accountID: fixture.accountID,
+            before: fixture.date.addingTimeInterval(180)
         )
-        XCTAssertEqual(
-            try await repository.snapshots(for: fixture.accountID),
-            [newest, failedSnapshot]
-        )
+        XCTAssertEqual(compactedCount, 1)
+        let snapshots = try await repository.snapshots(for: fixture.accountID)
+        XCTAssertEqual(snapshots, [newest, failedSnapshot])
     }
 
     func testNormalizationFailuresRetainAccountScopedSnapshotProvenance() async throws {
@@ -307,7 +313,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         let repository = NormalizationFailureRepository(vault: fixture.vault)
         try await repository.record(failure)
 
-        XCTAssertEqual(try await repository.failures(for: fixture.accountID), [failure])
+        let failures = try await repository.failures(for: fixture.accountID)
+        XCTAssertEqual(failures, [failure])
 
         do {
             try await repository.record(
@@ -341,13 +348,11 @@ final class WorkRelationRepositoryTests: XCTestCase {
         )
         let repository = ConditionalRequestCacheRepository(vault: fixture.vault)
         try await repository.save(validator)
-        XCTAssertEqual(
-            try await repository.validator(
-                for: validator.requestKey,
-                accountID: fixture.accountID
-            ),
-            validator
+        let restoredValidator = try await repository.validator(
+            for: validator.requestKey,
+            accountID: fixture.accountID
         )
+        XCTAssertEqual(restoredValidator, validator)
 
         do {
             _ = try await repository.validator(
@@ -394,10 +399,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         )
         let repository = SyncShardRepository(vault: fixture.vault)
         try await repository.save(shard, accountID: fixture.accountID)
-        XCTAssertEqual(
-            try await repository.shards(for: streamID, accountID: fixture.accountID),
-            [shard]
-        )
+        let shards = try await repository.shards(for: streamID, accountID: fixture.accountID)
+        XCTAssertEqual(shards, [shard])
 
         do {
             try await repository.save(shard, accountID: AccountID.make())
@@ -511,9 +514,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         try await CoverageRepository(vault: fixture.vault).save(coverage, attemptedAt: fixture.date)
 
         let repository = SyncStreamRepository(vault: fixture.vault)
-        let initial = try XCTUnwrap(
-            try await repository.stream(withID: streamID, accountID: fixture.accountID)
-        )
+        let initialStream = try await repository.stream(withID: streamID, accountID: fixture.accountID)
+        let initial = try XCTUnwrap(initialStream)
         XCTAssertEqual(initial.status, .partial)
         XCTAssertEqual(initial.highWater, coverage.intervalEnd)
         XCTAssertEqual(initial.lastAttemptAt, fixture.date)
@@ -530,10 +532,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
             failureDetail: nil
         )
         try await repository.save(completed)
-        XCTAssertEqual(
-            try await repository.stream(withID: streamID, accountID: fixture.accountID),
-            completed
-        )
+        let storedStream = try await repository.stream(withID: streamID, accountID: fixture.accountID)
+        XCTAssertEqual(storedStream, completed)
 
         do {
             _ = try await repository.stream(withID: streamID, accountID: AccountID.make())
@@ -574,7 +574,8 @@ final class WorkRelationRepositoryTests: XCTestCase {
         )
         let ledger = PersistentNotificationDeliveryLedger(vault: fixture.vault)
         try await ledger.record(key)
-        XCTAssertTrue(try await ledger.contains(key))
+        let containsKey = try await ledger.contains(key)
+        XCTAssertTrue(containsKey)
 
         let crossAccountKey = NotificationDedupeKey(
             route: NotificationRoute(

@@ -132,37 +132,32 @@ final class AccountCredentialReplacementTests: XCTestCase {
         XCTAssertEqual(result.account.login, "renamed-octocat")
         XCTAssertEqual(result.account.credentialStatus, .active)
         XCTAssertFalse(result.retiredCredentialCleanupFailed)
-        XCTAssertEqual(try await repository.accounts(), [result.account])
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthAccessToken,
-                accountID: account.id,
-                credentialID: result.account.credentialID
-            ),
-            Data("access-replacement".utf8)
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [result.account])
+        let replacementAccessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: result.account.credentialID
         )
-        XCTAssertEqual(
-            await secrets.value(
-                kind: .oauthRefreshToken,
-                accountID: account.id,
-                credentialID: result.account.credentialID
-            ),
-            Data("refresh-replacement".utf8)
+        XCTAssertEqual(replacementAccessToken, Data("access-replacement".utf8))
+        let replacementRefreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: result.account.credentialID
         )
-        XCTAssertNil(
-            await secrets.value(
-                kind: .oauthAccessToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            )
+        XCTAssertEqual(replacementRefreshToken, Data("refresh-replacement".utf8))
+        let retiredAccessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
-        XCTAssertNil(
-            await secrets.value(
-                kind: .oauthRefreshToken,
-                accountID: account.id,
-                credentialID: account.credentialID
-            )
+        XCTAssertNil(retiredAccessToken)
+        let retiredRefreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
         )
+        XCTAssertNil(retiredRefreshToken)
     }
 
     func testServiceRejectsMismatchedIdentityBeforeMutatingCredentialsOrVault() async throws {
@@ -204,8 +199,10 @@ final class AccountCredentialReplacementTests: XCTestCase {
             XCTAssertEqual(error, .immutableIdentityMismatch)
         }
 
-        XCTAssertEqual(await secrets.writeCount(), 0)
-        XCTAssertEqual(await secrets.removeCount(), 0)
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
+        let removeCount = await secrets.removeCount()
+        XCTAssertEqual(removeCount, 0)
     }
 
     private func makeAccount() -> GitHubAccount {

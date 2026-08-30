@@ -17,55 +17,12 @@ actor CoverageRepository {
     }
 
     func save(_ record: CoverageRecord, attemptedAt: Date = .now) async throws {
-        try validate(record)
-        let coverageID = Self.coverageID(for: record)
-        let attemptedAtMilliseconds = Self.milliseconds(attemptedAt)
-
         try await vault.write { database in
-            try Self.saveStream(
-                for: record,
-                attemptedAtMilliseconds: attemptedAtMilliseconds,
+            try Self.save(
+                record,
+                attemptedAt: attemptedAt,
+                expectedAccountID: vault.accountID,
                 in: database
-            )
-            try database.execute(
-                sql: """
-                    INSERT INTO coverage_records (
-                        id, account_id, organization_id, repository_id, feature, stream_id,
-                        interval_start_ms, interval_end_ms, credential_revision, capability_revision,
-                        status, last_successful_at_ms, failure_detail
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        account_id = excluded.account_id,
-                        organization_id = excluded.organization_id,
-                        repository_id = excluded.repository_id,
-                        feature = excluded.feature,
-                        stream_id = excluded.stream_id,
-                        interval_start_ms = excluded.interval_start_ms,
-                        interval_end_ms = excluded.interval_end_ms,
-                        credential_revision = excluded.credential_revision,
-                        capability_revision = excluded.capability_revision,
-                        status = excluded.status,
-                        last_successful_at_ms = COALESCE(
-                            excluded.last_successful_at_ms,
-                            coverage_records.last_successful_at_ms
-                        ),
-                        failure_detail = excluded.failure_detail
-                    """,
-                arguments: [
-                    coverageID,
-                    record.accountID.rawValue,
-                    record.organizationID.rawValue,
-                    record.repositoryID?.rawValue,
-                    record.feature.rawValue,
-                    record.streamID.rawValue,
-                    record.intervalStart.map(Self.milliseconds),
-                    record.intervalEnd.map(Self.milliseconds),
-                    record.credentialRevision.rawValue,
-                    record.capabilityRevision.rawValue,
-                    record.status.rawValue,
-                    record.lastSuccessfulAt.map(Self.milliseconds),
-                    record.failureDetail
-                ]
             )
         }
     }
@@ -93,8 +50,67 @@ actor CoverageRepository {
         }
     }
 
-    private func validate(_ record: CoverageRecord) throws {
-        guard record.accountID == vault.accountID else {
+    nonisolated static func save(
+        _ record: CoverageRecord,
+        attemptedAt: Date,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws {
+        try validate(record, expectedAccountID: expectedAccountID)
+        let coverageID = coverageID(for: record)
+        let attemptedAtMilliseconds = milliseconds(attemptedAt)
+        try saveStream(
+            for: record,
+            attemptedAtMilliseconds: attemptedAtMilliseconds,
+            in: database
+        )
+        try database.execute(
+            sql: """
+                INSERT INTO coverage_records (
+                    id, account_id, organization_id, repository_id, feature, stream_id,
+                    interval_start_ms, interval_end_ms, credential_revision, capability_revision,
+                    status, last_successful_at_ms, failure_detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    account_id = excluded.account_id,
+                    organization_id = excluded.organization_id,
+                    repository_id = excluded.repository_id,
+                    feature = excluded.feature,
+                    stream_id = excluded.stream_id,
+                    interval_start_ms = excluded.interval_start_ms,
+                    interval_end_ms = excluded.interval_end_ms,
+                    credential_revision = excluded.credential_revision,
+                    capability_revision = excluded.capability_revision,
+                    status = excluded.status,
+                    last_successful_at_ms = COALESCE(
+                        excluded.last_successful_at_ms,
+                        coverage_records.last_successful_at_ms
+                    ),
+                    failure_detail = excluded.failure_detail
+                """,
+            arguments: [
+                coverageID,
+                record.accountID.rawValue,
+                record.organizationID.rawValue,
+                record.repositoryID?.rawValue,
+                record.feature.rawValue,
+                record.streamID.rawValue,
+                record.intervalStart.map(milliseconds),
+                record.intervalEnd.map(milliseconds),
+                record.credentialRevision.rawValue,
+                record.capabilityRevision.rawValue,
+                record.status.rawValue,
+                record.lastSuccessfulAt.map(milliseconds),
+                record.failureDetail
+            ]
+        )
+    }
+
+    private nonisolated static func validate(
+        _ record: CoverageRecord,
+        expectedAccountID: AccountID
+    ) throws {
+        guard record.accountID == expectedAccountID else {
             throw CoverageRepositoryError.accountScopeMismatch
         }
         if let intervalStart = record.intervalStart,

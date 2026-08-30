@@ -43,10 +43,12 @@ actor PullRequestReviewRefreshService {
                 repository: candidate.repository,
                 number: candidate.number
             )
+            try Task.checkCancellation()
             let requestedReviewers = try await client.requestedReviewers(
                 repository: candidate.repository,
                 number: candidate.number
             )
+            try Task.checkCancellation()
             try await candidateRepository.writeTransaction(accountID: accountID) { database in
                 for (index, page) in reviews.pages.enumerated() {
                     try RawAPISnapshotRepository.save(
@@ -91,6 +93,7 @@ actor PullRequestReviewRefreshService {
                     in: database
                 )
             }
+            try Task.checkCancellation()
             refreshedPullRequestNodeIDs.append(candidate.nodeID)
             ssoHeaders.append(contentsOf: reviews.ssoHeaders)
             if let ssoHeader = requestedReviewers.ssoHeader {

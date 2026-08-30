@@ -23,10 +23,8 @@ final class GitHubHydrationBatchMetricRepositoryTests: XCTestCase {
         try await repository.record(older)
         try await repository.record(newer)
 
-        XCTAssertEqual(
-            try await repository.recentMetrics(for: fixture.accountID),
-            [newer, older]
-        )
+        let recentMetrics = try await repository.recentMetrics(for: fixture.accountID)
+        XCTAssertEqual(recentMetrics, [newer, older])
     }
 
     func testRejectsMetricsForAnotherVaultAccount() async throws {

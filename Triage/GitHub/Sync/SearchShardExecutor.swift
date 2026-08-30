@@ -99,6 +99,7 @@ actor SearchShardExecutor {
 
         do {
             let firstResponse = try await client.searchResponse(query, page: 1)
+            try Task.checkCancellation()
             let firstPage = firstResponse.value
             switch planner.nextPlan(
                 range: range,
@@ -129,6 +130,7 @@ actor SearchShardExecutor {
                 for page in max(2, resumePage)...pageCount {
                     try Task.checkCancellation()
                     let response = try await client.searchResponse(query, page: page)
+                    try Task.checkCancellation()
                     guard !response.value.incompleteResults else {
                         throw SearchShardExecutorError.incompleteSearchPage
                     }
@@ -154,6 +156,7 @@ actor SearchShardExecutor {
                     accessibleRepositoryNames: accessibleRepositoryNames,
                     preparePage: preparePage
                 )
+                try Task.checkCancellation()
                 try await executeShard(
                     query: try query.bounded(to: secondRange),
                     range: secondRange,
@@ -162,6 +165,7 @@ actor SearchShardExecutor {
                     accessibleRepositoryNames: accessibleRepositoryNames,
                     preparePage: preparePage
                 )
+                try Task.checkCancellation()
                 shard = completed(shard, cursor: "partitioned")
                 try await shardRepository.save(shard, accountID: accountID)
 
@@ -172,6 +176,7 @@ actor SearchShardExecutor {
                 shard = running(shard, cursor: "partitioned")
                 try await shardRepository.save(shard, accountID: accountID)
                 for repositoryName in accessibleRepositoryNames.sorted() {
+                    try Task.checkCancellation()
                     try await executeShard(
                         query: try query.scoped(
                             to: repositoryName,
@@ -183,6 +188,7 @@ actor SearchShardExecutor {
                         accessibleRepositoryNames: [],
                         preparePage: preparePage
                     )
+                    try Task.checkCancellation()
                 }
                 shard = completed(shard, cursor: "partitioned")
                 try await shardRepository.save(shard, accountID: accountID)

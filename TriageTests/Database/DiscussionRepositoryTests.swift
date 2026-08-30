@@ -61,7 +61,7 @@ private final class DiscussionFixture: @unchecked Sendable {
     let date = Date(timeIntervalSince1970: 1_000)
 
     init() async throws {
-        root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".triage-discussion-test-\(UUID().uuidString)", isDirectory: true)
         let accountID = AccountID.make()
         account = .init(id: accountID, githubUserID: 1, nodeID: GitHubNodeID(rawValue: "U_1")!, login: "octocat",

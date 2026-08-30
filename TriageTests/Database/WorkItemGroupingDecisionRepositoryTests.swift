@@ -9,13 +9,12 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
         let repository = WorkItemGroupingDecisionRepository(vault: fixture.vault)
         let decision = fixture.decision
         try await repository.replace([decision], accountID: fixture.accountID)
-        XCTAssertEqual(
-            try await repository.decisions(for: fixture.accountID),
-            [decision]
-        )
+        let restoredDecisions = try await repository.decisions(for: fixture.accountID)
+        XCTAssertEqual(restoredDecisions, [decision])
 
         try await repository.replace([], accountID: fixture.accountID)
-        XCTAssertTrue(try await repository.decisions(for: fixture.accountID).isEmpty)
+        let remainingDecisions = try await repository.decisions(for: fixture.accountID)
+        XCTAssertTrue(remainingDecisions.isEmpty)
     }
 
     func testRejectsDecisionReferencingNodeOutsideVaultAccount() async throws {
@@ -98,8 +97,18 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             )
             try await accounts.save(organization, access: access, selectedAt: date)
 
-            firstNode = node(id: GitHubNodeID(rawValue: "first-node")!, accountID: accountID)
-            secondNode = node(id: GitHubNodeID(rawValue: "second-node")!, accountID: accountID)
+            firstNode = Self.makeNode(
+                id: GitHubNodeID(rawValue: "first-node")!,
+                accountID: accountID,
+                organizationID: organizationID,
+                date: date
+            )
+            secondNode = Self.makeNode(
+                id: GitHubNodeID(rawValue: "second-node")!,
+                accountID: accountID,
+                organizationID: organizationID,
+                date: date
+            )
             let nodes = GitHubNodeRepository(vault: vault)
             try await nodes.save(firstNode)
             try await nodes.save(secondNode)
@@ -123,6 +132,15 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
         }
 
         func node(id: GitHubNodeID, accountID: AccountID) -> NormalizedGitHubNode {
+            Self.makeNode(id: id, accountID: accountID, organizationID: organizationID, date: date)
+        }
+
+        static func makeNode(
+            id: GitHubNodeID,
+            accountID: AccountID,
+            organizationID: OrganizationID,
+            date: Date
+        ) -> NormalizedGitHubNode {
             NormalizedGitHubNode(
                 nodeID: id,
                 accountID: accountID,

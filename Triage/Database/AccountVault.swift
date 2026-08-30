@@ -83,17 +83,10 @@ actor AccountVault {
     func writeTransaction<Value: Sendable>(
         _ operation: @Sendable (Database) throws -> Value
     ) throws -> Value {
-        var result: Result<Value, Error>?
-        try databasePool.write { database in
-            try database.inTransaction {
-                result = .success(try operation(database))
-                return .commit
-            }
-        }
-        guard let result else {
-            preconditionFailure("A committed database transaction must produce a result.")
-        }
-        return try result.get()
+        // DatabasePool.write commits the closure atomically and rolls it back when
+        // the operation throws, so an inner transaction would be both redundant
+        // and invalid on current GRDB/SQLite.
+        try databasePool.write(operation)
     }
 
     func close() throws {
@@ -113,7 +106,9 @@ actor AccountVault {
                 database,
                 sql: "PRAGMA cipher_integrity_check"
             )
-            guard integrityRows == ["ok"] else {
+            // SQLCipher reports one row per integrity error and no rows when
+            // every encrypted page passes HMAC verification.
+            guard integrityRows.isEmpty else {
                 throw VaultError.invalidIntegrityCheck
             }
         }

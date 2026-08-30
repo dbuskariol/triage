@@ -21,17 +21,14 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         XCTAssertEqual(workItems[0].score, AttentionScore(value: 900, breakdown: ["attentionReason": 900]))
 
         let search = SearchRepository(vault: fixture.vault)
-        XCTAssertTrue(
-            try await search.search(
-                "stale", accountID: fixture.accountID, organizationID: fixture.organizationID
-            ).isEmpty
+        let staleResults = try await search.search(
+            "stale", accountID: fixture.accountID, organizationID: fixture.organizationID
         )
-        XCTAssertEqual(
-            try await search.search(
-                "current", accountID: fixture.accountID, organizationID: fixture.organizationID
-            ).compactMap(\.workItemID),
-            [fixture.workItemID]
+        XCTAssertTrue(staleResults.isEmpty)
+        let currentResults = try await search.search(
+            "current", accountID: fixture.accountID, organizationID: fixture.organizationID
         )
+        XCTAssertEqual(currentResults.compactMap(\.workItemID), [fixture.workItemID])
     }
 
     func testRejectsPartialSnapshotWithoutChangingExistingDerivedState() async throws {
@@ -73,12 +70,11 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
             )
         )
 
-        let workItem = try XCTUnwrap(
-            try await WorkItemRepository(vault: fixture.vault).fetch(
-                accountID: fixture.accountID,
-                organizationID: fixture.organizationID
-            ).first
+        let workItems = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
         )
+        let workItem = try XCTUnwrap(workItems.first)
         XCTAssertEqual(workItem.workflow.status, .waiting)
         XCTAssertEqual(InboxEligibilityRule().disposition(for: workItem, at: fixture.date), .inbox)
     }
@@ -102,7 +98,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         }
 
         init() async throws {
-            directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent(".derived-intelligence-repository-tests-\(UUID().uuidString)", isDirectory: true)
             vault = try await VaultRegistry(rootDirectory: directory).open(
                 accountID: accountID,
@@ -120,7 +116,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                     createdAt: date,
                     lastValidatedAt: date
                 ),
-                credentialRevision: scope.credentialRevision
+                credentialRevision: CredentialRevision(rawValue: "credential")!
             )
             try await AccountRepository(vault: vault).save(
                 GitHubOrganization(
@@ -133,7 +129,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                     accountID: accountID,
                     organizationID: organizationID,
                     state: .available,
-                    capabilityRevision: scope.capabilityRevision,
+                    capabilityRevision: CapabilityRevision(rawValue: "capability")!,
                     capabilities: [],
                     checkedAt: date
                 ),
