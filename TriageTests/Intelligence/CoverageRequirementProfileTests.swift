@@ -75,10 +75,10 @@ final class CoverageRequirementProfileTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(requirements.count, 31)
+        XCTAssertEqual(requirements.count, 35)
         XCTAssertTrue(AccountOrganizationCoverageManifest.missingFeatures(in: requirements).isEmpty)
         XCTAssertFalse(requirements.contains { $0.feature == .notifications })
-        XCTAssertFalse(requirements.contains {
+        XCTAssertTrue(requirements.contains {
             $0.streamID.rawValue.contains(fixture.revokedRepositoryID.rawValue)
         })
         XCTAssertEqual(requirements, requirements.sorted(by: requirementPrecedes))
@@ -145,6 +145,53 @@ final class CoverageRequirementProfileTests: XCTestCase {
         )
         XCTAssertEqual(evaluation.missing, [missingDiscussion])
         XCTAssertEqual(evaluation.freshness.status, .partial)
+    }
+
+    func testKnownNonAvailableRepositoryCannotDisappearFromProfile() async throws {
+        let fixture = try await CoverageProfileFixture()
+        defer { fixture.remove() }
+        try await fixture.installTopology()
+
+        let requirements = try await fixture.vault.read { database in
+            try CoverageRequirementProfile.build(
+                for: fixture.scope,
+                coverage: [],
+                in: database
+            )
+        }
+        let retainedRequirements = requirements.filter {
+            $0.repositoryID == fixture.revokedRepositoryID
+        }
+        XCTAssertEqual(retainedRequirements.count, 4)
+
+        let evaluation = CoverageEvaluator().evaluate(
+            requirements: retainedRequirements,
+            records: [],
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertEqual(evaluation.missing, retainedRequirements)
+        XCTAssertEqual(evaluation.freshness.status, .partial)
+
+        let completedVisibleTopology = requirements
+            .filter { $0.repositoryID != fixture.revokedRepositoryID }
+            .map { requirement in
+                fixture.record(
+                    feature: requirement.feature,
+                    repositoryID: requirement.repositoryID,
+                    stream: requirement.streamID.rawValue,
+                    intervalStart: requirement.intervalStart,
+                    intervalEnd: requirement.intervalEnd
+                )
+            }
+        let state = AccountOrganizationCachedState(
+            coverage: completedVisibleTopology,
+            coverageRequirements: requirements,
+            lastSuccessfulSyncAt: fixture.now
+        )
+        XCTAssertEqual(state.freshness.status, .partial)
     }
 
     func testDuplicateHydrationLeafFailsClosed() async throws {

@@ -244,6 +244,210 @@ final class InventoryRepositoryTests: XCTestCase {
         XCTAssertTrue(candidates.isEmpty)
     }
 
+    func testInventoryOmissionRetainsPrivateTopologyAndMarksAccessUnknown() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let privateRepository = fixture.repository(id: 1, nodeID: "R_private", name: "private")
+        let visibleRepository = fixture.repository(id: 2, nodeID: "R_visible", name: "visible")
+        _ = try await repository.replace(
+            [privateRepository, visibleRepository],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let cachedNode = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "I_private")!,
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            repositoryID: RepositoryID(rawValue: privateRepository.nodeID)!,
+            kind: .issue,
+            numericID: "101",
+            number: 1,
+            title: "Retained private issue",
+            state: .open,
+            url: URL(string: "https://github.com/acme/private/issues/1")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: fixture.date,
+            updatedAt: fixture.date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "private-1",
+            observedAt: fixture.date,
+            accessibility: .accessible
+        )
+        try await GitHubNodeRepository(vault: fixture.vault).save(cachedNode)
+
+        let summaries = try await repository.replace(
+            [visibleRepository],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summaries.map(\.id.rawValue), [visibleRepository.nodeID])
+        let retained = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM repositories"),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT access_state FROM account_repository_access WHERE repository_id = ?",
+                    arguments: [privateRepository.nodeID]
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT repository_id FROM github_nodes WHERE github_node_id = ?",
+                    arguments: [cachedNode.nodeID.rawValue]
+                )
+            )
+        }
+        XCTAssertEqual(retained.0, 2)
+        XCTAssertEqual(retained.1, RepositoryAccessState.unknown.rawValue)
+        XCTAssertEqual(retained.2, privateRepository.nodeID)
+        let omittedCandidates = try await repository.repositories(
+            accountID: fixture.account.id,
+            organization: fixture.organization
+        )
+        XCTAssertEqual(omittedCandidates.map(\.id.rawValue), [visibleRepository.nodeID])
+
+        let restored = try await repository.replace(
+            [privateRepository, visibleRepository],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(120)
+        )
+        XCTAssertEqual(
+            Set(restored.map(\.id.rawValue)),
+            Set([privateRepository.nodeID, visibleRepository.nodeID])
+        )
+        let restoredAccess = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT access_state FROM account_repository_access WHERE repository_id = ?",
+                arguments: [privateRepository.nodeID]
+            )
+        }
+        XCTAssertEqual(restoredAccess, RepositoryAccessState.available.rawValue)
+    }
+
+    func testSameNameDifferentNodeIsExplicitReplacementEvidence() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let oldRepository = fixture.repository(id: 1, nodeID: "R_old", name: "recreated")
+        _ = try await repository.replace(
+            [oldRepository],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let oldNode = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "I_old")!,
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            repositoryID: RepositoryID(rawValue: oldRepository.nodeID)!,
+            kind: .issue,
+            numericID: "1",
+            number: 1,
+            title: "Old identity",
+            state: .open,
+            url: URL(string: "https://github.com/acme/recreated/issues/1")!,
+            bodyMarkdown: nil,
+            authorID: nil,
+            createdAt: fixture.date,
+            updatedAt: fixture.date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "old",
+            observedAt: fixture.date,
+            accessibility: .accessible
+        )
+        try await GitHubNodeRepository(vault: fixture.vault).save(oldNode)
+        let replacement = fixture.repository(id: 2, nodeID: "R_new", name: "recreated")
+
+        _ = try await repository.replace(
+            [replacement],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(60)
+        )
+
+        let persisted = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(database, sql: "SELECT id FROM repositories ORDER BY id"),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT repository_id FROM github_nodes WHERE github_node_id = ?",
+                    arguments: [oldNode.nodeID.rawValue]
+                ) as String?
+            )
+        }
+        XCTAssertEqual(persisted.0, [replacement.nodeID])
+        XCTAssertNil(persisted.1)
+    }
+
+    func testInventoryOmissionDoesNotChangeSiblingOrganizationAccess() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryInventoryRepository(vault: fixture.vault)
+        let siblingOrganization = GitHubOrganization(
+            id: OrganizationID(rawValue: "beta")!,
+            githubOrganizationID: 3,
+            nodeID: GitHubNodeID(rawValue: "O_3")!,
+            login: "beta"
+        )
+        try await AccountRepository(vault: fixture.vault).save(
+            siblingOrganization,
+            access: OrganizationAccess(
+                accountID: fixture.account.id,
+                organizationID: siblingOrganization.id,
+                state: .available,
+                capabilityRevision: CapabilityRevision(rawValue: "capability-1")!,
+                capabilities: [],
+                checkedAt: fixture.date
+            )
+        )
+        let acmeRepository = fixture.repository(id: 1, nodeID: "R_acme", name: "acme-private")
+        let betaRepository = fixture.repository(
+            id: 2,
+            nodeID: "R_beta",
+            name: "beta-private",
+            owner: "beta"
+        )
+        _ = try await repository.replace(
+            [acmeRepository],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        _ = try await repository.replace(
+            [betaRepository],
+            accountID: fixture.account.id,
+            organization: siblingOrganization,
+            observedAt: fixture.date
+        )
+
+        _ = try await repository.replace(
+            [],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(60)
+        )
+
+        let states = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: "SELECT repository_id, access_state FROM account_repository_access ORDER BY repository_id"
+            ).map { (($0["repository_id"] as String), ($0["access_state"] as String)) }
+        }
+        XCTAssertEqual(states.map(\.0), [acmeRepository.nodeID, betaRepository.nodeID])
+        XCTAssertEqual(states.map(\.1), [
+            RepositoryAccessState.unknown.rawValue,
+            RepositoryAccessState.available.rawValue
+        ])
+    }
+
     func testOmittedDiscussionCapabilityRemainsExplicitlyUnknown() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
@@ -353,7 +557,12 @@ private final class InventoryFixture: @unchecked Sendable {
         )
     }
 
-    func repository(id: UInt64, nodeID: String, name: String) -> GitHubRepositoryDTO {
+    func repository(
+        id: UInt64,
+        nodeID: String,
+        name: String,
+        owner: String = "acme"
+    ) -> GitHubRepositoryDTO {
         GitHubRepositoryDTO(
             id: id,
             nodeID: nodeID,
@@ -361,9 +570,9 @@ private final class InventoryFixture: @unchecked Sendable {
             isPrivate: true,
             isArchived: false,
             hasDiscussions: true,
-            htmlURL: URL(string: "https://github.com/acme/\(name)")!,
+            htmlURL: URL(string: "https://github.com/\(owner)/\(name)")!,
             updatedAt: date,
-            owner: .init(login: "acme")
+            owner: .init(login: owner)
         )
     }
 

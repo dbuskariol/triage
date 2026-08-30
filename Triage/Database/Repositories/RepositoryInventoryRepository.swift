@@ -157,10 +157,10 @@ actor RepositoryInventoryRepository {
         }
 
         let repositoryIDs = normalized.map(\.id.rawValue)
-        try deleteAbsentRepositories(
-            repositoryIDs,
+        try markRepositoryAccessUnknown(
             accountID: accountID,
             organizationID: organization.id,
+            observedAt: observedAt,
             in: database
         )
 
@@ -178,6 +178,7 @@ actor RepositoryInventoryRepository {
 
         let observedAtMilliseconds = milliseconds(observedAt)
         for repository in normalized {
+            try removeReplacedRepositoryIdentity(repository, organizationID: organization.id, in: database)
             try database.execute(
                 sql: """
                     INSERT INTO repositories (
@@ -218,12 +219,17 @@ actor RepositoryInventoryRepository {
             try database.execute(
                 sql: """
                     INSERT INTO account_repository_access (account_id, repository_id, access_state, observed_at_ms)
-                    VALUES (?, ?, 'available', ?)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(account_id, repository_id) DO UPDATE SET
                         access_state = excluded.access_state,
                         observed_at_ms = excluded.observed_at_ms
                     """,
-                arguments: [accountID.rawValue, repository.id.rawValue, observedAtMilliseconds]
+                arguments: [
+                    accountID.rawValue,
+                    repository.id.rawValue,
+                    RepositoryAccessState.available.rawValue,
+                    observedAtMilliseconds
+                ]
             )
         }
         return normalized.map(\.summary)
@@ -291,42 +297,52 @@ actor RepositoryInventoryRepository {
         )
     }
 
-    private nonisolated static func deleteAbsentRepositories(
-        _ repositoryIDs: [String],
+    private nonisolated static func markRepositoryAccessUnknown(
         accountID: AccountID,
+        organizationID: OrganizationID,
+        observedAt: Date,
+        in database: Database
+    ) throws {
+        try database.execute(
+            sql: """
+                UPDATE account_repository_access
+                SET access_state = ?, observed_at_ms = ?
+                WHERE account_id = ?
+                  AND repository_id IN (
+                      SELECT id FROM repositories WHERE organization_id = ?
+                  )
+                """,
+            arguments: [
+                RepositoryAccessState.unknown.rawValue,
+                milliseconds(observedAt),
+                accountID.rawValue,
+                organizationID.rawValue
+            ]
+        )
+    }
+
+    /// A current inventory row at the same GitHub owner/name with a different
+    /// immutable node ID is positive replacement evidence. Ordinary omission
+    /// is not, so only this narrow identity collision may remove cached data.
+    private nonisolated static func removeReplacedRepositoryIdentity(
+        _ repository: InventoryRepository,
         organizationID: OrganizationID,
         in database: Database
     ) throws {
-        if repositoryIDs.isEmpty {
-            try database.execute(
-                sql: """
-                    DELETE FROM repositories
-                    WHERE organization_id = ?
-                      AND EXISTS (
-                          SELECT 1 FROM account_repository_access
-                          WHERE account_repository_access.repository_id = repositories.id
-                            AND account_repository_access.account_id = ?
-                      )
-                    """,
-                arguments: [organizationID.rawValue, accountID.rawValue]
-            )
-            return
-        }
-        let placeholders = Array(repeating: "?", count: repositoryIDs.count).joined(separator: ", ")
-        var arguments: [DatabaseValueConvertible?] = [organizationID.rawValue, accountID.rawValue]
-        arguments.append(contentsOf: repositoryIDs)
         try database.execute(
             sql: """
                 DELETE FROM repositories
                 WHERE organization_id = ?
-                  AND EXISTS (
-                      SELECT 1 FROM account_repository_access
-                      WHERE account_repository_access.repository_id = repositories.id
-                        AND account_repository_access.account_id = ?
-                  )
-                  AND id NOT IN (\(placeholders))
+                  AND owner_login = ?
+                  AND name = ?
+                  AND id <> ?
                 """,
-            arguments: StatementArguments(arguments)
+            arguments: [
+                organizationID.rawValue,
+                repository.ownerLogin,
+                repository.name,
+                repository.id.rawValue
+            ]
         )
     }
 
