@@ -745,8 +745,7 @@ actor OrganizationWorkRefreshService {
                 normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
                 conditionalRequestCacheRepository: ConditionalRequestCacheRepository(vault: vault)
             ).refresh(
-                accountID: scope.accountID,
-                organizationID: scope.organizationID,
+                scope: scope,
                 githubOrganizationID: organization.githubOrganizationID,
                 currentUserID: ActorID(rawValue: currentUserNodeID.rawValue)!,
                 observedAt: attemptedAt

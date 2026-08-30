@@ -166,8 +166,7 @@ actor GitHubTimelineRefreshService {
     }
 
     func refresh(
-        accountID: AccountID,
-        organizationID: OrganizationID,
+        scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         currentUserID: ActorID,
         candidates requestedCandidates: [TimelineCandidate]? = nil,
@@ -175,6 +174,8 @@ actor GitHubTimelineRefreshService {
         budget: TimelineRefreshBudget = .standard,
         observedAt: Date = .now
     ) async throws -> GitHubTimelineRefreshResult {
+        let accountID = scope.accountID
+        let organizationID = scope.organizationID
         guard limit > 0, limit < .max else {
             throw GitHubTimelineRefreshServiceError.invalidLimit
         }
@@ -215,8 +216,7 @@ actor GitHubTimelineRefreshService {
             do {
                 let status = try await refresh(
                     candidate: candidate,
-                    accountID: accountID,
-                    organizationID: organizationID,
+                    scope: scope,
                     githubOrganizationID: githubOrganizationID,
                     observedAt: observedAt,
                     budget: &meter
@@ -310,20 +310,23 @@ actor GitHubTimelineRefreshService {
 
     private func refresh(
         candidate: TimelineCandidate,
-        accountID: AccountID,
-        organizationID: OrganizationID,
+        scope: SynchronizationScope,
         githubOrganizationID: UInt64,
         observedAt: Date,
         budget: inout BudgetMeter
     ) async throws -> GitHubTimelineRefreshOutcomeStatus {
+        let accountID = scope.accountID
+        let organizationID = scope.organizationID
         var ssoHeaders = [GitHubSSOHeader]()
         var firstPageETag: String?
+        var resumedFromCheckpoint = false
         let saved: TimelineSavedPageInventory
         if let checkpoint = try await candidateRepository.checkpoint(
             for: candidate,
             accountID: accountID,
             organizationID: organizationID
         ) {
+            resumedFromCheckpoint = true
             try Task.checkCancellation()
             if let nextPageURL = checkpoint.nextPageURL {
                 let resumedPages = try await eventRepository.savedPages(
@@ -356,11 +359,8 @@ actor GitHubTimelineRefreshService {
             )
             try Task.checkCancellation()
         } else {
-            let requestKey = Self.requestKey(for: candidate)
-            let validator = try await conditionalRequestCacheRepository.validator(
-                for: requestKey,
-                accountID: accountID
-            )
+            let identity = Self.conditionalRequestIdentity(for: candidate, scope: scope)
+            let validator = try await conditionalRequestCacheRepository.validator(for: identity)
             try Task.checkCancellation()
             guard budget.reservePage() else {
                 throw ControlFlowError.budgetExhausted
@@ -386,10 +386,7 @@ actor GitHubTimelineRefreshService {
                 ) {
                     throw ControlFlowError.ssoRequired(scopedHeader)
                 }
-                try await conditionalRequestCacheRepository.remove(
-                    requestKey: requestKey,
-                    accountID: accountID
-                )
+                try await conditionalRequestCacheRepository.remove(for: identity)
                 try Task.checkCancellation()
                 guard budget.reservePage() else {
                     throw ControlFlowError.budgetExhausted
@@ -500,17 +497,21 @@ actor GitHubTimelineRefreshService {
             try Task.checkCancellation()
             return .ssoRequired(scopedHeader)
         }
-        if let eTag = firstPageETag ?? saved.firstPageETag {
-            try await conditionalRequestCacheRepository.save(
+        let conditionalIdentity = Self.conditionalRequestIdentity(for: candidate, scope: scope)
+        let conditionalMutation: ConditionalRequestCacheMutation
+        let currentTraversalETag = firstPageETag
+            ?? (resumedFromCheckpoint ? saved.firstPageETag : nil)
+        if let eTag = currentTraversalETag {
+            conditionalMutation = .save(
                 ConditionalRequestValidator(
-                    requestKey: Self.requestKey(for: candidate),
-                    accountID: accountID,
+                    identity: conditionalIdentity,
                     eTag: eTag,
                     lastModified: nil,
                     observedAt: observedAt
                 )
             )
-            try Task.checkCancellation()
+        } else {
+            conditionalMutation = .remove(conditionalIdentity)
         }
         try Task.checkCancellation()
         try await eventRepository.replaceAndComplete(
@@ -518,7 +519,8 @@ actor GitHubTimelineRefreshService {
             candidate: candidate,
             accountID: accountID,
             organizationID: organizationID,
-            observedAt: observedAt
+            observedAt: observedAt,
+            conditionalRequestCacheMutation: conditionalMutation
         )
         try Task.checkCancellation()
         return .refreshed
@@ -831,5 +833,17 @@ actor GitHubTimelineRefreshService {
 
     private nonisolated static func requestKey(for candidate: TimelineCandidate) -> String {
         "GET \(candidate.repository.path)/issues/\(candidate.number)/timeline?per_page=100&page=1"
+    }
+
+    private nonisolated static func conditionalRequestIdentity(
+        for candidate: TimelineCandidate,
+        scope: SynchronizationScope
+    ) -> ConditionalRequestIdentity {
+        ConditionalRequestIdentity(
+            scope: scope,
+            feature: .timelines,
+            streamID: SyncStreamID(rawValue: "timeline:\(candidate.nodeID.rawValue)")!,
+            requestKey: requestKey(for: candidate)
+        )
     }
 }

@@ -329,7 +329,8 @@ actor TimelineEventRepository {
         candidate: TimelineCandidate,
         accountID: AccountID,
         organizationID: OrganizationID,
-        observedAt: Date
+        observedAt: Date,
+        conditionalRequestCacheMutation: ConditionalRequestCacheMutation? = nil
     ) async throws {
         guard accountID == vault.accountID else {
             throw TimelineEventRepositoryError.accountScopeMismatch
@@ -354,6 +355,22 @@ actor TimelineEventRepository {
                 completedAt: observedAt,
                 in: database
             )
+            switch conditionalRequestCacheMutation {
+            case let .save(validator):
+                try ConditionalRequestCacheRepository.save(
+                    validator,
+                    expectedAccountID: accountID,
+                    in: database
+                )
+            case let .remove(identity):
+                try ConditionalRequestCacheRepository.remove(
+                    for: identity,
+                    expectedAccountID: accountID,
+                    in: database
+                )
+            case nil:
+                break
+            }
         }
     }
 

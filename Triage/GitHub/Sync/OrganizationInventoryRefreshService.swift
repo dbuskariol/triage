@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 enum OrganizationRefreshError: Error, Equatable, Sendable {
     case ssoRequirement(GitHubSSOHeader)
@@ -222,13 +223,17 @@ actor OrganizationInventoryRefreshService {
         context: Context,
         observedAt: Date
     ) async throws -> (summaries: [RepositorySummary], coverage: CoverageRecord) {
-        let eTag = try await context.repositoryInventory.cachedETag(
-            accountID: context.account.id,
-            organization: context.organization,
-            fullReconciliationCutoff: observedAt.addingTimeInterval(
-                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
-            )
+        let conditionalIdentity = conditionalRequestIdentity(
+            feature: .repositories,
+            requestKey: "GET /orgs/\(context.organization.login)/repos?type=all&per_page=100",
+            context: context
         )
+        let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
+        let eTag = validator.flatMap {
+            $0.observedAt >= observedAt.addingTimeInterval(
+                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
+            ) ? $0.eTag : nil
+        }
         let fetched = try await client.fetchRepositories(in: context.organization.login, eTag: eTag)
         try Task.checkCancellation()
         let coverage = completeCoverage(feature: .repositories, context: context, observedAt: observedAt)
@@ -269,6 +274,13 @@ actor OrganizationInventoryRefreshService {
                     expectedAccountID: context.account.id,
                     in: database
                 )
+                try Self.persistConditionalValidator(
+                    eTag: inventory.pages.first?.page.etag,
+                    identity: conditionalIdentity,
+                    observedAt: observedAt,
+                    expectedAccountID: context.account.id,
+                    in: database
+                )
                 return summaries
             }
             return (
@@ -293,13 +305,17 @@ actor OrganizationInventoryRefreshService {
         accountLogin: String,
         observedAt: Date
     ) async throws -> (summaries: [TeamInventorySummary], coverage: CoverageRecord) {
-        let eTag = try await context.teamInventory.cachedETag(
-            accountID: context.account.id,
-            organization: context.organization,
-            fullReconciliationCutoff: observedAt.addingTimeInterval(
-                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
-            )
+        let conditionalIdentity = conditionalRequestIdentity(
+            feature: .teams,
+            requestKey: "GET /orgs/\(context.organization.login)/teams?per_page=100",
+            context: context
         )
+        let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
+        let eTag = validator.flatMap {
+            $0.observedAt >= observedAt.addingTimeInterval(
+                -OrganizationInventoryRefreshCadence.fullReconciliationInterval
+            ) ? $0.eTag : nil
+        }
         let fetched = try await client.fetchTeams(in: context.organization.login, eTag: eTag)
         try Task.checkCancellation()
         let updatedTeams: [GitHubTeamDTO]?
@@ -407,6 +423,15 @@ actor OrganizationInventoryRefreshService {
                 expectedAccountID: context.account.id,
                 in: database
             )
+            if preparedUpdatedTeams != nil {
+                try Self.persistConditionalValidator(
+                    eTag: preparedTeamPages.first?.page.etag,
+                    identity: conditionalIdentity,
+                    observedAt: observedAt,
+                    expectedAccountID: context.account.id,
+                    in: database
+                )
+            }
             return summaries
         }
         return (
@@ -449,7 +474,8 @@ actor OrganizationInventoryRefreshService {
             synchronizationScope: synchronizationScope,
             repositoryInventory: RepositoryInventoryRepository(vault: vault),
             teamInventory: TeamInventoryRepository(vault: vault),
-            coverage: CoverageRepository(vault: vault)
+            coverage: CoverageRepository(vault: vault),
+            conditionalRequests: ConditionalRequestCacheRepository(vault: vault)
         )
     }
 
@@ -591,6 +617,46 @@ actor OrganizationInventoryRefreshService {
         SyncStreamID(rawValue: "inventory-\(feature.rawValue)-\(organizationID.rawValue)")!
     }
 
+    private func conditionalRequestIdentity(
+        feature: CoverageFeature,
+        requestKey: String,
+        context: Context
+    ) -> ConditionalRequestIdentity {
+        ConditionalRequestIdentity(
+            scope: context.synchronizationScope,
+            feature: feature,
+            streamID: streamID(for: feature, organizationID: context.organization.id),
+            requestKey: requestKey
+        )
+    }
+
+    private nonisolated static func persistConditionalValidator(
+        eTag: String?,
+        identity: ConditionalRequestIdentity,
+        observedAt: Date,
+        expectedAccountID: AccountID,
+        in database: Database
+    ) throws {
+        if let eTag {
+            try ConditionalRequestCacheRepository.save(
+                ConditionalRequestValidator(
+                    identity: identity,
+                    eTag: eTag,
+                    lastModified: nil,
+                    observedAt: observedAt
+                ),
+                expectedAccountID: expectedAccountID,
+                in: database
+            )
+        } else {
+            try ConditionalRequestCacheRepository.remove(
+                for: identity,
+                expectedAccountID: expectedAccountID,
+                in: database
+            )
+        }
+    }
+
     nonisolated static func coverageStatus(for error: Error) -> CoverageStatus {
         if let refreshError = error as? OrganizationRefreshError,
            case .ssoRequirement = refreshError {
@@ -684,6 +750,7 @@ actor OrganizationInventoryRefreshService {
         let repositoryInventory: RepositoryInventoryRepository
         let teamInventory: TeamInventoryRepository
         let coverage: CoverageRepository
+        let conditionalRequests: ConditionalRequestCacheRepository
     }
 
     private struct TeamMembershipTarget: Sendable {

@@ -172,7 +172,7 @@ final class InventoryRepositoryTests: XCTestCase {
         XCTAssertEqual(retainedNames, ["retained"])
     }
 
-    func testCachedETagAndExistingRepositoriesAreAvailableForNotModifiedResponse() async throws {
+    func testExistingRepositoriesAreAvailableForNotModifiedResponse() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
@@ -183,31 +183,6 @@ final class InventoryRepositoryTests: XCTestCase {
             organization: fixture.organization,
             observedAt: fixture.date
         )
-        try await RawAPISnapshotRepository(vault: fixture.vault).save(
-            RawAPISnapshot(
-                id: RawAPISnapshotID.make(),
-                accountID: fixture.account.id,
-                githubNodeID: nil,
-                endpoint: "/orgs/acme/repos?type=all&per_page=100",
-                eTag: "\"inventory-v1\"",
-                parserVersion: 1,
-                observedAt: fixture.date,
-                payload: Data("[]".utf8)
-            )
-        )
-
-        let cachedETag = try await repository.cachedETag(
-            accountID: fixture.account.id,
-            organization: fixture.organization,
-            fullReconciliationCutoff: fixture.date.addingTimeInterval(-1)
-        )
-        XCTAssertEqual(cachedETag, "\"inventory-v1\"")
-        let staleETag = try await repository.cachedETag(
-            accountID: fixture.account.id,
-            organization: fixture.organization,
-            fullReconciliationCutoff: fixture.date.addingTimeInterval(1)
-        )
-        XCTAssertNil(staleETag)
         let existingRepositories = try await repository.repositories(
             accountID: fixture.account.id,
             organization: fixture.organization

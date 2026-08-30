@@ -1,8 +1,141 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import Triage
 
 final class OrganizationInventoryRefreshServiceTests: XCTestCase {
+    func testRawRepositorySnapshotETagCannotAuthorizeConditionalRequest() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        try await fixture.seedRawRepositorySnapshot(eTag: "\"raw-only\"")
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: fixture.repositoryPayload())
+        ])
+
+        let repositories = try await fixture.service(session: session).refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        XCTAssertEqual(repositories.map(\.name), ["repo"])
+        let sentValidators = await session.validators()
+        XCTAssertEqual(sentValidators, [nil])
+    }
+
+    func testRepositoryNotModifiedUsesCurrentScopedValidatorAndPreservesInventory() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(statusCode: 304, body: Data())
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let repositories = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        XCTAssertEqual(repositories.map(\.name), ["repo"])
+        let persistedRepositories = try await fixture.repositories()
+        XCTAssertEqual(persistedRepositories.map(\.name), ["repo"])
+        let sentValidators = await session.validators()
+        XCTAssertEqual(sentValidators, [nil, "\"repository-v1\""])
+    }
+
+    func testRepositoryValidatorIsCurrentRevisionScopedAndRotatesWithoutReuse() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v1\""]
+            ),
+            .http(
+                statusCode: 200,
+                body: fixture.repositoryPayload(),
+                headers: ["ETag": "\"repository-v2\""]
+            )
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        try await fixture.replaceCredentialRevision(with: "credential-2")
+        _ = try await service.refreshRepositories(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        let sentValidators = await session.validators()
+        XCTAssertEqual(sentValidators, [nil, nil])
+        let persisted = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT credential_revision, capability_revision, etag
+                    FROM conditional_request_cache
+                    """
+            ).map { row in
+                (
+                    row["credential_revision"] as String,
+                    row["capability_revision"] as String,
+                    row["etag"] as String
+                )
+            }
+        }
+        XCTAssertEqual(persisted.map(\.0), ["credential-2"])
+        XCTAssertEqual(persisted.map(\.1), ["capability-1"])
+        XCTAssertEqual(persisted.map(\.2), ["\"repository-v2\""])
+    }
+
+    func testTeamNotModifiedUsesOnlyItsScopedValidatorAndPreservesMembership() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(statusCode: 304, body: Data()),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload())
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .success(teams, coverage) = second.teams else {
+            return XCTFail("A scoped team 304 should reuse committed normalized inventory.")
+        }
+        XCTAssertEqual(teams.map(\.id), [TeamID(rawValue: "T_1")!])
+        XCTAssertEqual(teams.first?.membershipState, "active")
+        XCTAssertEqual(coverage.status, .complete)
+        let sentValidators = await session.validators()
+        XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
+    }
+
     func testRepositorySuccessSurvivesIndependentTeamFailure() async throws {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
@@ -299,6 +432,28 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
         )
     }
 
+    func replaceCredentialRevision(with rawValue: String) async throws {
+        try await AccountRepository(vault: vault).save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: rawValue)!
+        )
+    }
+
+    func seedRawRepositorySnapshot(eTag: String) async throws {
+        try await RawAPISnapshotRepository(vault: vault).save(
+            RawAPISnapshot(
+                id: RawAPISnapshotID.make(),
+                accountID: account.id,
+                githubNodeID: nil,
+                endpoint: "/orgs/\(organization.login)/repos?type=all&per_page=100",
+                eTag: eTag,
+                parserVersion: 1,
+                observedAt: observedAt,
+                payload: repositoryPayload()
+            )
+        )
+    }
+
     func repositoryPayload() -> Data {
         Data(
             #"[{"id":1,"node_id":"R_1","name":"repo","private":true,"archived":false,"has_discussions":true,"html_url":"https://github.com/acme/repo","updated_at":"2026-01-01T00:00:00Z","owner":{"login":"acme"}}]"#.utf8
@@ -311,6 +466,10 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
 
     func changedTeamPayload() -> Data {
         Data(#"[{"id":2,"node_id":"T_2","name":"Replacement","slug":"replacement","privacy":"closed"}]"#.utf8)
+    }
+
+    func activeMembershipPayload() -> Data {
+        Data(#"{"state":"active","role":"member"}"#.utf8)
     }
 
     func team() -> GitHubTeamDTO {
@@ -335,6 +494,7 @@ private actor ScriptedInventorySession: HTTPSession {
 
     private var responses: [Response]
     private var requestedPaths = [String]()
+    private var requestedValidators = [String?]()
 
     init(responses: [Response]) {
         self.responses = responses
@@ -342,6 +502,7 @@ private actor ScriptedInventorySession: HTTPSession {
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requestedPaths.append(request.url!.path)
+        requestedValidators.append(request.value(forHTTPHeaderField: "If-None-Match"))
         guard !responses.isEmpty else {
             throw GitHubTransportError.unexpectedResponse
         }
@@ -376,5 +537,9 @@ private actor ScriptedInventorySession: HTTPSession {
 
     func paths() -> [String] {
         requestedPaths
+    }
+
+    func validators() -> [String?] {
+        requestedValidators
     }
 }

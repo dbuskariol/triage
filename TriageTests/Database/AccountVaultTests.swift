@@ -73,12 +73,110 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "029-repository-discussion-capability-provenance")
+        XCTAssertEqual(migrations.last?.id, "030-revision-scoped-conditional-requests")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "c994cb4855836e571bc45a4baeedf4b154959027e67c397ed1ff7b0875288544"
+            "f742e3ff68ae96471ddeacf0f191fa032cd4c343f353b17f313f005810fe7f02"
         )
         try await registry.closeAll()
+    }
+
+    func testConditionalRequestMigrationInvalidatesLegacyUnscopedValidators() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = try VaultRegistry(rootDirectory: directory.appendingPathComponent("source"))
+        let vault = try await registry.open(
+            accountID: AccountID.make(),
+            vaultKey: try VaultKey.generate()
+        )
+        let priorMigrations = try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, checksum, applied_at_ms
+                    FROM schema_migrations
+                    WHERE id <> '030-revision-scoped-conditional-requests'
+                    ORDER BY id
+                    """
+            ).map { row in
+                (
+                    row["id"] as String,
+                    row["checksum"] as String,
+                    row["applied_at_ms"] as Int64
+                )
+            }
+        }
+        try await registry.closeAll()
+
+        let legacyPool = try DatabasePool(
+            path: directory.appendingPathComponent("legacy.sqlite").path
+        )
+        try await legacyPool.write { database in
+            try database.execute(sql: """
+                CREATE TABLE schema_migrations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    checksum TEXT NOT NULL,
+                    applied_at_ms INTEGER NOT NULL
+                )
+                """)
+            for migration in priorMigrations {
+                try database.execute(
+                    sql: "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                    arguments: [migration.0, migration.1, migration.2]
+                )
+            }
+            try database.execute(sql: "CREATE TABLE accounts (id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: "CREATE TABLE organizations (id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: """
+                CREATE TABLE account_organizations (
+                    account_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    PRIMARY KEY (account_id, organization_id)
+                )
+                """)
+            try database.execute(sql: "CREATE TABLE sync_streams (id TEXT PRIMARY KEY NOT NULL)")
+            try database.execute(sql: """
+                CREATE TABLE conditional_request_cache (
+                    request_key TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL,
+                    etag TEXT,
+                    last_modified TEXT,
+                    observed_at_ms INTEGER NOT NULL
+                )
+                """)
+            try database.execute(
+                sql: "INSERT INTO conditional_request_cache VALUES (?, ?, ?, NULL, ?)",
+                arguments: ["GET /legacy", "account", "\"legacy\"", 1]
+            )
+        }
+
+        try TriageDatabaseMigrator.migrate(legacyPool)
+
+        let migrated = try await legacyPool.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM conditional_request_cache"),
+                try Row.fetchAll(
+                    database,
+                    sql: "PRAGMA table_info(conditional_request_cache)"
+                ).map { $0["name"] as String },
+                try String.fetchOne(
+                    database,
+                    sql: """
+                        SELECT checksum FROM schema_migrations
+                        WHERE id = '030-revision-scoped-conditional-requests'
+                        """
+                )
+            )
+        }
+        XCTAssertEqual(migrated.0, 0)
+        XCTAssertTrue(migrated.1.contains("organization_id"))
+        XCTAssertTrue(migrated.1.contains("credential_revision"))
+        XCTAssertTrue(migrated.1.contains("capability_revision"))
+        XCTAssertEqual(
+            migrated.2,
+            "f742e3ff68ae96471ddeacf0f191fa032cd4c343f353b17f313f005810fe7f02"
+        )
     }
 
     func testTransactionRollsBackAllWritesWhenItsOperationFails() async throws {
