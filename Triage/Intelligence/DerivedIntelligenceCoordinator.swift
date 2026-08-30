@@ -236,7 +236,7 @@ struct DerivedIntelligenceCoordinator: Sendable {
         input: DerivedIntelligenceInput
     ) throws -> DerivedIntelligenceItemResult {
         let workItem = itemInput.workItem
-        let confirmedRelations = workItem.relations.filter { $0.confidence == .confirmed }
+        let confirmedRelations = trustedRelations(workItem.relations, scope: input.scope)
         let isOwned = confirmedRelations.contains {
             $0.objectNodeID == input.currentUserNodeID
                 && [.authored, .assigned, .projectWrapsContent].contains($0.kind)
@@ -248,7 +248,14 @@ struct DerivedIntelligenceCoordinator: Sendable {
         let waitingEvidence = EvidenceReference(
             id: EvidenceID(rawValue: "workflow-\(workItem.id.rawValue)")!,
             source: .localWorkflow,
+            locator: .localWorkflow("workflow-state"),
+            authority: .localWorkflow(
+                accountID: input.scope.accountID,
+                organizationID: input.scope.organizationID
+            ),
             nodeID: workItem.primaryNodeID,
+            confidence: .confirmed,
+            confirmation: .confirmed,
             observedAt: workItem.workflow.updatedAt
         )
         let reasons = [
@@ -280,7 +287,11 @@ struct DerivedIntelligenceCoordinator: Sendable {
                         ? EvidenceReference(
                             id: EvidenceID(rawValue: "work-item-\(workItem.primaryNodeID.rawValue)")!,
                             source: .graphQL,
+                            locator: .legacyUnverified,
+                            authority: .legacyUnverified,
                             nodeID: workItem.primaryNodeID,
+                            confidence: .provisional,
+                            confirmation: .provisional,
                             observedAt: workItem.lastRelevantActivityAt
                         )
                         : nil,
@@ -293,7 +304,14 @@ struct DerivedIntelligenceCoordinator: Sendable {
                             evidence: EvidenceReference(
                                 id: EvidenceID(rawValue: "action-\($0.id.rawValue)")!,
                                 source: .localWorkflow,
+                                locator: .localWorkflow("action-state"),
+                                authority: .localWorkflow(
+                                    accountID: input.scope.accountID,
+                                    organizationID: input.scope.organizationID
+                                ),
                                 nodeID: workItem.primaryNodeID,
+                                confidence: .confirmed,
+                                confirmation: .confirmed,
                                 observedAt: $0.updatedAt
                             )
                         )
@@ -439,6 +457,40 @@ struct DerivedIntelligenceCoordinator: Sendable {
             }
     }
 
+    /// Legacy or revision-stale evidence can remain in the encrypted vault for
+    /// explainability, but it must never drive current deterministic reasons.
+    private func trustedRelations(
+        _ relations: [WorkRelation],
+        scope: SynchronizationScope
+    ) -> [WorkRelation] {
+        relations.compactMap { relation in
+            guard relation.confidence == .confirmed else { return nil }
+            let evidence = relation.evidence.filter { evidence in
+                guard evidence.confidence == .confirmed,
+                      evidence.confirmation == .confirmed
+                else { return false }
+                switch evidence.authority {
+                case let .github(evidenceScope, _, _):
+                    return evidenceScope == scope
+                case let .localWorkflow(accountID, organizationID):
+                    return accountID == scope.accountID
+                        && organizationID == scope.organizationID
+                case .legacyUnverified:
+                    return false
+                }
+            }
+            guard !evidence.isEmpty else { return nil }
+            return WorkRelation(
+                kind: relation.kind,
+                subjectNodeID: relation.subjectNodeID,
+                objectNodeID: relation.objectNodeID,
+                confidence: relation.confidence,
+                evidence: evidence,
+                observedAt: relation.observedAt
+            )
+        }
+    }
+
     private func awaitedActor(from relations: [WorkRelation]) -> GitHubNodeID? {
         relations
             .filter { $0.kind == .awaitingResponse }
@@ -451,8 +503,12 @@ struct DerivedIntelligenceCoordinator: Sendable {
         EvidenceReference(
             id: EvidenceID(rawValue: "timeline-\(event.id.rawValue)")!,
             source: .restTimeline,
+            locator: .legacyUnverified,
+            authority: .legacyUnverified,
             nodeID: event.subjectNodeID,
             eventID: event.id,
+            confidence: .provisional,
+            confirmation: .provisional,
             observedAt: event.occurredAt,
             excerpt: event.body
         )

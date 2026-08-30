@@ -107,6 +107,10 @@ final class ConversationFollowUpRuleTests: XCTestCase {
                 EvidenceReference(
                     id: EvidenceID(rawValue: "\(kind.rawValue)-\(observedAt.timeIntervalSinceReferenceDate)")!,
                     source: .restTimeline,
+                    locator: .legacyUnverified,
+                    authority: .legacyUnverified,
+                    confidence: .provisional,
+                    confirmation: .provisional,
                     observedAt: observedAt
                 )
             ],

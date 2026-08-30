@@ -78,8 +78,12 @@ struct ConversationFollowUpRule: Sendable {
                     EvidenceReference(
                         id: EvidenceID(rawValue: "timeline-\($0.id.rawValue)")!,
                         source: .restTimeline,
+                        locator: .legacyUnverified,
+                        authority: .legacyUnverified,
                         nodeID: $0.subjectNodeID,
                         eventID: $0.id,
+                        confidence: .provisional,
+                        confirmation: .provisional,
                         observedAt: $0.occurredAt,
                         excerpt: $0.body
                     )

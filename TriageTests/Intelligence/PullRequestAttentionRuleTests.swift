@@ -164,6 +164,10 @@ final class PullRequestAttentionRuleTests: XCTestCase {
     EvidenceReference(
       id: EvidenceID(rawValue: id)!,
       source: .restReview,
+      locator: .legacyUnverified,
+      authority: .legacyUnverified,
+      confidence: .provisional,
+      confirmation: .provisional,
       observedAt: evaluatedAt
     )
   }

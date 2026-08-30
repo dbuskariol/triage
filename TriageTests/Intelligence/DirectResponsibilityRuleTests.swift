@@ -61,6 +61,10 @@ final class DirectResponsibilityRuleTests: XCTestCase {
                 EvidenceReference(
                     id: EvidenceID(rawValue: "evidence-\(kind.rawValue)")!,
                     source: .graphQL,
+                    locator: .legacyUnverified,
+                    authority: .legacyUnverified,
+                    confidence: .provisional,
+                    confirmation: .provisional,
                     observedAt: date
                 )
             ],

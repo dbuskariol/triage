@@ -6,15 +6,30 @@ final class EvidenceAndFreshnessTests: XCTestCase {
         let evidence = EvidenceReference(
             id: EvidenceID(rawValue: "event-1")!,
             source: .restTimeline,
+            locator: .endpoint("/repos/github/triage/issues/1/timeline?per_page=100&page=1"),
+            authority: .github(
+                scope: SynchronizationScope(
+                    accountID: AccountID(rawValue: "account-1")!,
+                    organizationID: OrganizationID(rawValue: "github")!,
+                    credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                    capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+                ),
+                feature: .timelines,
+                streamID: SyncStreamID(rawValue: "timeline-issue-1")!
+            ),
             nodeID: GitHubNodeID(rawValue: "I_kwDOExample")!,
             eventID: GitHubEventID(rawValue: "123")!,
             sourceRevision: "updated-at:2026-08-28T00:00:00Z",
+            rawSnapshotID: RawAPISnapshotID(rawValue: "snapshot-1")!,
+            confidence: .confirmed,
+            confirmation: .confirmed,
             observedAt: Date(timeIntervalSinceReferenceDate: 100),
             excerpt: "@octocat Please review this."
         )
 
         XCTAssertEqual(evidence.source, .restTimeline)
         XCTAssertEqual(evidence.eventID?.rawValue, "123")
+        XCTAssertEqual(evidence.confirmation, .confirmed)
         XCTAssertEqual(evidence.excerpt, "@octocat Please review this.")
     }
 
@@ -53,6 +68,19 @@ final class EvidenceAndFreshnessTests: XCTestCase {
         let evidence = EvidenceReference(
             id: EvidenceID(rawValue: "evidence-1")!,
             source: .graphQL,
+            locator: .query("TriageHydrateNodes"),
+            authority: .github(
+                scope: SynchronizationScope(
+                    accountID: AccountID(rawValue: "account-1")!,
+                    organizationID: OrganizationID(rawValue: "github")!,
+                    credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+                    capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+                ),
+                feature: .issues,
+                streamID: SyncStreamID(rawValue: "hydrate-nodes")!
+            ),
+            confidence: .provisional,
+            confirmation: .provisional,
             observedAt: date
         )
         let relation = WorkRelation(
@@ -76,12 +104,29 @@ final class EvidenceAndFreshnessTests: XCTestCase {
 
     func testUnknownEvidenceAndFreshnessEnumValuesAreRejected() {
         assertUnknownCaseRejected(EvidenceSource.self)
+        assertUnknownCaseRejected(EvidenceConfirmation.self)
         assertUnknownCaseRejected(WorkRelationKind.self)
         assertUnknownCaseRejected(RelationConfidence.self)
         assertUnknownCaseRejected(AttentionCategory.self)
         assertUnknownCaseRejected(CoverageFeature.self)
         assertUnknownCaseRejected(CoverageStatus.self)
         assertUnknownCaseRejected(FreshnessStatus.self)
+    }
+
+    func testLocalWorkflowEvidenceHasExplicitNonGitHubAuthority() throws {
+        let evidence = EvidenceReference(
+            id: EvidenceID(rawValue: "workflow-1")!,
+            source: .localWorkflow,
+            locator: .localWorkflow("workflow-state"),
+            authority: .localWorkflow(
+                accountID: AccountID(rawValue: "account-1")!,
+                organizationID: OrganizationID(rawValue: "github")!
+            ),
+            confidence: .confirmed,
+            confirmation: .confirmed,
+            observedAt: Date(timeIntervalSinceReferenceDate: 100)
+        )
+        try assertRoundTrip(evidence)
     }
 
     func testMissingRequiredOrganizationCoverageCannotReportFresh() {

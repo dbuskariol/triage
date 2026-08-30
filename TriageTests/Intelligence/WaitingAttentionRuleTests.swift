@@ -103,6 +103,10 @@ final class WaitingAttentionRuleTests: XCTestCase {
     EvidenceReference(
       id: EvidenceID(rawValue: id)!,
       source: .restTimeline,
+      locator: .legacyUnverified,
+      authority: .legacyUnverified,
+      confidence: .provisional,
+      confirmation: .provisional,
       observedAt: now
     )
   }

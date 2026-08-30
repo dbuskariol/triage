@@ -114,7 +114,11 @@ final class WorkItemTests: XCTestCase {
         let evidence = EvidenceReference(
             id: EvidenceID(rawValue: "evidence-1")!,
             source: .restSearch,
+            locator: .legacyUnverified,
+            authority: .legacyUnverified,
             nodeID: nodeID,
+            confidence: .provisional,
+            confirmation: .provisional,
             observedAt: date
         )
         let relation = WorkRelation(

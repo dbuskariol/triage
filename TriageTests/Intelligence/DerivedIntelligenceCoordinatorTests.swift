@@ -8,6 +8,15 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
     private let reviewerID = GitHubNodeID(rawValue: "reviewer")!
     private let now = Date(timeIntervalSinceReferenceDate: 10_000)
 
+    private var synchronizationScope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+        )
+    }
+
     func testRecomputeIsDeterministicAndPreservesRuleEvidence() throws {
         let first = try DerivedIntelligenceCoordinator().recompute(input(items: [item(id: "z"), item(id: "a")]))
         let second = try DerivedIntelligenceCoordinator().recompute(input(items: [item(id: "a"), item(id: "z")]))
@@ -53,6 +62,36 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         XCTAssertEqual(output.coverageState, .incomplete)
         XCTAssertEqual(output.menuCounts.inbox, 1)
         XCTAssertEqual(output.aiCandidateExclusions.first?.reason, .incompleteCoverage)
+    }
+
+    func testLegacyUnverifiedRelationsCannotDriveCurrentOwnershipOrConversationReasons() throws {
+        let output = try DerivedIntelligenceCoordinator().recompute(
+            input(items: [item(id: "legacy", trustRelations: false)])
+        )
+
+        XCTAssertFalse(output.items[0].isOwnedByCurrentUser)
+        XCTAssertFalse(output.items[0].attentionReasons.contains {
+            $0.ruleID == ConversationAttentionRuleID.directMentionAfterProgress.rawValue
+                || $0.ruleID == ConversationAttentionRuleID.newActivityOnParticipatedWork.rawValue
+        })
+    }
+
+    func testRevisionStaleGitHubRelationsCannotDriveCurrentReasons() throws {
+        let staleScope = SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "stale-credential")!,
+            capabilityRevision: synchronizationScope.capabilityRevision
+        )
+        let output = try DerivedIntelligenceCoordinator().recompute(
+            input(items: [item(id: "stale", relationScope: staleScope)])
+        )
+
+        XCTAssertFalse(output.items[0].isOwnedByCurrentUser)
+        XCTAssertFalse(output.items[0].attentionReasons.contains {
+            $0.ruleID == ConversationAttentionRuleID.directMentionAfterProgress.rawValue
+                || $0.ruleID == ConversationAttentionRuleID.newActivityOnParticipatedWork.rawValue
+        })
     }
 
     func testRecomputeBoundsUTF8SearchFieldsWithoutBreakingCharacters() throws {
@@ -158,12 +197,7 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return DerivedIntelligenceInput(
-            scope: SynchronizationScope(
-                accountID: accountID,
-                organizationID: organizationID,
-                credentialRevision: CredentialRevision(rawValue: "credential")!,
-                capabilityRevision: CapabilityRevision(rawValue: "capability")!
-            ),
+            scope: synchronizationScope,
             currentUserNodeID: currentUserID,
             visibleTeamNodeIDs: [],
             coverageRequirements: requirements ?? [
@@ -186,13 +220,29 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         )
     }
 
-    private func item(id: String) -> DerivedIntelligenceItemInput {
+    private func item(
+        id: String,
+        trustRelations: Bool = true,
+        relationScope: SynchronizationScope? = nil
+    ) -> DerivedIntelligenceItemInput {
         let workItemID = WorkItemID(rawValue: id)!
         let nodeID = GitHubNodeID(rawValue: "node-\(id)")!
+        let evidenceScope = relationScope ?? synchronizationScope
         let evidence = EvidenceReference(
             id: EvidenceID(rawValue: "authored-\(id)")!,
             source: .graphQL,
+            locator: trustRelations ? .query("TriageHydrateNodes") : .legacyUnverified,
+            authority: trustRelations
+                ? .github(
+                    scope: evidenceScope,
+                    feature: .pullRequests,
+                    streamID: SyncStreamID(rawValue: "pull-requests")!
+                )
+                : .legacyUnverified,
             nodeID: nodeID,
+            sourceRevision: "revision-\(id)",
+            confidence: trustRelations ? .confirmed : .provisional,
+            confirmation: trustRelations ? .confirmed : .provisional,
             observedAt: now
         )
         let workItem = WorkItem(
@@ -225,7 +275,20 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                         EvidenceReference(
                             id: EvidenceID(rawValue: "mention-\(id)")!,
                             source: .restTimeline,
+                            locator: trustRelations
+                                ? .endpoint("/repos/example/repository/issues/1/timeline")
+                                : .legacyUnverified,
+                            authority: trustRelations
+                                ? .github(
+                                    scope: evidenceScope,
+                                    feature: .timelines,
+                                    streamID: SyncStreamID(rawValue: "timeline:\(nodeID.rawValue)")!
+                                )
+                                : .legacyUnverified,
                             nodeID: nodeID,
+                            sourceRevision: "revision-\(id)",
+                            confidence: trustRelations ? .confirmed : .provisional,
+                            confirmation: trustRelations ? .confirmed : .provisional,
                             observedAt: now.addingTimeInterval(-1)
                         )
                     ],
@@ -255,7 +318,11 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                     evidence: EvidenceReference(
                         id: EvidenceID(rawValue: "review-\(id)")!,
                         source: .restReview,
+                        locator: .legacyUnverified,
+                        authority: .legacyUnverified,
                         nodeID: nodeID,
+                        confidence: .provisional,
+                        confirmation: .provisional,
                         observedAt: now.addingTimeInterval(-2)
                     )
                 )
@@ -309,7 +376,21 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                     subjectNodeID: nodeID,
                     objectNodeID: reviewerID,
                     confidence: .confirmed,
-                    evidence: [],
+                    evidence: [
+                        EvidenceReference(
+                            id: EvidenceID(rawValue: "awaiting-\(id)")!,
+                            source: .localWorkflow,
+                            locator: .localWorkflow("waiting-state"),
+                            authority: .localWorkflow(
+                                accountID: accountID,
+                                organizationID: organizationID
+                            ),
+                            nodeID: nodeID,
+                            confidence: .confirmed,
+                            confirmation: .confirmed,
+                            observedAt: now.addingTimeInterval(-10)
+                        )
+                    ],
                     observedAt: now.addingTimeInterval(-10)
                 )
             ],
