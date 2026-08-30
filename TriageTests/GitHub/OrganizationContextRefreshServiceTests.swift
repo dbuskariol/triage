@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import Triage
 
@@ -408,6 +409,81 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         XCTAssertNil(records.first { $0.streamID.rawValue == "discussions-acme" })
     }
 
+    func testCredentialRotationDuringProjectInventoryCancelsWithoutPostGateWrites() async throws {
+        try await assertScopeRotationDuringProjectInventory(.credential)
+    }
+
+    func testCapabilityRotationDuringProjectInventoryCancelsWithoutPostGateWrites() async throws {
+        try await assertScopeRotationDuringProjectInventory(.capability)
+    }
+
+    private func assertScopeRotationDuringProjectInventory(
+        _ rotation: OrganizationContextScopeRotation
+    ) async throws {
+        let fixture = try await OrganizationContextFixture()
+        defer { fixture.remove() }
+        let recorder = OrganizationContextRecorder()
+        let gate = OrganizationContextResponseGate()
+        let service = fixture.service(
+            recorder: recorder,
+            projectInventory: { scope, _, streamID, _, observedAt in
+                await gate.enterAndWait()
+                return ProjectV2SynchronizationResult(
+                    projects: [],
+                    projectCoverage: fixture.coverage(
+                        scope: scope,
+                        repositoryID: nil,
+                        feature: .projects,
+                        streamID: streamID,
+                        observedAt: observedAt
+                    ),
+                    itemCoverages: [:]
+                )
+            }
+        )
+        let task = Task {
+            try await service.refresh(
+                scope: fixture.scope,
+                organization: fixture.organization,
+                repositories: [],
+                observedAt: fixture.observedAt
+            )
+        }
+
+        await gate.waitUntilEntered()
+        let before = try await organizationContextDurableState(in: fixture.vault)
+        try await fixture.vault.write { database in
+            switch rotation {
+            case .credential:
+                try database.execute(
+                    sql: "UPDATE accounts SET credential_revision = 'credential-2' WHERE id = ?",
+                    arguments: [fixture.account.id.rawValue]
+                )
+            case .capability:
+                try database.execute(
+                    sql: """
+                        UPDATE account_organizations
+                        SET capability_revision = 'capability-2'
+                        WHERE account_id = ? AND organization_id = ?
+                    """,
+                    arguments: [fixture.account.id.rawValue, fixture.organization.id.rawValue]
+                )
+            }
+        }
+        await gate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected scope rotation to cancel context refresh.")
+        } catch is CancellationError {
+            // Expected supersession.
+        }
+        let after = try await organizationContextDurableState(in: fixture.vault)
+        XCTAssertEqual(after, before)
+        let events = await recorder.events()
+        XCTAssertFalse(events.contains("project-item"))
+    }
+
     func testLeafSynchronizersTranslateTransportCancellationWithoutPersistingFailureCoverage() async throws {
         let fixture = try await OrganizationContextFixture()
         defer { fixture.remove() }
@@ -574,6 +650,57 @@ private actor OrganizationContextRecorder {
 private actor CancelledOrganizationContextSession: HTTPSession {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         throw URLError(.cancelled)
+    }
+}
+
+private enum OrganizationContextScopeRotation {
+    case credential
+    case capability
+}
+
+private struct OrganizationContextDurableState: Equatable {
+    let coverageRecords: Int
+    let syncStreams: Int
+    let rawSnapshots: Int
+    let normalizationFailures: Int
+}
+
+private func organizationContextDurableState(
+    in vault: AccountVault
+) async throws -> OrganizationContextDurableState {
+    try await vault.read { database in
+        OrganizationContextDurableState(
+            coverageRecords: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records")!,
+            syncStreams: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_streams")!,
+            rawSnapshots: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!,
+            normalizationFailures: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM normalization_failures")!
+        )
+    }
+}
+
+private actor OrganizationContextResponseGate {
+    private var entered = false
+    private var released = false
+    private var enteredWaiters = [CheckedContinuation<Void, Never>]()
+    private var releaseWaiters = [CheckedContinuation<Void, Never>]()
+
+    func enterAndWait() async {
+        entered = true
+        enteredWaiters.forEach { $0.resume() }
+        enteredWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
     }
 }
 
