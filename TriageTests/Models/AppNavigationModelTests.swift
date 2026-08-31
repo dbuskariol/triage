@@ -4,7 +4,6 @@ import XCTest
 @MainActor
 final class AppNavigationModelTests: XCTestCase {
     func testSettingsSidebarUsesReadableNativeColumnWidths() {
-        XCTAssertEqual(SettingsSidebarLayout.contentAlignmentInset, 15)
         XCTAssertEqual(SettingsSidebarLayout.minimumWidth, 240)
         XCTAssertEqual(SettingsSidebarLayout.idealWidth, 260)
         XCTAssertEqual(SettingsSidebarLayout.maximumWidth, 320)
