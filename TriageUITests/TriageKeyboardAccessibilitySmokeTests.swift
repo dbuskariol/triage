@@ -85,7 +85,7 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         try requireMainWindow()
         app.typeKey(",", modifierFlags: .command)
 
-        let settingsWindow = app.windows["Settings"]
+        let settingsWindow = settingsWindow()
         XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3))
         let accounts = settingsWindow.descendants(matching: .any)["Accounts"]
         XCTAssertTrue(accounts.waitForExistence(timeout: 3))
@@ -107,7 +107,7 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         try requireMainWindow()
         app.typeKey(",", modifierFlags: .command)
 
-        let settingsWindow = app.windows["Settings"]
+        let settingsWindow = settingsWindow()
         XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3))
         let accounts = settingsWindow.descendants(matching: .any)["Accounts"]
         XCTAssertTrue(accounts.waitForExistence(timeout: 3))
@@ -197,8 +197,13 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         try requireMainWindow()
         app.typeKey(",", modifierFlags: .command)
 
-        let settingsWindow = app.windows["Settings"]
+        let settingsWindow = settingsWindow()
         XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3), "Command-Comma should open Settings.")
+        XCTAssertEqual(
+            settingsWindow.buttons.matching(identifier: "Hide Sidebar").count,
+            1,
+            "Settings should expose one native sidebar control in its toolbar."
+        )
 
         let accounts = settingsWindow.descendants(matching: .any)["Accounts"]
         XCTAssertTrue(accounts.waitForExistence(timeout: 3), "Settings should expose the Accounts section.")
@@ -218,7 +223,7 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
     func testAIConsentIsExplicitAndFailClosedInSettings() throws {
         try requireMainWindow()
         app.typeKey(",", modifierFlags: .command)
-        let settingsWindow = app.windows["Settings"]
+        let settingsWindow = settingsWindow()
         XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3))
         let ai = settingsWindow.descendants(matching: .any)["AI"]
         XCTAssertTrue(ai.waitForExistence(timeout: 3))
@@ -290,5 +295,9 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
             element(named: "Search work")
         ]
         return candidates.first(where: { $0.exists }) ?? candidates[0]
+    }
+
+    private func settingsWindow() -> XCUIElement {
+        app.windows["Triage Settings"]
     }
 }
