@@ -603,7 +603,7 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
             // to the helper or imply that a sign-in can complete.
             update(
                 accountID: account.id,
-                authentication: .blocked("Copilot is unavailable for classic personal access tokens on this Mac. Triage will not send this token to Copilot."),
+                authentication: .blocked("This classic personal access token is used only for read-only GitHub synchronization and is never sent to Copilot. A separate Copilot OAuth sign-in is not yet available in this build."),
                 entitlement: isEntitled,
                 consent: hasOrganizationConsent
             )

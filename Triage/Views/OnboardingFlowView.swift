@@ -14,14 +14,36 @@ enum OnboardingAIAccess: Equatable {
 }
 
 enum AIConsentPresentation {
+    static func settingsSummary(account: GitHubAccount?) -> String {
+        switch account?.authenticationKind {
+        case .classicPersonalAccessToken:
+            "Sends bounded work-item context to GitHub Copilot. Your classic token stays in Triage and is never sent to Copilot."
+        case .oauth:
+            "Sends bounded work-item context to GitHub Copilot after consent and identity checks. OAuth credential use is ephemeral."
+        case .fineGrainedPersonalAccessToken:
+            "Sends bounded work-item context to GitHub Copilot after consent and identity checks. Fine-grained token use is ephemeral."
+        case nil:
+            "Sends bounded work-item context to GitHub Copilot only after consent and identity checks."
+        }
+    }
+
     static func disclosure(
         account: GitHubAccount?,
         organization: GitHubOrganization?
     ) -> String {
         let accountName = account?.displayName ?? account?.login ?? "your selected GitHub account"
         let organizationName = organization?.displayName ?? organization?.login ?? "the selected organization"
-        let authenticationMethod = account?.authenticationKind.title ?? "the selected authentication method"
-        return "If enabled for \(organizationName), Triage sends normalized relevant conversation content from \(accountName) to GitHub Copilot using \(authenticationMethod). This can include Work Item titles and state, deterministic trigger reasons, bounded relevant body text and conversation excerpts, timestamps, participant role aliases, and relevant labels and project fields. Model selection is organization-specific. Triage keeps organization-scoped AI caches locally; turning AI off cancels active analysis, prevents helper launch, and removes that organization’s AI caches while preserving deterministic rules and user-created action items. The dashboard works without AI."
+        let authenticationDisclosure = switch account?.authenticationKind {
+        case .oauth:
+            "After consent and entitlement checks, Triage may pass this account’s OAuth credential once, in memory, to the isolated Copilot runtime."
+        case .fineGrainedPersonalAccessToken:
+            "After consent and entitlement checks, Triage may pass this account’s fine-grained token once, in memory, to the isolated Copilot runtime; GitHub requires that token to include Copilot Requests access."
+        case .classicPersonalAccessToken:
+            "This account’s classic personal access token is used only for read-only GitHub synchronization and is never sent to Copilot. Copilot requires a separate OAuth sign-in."
+        case nil:
+            "Copilot authentication is separate from read-only GitHub synchronization and must be verified before analysis."
+        }
+        return "If enabled for \(organizationName), Triage sends normalized relevant conversation content from \(accountName) to GitHub Copilot. \(authenticationDisclosure) This can include Work Item titles and state, deterministic trigger reasons, bounded relevant body text and conversation excerpts, timestamps, participant role aliases, and relevant labels and project fields. Model selection is organization-specific. Triage keeps organization-scoped AI caches locally; turning AI off cancels active analysis, prevents helper launch, and removes that organization’s AI caches while preserving deterministic rules and user-created action items. The dashboard works without AI."
     }
 }
 

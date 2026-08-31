@@ -153,6 +153,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     @Published private(set) var organizationAISettingsByAccount: [AccountID: [OrganizationID: OrganizationAISettingsState]] = [:]
     @Published private(set) var selectedCopilotAuthorizationState: CopilotAccountAuthorizationState = .unavailable
     @Published private(set) var copilotAuthenticationError: String?
+    @Published private(set) var copilotRuntimeOperationError: String?
     /// A user-requested runtime operation is active. The companion published
     /// authorization state carries its real downloading/verifying progress.
     @Published private(set) var isCopilotRuntimeOperationInProgress = false
@@ -2603,6 +2604,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         operation: @escaping @Sendable (any CopilotRuntimeAuthorizationProviding) async throws -> Void
     ) async {
         guard !isCopilotRuntimeOperationInProgress else { return }
+        copilotRuntimeOperationError = nil
         isCopilotRuntimeOperationInProgress = true
         let accountID = selectedAccountID
         let authorization = dependencies.copilotRuntimeAuthorization
@@ -2624,8 +2626,38 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         } catch where Task.isCancelled {
             await refreshSelectedOrganizationAIStatus()
         } catch {
-            refreshError = failureMessage
+            copilotRuntimeOperationError = Self.copilotRuntimeOperationFailureMessage(
+                for: error,
+                fallback: failureMessage
+            )
             await refreshSelectedOrganizationAIStatus()
+        }
+    }
+
+    private static func copilotRuntimeOperationFailureMessage(
+        for error: Error,
+        fallback: String
+    ) -> String {
+        guard let error = error as? CopilotRuntimeAcquisitionError else { return fallback }
+        return switch error {
+        case .redirectRejected:
+            "GitHub returned an unexpected runtime download location. Nothing was installed."
+        case .invalidResponse:
+            "GitHub did not return a valid runtime download. Nothing was installed."
+        case .archiveTooLarge:
+            "The runtime download exceeded Triage’s safety limit. Nothing was installed."
+        case .checksumMismatch, .executableChecksumMismatch:
+            "The downloaded runtime did not match Triage’s pinned checksum. Nothing was installed."
+        case .invalidArchive, .executableMissing, .invalidExecutableArchitecture, .invalidCodeSignature:
+            "The downloaded runtime failed verification. Nothing was installed."
+        case .fileSystem:
+            "Triage could not safely store the verified runtime. Check local storage and try again."
+        case .unsupportedArchitecture:
+            "This Mac’s processor is not supported by the approved Copilot runtime."
+        case .invalidSource:
+            "The pinned Copilot runtime source is invalid. Nothing was downloaded."
+        case .cancellation:
+            "The runtime download was cancelled. Nothing was installed."
         }
     }
 
@@ -2707,7 +2739,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         } catch CopilotAuthenticationError.entitlementRequired {
             copilotAuthenticationError = "Copilot entitlement is not verified for this organization."
         } catch CopilotAuthenticationError.deviceLoginUnavailable {
-            copilotAuthenticationError = "Copilot is unavailable for classic personal access tokens on this Mac. Triage will not send this token to Copilot."
+            copilotAuthenticationError = "This classic personal access token remains limited to read-only GitHub synchronization and is never sent to Copilot. A separate Copilot OAuth sign-in is not yet available in this build."
             await refreshSelectedOrganizationAIStatus()
         } catch {
             copilotAuthenticationError = "Copilot authentication could not be completed. Re-authenticate the selected GitHub account, then try again."

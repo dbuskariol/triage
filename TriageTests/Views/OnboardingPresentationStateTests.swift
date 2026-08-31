@@ -143,6 +143,38 @@ final class OnboardingPresentationStateTests: XCTestCase {
         XCTAssertTrue(disclosure.contains("dashboard works without AI"))
     }
 
+    func testAIConsentDisclosureKeepsGitHubAndCopilotCredentialBoundariesExplicit() {
+        let organization = makeOrganization()
+        let oauth = AIConsentPresentation.disclosure(
+            account: makeAccount(authenticationKind: .oauth),
+            organization: organization
+        )
+        XCTAssertTrue(oauth.contains("OAuth credential once, in memory"))
+
+        let fineGrained = AIConsentPresentation.disclosure(
+            account: makeAccount(authenticationKind: .fineGrainedPersonalAccessToken),
+            organization: organization
+        )
+        XCTAssertTrue(fineGrained.contains("fine-grained token once, in memory"))
+        XCTAssertTrue(fineGrained.contains("Copilot Requests access"))
+
+        let classic = AIConsentPresentation.disclosure(
+            account: makeAccount(authenticationKind: .classicPersonalAccessToken),
+            organization: organization
+        )
+        XCTAssertTrue(classic.contains("used only for read-only GitHub synchronization"))
+        XCTAssertTrue(classic.contains("never sent to Copilot"))
+        XCTAssertTrue(classic.contains("separate OAuth sign-in"))
+        XCTAssertFalse(classic.contains("using Classic Personal Access Token"))
+
+        let summary = AIConsentPresentation.settingsSummary(
+            account: makeAccount(authenticationKind: .classicPersonalAccessToken)
+        )
+        XCTAssertTrue(summary.contains("classic token stays in Triage"))
+        XCTAssertTrue(summary.contains("never sent to Copilot"))
+        XCTAssertFalse(summary.contains("conversation excerpts"))
+    }
+
     func testPATSheetSuppressesAParentOAuthConfigurationError() {
         let oauthError = "GitHub sign-in is not configured in this build."
 
@@ -251,13 +283,15 @@ final class OnboardingPresentationStateTests: XCTestCase {
         )
     }
 
-    private func makeAccount() -> GitHubAccount {
+    private func makeAccount(
+        authenticationKind: AuthenticationKind = .oauth
+    ) -> GitHubAccount {
         GitHubAccount(
             id: accountID,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_1")!,
             login: "octocat",
-            authenticationKind: .oauth,
+            authenticationKind: authenticationKind,
             credentialID: CredentialID(rawValue: "credential")!,
             credentialStatus: .active,
             createdAt: now
