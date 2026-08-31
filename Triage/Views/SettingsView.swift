@@ -46,7 +46,9 @@ enum NotificationSettingsPresentation {
 }
 
 enum SettingsSidebarLayout {
-    static let contentAlignmentInset: CGFloat = 13
+    // List rows carry less internal top padding than the large detail heading.
+    // Offset the sidebar content so their visible glyph tops align optically.
+    static let contentAlignmentInset: CGFloat = 15
     static let minimumWidth: CGFloat = 240
     static let idealWidth: CGFloat = 260
     static let maximumWidth: CGFloat = 320
