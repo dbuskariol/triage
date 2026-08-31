@@ -3,6 +3,31 @@ import XCTest
 @testable import Triage
 
 final class AccountVaultTests: XCTestCase {
+    func testAbsentTrustedRootBeneathMacOSTemporaryAliasCreatesAndReopensVault() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TriageAbsentVaultRoot-\(UUID().uuidString)", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE absent_root_value (value INTEGER NOT NULL)")
+            try database.execute(sql: "INSERT INTO absent_root_value (value) VALUES (7)")
+        }
+        try await registry.closeAll()
+
+        let reopenedRegistry = try VaultRegistry(rootDirectory: directory)
+        let reopened = try await reopenedRegistry.open(accountID: accountID, vaultKey: key)
+        let value = try await reopened.read { database in
+            try Int.fetchOne(database, sql: "SELECT value FROM absent_root_value")
+        }
+        XCTAssertEqual(value, 7)
+        try await reopenedRegistry.closeAll()
+    }
+
     func testVaultPersistsOnlyWithTheCorrectKey() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
