@@ -144,7 +144,7 @@ final class PersonalAccessTokenTests: XCTestCase {
             defaults: defaults
         )
         let account = GitHubAccount(
-            id: AccountID(rawValue: "replacement-account")!,
+            id: AccountID(rawValue: "00000000-0000-4000-8000-000000000211")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_1")!,
             login: "octocat",

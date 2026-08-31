@@ -3,11 +3,13 @@ import Foundation
 enum RuntimeOAuthConfigurationError: Error, Equatable, Sendable {
     case missingClientID
     case invalidBrokerURL
+    case invalidApplicationVersion
 }
 
 struct RuntimeOAuthConfiguration: Sendable {
     let oauth: GitHubOAuthConfiguration
     let brokerURL: URL
+    let applicationVersion: String
 
     init(bundle: Bundle = .main) throws {
         guard let clientID = bundle.object(forInfoDictionaryKey: "TRIAGE_GITHUB_OAUTH_CLIENT_ID") as? String,
@@ -23,10 +25,16 @@ struct RuntimeOAuthConfiguration: Sendable {
         else {
             throw RuntimeOAuthConfigurationError.invalidBrokerURL
         }
+        guard let applicationVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              AuthBrokerProtocol.isValidApplicationVersion(applicationVersion)
+        else {
+            throw RuntimeOAuthConfigurationError.invalidApplicationVersion
+        }
         oauth = try GitHubOAuthConfiguration(
             clientID: clientID,
             redirectURI: URL(string: "triage://oauth-callback")!
         )
         self.brokerURL = brokerURL
+        self.applicationVersion = applicationVersion
     }
 }

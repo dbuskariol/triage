@@ -67,7 +67,7 @@ Before production deployment, configure Cloudflare WAF rules for `POST /oauth/ex
 - Restrict Worker routes to its intended hostname; do not expose a development `workers.dev` route.
 - Monitor only aggregate platform health counters. Configure log sinks and WAF/Worker observability to redact request URLs, headers, and bodies; never retain authorization codes, PKCE verifiers, refresh tokens, access tokens, `client_secret`, or IP-derived analytics identifiers.
 
-CORS is disabled by default because Triage is a native client. If `CORS_ALLOWED_ORIGINS` is configured as a comma-separated list of exact HTTPS browser origins, matching origins receive only `POST` and `Content-Type` CORS permission. CORS is not authentication and non-matching browser requests must not be considered blocked at the network layer.
+CORS is disabled by default because Triage is a native client. If `CORS_ALLOWED_ORIGINS` is configured as a comma-separated list of exact HTTPS browser origins, matching origins receive CORS permission only for `POST` and the `Content-Type` and `X-Triage-Application-Version` headers. CORS is not authentication and non-matching browser requests must not be considered blocked at the network layer.
 
 ## Threat model and limitations
 

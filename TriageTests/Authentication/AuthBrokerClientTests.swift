@@ -8,6 +8,7 @@ final class AuthBrokerClientTests: XCTestCase {
         )
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,
+            applicationVersion: "0.1.0",
             session: session
         )
         let response = try await client.exchange(
@@ -24,20 +25,45 @@ final class AuthBrokerClientTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Cache-Control"), "no-store")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Triage-Application-Version"), "0.1.0")
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["version"] as? Int, AuthBrokerProtocol.version)
+        XCTAssertEqual(json["authorizationCode"] as? String, "code")
+        XCTAssertEqual(json["codeVerifier"] as? String, String(repeating: "a", count: 43))
+        XCTAssertEqual(json["redirectURI"] as? String, "triage://oauth-callback")
+        let nonce = try XCTUnwrap(json["nonce"] as? String)
+        XCTAssertEqual(nonce.count, 43)
+        XCTAssertTrue(nonce.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        let issuedAt = try XCTUnwrap(json["issuedAt"] as? NSNumber).int64Value
+        let expiresAt = try XCTUnwrap(json["expiresAt"] as? NSNumber).int64Value
+        XCTAssertEqual(expiresAt - issuedAt, AuthBrokerProtocol.requestLifetimeMilliseconds)
     }
 
     func testClientRejectsInsecureOrCredentialBearingBrokerURLs() {
         XCTAssertThrowsError(
-            try AuthBrokerClient(baseURL: URL(string: "http://oauth.triage.example")!)
+            try AuthBrokerClient(baseURL: URL(string: "http://oauth.triage.example")!, applicationVersion: "0.1.0")
         )
         XCTAssertThrowsError(
-            try AuthBrokerClient(baseURL: URL(string: "https://user:password@oauth.triage.example")!)
+            try AuthBrokerClient(baseURL: URL(string: "https://user:password@oauth.triage.example")!, applicationVersion: "0.1.0")
         )
+    }
+
+    func testClientRejectsAnInvalidApplicationVersion() {
+        XCTAssertThrowsError(
+            try AuthBrokerClient(
+                baseURL: URL(string: "https://oauth.triage.example")!,
+                applicationVersion: "0.1"
+            )
+        ) { error in
+            XCTAssertEqual(error as? AuthBrokerClientError, .invalidApplicationVersion)
+        }
     }
 
     func testClientDecodesOnlyTypedBrokerFailures() async throws {
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,
+            applicationVersion: "0.1.0",
             session: BrokerStubSession(
                 statusCode: 400,
                 responseBody: Data(#"{"version":1,"code":"invalidGrant","recoveryDescription":"Expired"}"#.utf8)
@@ -55,6 +81,7 @@ final class AuthBrokerClientTests: XCTestCase {
     func testClientRejectsOversizedBrokerResponsesBeforeDecoding() async throws {
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,
+            applicationVersion: "0.1.0",
             session: BrokerStubSession(
                 responseBody: Data(
                     repeating: 0,
@@ -74,6 +101,7 @@ final class AuthBrokerClientTests: XCTestCase {
     func testClientPropagatesCancellation() async throws {
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,
+            applicationVersion: "0.1.0",
             session: CancelledBrokerSession()
         )
 
@@ -93,6 +121,7 @@ final class AuthBrokerClientTests: XCTestCase {
         )
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,
+            applicationVersion: "0.1.0",
             session: session
         )
 

@@ -210,7 +210,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let account = GitHubAccount(
-            id: AccountID(rawValue: "fine-grained-account")!,
+            id: AccountID(rawValue: "00000000-0000-4000-8000-000000000207")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",
@@ -343,7 +343,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
 
     private func makeAccount() -> GitHubAccount {
         GitHubAccount(
-            id: AccountID(rawValue: "account-1")!,
+            id: AccountID(rawValue: "00000000-0000-4000-8000-000000000208")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",

@@ -7,9 +7,9 @@ final class AccountRestorationServiceTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let malformedAccountID = AccountID(rawValue: "account-malformed")!
-        let firstAccountID = AccountID(rawValue: "account-first")!
-        let secondAccountID = AccountID(rawValue: "account-second")!
+        let malformedAccountID = AccountID.make()
+        let firstAccountID = AccountID.make()
+        let secondAccountID = AccountID.make()
         let firstCredentialID = CredentialID(rawValue: "credential-first")!
         let secondCredentialID = CredentialID(rawValue: "credential-second")!
         let now = Date(timeIntervalSinceReferenceDate: 1_000)
@@ -87,7 +87,7 @@ final class AccountRestorationServiceTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let accountID = AccountID(rawValue: "account-token-read-failure")!
+        let accountID = AccountID.make()
         let credentialID = CredentialID(rawValue: "credential-token-read-failure")!
         let vaultKey = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: directory)
@@ -134,7 +134,7 @@ final class AccountRestorationServiceTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let accountID = AccountID(rawValue: "account-vault-key-read-failure")!
+        let accountID = AccountID.make()
         let vaultKeyKey = InMemorySecretStore.Key(
             kind: .vaultKey,
             accountID: accountID,
@@ -159,6 +159,93 @@ final class AccountRestorationServiceTests: XCTestCase {
         }
     }
 
+    func testUnsafeAccountIDWithAKeyRemainsANonDestructiveRestorationFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let unsafeAccountID = try XCTUnwrap(AccountID(rawValue: "../outside"))
+        let secrets = InMemorySecretStore(
+            accountIDs: [unsafeAccountID],
+            values: [
+                .init(kind: .vaultKey, accountID: unsafeAccountID, credentialID: nil): try VaultKey.generate().data
+            ]
+        )
+
+        do {
+            _ = try await AccountRestorationService(
+                secretStore: secrets,
+                vaultRegistry: try VaultRegistry(rootDirectory: directory)
+            ).restore()
+            XCTFail("Unsafe account identifiers must not be classified as removable unavailable vaults.")
+        } catch let error as VaultError {
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("Vaults", isDirectory: true).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.deletingLastPathComponent().appendingPathComponent("outside").path
+        ))
+    }
+
+    func testUnsafeAccountIDWithMissingOrMalformedKeyIsNeverClassifiedAsRemovableUnavailableData() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missingKeyID = try XCTUnwrap(AccountID(rawValue: "../missing-key"))
+        let malformedKeyID = try XCTUnwrap(AccountID(rawValue: "../malformed-key"))
+        let secrets = InMemorySecretStore(
+            accountIDs: [missingKeyID, malformedKeyID],
+            values: [
+                .init(kind: .vaultKey, accountID: malformedKeyID, credentialID: nil): Data([0])
+            ]
+        )
+
+        do {
+            _ = try await AccountRestorationService(
+                secretStore: secrets,
+                vaultRegistry: try VaultRegistry(rootDirectory: directory)
+            ).restore()
+            XCTFail("Unsafe identifiers must not be offered as unavailable-key recovery candidates.")
+        } catch let error as VaultError {
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+        }
+    }
+
+    func testVaultIntegrityMigrationAndSQLCipherFailuresBecomeRepairIssuesNeverUnavailableAccounts() throws {
+        let accountID = AccountID.make()
+        let expected: [(VaultError, AccountVaultRecoveryIssue.Kind)] = [
+            (.invalidIntegrityCheck, .databaseCorruption),
+            (.invalidMigrationBackup, .migrationFailure),
+            (.unsupportedDestructiveMigration("test-only-migration"), .migrationFailure),
+            (.sqlCipherUnavailable, .sqlCipherUnavailable)
+        ]
+
+        for (error, kind) in expected {
+            XCTAssertEqual(AccountRestorationService.recoveryIssueKind(for: error), kind)
+            let snapshot = try AccountSessionSnapshot(
+                accounts: [],
+                organizationsByAccount: [:],
+                organizationAccessesByAccount: [:],
+                accountCapabilitiesByAccount: [:],
+                vaultRecoveryIssues: [
+                    AccountVaultRecoveryIssue(
+                        accountID: accountID,
+                        kind: kind,
+                        verifiedBackupMigrationIDs: []
+                    )
+                ]
+            )
+            XCTAssertTrue(snapshot.unavailableAccountIDs.isEmpty)
+            XCTAssertEqual(snapshot.vaultRecoveryIssues.map(\.accountID), [accountID])
+        }
+
+        XCTAssertNil(AccountRestorationService.recoveryIssueKind(for: .accountBeingRemoved))
+        XCTAssertNil(AccountRestorationService.recoveryIssueKind(for: .missingApplicationSupportDirectory))
+    }
+
     private func account(
         id: AccountID,
         credentialID: CredentialID,
@@ -167,9 +254,9 @@ final class AccountRestorationServiceTests: XCTestCase {
     ) -> GitHubAccount {
         GitHubAccount(
             id: id,
-            githubUserID: id == AccountID(rawValue: "account-first")! ? 1 : 2,
+            githubUserID: authenticationKind == .fineGrainedPersonalAccessToken ? 1 : 2,
             nodeID: GitHubNodeID(
-                rawValue: id == AccountID(rawValue: "account-first")! ? "U_first" : "U_second"
+                rawValue: authenticationKind == .fineGrainedPersonalAccessToken ? "U_first" : "U_second"
             )!,
             login: id.rawValue,
             authenticationKind: authenticationKind,
