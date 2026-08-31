@@ -2585,9 +2585,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     func cancelCopilotRuntimeOperation() {
         guard let operation = copilotRuntimeOperationTask else { return }
         operation.cancel()
+        // Stop consuming progress before settling the row. A final URLSession
+        // delegate callback may already be queued when cancellation begins;
+        // it must not repaint the explicit missing state as Downloading.
+        copilotRuntimeStateObservationTask?.cancel()
+        copilotRuntimeStateObservationTask = nil
         // Settle the visible state synchronously. The authorization boundary
-        // below invalidates the acquisition generation, and the cancelled
-        // operation re-reads that authoritative state before it returns.
+        // below invalidates the acquisition generation; its state stream will
+        // be observed again only if the user begins a later operation.
         selectedCopilotAuthorizationState = .init(
             runtime: .missing,
             authentication: selectedCopilotAuthorizationState.authentication,
@@ -2595,15 +2600,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             hasOrganizationConsent: selectedCopilotAuthorizationState.hasOrganizationConsent
         )
         let authorization = dependencies.copilotRuntimeAuthorization
-        let accountID = selectedAccountID
-        Task { [weak self] in
+        Task {
             await authorization.cancelRuntimeOperationAtUserRequest()
-            guard let self else { return }
-            if let accountID {
-                let state = await authorization.state(for: accountID)
-                guard self.selectedAccountID == accountID else { return }
-                self.selectedCopilotAuthorizationState = state
-            }
         }
     }
 
@@ -2639,13 +2637,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
         do {
             try await operation(authorization)
+            try Task.checkCancellation()
             await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await invalidateCopilotAuthorityForAllAccounts()
             await refreshSelectedOrganizationAIStatus()
         } catch is CancellationError {
-            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
+            settleCancelledCopilotRuntimeOperation()
         } catch where Task.isCancelled {
-            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
+            settleCancelledCopilotRuntimeOperation()
         } catch {
             copilotRuntimeOperationError = Self.copilotRuntimeOperationFailureMessage(
                 for: error,
@@ -2654,6 +2653,15 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await refreshSelectedOrganizationAIStatus()
         }
+    }
+
+    private func settleCancelledCopilotRuntimeOperation() {
+        selectedCopilotAuthorizationState = .init(
+            runtime: .missing,
+            authentication: selectedCopilotAuthorizationState.authentication,
+            isEntitled: selectedCopilotAuthorizationState.isEntitled,
+            hasOrganizationConsent: selectedCopilotAuthorizationState.hasOrganizationConsent
+        )
     }
 
     private func publishCopilotRuntimeState(

@@ -554,10 +554,17 @@ final class TriageAppModelSelectionTests: XCTestCase {
 
         await assertRuntimeState(model, matches: .missing)
         for _ in 0..<100 {
-            if await runtimeAuthorization.cancellationCallCount() == 1 { return }
+            if await runtimeAuthorization.cancellationCallCount() == 1 { break }
             await Task.yield()
         }
-        XCTFail("The app model did not forward the explicit runtime cancellation.")
+        let cancellationCallCount = await runtimeAuthorization.cancellationCallCount()
+        XCTAssertEqual(cancellationCallCount, 1)
+
+        // A progress callback can already be queued when the URLSession task is
+        // cancelled. It must not repaint the explicitly settled Download row.
+        await runtimeAuthorization.publishLateRuntimeForTest(.verifying)
+        await Task.yield()
+        await assertRuntimeState(model, matches: .missing)
     }
 
     func testSuccessfulCredentialReplacementClearsResolvedRecoveryState() async throws {
@@ -1098,6 +1105,10 @@ private actor RuntimeProgressAuthorizationSpy: CopilotRuntimeAuthorizationProvid
     }
 
     func cancellationCallCount() -> Int { cancellationCalls }
+
+    func publishLateRuntimeForTest(_ state: CopilotRuntimeStatus) {
+        continuation?.yield(state)
+    }
 
     func repairRuntimeAtUserRequest() async throws { throw CancellationError() }
     func removeRuntimeAtUserRequest() async throws {}
