@@ -51,6 +51,7 @@ enum SettingsSidebarLayout {
     static let minimumWidth: CGFloat = 240
     static let idealWidth: CGFloat = 260
     static let maximumWidth: CGFloat = 320
+    static let detailHeadingAlignmentInset: CGFloat = 15
     static let minimumWindowWidth: CGFloat = 800
     static let defaultWindowWidth: CGFloat = 860
 }
@@ -78,6 +79,11 @@ struct SettingsView: View {
                     .tag(category)
             }
             .listStyle(.sidebar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear
+                    .frame(height: SettingsSidebarLayout.detailHeadingAlignmentInset)
+                    .accessibilityHidden(true)
+            }
             .navigationSplitViewColumnWidth(
                 min: SettingsSidebarLayout.minimumWidth,
                 ideal: SettingsSidebarLayout.idealWidth,

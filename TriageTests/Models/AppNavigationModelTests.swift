@@ -7,6 +7,7 @@ final class AppNavigationModelTests: XCTestCase {
         XCTAssertEqual(SettingsSidebarLayout.minimumWidth, 240)
         XCTAssertEqual(SettingsSidebarLayout.idealWidth, 260)
         XCTAssertEqual(SettingsSidebarLayout.maximumWidth, 320)
+        XCTAssertEqual(SettingsSidebarLayout.detailHeadingAlignmentInset, 15)
         XCTAssertGreaterThan(SettingsSidebarLayout.idealWidth, SettingsSidebarLayout.minimumWidth)
         XCTAssertGreaterThan(SettingsSidebarLayout.maximumWidth, SettingsSidebarLayout.idealWidth)
         XCTAssertGreaterThanOrEqual(SettingsSidebarLayout.minimumWindowWidth, 800)
