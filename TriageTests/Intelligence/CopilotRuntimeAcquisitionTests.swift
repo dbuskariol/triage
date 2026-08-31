@@ -119,7 +119,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         await assertRuntimeThrows { _ = try await service.acquireAtUserRequest() }
         XCTAssertEqual(fixture.extractor.calls, 0)
         let state = await service.state()
-        XCTAssertEqual(state, .corrupt("checksumMismatch"))
+        XCTAssertEqual(state, .absent)
     }
 
     func testExecutablePinMismatchDoesNotInstall() async throws {
@@ -132,7 +132,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         XCTAssertEqual(fixture.validator.calls, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
         let state = await service.state()
-        XCTAssertEqual(state, .corrupt("executableChecksumMismatch"))
+        XCTAssertEqual(state, .absent)
     }
 
     func testRedirectAndOversizedArchiveFailuresAreFailClosed() async throws {
@@ -143,7 +143,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
             await assertRuntimeThrows { _ = try await service.acquireAtUserRequest() }
             XCTAssertEqual(fixture.extractor.calls, 0)
             let state = await service.state()
-            XCTAssertEqual(state, .corrupt(String(describing: error)))
+            XCTAssertEqual(state, .absent)
         }
     }
 
@@ -305,12 +305,28 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         XCTAssertTrue(didCancel)
     }
 
-    func testRedirectPolicyAllowsOnlyPinnedGitHubAuthoritiesWithoutCredentialsOrQuery() {
+    func testRedirectPolicyAllowsOnlyGitHubsSignedPinnedAssetRedirect() {
         let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.81-10/copilot-darwin-arm64.tar.gz")!
-        let releaseAsset = URL(string: "https://release-assets.githubusercontent.com/copilot-darwin-arm64.tar.gz")!
+        var components = URLComponents(string: "https://release-assets.githubusercontent.com/github-production-release-asset/585860664/72ea65b1-51c9-4b30-87ed-e9ca2904af61")!
+        components.queryItems = [
+            URLQueryItem(name: "sig", value: "signed-value"),
+            URLQueryItem(name: "jwt", value: "bounded-token"),
+            URLQueryItem(name: "rscd", value: "attachment; filename=copilot-darwin-arm64.tar.gz"),
+        ]
+        let releaseAsset = components.url!
         XCTAssertTrue(CopilotRuntimeURLTransfer.isApprovedInitialURL(source))
         XCTAssertTrue(CopilotRuntimeURLTransfer.isApprovedRedirect(from: source, to: releaseAsset))
         XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedInitialURL(releaseAsset))
+        XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedRedirect(
+            from: source,
+            to: URL(string: "https://release-assets.githubusercontent.com/copilot-darwin-arm64.tar.gz")!
+        ))
+        components.queryItems = [
+            URLQueryItem(name: "sig", value: "signed-value"),
+            URLQueryItem(name: "jwt", value: "bounded-token"),
+            URLQueryItem(name: "rscd", value: "attachment; filename=other-file.tar.gz"),
+        ]
+        XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedRedirect(from: source, to: components.url!))
         XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedInitialURL(URL(string: "http://github.com/file")!))
         XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedInitialURL(URL(string: "https://evil.example/file")!))
         XCTAssertFalse(CopilotRuntimeURLTransfer.isApprovedInitialURL(URL(string: "https://github.com/file?token=secret")!))

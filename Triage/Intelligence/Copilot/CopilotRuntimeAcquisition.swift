@@ -237,7 +237,7 @@ actor CopilotRuntimeAcquisitionService {
         return stream
     }
 
-    /// The only method that may contact GitHub.  Nothing calls it implicitly.
+    /// The only method that may contact GitHub. Nothing calls it implicitly.
     func acquireAtUserRequest() async throws -> URL {
         let archive = release.archive(for: architecture)
         guard archive.url.scheme == "https", archive.url.host == CopilotRuntimeRelease.githubAuthority else {
@@ -287,11 +287,15 @@ actor CopilotRuntimeAcquisitionService {
             throw CopilotRuntimeAcquisitionError.cancellation
         } catch let error as CopilotRuntimeAcquisitionError {
             rollbackInstalledRuntime(installed, generation: generation)
-            finishAcquisition(.corrupt(String(describing: error)), generation: generation)
+            // A failed acquisition did not publish an installed executable.
+            // `corrupt` is reserved for an installed runtime which later
+            // fails revalidation; presenting a network failure as installed
+            // corruption would incorrectly offer Repair instead of Retry.
+            finishAcquisition(.absent, generation: generation)
             throw error
         } catch {
             rollbackInstalledRuntime(installed, generation: generation)
-            finishAcquisition(.corrupt("acquisition failed"), generation: generation)
+            finishAcquisition(.absent, generation: generation)
             throw CopilotRuntimeAcquisitionError.fileSystem
         }
     }
@@ -465,9 +469,13 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
         })
     }
 
-    private static func isCleanHTTPSURL(_ url: URL, host: String) -> Bool {
+    private static func isCleanHTTPSURL(
+        _ url: URL,
+        host: String,
+        allowsQuery: Bool = false
+    ) -> Bool {
         guard url.scheme == "https", url.user == nil, url.password == nil,
-              url.query == nil, url.fragment == nil,
+              (allowsQuery || url.query == nil), url.fragment == nil,
               url.port == nil || url.port == 443,
               let observedHost = url.host?.lowercased()
         else { return false }
@@ -479,8 +487,39 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
     }
 
     static func isApprovedRedirect(from source: URL, to destination: URL) -> Bool {
-        isApprovedInitialURL(source)
-            && isCleanHTTPSURL(destination, host: "release-assets.githubusercontent.com")
+        guard isApprovedInitialURL(source),
+              isCleanHTTPSURL(
+                destination,
+                host: "release-assets.githubusercontent.com",
+                allowsQuery: true
+              )
+        else { return false }
+
+        // GitHub release downloads use a time-limited, signed query on this
+        // exact asset host. Bind it to the expected production-asset path and
+        // source filename; the archive and executable hashes remain the final
+        // content authority. Arbitrary same-host redirects still fail closed.
+        let path = destination.pathComponents
+        guard path.count == 4,
+              path[1] == "github-production-release-asset",
+              UInt64(path[2]) != nil,
+              UUID(uuidString: path[3]) != nil,
+              let components = URLComponents(url: destination, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems,
+              !queryItems.isEmpty
+        else { return false }
+
+        let names = queryItems.map(\.name)
+        guard Set(names).count == names.count,
+              queryItems.contains(where: { $0.name == "sig" && !($0.value ?? "").isEmpty }),
+              queryItems.contains(where: { $0.name == "jwt" && !($0.value ?? "").isEmpty })
+        else { return false }
+
+        let expectedDisposition = "attachment; filename=\(source.lastPathComponent)"
+        return queryItems.contains { item in
+            (item.name == "rscd" || item.name == "response-content-disposition")
+                && item.value == expectedDisposition
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {

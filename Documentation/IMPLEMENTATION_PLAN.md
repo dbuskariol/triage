@@ -1483,9 +1483,12 @@ the only permitted acquisition: the pinned GitHub release URL for the running
 architecture. The download uses an ephemeral directory and accepts only the
 exact HTTPS redirect chain `github.com` to
 `release-assets.githubusercontent.com`; each URL must use port 443 (or the
-default), with no userinfo, query, or fragment. It has a fixed size limit,
-streams and checks the pinned SHA-256, and extracts only the expected regular
-`copilot` file.
+default), with no userinfo or fragment. The initial URL has no query. GitHub's
+single release-asset redirect may carry its time-limited signed query only when
+the destination matches the exact production-release-asset path shape and the
+query binds the expected source filename. It has a fixed size limit, streams
+and checks the pinned SHA-256, and extracts only the expected regular `copilot`
+file.
 Before atomically installing to app-owned Application Support at
 `Triage/CopilotRuntime/<version>/<architecture>/copilot`, it verifies the
 Mach-O architecture and GitHub Developer ID identifier, team, and Hardened

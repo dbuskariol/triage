@@ -118,6 +118,7 @@ struct SettingsView: View {
     @State private var isLoadingSelectedOrganizationNotificationConsent = false
     @State private var isSavingSelectedOrganizationNotificationConsent = false
     @State private var notificationConsentError: String?
+    @State private var isPresentingAIDataSharingDisclosure = false
 
     var body: some View {
         NavigationSplitView {
@@ -280,6 +281,27 @@ struct SettingsView: View {
             }
         } message: {
             Text(notificationSettingsOpenError ?? "Open System Settings, select Notifications, then allow Triage notifications.")
+        }
+        .sheet(isPresented: $isPresentingAIDataSharingDisclosure) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("AI Data Sharing")
+                    .font(.title2.weight(.semibold))
+                Text(AIConsentPresentation.disclosure(
+                    account: appModel.accounts.first(where: { $0.id == appModel.selectedAccountID }),
+                    organization: appModel.selectedOrganization
+                ))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Done") {
+                        isPresentingAIDataSharingDisclosure = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24)
+            .frame(width: 560)
         }
     }
 
@@ -920,19 +942,27 @@ struct SettingsView: View {
                     login: organization.login
                 )
                 let state = appModel.selectedOrganizationAISettings
-                Toggle("Allow AI analysis for \(organizationName)", isOn: Binding(
-                    get: { state?.consent.isEnabled ?? false },
-                    set: { enabled in
-                        Task { await appModel.recordSelectedOrganizationAIConsent(enabled) }
+                let selectedAccount = appModel.accounts.first(where: { $0.id == appModel.selectedAccountID })
+                SettingsValueRow(
+                    title: "Allow AI analysis for \(organizationName)",
+                    detail: AIConsentPresentation.settingsSummary(account: selectedAccount),
+                    systemImage: "sparkles"
+                ) {
+                    HStack(spacing: 10) {
+                        Button("Details…") {
+                            isPresentingAIDataSharingDisclosure = true
+                        }
+                        Toggle("Allow AI analysis for \(organizationName)", isOn: Binding(
+                            get: { state?.consent.isEnabled ?? false },
+                            set: { enabled in
+                                Task { await appModel.recordSelectedOrganizationAIConsent(enabled) }
+                            }
+                        ))
+                        .labelsHidden()
+                        .accessibilityLabel("Allow AI analysis for \(organizationName)")
+                        .accessibilityHint("AI authorization is local and organization-specific. Turning it off cancels analysis and erases only this organization's stored AI prompts, outputs, model cache, and AI action candidates.")
                     }
-                ))
-                .accessibilityHint("AI authorization is local and organization-specific. Turning it off cancels analysis and erases only this organization's stored AI prompts, outputs, model cache, and AI action candidates.")
-                Text(AIConsentPresentation.disclosure(
-                    account: appModel.accounts.first(where: { $0.id == appModel.selectedAccountID }),
-                    organization: organization
-                ))
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                }
                 SettingsDivider()
                 SettingsValueRow(
                     title: "Automatic action confidence",
@@ -1010,9 +1040,9 @@ struct SettingsView: View {
                     systemImage: "person.badge.key"
                 ) {
                     if appModel.accounts.first(where: { $0.id == appModel.selectedAccountID })?.authenticationKind == .classicPersonalAccessToken {
-                        Text("Unavailable")
+                        Text("Separate sign-in required")
                             .foregroundStyle(.secondary)
-                            .accessibilityLabel("Copilot is unavailable for classic personal access tokens")
+                            .accessibilityLabel("A separate Copilot OAuth sign-in is required")
                     } else {
                         Button("Authenticate Copilot") {
                             Task { await appModel.authenticateSelectedCopilotAccountAtUserRequest() }
@@ -1027,6 +1057,12 @@ struct SettingsView: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .accessibilityLabel("Copilot authentication error: \(error)")
+                }
+                if let error = appModel.copilotRuntimeOperationError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Copilot runtime error: \(error)")
                 }
             } else {
                 Text("Select an available organization before configuring AI analysis.")
@@ -1112,7 +1148,7 @@ struct SettingsView: View {
     private func copilotAuthenticationDetail(_ status: CopilotAuthenticationStatus) -> String {
         switch status {
         case .signedOut: "Not authenticated for this Triage account."
-        case .deviceLoginRequired: "Copilot device login is unavailable in this build."
+        case .deviceLoginRequired: "A separate Copilot OAuth sign-in is required."
         case .verifyingIdentity: "Verifying the authenticated GitHub numeric user ID."
         case .authenticated: "Authenticated identity exactly matches the selected Triage account."
         case let .identityMismatch(expected, actual): "Blocked: Copilot user \(actual) does not match selected GitHub user \(expected)."
