@@ -1098,10 +1098,13 @@ struct SettingsView: View {
             .keyboardShortcut("d", modifiers: [.command, .option])
             .disabled(ifUnsupportedRuntime(status) || isOperationInProgress)
             .accessibilityHint("Downloads the pinned Copilot runtime only after this explicit request.")
+            .id("copilot-runtime-download")
         case .downloading, .verifying:
             Button("Cancel") { appModel.cancelCopilotRuntimeOperation() }
                 .accessibilityLabel("Cancel Copilot runtime download")
                 .accessibilityHint("Cancels the Copilot runtime download and removes its temporary files.")
+                .keyboardShortcut(.cancelAction)
+                .id("copilot-runtime-cancel")
         case .ready:
             Button("Remove", role: .destructive) {
                 appModel.cancelCopilotRuntimeOperation()
@@ -1109,12 +1112,14 @@ struct SettingsView: View {
             }
             .disabled(isOperationInProgress)
             .accessibilityHint("Removes the approved Copilot runtime from this Mac.")
+            .id("copilot-runtime-remove")
         case .corrupt:
             Button("Repair") {
                 appModel.startCopilotRuntimeRepairAtUserRequest()
             }
             .disabled(isOperationInProgress)
             .accessibilityHint("Removes and re-downloads the verified Copilot runtime.")
+            .id("copilot-runtime-repair")
         }
     }
 

@@ -2014,7 +2014,6 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         else {
             return
         }
-        let generation = refreshGeneration
         do {
             let secretStore = KeychainSecretStore()
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
@@ -2584,7 +2583,28 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func cancelCopilotRuntimeOperation() {
-        copilotRuntimeOperationTask?.cancel()
+        guard let operation = copilotRuntimeOperationTask else { return }
+        operation.cancel()
+        // Settle the visible state synchronously. The authorization boundary
+        // below invalidates the acquisition generation, and the cancelled
+        // operation re-reads that authoritative state before it returns.
+        selectedCopilotAuthorizationState = .init(
+            runtime: .missing,
+            authentication: selectedCopilotAuthorizationState.authentication,
+            isEntitled: selectedCopilotAuthorizationState.isEntitled,
+            hasOrganizationConsent: selectedCopilotAuthorizationState.hasOrganizationConsent
+        )
+        let authorization = dependencies.copilotRuntimeAuthorization
+        let accountID = selectedAccountID
+        Task { [weak self] in
+            await authorization.cancelRuntimeOperationAtUserRequest()
+            guard let self else { return }
+            if let accountID {
+                let state = await authorization.state(for: accountID)
+                guard self.selectedAccountID == accountID else { return }
+                self.selectedCopilotAuthorizationState = state
+            }
+        }
     }
 
     func removeCopilotRuntimeAtUserRequest() async {
@@ -2619,19 +2639,31 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
         do {
             try await operation(authorization)
+            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await invalidateCopilotAuthorityForAllAccounts()
             await refreshSelectedOrganizationAIStatus()
         } catch is CancellationError {
-            await refreshSelectedOrganizationAIStatus()
+            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
         } catch where Task.isCancelled {
-            await refreshSelectedOrganizationAIStatus()
+            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
         } catch {
             copilotRuntimeOperationError = Self.copilotRuntimeOperationFailureMessage(
                 for: error,
                 fallback: failureMessage
             )
+            await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await refreshSelectedOrganizationAIStatus()
         }
+    }
+
+    private func publishCopilotRuntimeState(
+        from authorization: any CopilotRuntimeAuthorizationProviding,
+        accountID: AccountID?
+    ) async {
+        guard let accountID else { return }
+        let state = await authorization.state(for: accountID)
+        guard selectedAccountID == accountID else { return }
+        selectedCopilotAuthorizationState = state
     }
 
     private static func copilotRuntimeOperationFailureMessage(
@@ -2644,6 +2676,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             "GitHub returned an unexpected runtime download location. Nothing was installed."
         case .invalidResponse:
             "GitHub did not return a valid runtime download. Nothing was installed."
+        case .networkFailure:
+            "The runtime download stopped before it completed. Nothing was installed; check your connection and try Download again."
         case .archiveTooLarge:
             "The runtime download exceeded Triage’s safety limit. Nothing was installed."
         case .checksumMismatch, .executableChecksumMismatch:

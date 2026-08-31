@@ -249,6 +249,7 @@ struct TriageApp: App {
                 preferences: preferences,
                 externalNavigation: externalNavigation
             )
+            TriageSettingsWindowCommands()
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
@@ -261,7 +262,7 @@ struct TriageApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        Window("Triage Settings", id: "settings") {
             SettingsView()
                 .environmentObject(appModel)
                 .environmentObject(navigation)
@@ -276,6 +277,10 @@ struct TriageApp: App {
                     idealHeight: 680
                 )
         }
+        .defaultSize(
+            width: SettingsSidebarLayout.defaultWindowWidth,
+            height: 680
+        )
         .windowStyle(.hiddenTitleBar)
     }
 
@@ -289,6 +294,19 @@ struct TriageApp: App {
         )
     }
 
+}
+
+private struct TriageSettingsWindowCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                openWindow(id: "settings")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+    }
 }
 
 enum TriageStartupDiagnostics {

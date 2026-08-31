@@ -78,6 +78,7 @@ enum CopilotRuntimeAcquisitionError: Error, Equatable, Sendable {
     case invalidSource
     case redirectRejected
     case invalidResponse
+    case networkFailure
     case archiveTooLarge
     case checksumMismatch
     case executableChecksumMismatch
@@ -335,6 +336,14 @@ actor CopilotRuntimeAcquisitionService {
         return try await acquireAtUserRequest()
     }
 
+    /// Invalidates the active acquisition generation immediately. The task
+    /// cancellation handler still closes the URLSession transfer, while this
+    /// generation fence guarantees that a late callback cannot verify or
+    /// publish an executable after the user has pressed Cancel.
+    func cancelAtUserRequest() {
+        invalidateAcquisitionAndPublish(.absent)
+    }
+
     private func beginAcquisition() -> UInt64 {
         acquisitionGeneration &+= 1
         activeProgressGeneration = acquisitionGeneration
@@ -406,6 +415,10 @@ final class URLSessionCopilotRuntimeDownloader: NSObject, CopilotRuntimeDownload
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // A release-asset connection that stops producing bytes must settle
+        // back to Retry instead of leaving Settings in Downloading forever.
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 10 * 60
         let session = URLSession(configuration: configuration, delegate: transfer, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         return try await transfer.run(session: session, url: archive.url)
@@ -602,8 +615,14 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
         let outcome: Result<String, Error>?
         if isTerminal {
             outcome = nil
-        } else if let error {
-            outcome = .failure(error)
+        } else if let urlError = error as? URLError {
+            outcome = .failure(
+                urlError.code == .cancelled
+                    ? CopilotRuntimeAcquisitionError.cancellation
+                    : CopilotRuntimeAcquisitionError.networkFailure
+            )
+        } else if error != nil {
+            outcome = .failure(CopilotRuntimeAcquisitionError.networkFailure)
         } else {
             outcome = .success(hasher.finalize().map { String(format: "%02x", $0) }.joined())
         }
