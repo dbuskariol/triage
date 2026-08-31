@@ -167,6 +167,7 @@ actor OAuthCredentialRefreshService {
                     credentialID: account.credentialID
                 )
                 refreshTokenWasWritten = true
+                try Task.checkCancellation()
             }
             try await secretStore.write(
                 Data(response.accessToken.value.rawValue.utf8),
@@ -175,6 +176,7 @@ actor OAuthCredentialRefreshService {
                 credentialID: account.credentialID
             )
             accessTokenWasWritten = true
+            try Task.checkCancellation()
             let accessTokenExpiresAt = response.expiresIn.map { now.addingTimeInterval($0) }
             let refreshTokenExpiresAt = response.refreshTokenExpiresIn.map { now.addingTimeInterval($0) }
                 ?? account.refreshTokenExpiresAt

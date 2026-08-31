@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import Triage
 
@@ -65,6 +66,23 @@ final class LocalWorkflowUndoPolicyTests: XCTestCase {
         XCTAssertFalse(LocalWorkflowUndoPolicy.hasSamePersistentState(initial, changed))
     }
 
+    @MainActor
+    func testNativeUndoRegistrationNamesStandaloneAsynchronousWorkflowUndo() {
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        let target = UndoTarget()
+
+        LocalWorkflowUndoPolicy.registerNativeUndo(
+            named: "Archive in Triage",
+            with: undoManager
+        ) {
+            undoManager.registerUndo(withTarget: target) { _ in }
+        }
+
+        XCTAssertTrue(undoManager.canUndo)
+        XCTAssertEqual(undoManager.undoActionName, "Archive in Triage")
+    }
+
     private func state(
         status: LocalWorkStatus = .active,
         isPinned: Bool = false,
@@ -99,3 +117,5 @@ final class LocalWorkflowUndoPolicyTests: XCTestCase {
         }
     }
 }
+
+private final class UndoTarget: NSObject {}

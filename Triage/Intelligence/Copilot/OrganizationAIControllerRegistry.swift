@@ -18,7 +18,8 @@ actor OrganizationAIControllerRegistry: OrganizationAIControllerProviding {
         return controller
     }
 
-    func evict(accountID: AccountID) {
-        controllers[accountID] = nil
+    func evict(accountID: AccountID) async {
+        guard let controller = controllers.removeValue(forKey: accountID) else { return }
+        await controller.cancelAll()
     }
 }

@@ -129,6 +129,36 @@ final class AccountRestorationServiceTests: XCTestCase {
         }
     }
 
+    func testVaultKeyReadFailureDoesNotExposeDestructiveUnavailableKeyRecovery() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID(rawValue: "account-vault-key-read-failure")!
+        let vaultKeyKey = InMemorySecretStore.Key(
+            kind: .vaultKey,
+            accountID: accountID,
+            credentialID: nil
+        )
+        let secrets = InMemorySecretStore(
+            accountIDs: [accountID],
+            values: [:],
+            failingReadKey: vaultKeyKey
+        )
+
+        do {
+            _ = try await AccountRestorationService(
+                secretStore: secrets,
+                vaultRegistry: try VaultRegistry(rootDirectory: directory)
+            ).restore()
+            XCTFail("A vault-key read failure must remain retryable, not become a keyless-vault account.")
+        } catch let error as InMemorySecretStore.Failure {
+            XCTAssertEqual(error, .configuredReadFailure)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     private func account(
         id: AccountID,
         credentialID: CredentialID,

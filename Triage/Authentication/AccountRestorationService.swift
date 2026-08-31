@@ -25,18 +25,30 @@ actor AccountRestorationService {
         var unavailableAccountIDs: [AccountID] = []
 
         for accountID in try await secretStore.accountIDs() {
-            let vaultKey: VaultKey
+            let vaultKeyData: Data?
             do {
-                guard let vaultKeyData = try await secretStore.read(
+                vaultKeyData = try await secretStore.read(
                     kind: .vaultKey,
                     accountID: accountID,
                     credentialID: nil
-                ) else {
-                    unavailableAccountIDs.append(accountID)
-                    continue
-                }
+                )
+            } catch {
+                // A Keychain read failure is not evidence that the key is
+                // missing. Propagate it so the UI offers retry, never a
+                // destructive keyless-vault recovery action.
+                throw error
+            }
+            guard let vaultKeyData else {
+                unavailableAccountIDs.append(accountID)
+                continue
+            }
+            let vaultKey: VaultKey
+            do {
                 vaultKey = try VaultKey(data: vaultKeyData)
             } catch {
+                // A present but malformed key cannot open a vault. It is an
+                // explicit unavailable-key path and remains independently
+                // removable without affecting other restored accounts.
                 unavailableAccountIDs.append(accountID)
                 continue
             }

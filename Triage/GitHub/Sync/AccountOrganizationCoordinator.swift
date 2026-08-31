@@ -104,7 +104,17 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
     }
 
     var freshness: FreshnessState {
-        let latestSuccess = coverage.compactMap(\.lastSuccessfulAt).max() ?? lastSuccessfulSyncAt
+        // Notifications and organization-metadata replay are durable source
+        // evidence, but neither is part of the work-list completeness
+        // contract. Their failure must not make an otherwise complete work
+        // refresh look failed or SSO-blocked. Keep the full collection for
+        // authority validation below; use only required features when
+        // classifying workspace freshness.
+        let requiredCoverage = coverage.filter {
+            AccountOrganizationCoverageManifest.requiredFeatures.contains($0.feature)
+        }
+        let latestSuccess = requiredCoverage.compactMap(\.lastSuccessfulAt).max()
+            ?? lastSuccessfulSyncAt
         guard !coverage.isEmpty else {
             return FreshnessState(
                 status: .stale,
@@ -112,28 +122,28 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
                 detail: "No cached synchronization coverage is available."
             )
         }
-        if let record = coverage.first(where: { $0.status == .requiresSSO }) {
+        if let record = requiredCoverage.first(where: { $0.status == .requiresSSO }) {
             return FreshnessState(
                 status: .ssoRequired,
                 lastSuccessfulSyncAt: latestSuccess,
                 detail: record.failureDetail
             )
         }
-        if let record = coverage.first(where: { $0.status == .requiresApproval }) {
+        if let record = requiredCoverage.first(where: { $0.status == .requiresApproval }) {
             return FreshnessState(
                 status: .approvalRequired,
                 lastSuccessfulSyncAt: latestSuccess,
                 detail: record.failureDetail
             )
         }
-        if let record = coverage.first(where: { $0.status == .failed }) {
+        if let record = requiredCoverage.first(where: { $0.status == .failed }) {
             return FreshnessState(
                 status: .failed,
                 lastSuccessfulSyncAt: latestSuccess,
                 detail: record.failureDetail
             )
         }
-        if let record = coverage.first(where: {
+        if let record = requiredCoverage.first(where: {
             $0.status == .partial || $0.status == .unavailable
         }) {
             return FreshnessState(
@@ -142,7 +152,7 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
                 detail: record.failureDetail
             )
         }
-        if coverage.contains(where: { $0.status == .unknown }) {
+        if requiredCoverage.contains(where: { $0.status == .unknown }) {
             return FreshnessState(
                 status: .stale,
                 lastSuccessfulSyncAt: latestSuccess,

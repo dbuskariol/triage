@@ -125,6 +125,12 @@ actor CopilotHelperClient: TriageCopilotHelping {
         }
       }
     } catch is CancellationError {
+      // The cancellation handler schedules termination without blocking its
+      // caller. Before reporting cancellation, synchronously fence the exact
+      // still-active request so a fast cooperative read failure cannot race
+      // ahead and leave the helper transport alive. The request identity
+      // check keeps a delayed cancellation from terminating newer work.
+      await cancelRunningProcess(for: requestHeader)
       throw CopilotXPCError.operationCancelled
     }
   }

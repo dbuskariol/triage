@@ -182,6 +182,73 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertNil(durable.cachedState?.lastSuccessfulSyncAt)
     }
 
+    func testOptionalDiscoveryAndMetadataFailuresDoNotOverrideRequiredCoverageFreshness() {
+        let scope = CoordinatorFixture.defaultScope
+        let completedAt = CoordinatorFixture.initialDate.addingTimeInterval(10)
+        let requiredCoverage = AccountOrganizationCoverageManifest.requiredFeatures.map { feature in
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: feature,
+                streamID: SyncStreamID(rawValue: "required-\(feature.rawValue)")!,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: completedAt,
+                failureDetail: nil
+            )
+        }
+        let requirements = requiredCoverage.map {
+            CoverageRequirement(
+                feature: $0.feature,
+                repositoryID: $0.repositoryID,
+                streamID: $0.streamID
+            )
+        }
+        let optionalCoverage = [
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .notifications,
+                streamID: SyncStreamID(rawValue: "notifications-\(scope.organizationID.rawValue)")!,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .failed,
+                lastSuccessfulAt: nil,
+                failureDetail: "Notification discovery was unavailable."
+            ),
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .organizationMetadata,
+                streamID: SyncStreamID(rawValue: "organization-metadata-\(scope.organizationID.rawValue)")!,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .requiresSSO,
+                lastSuccessfulAt: nil,
+                failureDetail: "Metadata replay requires SSO."
+            )
+        ]
+
+        let freshness = AccountOrganizationCachedState(
+            coverage: requiredCoverage + optionalCoverage,
+            coverageRequirements: requirements,
+            lastSuccessfulSyncAt: completedAt
+        ).freshness
+
+        XCTAssertEqual(freshness.status, .fresh)
+        XCTAssertEqual(freshness.lastSuccessfulSyncAt, completedAt)
+    }
+
     func testAttachedPriorityRegressionUsesContinuationReceiptRatherThanArrayIndexing() async throws {
         let fixture = CoordinatorFixture()
         let scope = fixture.scope()

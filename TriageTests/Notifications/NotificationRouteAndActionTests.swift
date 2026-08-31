@@ -3,6 +3,7 @@ import XCTest
 @testable import Triage
 
 final class NotificationRouteAndActionTests: XCTestCase {
+  private let authenticator = FixtureNotificationPayloadAuthenticator()
   private let route = NotificationRoute(
     accountID: AccountID(rawValue: "account")!,
     organizationID: OrganizationID(rawValue: "organization")!,
@@ -20,11 +21,12 @@ final class NotificationRouteAndActionTests: XCTestCase {
       reason: .directReviewRequest,
       evidenceVersion: "revision-2"
     )
-    let encoded = try NotificationPayloadCodec.encode(first)
+    let encoded = try NotificationPayloadCodec.encode(first, authenticator: authenticator)
 
     XCTAssertEqual(
       NotificationPayloadCodec.decode(
-        userInfo: [NotificationPayloadCodec.userInfoKey: encoded]
+        userInfo: [NotificationPayloadCodec.userInfoKey: encoded],
+        authenticator: authenticator
       ),
       first
     )
@@ -37,11 +39,12 @@ final class NotificationRouteAndActionTests: XCTestCase {
       reason: .directReviewRequest,
       evidenceVersion: "revision-1"
     )
-    let encoded = try NotificationPayloadCodec.encode(payload)
+    let encoded = try NotificationPayloadCodec.encode(payload, authenticator: authenticator)
     let tampered = encoded.replacingOccurrences(of: "revision-1", with: "revision-2")
 
     XCTAssertNil(NotificationPayloadCodec.decode(
-      userInfo: [NotificationPayloadCodec.userInfoKey: tampered]
+      userInfo: [NotificationPayloadCodec.userInfoKey: tampered],
+      authenticator: authenticator
     ))
   }
 
@@ -120,5 +123,15 @@ final class NotificationRouteAndActionTests: XCTestCase {
       lastRelevantActivityAt: date,
       score: .init(value: 1, breakdown: [:])
     )
+  }
+}
+
+private struct FixtureNotificationPayloadAuthenticator: NotificationPayloadAuthenticating {
+  func authenticationCode(for payload: Data) throws -> String {
+    payload.base64EncodedString()
+  }
+
+  func isValid(authenticationCode: String, for payload: Data) throws -> Bool {
+    authenticationCode == payload.base64EncodedString()
   }
 }
