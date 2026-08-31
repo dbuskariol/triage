@@ -53,6 +53,21 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         )
     }
 
+    func testAbsentStateReconcilesAnAtomicInstallCompletedByAnotherService() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let observer = try fixture.service()
+        let initial = await observer.state()
+        XCTAssertEqual(initial, .absent)
+
+        let installer = try fixture.service()
+        let installed = try await installer.acquireAtUserRequest()
+        let observed = await observer.state()
+
+        XCTAssertEqual(observed, .ready(installed))
+        XCTAssertEqual(fixture.downloader.calls, 1, "state reconciliation must remain local-only")
+    }
+
     func testPinnedArchiveAndExecutableDigestsAreDistinctForEachArchitecture() {
         let arm64 = CopilotRuntimeRelease.pinned.archive(for: .arm64)
         XCTAssertEqual(arm64.expectedArchiveSHA256, "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871")

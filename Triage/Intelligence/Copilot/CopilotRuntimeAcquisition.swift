@@ -206,22 +206,6 @@ actor CopilotRuntimeAcquisitionService {
         self.hasher = hasher
         self.files = files
 
-        // Runtime acquisition is explicit, but detection is local and must
-        // survive relaunch. Revalidate the pinned executable before exposing
-        // it as ready; never infer readiness from presence alone.
-        let installed = files.installedExecutable(
-            root: root,
-            release: release,
-            architecture: self.architecture
-        )
-        if files.exists(installed) {
-            do {
-                try validator.validate(installed, architecture: self.architecture)
-                currentState = .ready(installed)
-            } catch {
-                currentState = .corrupt(String(describing: error))
-            }
-        }
     }
 
     /// Canonicalizes only the existing, trusted support-directory boundary.
@@ -238,12 +222,16 @@ actor CopilotRuntimeAcquisitionService {
             .appending(path: "Triage/CopilotRuntime", directoryHint: .isDirectory)
     }
 
-    func state() -> CopilotRuntimeAcquisitionState { currentState }
+    func state() -> CopilotRuntimeAcquisitionState {
+        reconcileInstalledRuntimeIfNeeded()
+        return currentState
+    }
 
     /// Emits the exact acquisition state owned by this actor. Consumers see an
     /// immediate current value, then only state transitions from an explicit
     /// user-requested operation; this stream never starts an acquisition.
     func stateUpdates() -> AsyncStream<CopilotRuntimeAcquisitionState> {
+        reconcileInstalledRuntimeIfNeeded()
         let observerID = UUID()
         var continuation: AsyncStream<CopilotRuntimeAcquisitionState>.Continuation!
         let stream = AsyncStream<CopilotRuntimeAcquisitionState> { continuation = $0 }
@@ -253,6 +241,26 @@ actor CopilotRuntimeAcquisitionService {
             Task { await self?.removeStateObserver(observerID) }
         }
         return stream
+    }
+
+    /// Runtime acquisition is explicit, but local detection must survive both
+    /// relaunch and an atomic install completed by another process. Presence
+    /// alone is never authority: every absent-to-ready reconciliation repeats
+    /// architecture, signing-team, identifier, and Hardened Runtime checks.
+    private func reconcileInstalledRuntimeIfNeeded() {
+        guard currentState == .absent else { return }
+        let installed = files.installedExecutable(
+            root: root,
+            release: release,
+            architecture: architecture
+        )
+        guard files.exists(installed) else { return }
+        do {
+            try validator.validate(installed, architecture: architecture)
+            currentState = .ready(installed)
+        } catch {
+            currentState = .corrupt(String(describing: error))
+        }
     }
 
     /// The only method that may contact GitHub. Nothing calls it implicitly.
