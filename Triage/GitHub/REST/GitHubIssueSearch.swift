@@ -37,7 +37,7 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
         case .commented: "commenter"
         case .reviewRequested: "review-requested"
         case .reviewInvolves: "reviewed-by"
-        case .teamMentioned: "mentions"
+        case .teamMentioned: "team"
         case .teamReviewRequested: "team-review-requested"
         }
     }

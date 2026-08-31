@@ -33,6 +33,23 @@ final class GitHubIssueSearchTests: XCTestCase {
         )
     }
 
+    func testBuildsVisibleTeamMentionSearch() throws {
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github",
+            userLogin: "octocat",
+            state: .open,
+            relationship: .teamMentioned(
+                teamNodeID: GitHubNodeID(rawValue: "T_1")!,
+                teamSlug: "mac-apps"
+            )
+        )
+
+        XCTAssertEqual(
+            query.value,
+            "org:github is:open team:github/mac-apps"
+        )
+    }
+
     func testSearchRejectsUntrustedQualifierInputs() {
         XCTAssertThrowsError(
             try GitHubIssueSearchQuery(
