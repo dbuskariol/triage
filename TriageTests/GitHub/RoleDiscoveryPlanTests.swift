@@ -67,6 +67,14 @@ final class RoleDiscoveryPlanTests: XCTestCase {
             stream.streamID(parent: SyncStreamID(rawValue: "role-org")!).rawValue,
             "role-org-open-team-review-requested"
         )
+
+        let mentionStream = try XCTUnwrap(
+            plan.streams.first { $0.kind == .openTeamMentions }
+        )
+        XCTAssertEqual(
+            mentionStream.queries.first?.value,
+            "org:github is:open team:github/mac-apps"
+        )
     }
 
     func testSourceSpecificFailureDoesNotPreventIndependentRoleStream() async throws {
