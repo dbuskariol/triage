@@ -124,6 +124,17 @@ final class GitHubOAuthTests: XCTestCase {
             )
         )
     }
+
+    func testStaleCancellationGenerationCannotFinishNewAuthorization() {
+        var generation = OAuthAuthorizationGeneration()
+        let cancelledAuthorization = generation.begin()
+
+        XCTAssertTrue(generation.finish(cancelledAuthorization))
+
+        let currentAuthorization = generation.begin()
+        XCTAssertFalse(generation.finish(cancelledAuthorization))
+        XCTAssertTrue(generation.isCurrent(currentAuthorization))
+    }
 }
 
 private extension Array where Element == URLQueryItem {

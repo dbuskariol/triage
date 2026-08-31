@@ -90,6 +90,7 @@ enum GitHubResponseDecodingResult<Value: Sendable>: Sendable {
 enum GitHubRESTClientError: Error, Equatable, Sendable {
     case invalidJSON
     case missingServerDate
+    case responseTooLarge
 }
 
 actor GitHubRESTClient {
@@ -119,9 +120,14 @@ actor GitHubRESTClient {
 
     func getResponse<Value: Decodable & Sendable>(
         _ type: Value.Type,
-        request: GitHubRESTRequest
+        request: GitHubRESTRequest,
+        maximumPayloadBytes: Int? = nil
     ) async throws -> GitHubResponse<Value> {
-        switch try await getResponsePreservingUndecodablePayload(type, request: request) {
+        switch try await getResponsePreservingUndecodablePayload(
+            type,
+            request: request,
+            maximumPayloadBytes: maximumPayloadBytes
+        ) {
         case let .response(response):
             return response
         case .undecodable:
@@ -131,12 +137,16 @@ actor GitHubRESTClient {
 
     func getResponsePreservingUndecodablePayload<Value: Decodable & Sendable>(
         _ type: Value.Type,
-        request: GitHubRESTRequest
+        request: GitHubRESTRequest,
+        maximumPayloadBytes: Int? = nil
     ) async throws -> GitHubResponseDecodingResult<Value> {
         let response = try await send(request)
         if let failure = GitHubFailureClassifier.classify(response) {
             GitHubDiagnostics.record(failure)
             throw failure
+        }
+        if let maximumPayloadBytes, response.body.count > maximumPayloadBytes {
+            throw GitHubRESTClientError.responseTooLarge
         }
         do {
             return .response(

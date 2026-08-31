@@ -95,7 +95,8 @@ actor DatabaseWorkspaceObserver: WorkspaceObserving {
 
         let workItems = try await WorkItemRepository(vault: vault).fetch(
             accountID: scope.accountID,
-            organizationID: scope.organizationID
+            organizationID: scope.organizationID,
+            authorityScope: scope
         )
         let coverageRecords = try await vault.read { database in
             try CoverageRepository.currentRecords(for: scope, in: database)
@@ -122,13 +123,12 @@ actor DatabaseWorkspaceObserver: WorkspaceObserving {
 
         try Task.checkCancellation()
         let revisionFence = try await vault.read { database in
-            try WorkspaceDatabaseObservationService.snapshot(
+            try WorkspaceDatabaseObservationService.revision(
                 in: database,
-                scope: scope,
-                selectedWorkItemID: nil
+                scope: scope
             )
         }
-        guard revisionFence == rawSnapshot else {
+        guard revisionFence == rawSnapshot.revision else {
             return nil
         }
 
@@ -138,6 +138,7 @@ actor DatabaseWorkspaceObserver: WorkspaceObserving {
             durableState: durableState,
             coverageRequirements: cachedState.coverageRequirements ?? [],
             coverageRecords: coverageRecords,
+            organizationVisibilityFreshness: rawSnapshot.organizationVisibilityFreshness,
             menuCounts: menuCounts,
             derivedEvaluatedAt: rawSnapshot.revision.derivedEvaluatedAt,
             origin: .observed

@@ -459,7 +459,7 @@ actor WorkRelationRepository {
                 WHERE account_id = ? AND organization_id = ? AND repository_id IS ?
                   AND feature = ? AND stream_id = ?
                   AND credential_revision = ? AND capability_revision = ?
-                  AND status = ? AND last_successful_at_ms = ?
+                  AND status = ? AND last_successful_at_ms >= ?
             """,
             arguments: [
                 scope.accountID.rawValue, scope.organizationID.rawValue,
@@ -508,9 +508,24 @@ actor WorkRelationRepository {
                   AND authority_stream_id = ? AND authority_credential_revision = ?
                   AND authority_capability_revision = ? AND observed_at_ms = ?
                   AND \(locatorClause)
-                  AND (github_node_id IS NULL OR github_node_id = ?)
+                  AND (
+                      github_node_id IS NULL OR github_node_id = ?
+                      OR EXISTS (
+                          SELECT 1 FROM project_item_raw_provenance
+                          WHERE project_item_raw_provenance.project_item_node_id = ?
+                            AND project_item_raw_provenance.raw_snapshot_id = raw_api_snapshots.id
+                            AND project_item_raw_provenance.account_id = ?
+                            AND project_item_raw_provenance.organization_id = ?
+                            AND project_item_raw_provenance.credential_revision = ?
+                            AND project_item_raw_provenance.capability_revision = ?
+                      )
+                  )
             """,
-            arguments: StatementArguments(arguments + [subjectNodeID.rawValue])
+            arguments: StatementArguments(arguments + [
+                subjectNodeID.rawValue, subjectNodeID.rawValue,
+                authority.scope.accountID.rawValue, authority.scope.organizationID.rawValue,
+                authority.scope.credentialRevision.rawValue, authority.scope.capabilityRevision.rawValue
+            ])
         ) ?? 0
         guard count == 1 else {
             throw WorkRelationRepositoryError.rawSnapshotScopeMismatch

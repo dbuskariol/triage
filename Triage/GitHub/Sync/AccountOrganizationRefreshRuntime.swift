@@ -57,6 +57,7 @@ actor AccountOrganizationRefreshRuntime {
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
+        organizationAIController: OrganizationAIController? = nil,
         activateCachedState: @escaping AccountOrganizationCoordinator.CachedStateActivation = { _, _ in }
     ) {
         self.accountID = accountID
@@ -76,7 +77,8 @@ actor AccountOrganizationRefreshRuntime {
                 credentialReader: credentialReader,
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
-                rateLimitControllers: rateLimitControllers
+                rateLimitControllers: rateLimitControllers,
+                organizationAIController: organizationAIController
             ),
             activateCachedState: activateCachedState
         )
@@ -92,6 +94,25 @@ actor AccountOrganizationRefreshRuntime {
         }
     }
 
+    /// A caller that already holds a revision-qualified scope must never cause
+    /// work for a newer authority revision merely because the account and
+    /// organization identifiers still match.
+    func select(
+        _ expectedScope: SynchronizationScope
+    ) async throws -> AccountOrganizationCoordinatorState? {
+        try ensureActive()
+        guard expectedScope.accountID == accountID else {
+            throw CancellationError()
+        }
+        let currentScope = try await currentScope(for: expectedScope.organizationID)
+        guard currentScope == expectedScope else {
+            throw CancellationError()
+        }
+        return try await runAndWait(for: expectedScope) {
+            try await self.coordinator.select(expectedScope)
+        }
+    }
+
     func refresh(
         organizationID: OrganizationID,
         priority: AccountOrganizationRefreshPriority
@@ -100,6 +121,25 @@ actor AccountOrganizationRefreshRuntime {
         let scope = try await currentScope(for: organizationID)
         return try await runAndWait(for: scope) {
             try await self.coordinator.refresh(scope, priority: priority)
+        }
+    }
+
+    /// See `select(_:)`: scope authority is an input fence, not only a result
+    /// filter. This check precedes every dispatch to the coordinator.
+    func refresh(
+        _ expectedScope: SynchronizationScope,
+        priority: AccountOrganizationRefreshPriority
+    ) async throws -> AccountOrganizationCoordinatorState? {
+        try ensureActive()
+        guard expectedScope.accountID == accountID else {
+            throw CancellationError()
+        }
+        let currentScope = try await currentScope(for: expectedScope.organizationID)
+        guard currentScope == expectedScope else {
+            throw CancellationError()
+        }
+        return try await runAndWait(for: expectedScope) {
+            try await self.coordinator.refresh(expectedScope, priority: priority)
         }
     }
 

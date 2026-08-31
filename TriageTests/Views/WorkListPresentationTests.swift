@@ -74,6 +74,75 @@ final class WorkListPresentationTests: XCTestCase {
         ))
     }
 
+    func testEmptyQueueSuccessCopyRequiresAnUpToDateWorkspaceWithoutSearchFailure() {
+        XCTAssertTrue(WorkListPresentation.canPresentSuccessfulEmptyQueue(
+            query: "  ",
+            isSearching: false,
+            searchError: nil,
+            workspaceStatus: .upToDate
+        ))
+
+        for status in [
+            WorkspacePresentationState.SynchronizationStatus.initialSynchronization,
+            .refreshing,
+            .partial,
+            .ssoRequired,
+            .approvalRequired,
+            .offline,
+            .signInRequired,
+            .unavailable
+        ] {
+            XCTAssertFalse(WorkListPresentation.canPresentSuccessfulEmptyQueue(
+                query: "",
+                isSearching: false,
+                searchError: nil,
+                workspaceStatus: status
+            ))
+        }
+        XCTAssertFalse(WorkListPresentation.canPresentSuccessfulEmptyQueue(
+            query: "review",
+            isSearching: false,
+            searchError: nil,
+            workspaceStatus: .upToDate
+        ))
+        XCTAssertFalse(WorkListPresentation.canPresentSuccessfulEmptyQueue(
+            query: "review",
+            isSearching: false,
+            searchError: "Triage could not search its encrypted cache.",
+            workspaceStatus: .upToDate
+        ))
+    }
+
+    func testEmptyQueuePresentationRoutesSearchFailureBeforeNoMatch() {
+        XCTAssertEqual(
+            WorkListPresentation.emptyQueuePresentation(
+                query: "review",
+                isSearching: false,
+                searchError: "Triage could not search its encrypted cache.",
+                workspaceStatus: .upToDate
+            ),
+            .searchUnavailable
+        )
+        XCTAssertEqual(
+            WorkListPresentation.emptyQueuePresentation(
+                query: "review",
+                isSearching: false,
+                searchError: nil,
+                workspaceStatus: .upToDate
+            ),
+            .noMatchingWork
+        )
+        XCTAssertEqual(
+            WorkListPresentation.emptyQueuePresentation(
+                query: "",
+                isSearching: false,
+                searchError: nil,
+                workspaceStatus: .partial
+            ),
+            .workspaceStatus
+        )
+    }
+
     func testVisibleMetadataUsesOnlyAvailableCachedWorkflowAndResponsibilityFields() {
         let item = makeWorkItem(
             workflow: WorkflowState(
@@ -95,6 +164,66 @@ final class WorkListPresentationTests: XCTestCase {
         XCTAssertTrue(metadata.contains(where: { $0.hasPrefix("Snoozed until ") }))
         XCTAssertTrue(metadata.contains("Partial coverage"))
         XCTAssertTrue(metadata.contains(where: { $0.hasPrefix("Activity ") }))
+    }
+
+    func testActionDisclosureNamesOnlyOpenLocalActionItems() {
+        let openAction = actionItem(id: "open", state: .open)
+        let completedAction = actionItem(id: "completed", state: .completed)
+        let item = makeWorkItem(
+            workflow: WorkflowState(updatedAt: now),
+            freshness: .fresh,
+            actions: [openAction, completedAction]
+        )
+
+        XCTAssertEqual(
+            WorkListPresentation.actionDisclosure(for: item),
+            WorkListActionDisclosure(
+                title: "1 open action item",
+                accessibilityLabel: "1 open action item, stored locally in Triage"
+            )
+        )
+    }
+
+    func testWaitingWakeUpAppearsInInboxAndKeepsItsPersistedRanking() {
+        let wakeUp = makeWorkItem(
+            id: "wake-up",
+            workflow: WorkflowState(status: .waiting, updatedAt: now),
+            freshness: .fresh,
+            actions: [],
+            attentionReasons: [
+                AttentionReason(
+                    id: "follow-up-due",
+                    category: .waiting,
+                    ruleID: WaitingAttentionRuleID.followUpDue.rawValue,
+                    ruleVersion: 1,
+                    strength: 5,
+                    title: "Follow up due",
+                    explanation: "The stored waiting follow-up is due.",
+                    evidence: [],
+                    evaluatedAt: now
+                )
+            ],
+            score: 12
+        )
+        let stillWaiting = makeWorkItem(
+            id: "still-waiting",
+            workflow: WorkflowState(status: .waiting, updatedAt: now),
+            freshness: .fresh,
+            actions: [],
+            attentionReasons: [],
+            score: 500
+        )
+
+        XCTAssertEqual(
+            WorkListPresentation.items(from: [stillWaiting, wakeUp], section: .inbox, at: now)
+                .map(\.id.rawValue),
+            ["wake-up"]
+        )
+        XCTAssertEqual(
+            WorkListPresentation.items(from: [wakeUp, stillWaiting], section: .waiting, at: now)
+                .map(\.id.rawValue),
+            ["still-waiting"]
+        )
     }
 
     func testSelectionRestorationBindingTracksExactScopeAndAvailableItems() {
@@ -266,13 +395,16 @@ final class WorkListPresentationTests: XCTestCase {
     }
 
     private func makeWorkItem(
+        id: String = "work",
         workflow: WorkflowState,
         freshness: FreshnessStatus,
         actions: [ActionItem],
-        relations: [WorkRelation] = []
+        relations: [WorkRelation] = [],
+        attentionReasons: [AttentionReason]? = nil,
+        score: Int = 1
     ) -> WorkItem {
         WorkItem(
-            id: WorkItemID(rawValue: "work")!,
+            id: WorkItemID(rawValue: id)!,
             accountID: AccountID(rawValue: "account")!,
             organizationID: OrganizationID(rawValue: "organization")!,
             primaryNodeID: GitHubNodeID(rawValue: "node")!,
@@ -293,7 +425,7 @@ final class WorkListPresentationTests: XCTestCase {
             members: [],
             contextLinks: [],
             relations: relations,
-            attentionReasons: [
+            attentionReasons: attentionReasons ?? [
                 AttentionReason(
                     id: "review-requested",
                     category: .pullRequest,
@@ -310,7 +442,7 @@ final class WorkListPresentationTests: XCTestCase {
             workflow: workflow,
             freshness: FreshnessState(status: freshness),
             lastRelevantActivityAt: now,
-            score: AttentionScore(value: 1, breakdown: [:])
+            score: AttentionScore(value: score, breakdown: [:])
         )
     }
 

@@ -9,6 +9,8 @@ enum GitHubProjectV2NormalizationError: Error, Equatable, Sendable {
     case invalidItem
     case malformedFieldUnion(String)
     case duplicateFieldName(String)
+    case malformedNestedConnection(String)
+    case duplicateNestedNodeID(String)
 }
 
 struct GitHubProjectV2Record: Equatable, Sendable {
@@ -210,15 +212,9 @@ enum GitHubProjectV2Normalizer {
             guard names.insert(name).inserted else {
                 throw GitHubProjectV2NormalizationError.duplicateFieldName(name)
             }
-            let usersComplete = value.users.map {
-                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
-            } ?? true
-            let labelsComplete = value.labels.map {
-                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
-            } ?? true
-            let pullRequestsComplete = value.pullRequests.map {
-                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
-            } ?? true
+            let usersComplete = try nestedConnectionIsComplete(value.users, named: "users")
+            let labelsComplete = try nestedConnectionIsComplete(value.labels, named: "labels")
+            let pullRequestsComplete = try nestedConnectionIsComplete(value.pullRequests, named: "pullRequests")
             let nestedComplete = usersComplete && labelsComplete && pullRequestsComplete
             let date = value.date.flatMap(parseProjectDate)
             let validDate = value.date == nil || date != nil
@@ -252,6 +248,42 @@ enum GitHubProjectV2Normalizer {
                          displayValue: display, dateValue: date, actorNodeID: actorID,
                          context: context, isAuthoritative: authoritative)
         }
+    }
+
+    /// Nested field collections are not independently cursor-paginated. A
+    /// null node or missing identity therefore downgrades only that field
+    /// value, while a server response exceeding `first: 50` or repeating an
+    /// identity is malformed and cannot be normalized.
+    private static func nestedConnectionIsComplete(
+        _ connection: GitHubProjectV2FieldValuePayload.NodeConnection?,
+        named name: String
+    ) throws -> Bool {
+        guard let connection else { return true }
+        return try nestedNodesAreComplete(connection.nodes, hasNextPage: connection.pageInfo.hasNextPage, named: name)
+    }
+
+    private static func nestedConnectionIsComplete(
+        _ connection: GitHubProjectV2FieldValuePayload.LabelConnection?,
+        named name: String
+    ) throws -> Bool {
+        guard let connection else { return true }
+        return try nestedNodesAreComplete(connection.nodes, hasNextPage: connection.pageInfo.hasNextPage, named: name)
+    }
+
+    private static func nestedNodesAreComplete(
+        _ nodes: [GitHubProjectV2FieldValuePayload.NamedNode?],
+        hasNextPage: Bool,
+        named name: String
+    ) throws -> Bool {
+        guard nodes.count <= 50 else {
+            throw GitHubProjectV2NormalizationError.malformedNestedConnection(name)
+        }
+        let identifiers = nodes.compactMap { $0?.id }.compactMap(GitHubNodeID.init(rawValue:))
+        guard identifiers.count == nodes.count else { return false }
+        guard Set(identifiers).count == identifiers.count else {
+            throw GitHubProjectV2NormalizationError.duplicateNestedNodeID(name)
+        }
+        return !hasNextPage
     }
 
     private static func parseProjectDate(_ value: String) -> Date? {

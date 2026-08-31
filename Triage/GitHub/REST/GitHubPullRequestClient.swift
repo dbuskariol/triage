@@ -10,6 +10,8 @@ enum GitHubPullRequestClientError: Error, Equatable, Sendable {
     case paginationLoop
     case paginationLimitExceeded
     case invalidPaginationLink
+    case unexpectedConditionalResponse
+    case pageObjectLimitExceeded
 }
 
 struct GitHubRepositoryPath: Sendable {
@@ -111,16 +113,19 @@ struct GitHubPullRequestReviewFetchFailure: Error, Sendable {
 
 enum GitHubPullRequestReviewFetchResult: Sendable {
     case inventory(GitHubPullRequestReviewInventory, [GitHubPullRequestReviewRawPage])
+    case notModified(ssoHeader: GitHubSSOHeader?)
     case failure(GitHubPullRequestReviewFetchFailure)
 }
 
 enum GitHubRequestedReviewersFetchResult: Sendable {
     case response(GitHubResponse<GitHubRequestedReviewersDTO>)
+    case notModified(ssoHeader: GitHubSSOHeader?)
     case failure(GitHubPullRequestReviewFetchFailure)
 }
 
 actor GitHubPullRequestClient {
     private static let maximumReviewPages = 100
+    private static let maximumRequestedReviewerResponseBytes = 256 * 1_024
 
     private let client: GitHubRESTClient
 
@@ -133,13 +138,15 @@ actor GitHubPullRequestClient {
         number: Int
     ) async throws -> GitHubPage<GitHubPullRequestReviewDTO> {
         guard number > 0 else { throw GitHubRepositoryPathError.invalidPullRequestNumber }
-        return try await client.getPage(
+        let page = try await client.getPage(
             GitHubPullRequestReviewDTO.self,
             request: GitHubRESTRequest(
                 path: "\(repository.path)/pulls/\(number)/reviews",
                 query: [URLQueryItem(name: "per_page", value: "100")]
             )
         )
+        try Self.validatePageObjectCount(page)
+        return page
     }
 
     func allReviews(
@@ -149,6 +156,10 @@ actor GitHubPullRequestClient {
         switch try await allReviewsPreservingFailure(repository: repository, number: number) {
         case let .inventory(inventory, _):
             return inventory
+        case .notModified:
+            // This convenience API never supplies validators, so a 304 is
+            // not an authoritative inventory and must not be normalized.
+            throw GitHubPullRequestClientError.unexpectedConditionalResponse
         case let .failure(failure):
             throw failure
         }
@@ -160,16 +171,19 @@ actor GitHubPullRequestClient {
     func allReviewsPreservingFailure(
         repository: GitHubRepositoryPath,
         number: Int,
-        githubOrganizationID: UInt64? = nil
+        githubOrganizationID: UInt64? = nil,
+        validators: GitHubHTTPValidators? = nil
     ) async throws -> GitHubPullRequestReviewFetchResult {
         guard number > 0 else { throw GitHubRepositoryPathError.invalidPullRequestNumber }
         let firstRequestKey = Self.reviewsRequestKey(repository: repository, number: number)
         var rawPages = [GitHubPullRequestReviewRawPage]()
         let initial: GitHubPage<GitHubPullRequestReviewDTO>
         do {
-            initial = try await firstReviewPage(repository: repository, number: number)
+            initial = try await firstReviewPage(repository: repository, number: number, validators: validators)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let failure as GitHubFailure where failure.statusCode == 304 && validators != nil {
+            return .notModified(ssoHeader: failure.ssoHeader)
         } catch let error as GitHubPullRequestReviewUndecodablePageError {
             rawPages.append(error.rawPage)
             return .failure(.init(
@@ -187,12 +201,26 @@ actor GitHubPullRequestClient {
 
         var page = initial
         var reviews: [GitHubPullRequestReviewDTO] = []
-        var pages = [page]
+        var pages = [GitHubPage<GitHubPullRequestReviewDTO>]()
         var reviewNodeIDs = Set<String>()
-        var ssoHeaders = [page.ssoHeader].compactMap { $0 }
+        var ssoHeaders = [GitHubSSOHeader]()
         var visitedPageURLs = Set<String>()
-        var pageCount = 1
+        var pageCount = 0
         rawPages.append(Self.rawPage(page, requestKey: firstRequestKey))
+        do {
+            try Self.validatePageObjectCount(page)
+        } catch {
+            return .failure(.init(
+                terminalRequestKey: firstRequestKey,
+                rawPages: rawPages,
+                terminalFailure: .malformedResponse
+            ))
+        }
+        pages.append(page)
+        if let ssoHeader = page.ssoHeader {
+            ssoHeaders.append(ssoHeader)
+        }
+        pageCount = 1
 
         if let githubOrganizationID,
            page.ssoHeader?.scoped(to: githubOrganizationID) != nil {
@@ -270,9 +298,18 @@ actor GitHubPullRequestClient {
                     terminalFailure: Self.terminalFailure(for: error)
                 ))
             }
+            rawPages.append(Self.rawPage(page, requestKey: requestKey))
+            do {
+                try Self.validatePageObjectCount(page)
+            } catch {
+                return .failure(.init(
+                    terminalRequestKey: requestKey,
+                    rawPages: rawPages,
+                    terminalFailure: .malformedResponse
+                ))
+            }
             pageCount += 1
             pages.append(page)
-            rawPages.append(Self.rawPage(page, requestKey: requestKey))
             append(page.values)
             if let ssoHeader = page.ssoHeader {
                 ssoHeaders.append(ssoHeader)
@@ -318,27 +355,35 @@ actor GitHubPullRequestClient {
 
     func requestedReviewers(
         repository: GitHubRepositoryPath,
-        number: Int
+        number: Int,
+        validators: GitHubHTTPValidators? = nil
     ) async throws -> GitHubResponse<GitHubRequestedReviewersDTO> {
         guard number > 0 else { throw GitHubRepositoryPathError.invalidPullRequestNumber }
         return try await client.getResponse(
             GitHubRequestedReviewersDTO.self,
             request: GitHubRESTRequest(
-                path: "\(repository.path)/pulls/\(number)/requested_reviewers"
+                path: "\(repository.path)/pulls/\(number)/requested_reviewers",
+                validators: validators,
+                maximumResponseBodyBytes: Self.maximumRequestedReviewerResponseBytes
             )
         )
     }
 
     func requestedReviewersPreservingFailure(
         repository: GitHubRepositoryPath,
-        number: Int
+        number: Int,
+        validators: GitHubHTTPValidators? = nil
     ) async throws -> GitHubRequestedReviewersFetchResult {
         guard number > 0 else { throw GitHubRepositoryPathError.invalidPullRequestNumber }
         let requestKey = Self.requestedReviewersRequestKey(repository: repository, number: number)
         do {
             switch try await client.getResponsePreservingUndecodablePayload(
                 GitHubRequestedReviewersDTO.self,
-                request: GitHubRESTRequest(path: "\(repository.path)/pulls/\(number)/requested_reviewers")
+                request: GitHubRESTRequest(
+                    path: "\(repository.path)/pulls/\(number)/requested_reviewers",
+                    validators: validators,
+                    maximumResponseBodyBytes: Self.maximumRequestedReviewerResponseBytes
+                )
             ) {
             case let .response(response):
                 return .response(response)
@@ -358,6 +403,8 @@ actor GitHubPullRequestClient {
             }
         } catch is CancellationError {
             throw CancellationError()
+        } catch let failure as GitHubFailure where failure.statusCode == 304 && validators != nil {
+            return .notModified(ssoHeader: failure.ssoHeader)
         } catch {
             return .failure(.init(
                 terminalRequestKey: requestKey,
@@ -369,13 +416,15 @@ actor GitHubPullRequestClient {
 
     private func firstReviewPage(
         repository: GitHubRepositoryPath,
-        number: Int
+        number: Int,
+        validators: GitHubHTTPValidators?
     ) async throws -> GitHubPage<GitHubPullRequestReviewDTO> {
         switch try await client.getPagePreservingUndecodablePayload(
             GitHubPullRequestReviewDTO.self,
             request: GitHubRESTRequest(
                 path: "\(repository.path)/pulls/\(number)/reviews",
-                query: [URLQueryItem(name: "per_page", value: "100")]
+                query: [URLQueryItem(name: "per_page", value: "100")],
+                validators: validators
             )
         ) {
         case let .page(page): return page
@@ -426,6 +475,14 @@ actor GitHubPullRequestClient {
             lastModified: page.lastModified,
             ssoHeader: page.ssoHeader
         )
+    }
+
+    private nonisolated static func validatePageObjectCount(
+        _ page: GitHubPage<GitHubPullRequestReviewDTO>
+    ) throws {
+        guard page.values.count <= 100 else {
+            throw GitHubPullRequestClientError.pageObjectLimitExceeded
+        }
     }
 
     private nonisolated static func terminalFailure(

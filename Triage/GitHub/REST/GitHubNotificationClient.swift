@@ -158,6 +158,7 @@ actor GitHubNotificationClient {
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
             return .notModified(ssoHeader: failure.ssoHeader)
         }
+        try Self.validatePageObjectCount(page.values)
 
         var values = [GitHubNotificationDTO]()
         var notificationIDs = Set<String>()
@@ -187,6 +188,7 @@ actor GitHubNotificationClient {
                 GitHubNotificationDTO.self,
                 request: try GitHubRESTRequest(nextPageURL: nextURL)
             )
+            try Self.validatePageObjectCount(page.values)
             currentPageNumber = nextPageNumber
             pages.append(.init(page: page, endpoint: Self.endpoint(forPage: nextPageNumber)))
             try Self.append(page.values, to: &values, notificationIDs: &notificationIDs)
@@ -207,15 +209,21 @@ actor GitHubNotificationClient {
         to values: inout [GitHubNotificationDTO],
         notificationIDs: inout Set<String>
     ) throws {
-        guard pageValues.count <= 100 else {
-            throw GitHubNotificationClientError.pageObjectLimitExceeded
-        }
+        try validatePageObjectCount(pageValues)
         for value in pageValues {
             try validate(value)
             guard notificationIDs.insert(value.id).inserted else {
                 throw GitHubNotificationClientError.duplicateNotification
             }
             values.append(value)
+        }
+    }
+
+    private nonisolated static func validatePageObjectCount(
+        _ pageValues: [GitHubNotificationDTO]
+    ) throws {
+        guard pageValues.count <= 100 else {
+            throw GitHubNotificationClientError.pageObjectLimitExceeded
         }
     }
 

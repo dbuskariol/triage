@@ -118,12 +118,10 @@ struct MenuBarView: View {
     }
 
     private var inboxItems: [WorkItem] {
-        let now = Date()
-        return AttentionRanker().sort(
-            appModel.workItems.filter {
-                InboxEligibilityRule().disposition(for: $0, at: now) == .inbox
-            },
-            at: now
+        WorkListPresentation.items(
+            from: appModel.workItems,
+            section: .inbox,
+            at: Date()
         )
     }
 
@@ -149,7 +147,7 @@ struct MenuBarView: View {
     }
 
     private var presentation: WorkspacePresentationState {
-        WorkspacePresentationState(
+        Self.workspacePresentation(
             workItems: appModel.workItems,
             selectedAccountID: appModel.selectedAccountID,
             selectedOrganizationID: appModel.selectedOrganizationID,
@@ -157,7 +155,41 @@ struct MenuBarView: View {
             hasSSOAuthorizationHeader: appModel.ssoAuthorizationHeader != nil,
             isRefreshing: appModel.isRefreshing,
             refreshError: appModel.refreshError,
+            workspaceFreshness: appModel.selectedOrganizationFreshness,
+            workspaceCoverage: appModel.selectedWorkspaceCoverage,
+            organizationVisibilityFreshness: appModel.selectedOrganizationVisibilityFreshness,
+            restorationError: appModel.workspaceRestorationError,
             now: Date()
+        )
+    }
+
+    static func workspacePresentation(
+        workItems: [WorkItem],
+        selectedAccountID: AccountID?,
+        selectedOrganizationID: OrganizationID?,
+        organizationAccess: OrganizationAccess?,
+        hasSSOAuthorizationHeader: Bool,
+        isRefreshing: Bool,
+        refreshError: String?,
+        workspaceFreshness: FreshnessState?,
+        workspaceCoverage: CoverageEvaluation?,
+        organizationVisibilityFreshness: FreshnessState?,
+        restorationError: String?,
+        now: Date
+    ) -> WorkspacePresentationState {
+        WorkspacePresentationState(
+            workItems: workItems,
+            selectedAccountID: selectedAccountID,
+            selectedOrganizationID: selectedOrganizationID,
+            organizationAccess: organizationAccess,
+            hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
+            isRefreshing: isRefreshing,
+            refreshError: refreshError,
+            workspaceFreshness: workspaceFreshness,
+            workspaceCoverage: workspaceCoverage,
+            organizationVisibilityFreshness: organizationVisibilityFreshness,
+            restorationError: restorationError,
+            now: now
         )
     }
 

@@ -280,8 +280,59 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 && terminalCount == 1 && terminalOrdinal == expected
             else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
         }
-        try validatePersistedTopology(token, in: database)
+        _ = try validatePersistedTopology(token, in: database)
         try Task.checkCancellation()
+    }
+
+    /// Returns only a receipt which is still valid for the exact current
+    /// candidate authority. Callers use this for a conditional REST replay;
+    /// absence or any tamper is intentionally indistinguishable from no proof.
+    nonisolated static func currentReceipt(
+        scope: SynchronizationScope,
+        feature: CoverageFeature,
+        streamID: SyncStreamID,
+        candidate: PullRequestReviewCandidate,
+        in database: Database
+    ) throws -> ReviewCandidateCompleteTraversalReceiptToken? {
+        guard let id = try String.fetchOne(database, sql: """
+            SELECT id FROM review_candidate_complete_traversal_receipts
+            WHERE account_id = ? AND organization_id = ? AND feature = ? AND stream_id = ?
+              AND candidate_node_id = ? AND repository_id = ? AND candidate_source_revision = ?
+              AND credential_revision = ? AND capability_revision = ?
+            ORDER BY observed_at_ms DESC LIMIT 1
+            """, arguments: [scope.accountID.rawValue, scope.organizationID.rawValue,
+                               feature.rawValue, streamID.rawValue, candidate.nodeID.rawValue,
+                               candidate.repositoryID.rawValue, candidate.sourceRevision,
+                               scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue]),
+              let uuid = UUID(uuidString: id)
+        else { return nil }
+        let token = ReviewCandidateCompleteTraversalReceiptToken(
+            id: uuid, scope: scope, feature: feature, streamID: streamID,
+            candidateNodeID: candidate.nodeID, repositoryID: candidate.repositoryID,
+            candidateSourceRevision: candidate.sourceRevision
+        )
+        try validate(token, in: database)
+        return token
+    }
+
+    /// Reconstructs the exact receipt-owned source traversal for a current
+    /// review candidate. This is deliberately narrower than raw-snapshot
+    /// lookup: scope, feature, stream, candidate revision, credential, and
+    /// capability are all revalidated before a conditional replay can use it.
+    nonisolated static func currentReviewTraversal(
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        candidate: PullRequestReviewCandidate,
+        in database: Database
+    ) throws -> ReviewCandidateCompleteTraversal? {
+        guard let token = try currentReceipt(
+            scope: scope,
+            feature: .reviews,
+            streamID: streamID,
+            candidate: candidate,
+            in: database
+        ) else { return nil }
+        return try validatePersistedTopology(token, in: database)
     }
 
     /// Rebuilds the persisted receipt from its immutable raw bindings before
@@ -291,7 +342,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     private nonisolated static func validatePersistedTopology(
         _ token: ReviewCandidateCompleteTraversalReceiptToken,
         in database: Database
-    ) throws {
+    ) throws -> ReviewCandidateCompleteTraversal {
         try Task.checkCancellation()
         guard let candidateRow = try Row.fetchOne(
             database,
@@ -426,6 +477,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         } catch {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
         }
+        return traversal
     }
 
     private nonisolated static func validate(

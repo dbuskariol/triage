@@ -20,19 +20,22 @@ struct PullRequestReviewCandidate: Sendable {
     /// traversal receipt rechecks this before it authorizes destructive
     /// normalization.
     let sourceRevision: String
+    let updatedAt: Date
 
     init(
         nodeID: GitHubNodeID,
         repositoryID: RepositoryID,
         repository: GitHubRepositoryPath,
         number: Int,
-        sourceRevision: String = ""
+        sourceRevision: String = "",
+        updatedAt: Date = .distantPast
     ) {
         self.nodeID = nodeID
         self.repositoryID = repositoryID
         self.repository = repository
         self.number = number
         self.sourceRevision = sourceRevision
+        self.updatedAt = updatedAt
     }
 }
 
@@ -70,7 +73,7 @@ actor PullRequestReviewCandidateRepository {
                 sql: """
                     SELECT github_nodes.github_node_id, repositories.id AS repository_id,
                            repositories.owner_login, repositories.name, github_nodes.number,
-                           github_nodes.source_revision
+                           github_nodes.source_revision, github_nodes.updated_at_ms
                     FROM pull_requests
                     JOIN github_nodes
                       ON github_nodes.github_node_id = pull_requests.github_node_id
@@ -137,7 +140,9 @@ actor PullRequestReviewCandidateRepository {
                 feature: feature,
                 in: database
             )
-            let candidates = try Self.eligibleCandidates(scope: scope, in: database)
+            let candidates = try Self.eligibleCandidates(
+                scope: scope, streamID: streamID, feature: feature, in: database
+            )
             let hasBlockedKnownCandidates = try Self.hasBlockedKnownCandidates(
                 accountID: scope.accountID,
                 organizationID: scope.organizationID,
@@ -270,6 +275,7 @@ actor PullRequestReviewCandidateRepository {
               let repositoryID = RepositoryID(rawValue: row["repository_id"]),
               let number: Int = row["number"],
               let sourceRevision: String = row["source_revision"],
+              let updatedAtMilliseconds: Int64 = row["updated_at_ms"],
               !sourceRevision.isEmpty
         else {
             throw PullRequestReviewCandidateRepositoryError.invalidPersistedCandidate
@@ -282,20 +288,23 @@ actor PullRequestReviewCandidateRepository {
                 repository: row["name"]
             ),
             number: number,
-            sourceRevision: sourceRevision
+            sourceRevision: sourceRevision,
+            updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000)
         )
     }
 
     private nonisolated static func eligibleCandidates(
         scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        feature: CoverageFeature,
         in database: Database
     ) throws -> [PullRequestReviewCandidate] {
-        try Row.fetchAll(
+        let candidates = try Row.fetchAll(
             database,
             sql: """
                 SELECT github_nodes.github_node_id, repositories.id AS repository_id,
                        repositories.owner_login, repositories.name, github_nodes.number,
-                       github_nodes.source_revision
+                       github_nodes.source_revision, github_nodes.updated_at_ms
                 FROM pull_requests
                 JOIN github_nodes
                   ON github_nodes.github_node_id = pull_requests.github_node_id
@@ -318,6 +327,12 @@ actor PullRequestReviewCandidateRepository {
                 scope.accountID.rawValue
             ]
         ).map(candidate)
+        return try candidates.filter { candidate in
+            guard let state = try ReviewCandidateIncrementalStateRepository.state(
+                scope: scope, feature: feature, streamID: streamID, candidate: candidate, in: database
+            ) else { return true }
+            return candidate.updatedAt >= state.highWater.addingTimeInterval(-5 * 60)
+        }
     }
 
     private nonisolated static func hasBlockedKnownCandidates(

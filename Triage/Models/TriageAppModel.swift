@@ -1,6 +1,14 @@
 import AppKit
 import Foundation
 
+struct OrganizationAISettingsState: Equatable {
+    let consent: OrganizationAIConsent
+    let isEffectivelyAvailable: Bool
+    let status: String
+
+    var selectedModelTitle: String { consent.selectedModelID ?? "Auto" }
+}
+
 /// Serializes workspace activation. Replacement cancels the predecessor and
 /// waits for it to quiesce before beginning the next vault/read path, so an
 /// A→B→A interaction cannot let the first A publish after the final A wins.
@@ -73,6 +81,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     @Published private(set) var accounts: [GitHubAccount] = []
+    /// Opaque local account identities whose vault key is unavailable. They
+    /// cannot be selected or refreshed, but remain removable from Settings.
+    @Published private(set) var unavailableAccountIDs: Set<AccountID> = []
     @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
     @Published private(set) var organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]] = [:]
     @Published private(set) var accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot] = [:]
@@ -97,6 +108,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     @Published private(set) var ssoAuthorizationHeader: GitHubSSOHeader?
     @Published private(set) var selectedOrganizationFreshness: FreshnessState?
     @Published private(set) var selectedWorkspaceCoverage: CoverageEvaluation?
+    /// Account-scoped `/user/orgs` completeness is separate from a selected
+    /// workspace's repository coverage. It stays visible when a daily
+    /// inventory attempt fails but cached organization rows are retained.
+    @Published private(set) var organizationVisibilityFreshnessByAccount: [AccountID: FreshnessState] = [:]
+    @Published private(set) var organizationAISettingsByAccount: [AccountID: [OrganizationID: OrganizationAISettingsState]] = [:]
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
@@ -106,6 +122,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private let dependencies: TriageApplicationDependencies
     private let vaultRegistry: VaultRegistry
     private let workspaceAccessibility: WorkspaceAccessibilityCoordinator?
+    /// This is set only by the DEBUG-gated UI fixture composition. It keeps
+    /// fixture navigation entirely in memory instead of touching Keychain,
+    /// a production vault, or any GitHub transport.
+    private let usesInMemoryUITestFixture: Bool
     private var refreshGeneration = 0
     private var backgroundRefreshGeneration: UInt64 = 0
     private var accountsBeingRemoved: Set<AccountID> = []
@@ -141,16 +161,28 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         return organizationAccessesByAccount[selectedAccountID]?[selectedOrganizationID]
     }
 
+    var selectedOrganizationVisibilityFreshness: FreshnessState? {
+        guard let selectedAccountID else { return nil }
+        return organizationVisibilityFreshnessByAccount[selectedAccountID]
+    }
+
+    var selectedOrganizationAISettings: OrganizationAISettingsState? {
+        guard let selectedAccountID, let selectedOrganizationID else { return nil }
+        return organizationAISettingsByAccount[selectedAccountID]?[selectedOrganizationID]
+    }
+
     init(
         dependencies: TriageApplicationDependencies,
         vaultRegistry: VaultRegistry,
         defaults: UserDefaults = .standard,
-        workspaceAccessibility: WorkspaceAccessibilityCoordinator? = nil
+        workspaceAccessibility: WorkspaceAccessibilityCoordinator? = nil,
+        usesInMemoryUITestFixture: Bool = false
     ) {
         self.dependencies = dependencies
         self.vaultRegistry = vaultRegistry
         self.defaults = defaults
         self.workspaceAccessibility = workspaceAccessibility
+        self.usesInMemoryUITestFixture = usesInMemoryUITestFixture
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID)
             .flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
@@ -174,18 +206,35 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         selectedOrganizationID = organizations.first?.id
     }
 
-    private func install(session: AccountSessionSnapshot) async {
+    private func install(
+        session: AccountSessionSnapshot,
+        requiringActiveAccountID: AccountID? = nil
+    ) async {
         await cancelForegroundRefresh()
         await workspaceActivation.cancelAndWait()
         await cancelWorkspaceObservationAndWait()
+        guard !isShuttingDown,
+              requiringActiveAccountID.map({ accountID in
+                  accounts.contains(where: { $0.id == accountID })
+                      && !accountsBeingRemoved.contains(accountID)
+              }) ?? true
+        else {
+            return
+        }
         cachedWorkItems = WorkspacePresentationCache()
         cachedWorkspaceScopes = [:]
         workspaceRestorationError = nil
         accounts = session.accounts
+        unavailableAccountIDs = session.unavailableAccountIDs
         organizationsByAccount = session.organizationsByAccount
         organizationAccessesByAccount = session.organizationAccessesByAccount
         accountCapabilitiesByAccount = session.accountCapabilitiesByAccount
+        organizationVisibilityFreshnessByAccount = [:]
+        organizationAISettingsByAccount = [:]
         credentialActionNotice = session.credentialActionNotice
+        if session.unavailableAccountIDs.isEmpty {
+            restorationError = nil
+        }
         if !accounts.contains(where: { $0.id == selectedAccountID }) {
             selectedAccountID = accounts.first?.id
         }
@@ -198,16 +247,26 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         workItems: [WorkItem],
         scope: SynchronizationScope
     ) {
+        let insertedActionItemCount = Self.insertedActionItemCount(
+            in: workItems,
+            comparedWith: cachedWorkItems[scope] ?? []
+        )
         cachedWorkItems[scope] = workItems
         cachedWorkspaceScopes[scope.accountID, default: [:]][scope.organizationID] = scope
-        if selectedAccountID == scope.accountID, selectedOrganizationID == scope.organizationID {
+        let isSelectedWorkspace = selectedAccountID == scope.accountID
+            && selectedOrganizationID == scope.organizationID
+        if isSelectedWorkspace {
             workspaceRestorationError = nil
+            workspaceAccessibility?.actionItemsInserted(count: insertedActionItemCount)
         }
         present(workItems: workItems)
     }
 
     private func present(workItems: [WorkItem]) {
         self.workItems = workItems
+        workspaceAccessibility?.workspaceContentAvailabilityChanged(
+            hasCachedWork: !workItems.isEmpty
+        )
         if !workItems.contains(where: { $0.id == selectedWorkItemID }) {
             selectedWorkItemID = workItems.first?.id
         }
@@ -275,11 +334,29 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               selectedAccountID == scope.accountID,
               selectedOrganizationID == scope.organizationID
         else { return }
+        let insertedActionItemCount = Self.insertedActionItemCount(
+            in: snapshot.workItems,
+            comparedWith: cachedWorkItems[scope] ?? []
+        )
         cachedWorkItems[scope] = snapshot.workItems
         cachedWorkspaceScopes[scope.accountID, default: [:]][scope.organizationID] = scope
         selectedOrganizationFreshness = snapshot.durableState.freshness
         selectedWorkspaceCoverage = snapshot.coverageEvaluation
+        workspaceAccessibility?.actionItemsInserted(count: insertedActionItemCount)
         present(workItems: snapshot.workItems)
+    }
+
+    private static func insertedActionItemCount(
+        in workItems: [WorkItem],
+        comparedWith previousWorkItems: [WorkItem]
+    ) -> Int {
+        let existingActionItemIDs = Set(previousWorkItems.flatMap { item in
+            item.openActionItems.map(\.id)
+        })
+        let updatedActionItemIDs = Set(workItems.flatMap { item in
+            item.openActionItems.map(\.id)
+        })
+        return updatedActionItemIDs.subtracting(existingActionItemIDs).count
     }
 
     func present(
@@ -296,6 +373,31 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func searchCachedWork(_ query: String) async throws -> [SearchResult] {
+        guard !isShuttingDown else { throw CancellationError() }
+        guard !usesInMemoryUITestFixture else {
+            let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard !normalizedQuery.isEmpty else { return [] }
+            return workItems.enumerated().compactMap { index, workItem in
+                let searchableText = [
+                    workItem.title,
+                    workItem.repository?.fullName ?? "",
+                    workItem.workflow.localNote ?? "",
+                    workItem.actionItems.map(\.title).joined(separator: " ")
+                ].joined(separator: " ")
+                let normalizedText = searchableText.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: .current
+                )
+                guard normalizedText.contains(normalizedQuery) else { return nil }
+                return SearchResult(
+                    documentID: Int64(index + 1),
+                    workItemID: workItem.id,
+                    nodeID: workItem.primaryNodeID,
+                    rank: Double(index)
+                )
+            }
+        }
         guard let account = accounts.first(where: { $0.id == selectedAccountID }),
               let organization = selectedOrganization
         else {
@@ -308,12 +410,19 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
+        guard !isShuttingDown, !accountsBeingRemoved.contains(account.id) else {
+            throw CancellationError()
+        }
         let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
-        return try await SearchRepository(vault: vault).search(
+        let results = try await SearchRepository(vault: vault).search(
             query,
             accountID: account.id,
             organizationID: organization.id
         )
+        guard !isShuttingDown, !accountsBeingRemoved.contains(account.id) else {
+            throw CancellationError()
+        }
+        return results
     }
 
     func selectAccount(_ accountID: AccountID, activatesOrganization: Bool = true) {
@@ -347,7 +456,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func removeAccount(_ accountID: AccountID) async throws {
-        guard accounts.contains(where: { $0.id == accountID }) else { return }
+        guard accounts.contains(where: { $0.id == accountID })
+                || unavailableAccountIDs.contains(accountID)
+        else { return }
 
         let isRemovingSelectedAccount = selectedAccountID == accountID
         accountsBeingRemoved.insert(accountID)
@@ -364,12 +475,21 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         // any notification delivery ledger reference first so a later account
         // reusing this opaque ID cannot retain a closed vault handle.
         await dependencies.workspaceObservationLifecycle.evictAccount(accountID)
+        await dependencies.purgeAccountNotificationPreferences(accountID)
         try await dependencies.accountSession.removeAccount(accountID)
 
+        dependencies.purgeAccountNavigationState(accountID)
         accounts.removeAll { $0.id == accountID }
+        unavailableAccountIDs.remove(accountID)
+        if unavailableAccountIDs.isEmpty {
+            restorationError = nil
+        }
+        workspaceRestorationError = nil
         organizationsByAccount[accountID] = nil
         organizationAccessesByAccount[accountID] = nil
         accountCapabilitiesByAccount[accountID] = nil
+        organizationVisibilityFreshnessByAccount[accountID] = nil
+        organizationAISettingsByAccount[accountID] = nil
         cachedWorkItems.removeAll(for: accountID)
         cachedWorkspaceScopes[accountID] = nil
         if isRemovingSelectedAccount {
@@ -386,6 +506,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func connectGitHub(presentationAnchor: NSWindow) async {
+        guard !usesInMemoryUITestFixture else {
+            connectionError = "GitHub sign-in is unavailable in the local UI fixture."
+            return
+        }
         connectionError = nil
         isConnecting = true
         defer { isConnecting = false }
@@ -429,6 +553,13 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await recheckSelectedOrganizationAccess()
         } catch is PersonalAccessTokenError {
             connectionError = "Enter a supported fine-grained or classic GitHub personal access token."
+        } catch let error as AccountConnectionError {
+            switch error {
+            case .missingFineGrainedResourceOwnerOrganization:
+                connectionError = error.recoveryDescription
+            case .invalidGitHubIdentity, .missingOAuthBroker:
+                connectionError = "Triage could not validate this personal access token. Check its access and try again."
+            }
         } catch {
             connectionError = "Triage could not validate this personal access token. Check its access and try again."
         }
@@ -438,6 +569,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         account: GitHubAccount,
         presentationAnchor: NSWindow
     ) async {
+        guard !usesInMemoryUITestFixture else {
+            connectionError = "GitHub sign-in is unavailable in the local UI fixture."
+            return
+        }
         connectionError = nil
         credentialActionNotice = nil
         isConnecting = true
@@ -454,22 +589,30 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             isCredentialMutationInProgress = true
             invalidateBackgroundRefreshScheduling()
             try await cancelInactiveRefreshes(for: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             await cancelForegroundRefresh()
+            guard canContinueCredentialMutation(for: account.id) else { return }
             await cancelForegroundRefreshes(for: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             let configuration = try RuntimeOAuthConfiguration()
             let request = try await oauthAuthorizer.authorize(
                 configuration: configuration.oauth,
                 presentationAnchor: presentationAnchor
             )
+            guard canContinueCredentialMutation(for: account.id) else { return }
             let snapshot = try await dependencies.accountSession.reconnectOAuth(request, replacing: account)
-            await install(session: snapshot)
+            guard canContinueCredentialMutation(for: account.id) else { return }
+            await install(session: snapshot, requiringActiveAccountID: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             isCredentialMutationInProgress = false
             await recheckSelectedOrganizationAccess()
         } catch let error as AccountCredentialReplacementError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             connectionError = credentialReplacementMessage(for: error)
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
         } catch let error as RuntimeOAuthConfigurationError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             switch error {
             case .missingClientID:
                 connectionError = "GitHub sign-in is not configured in this build."
@@ -479,10 +622,12 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
         } catch is CancellationError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
             return
         } catch {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             connectionError = "GitHub reconnect could not be completed. Try again."
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
@@ -509,16 +654,22 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             isCredentialMutationInProgress = true
             invalidateBackgroundRefreshScheduling()
             try await cancelInactiveRefreshes(for: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             await cancelForegroundRefresh()
+            guard canContinueCredentialMutation(for: account.id) else { return }
             await cancelForegroundRefreshes(for: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             let snapshot = try await dependencies.accountSession.replacePersonalAccessToken(
                 try PersonalAccessToken(rawValue: rawValue),
                 replacing: account
             )
-            await install(session: snapshot)
+            guard canContinueCredentialMutation(for: account.id) else { return }
+            await install(session: snapshot, requiringActiveAccountID: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             isCredentialMutationInProgress = false
             await recheckSelectedOrganizationAccess()
         } catch let error as PersonalAccessTokenError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             switch error {
             case .unsupportedTokenFormat:
                 connectionError = "Enter a supported personal access token for this account."
@@ -526,14 +677,17 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
         } catch let error as AccountCredentialReplacementError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             connectionError = credentialReplacementMessage(for: error)
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
         } catch is CancellationError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
             return
         } catch {
+            guard canContinueCredentialMutation(for: account.id) else { return }
             connectionError = "Triage could not replace this personal access token. Check its access and try again."
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
@@ -544,8 +698,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         connectionError = "Triage could not find its active window."
     }
 
+    private func canContinueCredentialMutation(for accountID: AccountID) -> Bool {
+        !isShuttingDown
+            && accounts.contains(where: { $0.id == accountID })
+            && !accountsBeingRemoved.contains(accountID)
+    }
+
     func startAutomaticRefreshes() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
         await refreshScheduler.start { [weak self] in
             await self?.refreshSelectedOrganizationAfterAccessCheck()
         }
@@ -589,19 +749,38 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 requestPriority: .selectedOrganizationRefresh
             )
             let identityClient = GitHubIdentityClient(client: client)
+            let authenticatedUserReplay = PostAccountAuthenticatedUserReplayService(
+                client: identityClient,
+                receipts: AuthenticatedUserReplayReceiptRepository(vault: vault)
+            )
             let inventoryReplay = PostAccountOrganizationInventoryReplayService(
                 client: identityClient,
-                receipts: PostAccountIdentityReplayReceiptRepository(vault: vault)
+                receipts: PostAccountIdentityReplayReceiptRepository(vault: vault),
+                rawSnapshots: RawAPISnapshotRepository(vault: vault)
             )
+            let inventoryReceipts = PostAccountIdentityReplayReceiptRepository(vault: vault)
             let result = try await DailyActiveAccountIdentityRefreshService(
                 vault: vault,
                 loadAuthenticatedUser: {
-                    try await identityClient.authenticatedUser().value
+                    let credentialRevision = try await AccountRepository(vault: vault)
+                        .credentialRevision(for: account.id)
+                    return try await authenticatedUserReplay.user(
+                        accountID: account.id,
+                        credentialRevision: credentialRevision
+                    )
                 },
                 loadOrganizationInventory: { accountID, credentialRevision in
                     try await inventoryReplay.organizations(
                         accountID: accountID,
                         credentialRevision: credentialRevision
+                    )
+                },
+                loadOrganizationInventoryValidatedAt: { accountID, credentialRevision in
+                    try await inventoryReceipts.inventoryValidatedAt(
+                        for: AccountOrganizationInventoryReplayIdentity(
+                            accountID: accountID,
+                            credentialRevision: credentialRevision
+                        )
                     )
                 }
             ).refreshIfDue(for: account)
@@ -613,12 +792,24 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             switch result {
             case .notDue:
                 return
-            case let .refreshed(snapshot), let .inventoryUnavailable(snapshot):
+            case let .refreshed(snapshot):
                 replaceDailyIdentitySnapshot(snapshot)
+                organizationVisibilityFreshnessByAccount[account.id] = FreshnessState(
+                    status: .fresh,
+                    lastSuccessfulSyncAt: snapshot.account.lastValidatedAt
+                )
+            case let .inventoryUnavailable(snapshot):
+                replaceDailyIdentitySnapshot(snapshot)
+                organizationVisibilityFreshnessByAccount[account.id] = FreshnessState(
+                    status: .partial,
+                    lastSuccessfulSyncAt: organizationVisibilityFreshnessByAccount[account.id]?.lastSuccessfulSyncAt,
+                    detail: "Organization visibility could not be refreshed. Showing saved organizations."
+                )
             case let .credentialRevoked(revoked):
                 if let index = accounts.firstIndex(where: { $0.id == revoked.id }) {
                     accounts[index] = revoked
                 }
+                organizationVisibilityFreshnessByAccount[account.id] = nil
                 refreshError = "GitHub credentials need to be reconnected. Cached work remains available."
             }
         } catch is CancellationError {
@@ -645,6 +836,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// Enters the durable due-refresh path after the ordinary selected-workspace
     /// activation has settled, avoiding a second foreground refresh owner.
     func launchOrganizationRefreshLifecycle() async {
+        guard !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.launch(
             synchronizationScopes: scopes,
@@ -653,7 +845,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func applicationDidBecomeActive() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.applicationDidBecomeActive(
             synchronizationScopes: scopes,
@@ -662,7 +854,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func handleSystemWake() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.wake(
             synchronizationScopes: scopes,
@@ -671,7 +863,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func scheduleOpportunisticBackgroundRefresh() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.scheduleOpportunisticBackgroundRefresh(
             synchronizationScopes: scopes,
@@ -715,6 +907,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func restoreAccounts() async {
+        restorationError = nil
         do {
             let result = try await dependencies.accountSession.restoreAccounts()
             await install(session: result)
@@ -726,7 +919,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             }
             activateSelectedOrganization()
             if !result.unavailableAccountIDs.isEmpty {
-                restorationError = "One or more connected accounts need to be reconnected."
+                restorationError = "An account's encrypted local data cannot be opened. Remove its local data in Settings, then reconnect to resync."
             }
         } catch is CancellationError {
             return
@@ -1323,6 +1516,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             "This credential belongs to a different GitHub account. The connected profile was not changed."
         case .authenticationKindMismatch:
             "Replace a credential with the same authentication kind, or connect a separate profile."
+        case .fineGrainedResourceOwnerOrganizationRequired:
+            "Fine-grained personal access tokens need a resource-owner organization. Connect it as a new account instead of replacing this credential."
         case .invalidGitHubIdentity:
             "GitHub returned an invalid account identity. The connected profile was not changed."
         case .stagedCredentialCleanupFailed:
@@ -1424,28 +1619,243 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func applyWorkflowAction(_ action: WorkflowAction, to workItem: WorkItem) async {
-        guard !accountsBeingRemoved.contains(workItem.accountID) else { return }
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
+        guard !usesInMemoryUITestFixture else {
+            workspaceAccessibility?.workflowCompleted(action)
+            return
+        }
         do {
             let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             try await dependencies.workspaceMutator.apply(action, to: workItem.id, in: scope)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             workspaceAccessibility?.workflowCompleted(action)
         } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             refreshError = "Triage could not save this local workflow change."
         }
     }
 
     func completeActionItem(_ actionItem: ActionItem, in workItem: WorkItem) async {
-        guard !accountsBeingRemoved.contains(workItem.accountID) else { return }
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
+        guard !usesInMemoryUITestFixture else {
+            workspaceAccessibility?.actionItemCompleted()
+            return
+        }
         do {
             let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             try await dependencies.workspaceMutator.completeActionItem(
                 actionItem.id,
                 in: workItem.id,
                 scope: scope
             )
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             workspaceAccessibility?.actionItemCompleted()
         } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             refreshError = "Triage could not complete this local action item."
+        }
+    }
+
+    /// Updates only the explicitly local editable fields. This method has no
+    /// GitHub transport and returns the committed local record for undo.
+    func editActionItem(
+        _ edit: LocalActionItemEdit,
+        actionItem: ActionItem,
+        in workItem: WorkItem
+    ) async -> ActionItem? {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+        guard !usesInMemoryUITestFixture else {
+            return actionItem.applying(edit, at: .now)
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+            let updated = try await dependencies.workspaceMutator.editActionItem(
+                edit,
+                actionItemID: actionItem.id,
+                in: workItem.id,
+                expectedUpdatedAt: actionItem.updatedAt,
+                scope: scope
+            )
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+            return updated
+        } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+            refreshError = "Triage could not save this local action-item edit."
+            return nil
+        }
+    }
+
+    /// Reads the already-normalized local source record. Detail presentation
+    /// never turns an absent body into a network fetch.
+    func localDetailSource(for workItem: WorkItem) async -> WorkDetailSource? {
+        guard !isShuttingDown,
+              !accountsBeingRemoved.contains(workItem.accountID),
+              !usesInMemoryUITestFixture,
+              !Task.isCancelled
+        else { return nil }
+        do {
+            let secretStore = KeychainSecretStore()
+            guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
+                return nil
+            }
+            guard !isShuttingDown,
+                  !accountsBeingRemoved.contains(workItem.accountID),
+                  !Task.isCancelled
+            else { return nil }
+            let vault = try await vaultRegistry.open(accountID: workItem.accountID, vaultKey: vaultKey)
+            let source = try await WorkDetailRepository(vault: vault).source(for: workItem)
+            guard !isShuttingDown,
+                  !accountsBeingRemoved.contains(workItem.accountID),
+                  !Task.isCancelled
+            else { return nil }
+            return source
+        } catch {
+            return nil
+        }
+    }
+
+    /// Returns one bounded page from the encrypted normalized timeline. The
+    /// caller owns cancellation; no refresh or GitHub request occurs here.
+    func localTimelinePage(
+        for workItem: WorkItem,
+        after cursor: WorkDetailTimelineCursor?,
+        limit: Int
+    ) async -> WorkDetailTimelinePage? {
+        guard !isShuttingDown,
+              !accountsBeingRemoved.contains(workItem.accountID),
+              !usesInMemoryUITestFixture,
+              !Task.isCancelled
+        else { return nil }
+        do {
+            let secretStore = KeychainSecretStore()
+            guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
+                return nil
+            }
+            guard !isShuttingDown,
+                  !accountsBeingRemoved.contains(workItem.accountID),
+                  !Task.isCancelled
+            else { return nil }
+            let vault = try await vaultRegistry.open(accountID: workItem.accountID, vaultKey: vaultKey)
+            let page = try await WorkDetailRepository(vault: vault).timelinePage(
+                for: workItem,
+                after: cursor,
+                limit: limit
+            )
+            guard !isShuttingDown,
+                  !accountsBeingRemoved.contains(workItem.accountID),
+                  !Task.isCancelled
+            else { return nil }
+            return page
+        } catch {
+            return nil
+        }
+    }
+
+    /// Reloads the persisted consent and its current fail-closed effective
+    /// state for the selected organization. The unavailable production
+    /// Copilot boundary deliberately produces an explicit unavailable state.
+    func refreshSelectedOrganizationAIStatus() async {
+        guard !isShuttingDown else { return }
+        guard !usesInMemoryUITestFixture else {
+            guard let accountID = selectedAccountID,
+                  let organizationID = selectedOrganizationID
+            else { return }
+            organizationAISettingsByAccount[accountID, default: [:]][organizationID] = .init(
+                consent: .disabled(accountID: accountID, organizationID: organizationID),
+                isEffectivelyAvailable: false,
+                status: "AI analysis is blocked in the deterministic local UI fixture."
+            )
+            return
+        }
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization,
+              !accountsBeingRemoved.contains(account.id)
+        else { return }
+        do {
+            let context = try await aiContext(for: account, organization: organization)
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id
+            else { return }
+            let policy = try await context.controller.policy(
+                for: context.scope,
+                account: account
+            )
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id
+            else { return }
+            organizationAISettingsByAccount[account.id, default: [:]][organization.id] = Self.aiSettingsState(
+                policy: policy
+            )
+        } catch is CancellationError {
+        } catch {
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id
+            else { return }
+            organizationAISettingsByAccount[account.id, default: [:]][organization.id] = .init(
+                consent: .disabled(accountID: account.id, organizationID: organization.id),
+                isEffectivelyAvailable: false,
+                status: "AI analysis is unavailable until Triage can verify this organization's local authorization."
+            )
+        }
+    }
+
+    /// Persists one selected organization's explicit choice. Disabling uses
+    /// the controller's cancellation-and-purge path, which cannot affect
+    /// source content, deterministic/manual work, or another organization.
+    func recordSelectedOrganizationAIConsent(_ isEnabled: Bool) async {
+        guard !isShuttingDown else { return }
+        guard !usesInMemoryUITestFixture else {
+            guard let accountID = selectedAccountID,
+                  let organizationID = selectedOrganizationID
+            else { return }
+            organizationAISettingsByAccount[accountID, default: [:]][organizationID] = .init(
+                consent: .init(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    isEnabled: isEnabled,
+                    selectedModelID: nil,
+                    updatedAt: .now
+                ),
+                isEffectivelyAvailable: false,
+                status: "AI analysis is blocked in the deterministic local UI fixture."
+            )
+            return
+        }
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization,
+              !accountsBeingRemoved.contains(account.id)
+        else { return }
+        do {
+            let context = try await aiContext(for: account, organization: organization)
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            if isEnabled {
+                try await context.controller.recordConsent(.init(
+                    accountID: account.id,
+                    organizationID: organization.id,
+                    isEnabled: true,
+                    selectedModelID: nil,
+                    updatedAt: .now
+                ))
+            } else {
+                try await context.controller.cancelAndDisable(for: context.scope)
+            }
+            guard !isShuttingDown else { return }
+            await refreshSelectedOrganizationAIStatus()
+        } catch {
+            guard !isShuttingDown else { return }
+            refreshError = isEnabled
+                ? "Triage could not save AI consent for this organization."
+                : "Triage could not disable and erase AI data for this organization."
         }
     }
 
@@ -1455,6 +1865,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// visible UI. No response makes a GitHub request or changes GitHub
     /// notification state.
     func handleNotificationLocalAction(_ action: NotificationLocalAction) async {
+        guard !isShuttingDown else { return }
         let route: NotificationRoute
         switch action {
         case let .openTriage(value), let .snoozeOneHour(value, _), let .archiveInTriage(value):
@@ -1467,42 +1878,76 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             return
         }
 
-        do {
-            let scope = try await synchronizationScope(
-                accountID: route.accountID,
-                organizationID: route.organizationID
-            )
-            guard try await containsWorkItem(route.workItemID, in: scope) else {
-                return
-            }
+        if usesInMemoryUITestFixture {
             if selectedAccountID != route.accountID {
                 selectAccount(route.accountID, activatesOrganization: false)
             }
             if selectedOrganizationID != route.organizationID {
                 selectOrganization(route.organizationID)
+            }
+            guard workItems.contains(where: { $0.id == route.workItemID }) else { return }
+            selectedWorkItemID = route.workItemID
+            return
+        }
+
+        do {
+            let scope = try await synchronizationScope(
+                accountID: route.accountID,
+                organizationID: route.organizationID
+            )
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+            guard let workItem = try await workItem(route.workItemID, in: scope) else {
+                return
+            }
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+            switch action {
+            case .openTriage:
+                break
+            case .snoozeOneHour, .archiveInTriage:
+                guard NotificationActionAuthorizationValidator.matches(route: route, workItem: workItem) else {
+                    return
+                }
+            }
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+            if selectedAccountID != route.accountID {
+                selectAccount(route.accountID, activatesOrganization: false)
+            }
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+            if selectedOrganizationID != route.organizationID {
+                selectOrganization(route.organizationID)
             } else {
                 activateSelectedOrganization()
             }
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
             selectedWorkItemID = route.workItemID
             switch action {
             case .openTriage:
                 return
             case let .snoozeOneHour(_, until):
-                try await dependencies.workspaceMutator.apply(
+                guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+                guard let authorization = route.actionAuthorization else { return }
+                try await dependencies.workspaceMutator.applyNotificationAction(
                     .snooze(until: until),
                     to: route.workItemID,
-                    in: scope
+                    in: scope,
+                    expectedAuthorization: authorization
                 )
+                guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
             case .archiveInTriage:
-                try await dependencies.workspaceMutator.apply(
+                guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
+                guard let authorization = route.actionAuthorization else { return }
+                try await dependencies.workspaceMutator.applyNotificationAction(
                     .archive,
                     to: route.workItemID,
-                    in: scope
+                    in: scope,
+                    expectedAuthorization: authorization
                 )
+                guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
             }
         } catch is CancellationError {
             return
         } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(route.accountID) else { return }
             refreshError = "Triage could not apply this local notification action."
         }
     }
@@ -1532,6 +1977,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     private func activateSelectedOrganization() {
+        guard !usesInMemoryUITestFixture else {
+            presentCachedWorkItems()
+            return
+        }
         guard let accountID = selectedAccountID,
               let organizationID = selectedOrganizationID
         else { return }
@@ -1555,6 +2004,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func refreshSelectedOrganizationAfterAccessCheck() async {
+        guard !usesInMemoryUITestFixture else { return }
         guard let access = selectedOrganizationAccess else {
             await recheckSelectedOrganizationAccess()
             return
@@ -1746,10 +2196,42 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         )
     }
 
-    private func containsWorkItem(
+    private func aiContext(
+        for account: GitHubAccount,
+        organization: GitHubOrganization
+    ) async throws -> (scope: SynchronizationScope, controller: OrganizationAIController) {
+        let secretStore = KeychainSecretStore()
+        let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
+        let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+        let scope = try await AccountRepository(vault: vault).synchronizationScope(
+            for: account.id,
+            organizationID: organization.id
+        )
+        return (scope, await dependencies.organizationAIControllers.controller(for: vault))
+    }
+
+    private static func aiSettingsState(
+        policy: OrganizationAIExecutionPolicy
+    ) -> OrganizationAISettingsState {
+        let status: String
+        if !policy.consent.isEnabled {
+            status = "Consent is disabled. Triage will not send organization content for AI analysis."
+        } else if !policy.permitsAnalysis {
+            status = "Copilot runtime, identity, entitlement, budget, or model availability is not verified. AI analysis is blocked."
+        } else {
+            status = "AI analysis is authorized for this organization."
+        }
+        return .init(
+            consent: policy.consent,
+            isEffectivelyAvailable: policy.permitsAnalysis,
+            status: status
+        )
+    }
+
+    private func workItem(
         _ workItemID: WorkItemID,
         in scope: SynchronizationScope
-    ) async throws -> Bool {
+    ) async throws -> WorkItem? {
         let secretStore = KeychainSecretStore()
         guard let vaultKey = try await secretStore.readVaultKey(for: scope.accountID) else {
             throw AccountCredentialReaderError.missingAccessToken
@@ -1758,7 +2240,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         return try await WorkItemRepository(vault: vault).fetch(
             accountID: scope.accountID,
             organizationID: scope.organizationID
-        ).contains { $0.id == workItemID }
+        ).first { $0.id == workItemID }
     }
 
     private func requiredVaultKey(

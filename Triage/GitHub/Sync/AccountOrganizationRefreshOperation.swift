@@ -32,7 +32,8 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
         credentialReader: AccountCredentialReader,
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
-        rateLimitControllers: GitHubRateLimitControllerRegistry = .shared
+        rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
+        organizationAIController: OrganizationAIController? = nil
     ) {
         self.vault = vault
         refreshPipeline = { account, organization, synchronizationScope, requestPriority, reconciliationIntent in
@@ -41,7 +42,8 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
                 rateLimitControllers: rateLimitControllers,
-                requestPriority: requestPriority
+                requestPriority: requestPriority,
+                organizationAIController: organizationAIController
             ).refresh(
                 account: account,
                 organization: organization,

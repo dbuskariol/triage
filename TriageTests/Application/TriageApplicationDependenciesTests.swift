@@ -41,6 +41,107 @@ final class TriageApplicationDependenciesTests: XCTestCase {
         XCTAssertTrue(dependencies.workspaceMutator is TriageWorkspaceMutator)
     }
 
+    func testProductionCompositionWithNotificationSettingsWrapsObservationAndLifecycle() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-production-notification-composition-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let composition = TriageProductionComposition(
+            vaultRegistry: try VaultRegistry(rootDirectory: root),
+            secretStore: KeychainSecretStore(),
+            applicationSupportDirectory: root.appendingPathComponent("Application Support", isDirectory: true),
+            cachesDirectory: root.appendingPathComponent("Caches", isDirectory: true)
+        )
+        let settings = NotificationPreferencesSpy()
+        let dependencies = composition.dependencies(notificationSettings: settings)
+
+        XCTAssertTrue(dependencies.workspaceObserver is NotificationDeliveringWorkspaceObserver)
+        XCTAssertTrue(dependencies.workspaceObservationLifecycle is NotificationDeliveringWorkspaceObserver)
+        await dependencies.workspaceObservationLifecycle.shutdown()
+    }
+
+    func testSessionSnapshotRepresentsKeylessVaultAsRecoveryOnlyAccount() throws {
+        let unavailableAccountID = AccountID.make()
+
+        let snapshot = try AccountSessionSnapshot(
+            accounts: [],
+            organizationsByAccount: [:],
+            organizationAccessesByAccount: [:],
+            accountCapabilitiesByAccount: [:],
+            unavailableAccountIDs: [unavailableAccountID]
+        )
+
+        XCTAssertEqual(snapshot.unavailableAccountIDs, [unavailableAccountID])
+        XCTAssertTrue(snapshot.accounts.isEmpty)
+    }
+
+    func testProductionSessionRestoresKeylessVaultAsRecoverableLocalAccount() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-keyless-production-session-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unavailableAccountID = AccountID.make()
+        let session = TriageAccountSessionService(
+            vaultRegistry: try VaultRegistry(rootDirectory: root),
+            secretStore: KeychainSecretStore(),
+            applicationSupportDirectory: root.appendingPathComponent("Application Support", isDirectory: true),
+            cachesDirectory: root.appendingPathComponent("Caches", isDirectory: true),
+            restoreAccountState: {
+                AccountRestorationResult(
+                    accounts: [],
+                    organizationsByAccount: [:],
+                    organizationAccessesByAccount: [:],
+                    accountCapabilitiesByAccount: [:],
+                    unavailableAccountIDs: [unavailableAccountID]
+                )
+            }
+        )
+
+        let snapshot = try await session.restoreAccounts()
+
+        XCTAssertEqual(snapshot.unavailableAccountIDs, [unavailableAccountID])
+        XCTAssertTrue(snapshot.accounts.isEmpty)
+    }
+
+    func testStartupDeletionRecoveryPurgesEveryRecoveredAccountBeforeRestoration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-startup-deletion-recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let firstRecoveredAccountID = AccountID.make()
+        let secondRecoveredAccountID = AccountID.make()
+        let purger = RecoveredAccountStatePurgerSpy()
+        let session = TriageAccountSessionService(
+            vaultRegistry: try VaultRegistry(rootDirectory: root),
+            secretStore: KeychainSecretStore(),
+            applicationSupportDirectory: root.appendingPathComponent("Application Support", isDirectory: true),
+            cachesDirectory: root.appendingPathComponent("Caches", isDirectory: true),
+            restoreAccountState: {
+                guard await purger.purgedAccountIDs() == [firstRecoveredAccountID, secondRecoveredAccountID] else {
+                    throw StartupDeletionRecoveryTestError.restoredBeforeCleanup
+                }
+                return AccountRestorationResult(
+                    accounts: [],
+                    organizationsByAccount: [:],
+                    organizationAccessesByAccount: [:],
+                    accountCapabilitiesByAccount: [:],
+                    unavailableAccountIDs: []
+                )
+            },
+            recoverInterruptedRemovals: {
+                [firstRecoveredAccountID, secondRecoveredAccountID]
+            },
+            deletionRecoveryStatePurger: purger
+        )
+
+        let snapshot = try await session.restoreAccounts()
+        let purgedAccountIDs = await purger.purgedAccountIDs()
+
+        XCTAssertTrue(snapshot.accounts.isEmpty)
+        XCTAssertEqual(
+            purgedAccountIDs,
+            [firstRecoveredAccountID, secondRecoveredAccountID]
+        )
+    }
+
     func testPostCredentialReplayMapsOnlyValidOrganizationIdentities() throws {
         let mapped = try TriageAccountSessionService.organizationForInventoryReplay(
             GitHubOrganizationDTO(id: 1, nodeID: "O_1", login: "acme", avatarURL: nil)
@@ -106,6 +207,120 @@ final class TriageApplicationDependenciesTests: XCTestCase {
         XCTAssertEqual(observedScopes, [scope])
         XCTAssertEqual(appliedScopes, [scope])
         XCTAssertEqual(lifecycleEvents, [.launch, .active, .wake, .background, .stop])
+    }
+
+    func testProductionCoordinatorRejectsObsoleteScopeBeforeNewerRuntimeDispatch() async throws {
+        let current = fixtureScope()
+        let obsolete = SynchronizationScope(
+            accountID: current.accountID,
+            organizationID: current.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-obsolete")!,
+            capabilityRevision: current.capabilityRevision
+        )
+        let runtime = CoordinatorRuntimeSpy(currentScope: current)
+        let coordinator = TriageWorkspaceCoordinator(makeRuntime: { _ in runtime })
+
+        do {
+            _ = try await coordinator.refresh(obsolete, priority: .manual)
+            XCTFail("An obsolete scope must cancel before dispatching newer authority.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let dispatched = await runtime.refreshScopes()
+        XCTAssertTrue(dispatched.isEmpty)
+    }
+
+    func testProductionCoordinatorEvictsLifecycleRuntimeForReplacementAndRemoval() async throws {
+        let scope = fixtureScope()
+        let first = CoordinatorRuntimeSpy(currentScope: scope)
+        let second = CoordinatorRuntimeSpy(currentScope: scope)
+        let factory = RotatingCoordinatorRuntimeFactory([first, second])
+        let coordinator = TriageWorkspaceCoordinator(
+            makeRuntime: { accountID in try await factory.makeRuntime(for: accountID) }
+        )
+
+        await coordinator.launch(
+            synchronizationScopes: [scope],
+            activeAccountID: scope.accountID
+        )
+        try await coordinator.cancelAll(for: scope.accountID)
+        await coordinator.applicationDidBecomeActive(
+            synchronizationScopes: [scope],
+            activeAccountID: scope.accountID
+        )
+
+        let resolutionsAfterReplacement = await factory.resolutionCount()
+        let firstCancels = await first.cancelCount()
+        let secondActivations = await second.activationCount()
+        XCTAssertEqual(resolutionsAfterReplacement, 2)
+        XCTAssertGreaterThanOrEqual(firstCancels, 1)
+        XCTAssertEqual(secondActivations, 1)
+
+        try await coordinator.cancelAll(for: scope.accountID)
+        await coordinator.applicationDidBecomeActive(
+            synchronizationScopes: [],
+            activeAccountID: nil
+        )
+        let finalResolutions = await factory.resolutionCount()
+        XCTAssertEqual(finalResolutions, 2)
+    }
+
+    func testProductionCoordinatorStaleScheduledCallbackCannotReopenRuntimeAfterCancellation() async throws {
+        let scope = fixtureScope()
+        let first = CoordinatorRuntimeSpy(currentScope: scope)
+        let scheduler = CoordinatorBackgroundSchedulerSpy()
+        let factory = RotatingCoordinatorRuntimeFactory([first])
+        let coordinator = TriageWorkspaceCoordinator(
+            backgroundScheduler: scheduler,
+            makeRuntime: { accountID in try await factory.makeRuntime(for: accountID) }
+        )
+
+        await coordinator.launch(
+            synchronizationScopes: [scope],
+            activeAccountID: scope.accountID
+        )
+        try await coordinator.cancelAll(for: scope.accountID)
+        await scheduler.runScheduledOperation()
+
+        let resolutions = await factory.resolutionCount()
+        XCTAssertEqual(resolutions, 1)
+    }
+
+    func testProductionCoordinatorDiscardsRuntimeProducedAfterCancellation() async throws {
+        let scope = fixtureScope()
+        let stale = CoordinatorRuntimeSpy(currentScope: scope)
+        let fresh = CoordinatorRuntimeSpy(currentScope: scope)
+        let factory = SuspendedCoordinatorRuntimeFactory(stale: stale, fresh: fresh)
+        let coordinator = TriageWorkspaceCoordinator(
+            makeRuntime: { accountID in try await factory.makeRuntime(for: accountID) }
+        )
+        let select = Task { () -> Bool in
+            do {
+                _ = try await coordinator.select(scope)
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        await factory.waitUntilFirstResolutionStarts()
+        try await coordinator.cancelAll(for: scope.accountID)
+        await factory.resumeFirstResolution()
+
+        let selected = await select.value
+        let staleCancels = await stale.cancelCount()
+        XCTAssertFalse(selected)
+        XCTAssertEqual(staleCancels, 1)
+
+        await coordinator.applicationDidBecomeActive(
+            synchronizationScopes: [scope],
+            activeAccountID: scope.accountID
+        )
+        let resolutions = await factory.resolutionCount()
+        let freshActivations = await fresh.activationCount()
+        XCTAssertEqual(resolutions, 2)
+        XCTAssertEqual(freshActivations, 1)
     }
 
     func testSnapshotRejectsMixedAuthorityCoverage() throws {
@@ -174,6 +389,11 @@ final class TriageApplicationDependenciesTests: XCTestCase {
     }
 }
 
+@MainActor
+private final class NotificationPreferencesSpy: NotificationDeliveryPreferencesProviding {
+    func deliveryPreferences(for _: OrganizationID) async -> NotificationPreferences? { nil }
+}
+
 private actor SessionSpy: AccountSessionServing {
     private var restores = 0
 
@@ -194,6 +414,20 @@ private actor SessionSpy: AccountSessionServing {
     func removeAccount(_: AccountID) async throws {}
 
     func restoreCallCount() -> Int { restores }
+}
+
+private enum StartupDeletionRecoveryTestError: Error {
+    case restoredBeforeCleanup
+}
+
+private actor RecoveredAccountStatePurgerSpy: AccountDeletionRecoveryStatePurging {
+    private var accountIDs = [AccountID]()
+
+    func purgeRecoveredDeletedAccountState(for accountID: AccountID) {
+        accountIDs.append(accountID)
+    }
+
+    func purgedAccountIDs() -> [AccountID] { accountIDs }
 }
 
 private actor CoordinatorSpy: WorkspaceCoordinating {
@@ -273,6 +507,138 @@ private actor MutatorSpy: WorkspaceMutating {
     }
 
     func completeActionItem(_: ActionItemID, in _: WorkItemID, scope: SynchronizationScope) async throws {}
+    func editActionItem(_: LocalActionItemEdit, actionItemID _: ActionItemID, in _: WorkItemID, expectedUpdatedAt _: Date, scope _: SynchronizationScope) async throws -> ActionItem { throw CancellationError() }
 
     func appliedScopes() -> [SynchronizationScope] { scopes }
+}
+
+private actor CoordinatorRuntimeSpy: AccountWorkspaceRefreshRunning {
+    private let currentScope: SynchronizationScope
+    private var refreshed = [SynchronizationScope]()
+    private var activations = 0
+    private var cancellations = 0
+
+    init(currentScope: SynchronizationScope) {
+        self.currentScope = currentScope
+    }
+
+    func select(_ scope: SynchronizationScope) async throws -> AccountOrganizationCoordinatorState? {
+        guard scope == currentScope else { throw CancellationError() }
+        return nil
+    }
+
+    func refresh(
+        _ scope: SynchronizationScope,
+        priority _: AccountOrganizationRefreshPriority
+    ) async throws -> AccountOrganizationCoordinatorState? {
+        guard scope == currentScope else { throw CancellationError() }
+        refreshed.append(scope)
+        return nil
+    }
+
+    func cancel(organizationID _: OrganizationID) async throws {}
+
+    func applicationDidBecomeActive(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID _: AccountID?
+    ) async throws {
+        guard synchronizationScopes.allSatisfy({ $0 == currentScope }) else {
+            throw CancellationError()
+        }
+        activations += 1
+    }
+
+    func cancelAll() async throws {
+        cancellations += 1
+    }
+
+    func refreshScopes() -> [SynchronizationScope] { refreshed }
+    func activationCount() -> Int { activations }
+    func cancelCount() -> Int { cancellations }
+}
+
+private actor RotatingCoordinatorRuntimeFactory {
+    private var values: [any AccountWorkspaceRefreshRunning]
+    private var resolutions = 0
+
+    init(_ values: [any AccountWorkspaceRefreshRunning]) {
+        self.values = values
+    }
+
+    func makeRuntime(for _: AccountID) throws -> any AccountWorkspaceRefreshRunning {
+        guard !values.isEmpty else { throw CoordinatorRuntimeFactoryError.exhausted }
+        resolutions += 1
+        return values.removeFirst()
+    }
+
+    func resolutionCount() -> Int { resolutions }
+}
+
+private enum CoordinatorRuntimeFactoryError: Error {
+    case exhausted
+}
+
+private actor CoordinatorBackgroundSchedulerSpy: OrganizationRefreshBackgroundScheduling {
+    private var operation: (@Sendable () async -> Void)?
+
+    func schedule(
+        identifier _: String,
+        interval _: TimeInterval,
+        operation: @escaping @Sendable () async -> Void
+    ) async {
+        self.operation = operation
+    }
+
+    func cancel(identifier _: String) async {
+        operation = nil
+    }
+
+    func runScheduledOperation() async {
+        guard let operation else { return }
+        await operation()
+    }
+}
+
+private actor SuspendedCoordinatorRuntimeFactory {
+    private let stale: any AccountWorkspaceRefreshRunning
+    private let fresh: any AccountWorkspaceRefreshRunning
+    private var resolutions = 0
+    private var firstResolutionStarted = false
+    private var firstResolutionWaiters = [CheckedContinuation<Void, Never>]()
+    private var firstResolutionContinuation: CheckedContinuation<Void, Never>?
+
+    init(stale: any AccountWorkspaceRefreshRunning, fresh: any AccountWorkspaceRefreshRunning) {
+        self.stale = stale
+        self.fresh = fresh
+    }
+
+    func makeRuntime(for _: AccountID) async throws -> any AccountWorkspaceRefreshRunning {
+        resolutions += 1
+        guard resolutions == 1 else { return fresh }
+        firstResolutionStarted = true
+        let waiters = firstResolutionWaiters
+        firstResolutionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            firstResolutionContinuation = continuation
+        }
+        return stale
+    }
+
+    func waitUntilFirstResolutionStarts() async {
+        guard !firstResolutionStarted else { return }
+        await withCheckedContinuation { continuation in
+            firstResolutionWaiters.append(continuation)
+        }
+    }
+
+    func resumeFirstResolution() {
+        let continuation = firstResolutionContinuation
+        firstResolutionContinuation = nil
+        continuation?.resume()
+    }
+
+    func resolutionCount() -> Int { resolutions }
 }

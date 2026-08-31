@@ -69,6 +69,62 @@ protocol WorkspaceObservationLifecycleHandling: Sendable {
     func shutdown() async
 }
 
+/// Main-actor presentation cleanup performed only after durable account
+/// deletion succeeds and before the app model releases its account state.
+/// Keeping it injected makes the persistence boundary explicit without a
+/// process-global navigation dependency.
+typealias AccountNavigationStatePurging = @MainActor @Sendable (AccountID) -> Void
+typealias AccountNotificationPreferencePurging = @MainActor @Sendable (AccountID) async -> Void
+
+/// Removes presentation state that must not survive an interrupted account
+/// deletion. Account-session recovery invokes this only after the deletion
+/// journal has completed crypto-erasure and before it returns a restoration
+/// snapshot to the UI.
+protocol AccountDeletionRecoveryStatePurging: Sendable {
+    func purgeRecoveredDeletedAccountState(for accountID: AccountID) async
+}
+
+struct NoopAccountDeletionRecoveryStatePurger: AccountDeletionRecoveryStatePurging {
+    func purgeRecoveredDeletedAccountState(for _: AccountID) async {}
+}
+
+/// Production cleanup for state stored outside an encrypted account vault.
+/// The account and organization defaults form one selection, so clearing the
+/// deleted account also clears its paired organization. Work-item selection
+/// and history remain owned by `AppNavigationModel` and are removed through
+/// its injected account-scoped purge operation.
+struct AccountDeletionRecoveryStatePurger: AccountDeletionRecoveryStatePurging {
+    private enum PreferenceKey {
+        static let selectedAccountID = "workspace.selected-account-id"
+        static let selectedOrganizationID = "workspace.selected-organization-id"
+    }
+
+    private let purgeAccountNavigationState: AccountNavigationStatePurging
+
+    init(purgeAccountNavigationState: @escaping AccountNavigationStatePurging) {
+        self.purgeAccountNavigationState = purgeAccountNavigationState
+    }
+
+    func purgeRecoveredDeletedAccountState(for accountID: AccountID) async {
+        await MainActor.run {
+            Self.purgeSelectedAccountAndOrganization(for: accountID)
+            purgeAccountNavigationState(accountID)
+        }
+    }
+
+    @MainActor
+    static func purgeSelectedAccountAndOrganization(
+        for accountID: AccountID,
+        defaults: UserDefaults = .standard
+    ) {
+        guard defaults.string(forKey: PreferenceKey.selectedAccountID) == accountID.rawValue else {
+            return
+        }
+        defaults.removeObject(forKey: PreferenceKey.selectedAccountID)
+        defaults.removeObject(forKey: PreferenceKey.selectedOrganizationID)
+    }
+}
+
 struct NoopWorkspaceObservationLifecycle: WorkspaceObservationLifecycleHandling {
     func evictAccount(_: AccountID) async {}
     func shutdown() async {}
@@ -88,6 +144,34 @@ protocol WorkspaceMutating: Sendable {
         in workItemID: WorkItemID,
         scope: SynchronizationScope
     ) async throws
+    func editActionItem(
+        _ edit: LocalActionItemEdit,
+        actionItemID: ActionItemID,
+        in workItemID: WorkItemID,
+        expectedUpdatedAt: Date,
+        scope: SynchronizationScope
+    ) async throws -> ActionItem
+    /// Revalidates a signed local-notification authorization against the
+    /// transaction-fetched work item before committing its workflow mutation.
+    func applyNotificationAction(
+        _ action: WorkflowAction,
+        to workItemID: WorkItemID,
+        in scope: SynchronizationScope,
+        expectedAuthorization: NotificationActionAuthorization
+    ) async throws
+}
+
+extension WorkspaceMutating {
+    /// Non-production fixtures have no durable work-item transaction to
+    /// revalidate. The production mutator overrides this boundary.
+    func applyNotificationAction(
+        _ action: WorkflowAction,
+        to workItemID: WorkItemID,
+        in scope: SynchronizationScope,
+        expectedAuthorization _: NotificationActionAuthorization
+    ) async throws {
+        try await apply(action, to: workItemID, in: scope)
+    }
 }
 
 /// A main-actor sink is intentionally separate from the Sendable services.
@@ -116,6 +200,9 @@ struct TriageApplicationDependencies: Sendable {
     let workspaceObserver: any WorkspaceObserving
     let workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling
     let workspaceMutator: any WorkspaceMutating
+    let organizationAIControllers: any OrganizationAIControllerProviding
+    let purgeAccountNavigationState: AccountNavigationStatePurging
+    let purgeAccountNotificationPreferences: AccountNotificationPreferencePurging
 
     init(
         accountSession: any AccountSessionServing,
@@ -123,7 +210,10 @@ struct TriageApplicationDependencies: Sendable {
         refreshLifecycle: any OrganizationRefreshLifecycleHandling,
         workspaceObserver: any WorkspaceObserving,
         workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle(),
-        workspaceMutator: any WorkspaceMutating
+        workspaceMutator: any WorkspaceMutating,
+        organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry(),
+        purgeAccountNavigationState: @escaping AccountNavigationStatePurging = { _ in },
+        purgeAccountNotificationPreferences: @escaping AccountNotificationPreferencePurging = { _ in }
     ) {
         self.accountSession = accountSession
         self.workspaceCoordinator = workspaceCoordinator
@@ -131,5 +221,8 @@ struct TriageApplicationDependencies: Sendable {
         self.workspaceObserver = workspaceObserver
         self.workspaceObservationLifecycle = workspaceObservationLifecycle
         self.workspaceMutator = workspaceMutator
+        self.organizationAIControllers = organizationAIControllers
+        self.purgeAccountNavigationState = purgeAccountNavigationState
+        self.purgeAccountNotificationPreferences = purgeAccountNotificationPreferences
     }
 }

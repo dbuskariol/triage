@@ -7,6 +7,12 @@ enum RequestedReviewerCorroboration: Sendable, Equatable {
     case sourceUnavailable
 }
 
+private struct ReviewRESTReplay: Sendable {
+    let reviews: GitHubPullRequestReviewInventory
+    let reviewRawPages: [GitHubPullRequestReviewRawPage]
+    let requestedReviewers: GitHubResponse<GitHubRequestedReviewersDTO>
+}
+
 struct PullRequestReviewRefreshResult: Sendable {
     let refreshedPullRequestNodeIDs: [GitHubNodeID]
     let hasRemainingCandidates: Bool
@@ -79,13 +85,17 @@ actor PullRequestReviewRefreshService {
         let observedAtMilliseconds = Self.milliseconds(observedAt)
 
         candidateLoop: for candidate in inventory.candidates {
-            let reviewFetch: GitHubPullRequestReviewFetchResult
+            let reviewValidators = try await cachedValidators(
+                for: Self.reviewsRequestKey(for: candidate), scope: scope, streamID: streamID
+            )
+            var reviewFetch: GitHubPullRequestReviewFetchResult
             do {
                 try await validateCurrentScope(scope)
                 reviewFetch = try await client.allReviewsPreservingFailure(
                     repository: candidate.repository,
                     number: candidate.number,
-                    githubOrganizationID: githubOrganizationID
+                    githubOrganizationID: githubOrganizationID,
+                    validators: reviewValidators
                 )
                 try await validateCurrentScope(scope)
             } catch is CancellationError {
@@ -96,10 +106,46 @@ actor PullRequestReviewRefreshService {
             }
             let reviews: GitHubPullRequestReviewInventory
             let reviewRawPages: [GitHubPullRequestReviewRawPage]
+            var receiptReplay: ReviewRESTReplay?
             switch reviewFetch {
             case let .inventory(inventory, rawPages):
                 reviews = inventory
                 reviewRawPages = rawPages
+            case .notModified:
+                receiptReplay = try await replayedREST(
+                    candidate: candidate,
+                    scope: scope,
+                    streamID: streamID,
+                    reviewValidators: reviewValidators,
+                    requestedReviewerValidators: nil
+                )
+                if let receiptReplay {
+                    reviews = receiptReplay.reviews
+                    reviewRawPages = receiptReplay.reviewRawPages
+                } else {
+                    // A missing or tampered receipt gets exactly one
+                    // unconditional recovery request for this source.
+                    switch try await client.allReviewsPreservingFailure(
+                        repository: candidate.repository,
+                        number: candidate.number,
+                        githubOrganizationID: githubOrganizationID
+                    ) {
+                    case let .inventory(inventory, rawPages):
+                        reviews = inventory
+                        reviewRawPages = rawPages
+                    case let .failure(failure):
+                        ssoHeaders.append(contentsOf: failure.ssoHeaders)
+                        let classification = try await publishFailure(
+                            failure, accumulatedRawPages: [], candidate: candidate, scope: scope,
+                            streamID: streamID, githubOrganizationID: githubOrganizationID, attemptedAt: observedAt
+                        )
+                        failureClassifications.append(classification)
+                        if Self.continuesAfter(classification) { continue candidateLoop }
+                        break candidateLoop
+                    case .notModified:
+                        throw GitHubPullRequestClientError.unexpectedConditionalResponse
+                    }
+                }
             case let .failure(failure):
                 ssoHeaders.append(contentsOf: failure.ssoHeaders)
                 let classification = try await publishFailure(
@@ -141,12 +187,16 @@ actor PullRequestReviewRefreshService {
                 failureClassifications.append(classification)
                 break candidateLoop
             }
-            let requestedReviewersFetch: GitHubRequestedReviewersFetchResult
+            let requestedValidators = try await cachedValidators(
+                for: Self.requestedReviewersRequestKey(for: candidate), scope: scope, streamID: streamID
+            )
+            var requestedReviewersFetch: GitHubRequestedReviewersFetchResult
             do {
                 try await validateCurrentScope(scope)
                 requestedReviewersFetch = try await client.requestedReviewersPreservingFailure(
                     repository: candidate.repository,
-                    number: candidate.number
+                    number: candidate.number,
+                    validators: requestedValidators
                 )
                 try await validateCurrentScope(scope)
             } catch is CancellationError {
@@ -159,6 +209,41 @@ actor PullRequestReviewRefreshService {
             switch requestedReviewersFetch {
             case let .response(response):
                 requestedReviewers = response
+            case .notModified:
+                if receiptReplay == nil {
+                    receiptReplay = try await replayedREST(
+                        candidate: candidate,
+                        scope: scope,
+                        streamID: streamID,
+                        reviewValidators: nil,
+                        requestedReviewerValidators: requestedValidators
+                    )
+                }
+                if let receiptReplay,
+                   Self.matches(receiptReplay.requestedReviewers, validators: requestedValidators) {
+                    requestedReviewers = receiptReplay.requestedReviewers
+                } else {
+                    // Do not downgrade this segment merely because its peer
+                    // was replayable. Recover this 304 once, independently.
+                    switch try await client.requestedReviewersPreservingFailure(
+                        repository: candidate.repository,
+                        number: candidate.number
+                    ) {
+                    case let .response(response):
+                        requestedReviewers = response
+                    case let .failure(failure):
+                        ssoHeaders.append(contentsOf: failure.ssoHeaders)
+                        let classification = try await publishFailure(
+                            failure, accumulatedRawPages: reviewRawPages, candidate: candidate, scope: scope,
+                            streamID: streamID, githubOrganizationID: githubOrganizationID, attemptedAt: observedAt
+                        )
+                        failureClassifications.append(classification)
+                        if Self.continuesAfter(classification) { continue candidateLoop }
+                        break candidateLoop
+                    case .notModified:
+                        throw GitHubPullRequestClientError.unexpectedConditionalResponse
+                    }
+                }
             case let .failure(failure):
                 ssoHeaders.append(contentsOf: failure.ssoHeaders)
                 let classification = try await publishFailure(
@@ -217,7 +302,8 @@ actor PullRequestReviewRefreshService {
                     return Self.corroborateRequestedReviewers(
                         requestedReviewers.value,
                         candidate: candidate,
-                        accountID: accountID,
+                        scope: scope,
+                        streamID: streamID,
                         in: database
                     )
                 }
@@ -263,6 +349,37 @@ actor PullRequestReviewRefreshService {
                     accountID: accountID,
                     observedAtMilliseconds: observedAtMilliseconds,
                     replacementProof: replacementProof,
+                    in: database
+                )
+                try ReviewCandidateIncrementalStateRepository.save(
+                    .init(
+                        scope: scope,
+                        feature: .reviews,
+                        streamID: streamID,
+                        candidate: candidate,
+                        firstPageRequestKey: Self.reviewsRequestKey(for: candidate),
+                        highWater: observedAt,
+                        rootCursor: nil,
+                        updatedAt: observedAt
+                    ),
+                    in: database
+                )
+                try Self.saveValidator(
+                    eTag: reviewRawPages.first?.eTag,
+                    lastModified: reviewRawPages.first?.lastModified,
+                    requestKey: Self.reviewsRequestKey(for: candidate),
+                    scope: scope,
+                    streamID: streamID,
+                    observedAt: observedAt,
+                    in: database
+                )
+                try Self.saveValidator(
+                    eTag: requestedReviewers.etag,
+                    lastModified: requestedReviewers.lastModified,
+                    requestKey: Self.requestedReviewersRequestKey(for: candidate),
+                    scope: scope,
+                    streamID: streamID,
+                    observedAt: observedAt,
                     in: database
                 )
                 try PullRequestReviewCandidateRepository.advanceFairSchedule(
@@ -318,14 +435,38 @@ actor PullRequestReviewRefreshService {
     private nonisolated static func corroborateRequestedReviewers(
         _ rest: GitHubRequestedReviewersDTO,
         candidate: PullRequestReviewCandidate,
-        accountID: AccountID,
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
         in database: Database
     ) -> RequestedReviewerCorroboration {
         guard let restIDs = reviewerIDs(from: rest) else { return .sourceUnavailable }
+        // Hydration output is corroboration only when its raw request was
+        // recorded for this exact review authority. Legacy/account-only rows
+        // may be useful diagnostics, but must never authorize replacement.
         let payloads = (try? Data.fetchAll(
             database,
-            sql: "SELECT payload FROM raw_api_snapshots WHERE account_id = ? AND endpoint = ? ORDER BY observed_at_ms DESC",
-            arguments: [accountID.rawValue, "graphql:TriageHydrateNodes"]
+            sql: """
+                SELECT payload
+                FROM raw_api_snapshots
+                WHERE account_id = ? AND github_node_id = ?
+                  AND endpoint = ?
+                  AND authority_organization_id = ?
+                  AND authority_feature = ?
+                  AND authority_stream_id = ?
+                  AND authority_request_key = ?
+                  AND authority_credential_revision = ?
+                  AND authority_capability_revision = ?
+                  AND parser_version = 2
+                ORDER BY observed_at_ms DESC
+                """,
+            arguments: [
+                scope.accountID.rawValue, candidate.nodeID.rawValue,
+                "graphql:TriageHydrateNodes/node=\(candidate.nodeID.rawValue)", scope.organizationID.rawValue,
+                CoverageFeature.pullRequests.rawValue,
+                "hydration-pull-requests-\(scope.organizationID.rawValue)",
+                "graphql:TriageHydrateNodes/node=\(candidate.nodeID.rawValue)", scope.credentialRevision.rawValue,
+                scope.capabilityRevision.rawValue
+            ]
         )) ?? []
         for payload in payloads {
             guard let root = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
@@ -354,6 +495,173 @@ actor PullRequestReviewRefreshService {
         let ids = (value.users + value.teams).compactMap { GitHubNodeID(rawValue: $0.nodeID) }
         guard ids.count == value.users.count + value.teams.count, Set(ids).count == ids.count else { return nil }
         return Set(ids)
+    }
+
+    /// A 304 is usable only when its exact, complete review receipt can be
+    /// rebuilt from receipt-owned raw pages. The receipt repository rechecks
+    /// authority and raw topology; this layer also binds the specific request
+    /// validator that generated the 304 before returning decoded values.
+    private func replayedREST(
+        candidate: PullRequestReviewCandidate,
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        reviewValidators: GitHubHTTPValidators?,
+        requestedReviewerValidators: GitHubHTTPValidators?
+    ) async throws -> ReviewRESTReplay? {
+        do {
+            return try await candidateRepository.writeTransaction(accountID: scope.accountID) { database in
+                try Self.validateCurrentScope(scope, in: database)
+                guard let traversal = try ReviewCandidateCompleteTraversalReceiptRepository.currentReviewTraversal(
+                    scope: scope,
+                    streamID: streamID,
+                    candidate: candidate,
+                    in: database
+                ) else { return nil }
+                return try Self.decodeReplay(
+                    traversal,
+                    reviewValidators: reviewValidators,
+                    requestedReviewerValidators: requestedReviewerValidators
+                )
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch ReviewCandidateCompleteTraversalReceiptRepositoryError.staleSynchronizationScope {
+            throw CancellationError()
+        } catch is ReviewCandidateCompleteTraversalReceiptRepositoryError {
+            // A receipt is only a replay proof while every immutable binding
+            // survives validation. Tamper and incomplete coverage recover via
+            // the caller's one unconditional request.
+            return nil
+        }
+    }
+
+    private nonisolated static func decodeReplay(
+        _ traversal: ReviewCandidateCompleteTraversal,
+        reviewValidators: GitHubHTTPValidators?,
+        requestedReviewerValidators: GitHubHTTPValidators?
+    ) throws -> ReviewRESTReplay? {
+        guard traversal.feature == .reviews,
+              traversal.segments.count == 2,
+              let reviewSegment = traversal.segments.first(where: { $0.kind == .reviewHistory }),
+              let requestedSegment = traversal.segments.first(where: { $0.kind == .requestedReviewers }),
+              reviewSegment.pages.count > 0,
+              requestedSegment.pages.count == 1,
+              reviewSegment.pages.count + requestedSegment.pages.count
+                == traversal.segments.reduce(0, { $0 + $1.pages.count })
+        else { return nil }
+        guard matches(reviewSegment.pages[0], validators: reviewValidators),
+              matches(requestedSegment.pages[0], validators: requestedReviewerValidators)
+        else { return nil }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var seenReviewNodeIDs = Set<String>()
+        var reviews = [GitHubPullRequestReviewDTO]()
+        var rawPages = [GitHubPullRequestReviewRawPage]()
+        var pages = [GitHubPage<GitHubPullRequestReviewDTO>]()
+        for page in reviewSegment.pages {
+            let decoded: [GitHubPullRequestReviewDTO]
+            do {
+                decoded = try decoder.decode([GitHubPullRequestReviewDTO].self, from: page.payload)
+            } catch {
+                return nil
+            }
+            for review in decoded where seenReviewNodeIDs.insert(review.nodeID).inserted {
+                reviews.append(review)
+            }
+            rawPages.append(.init(
+                requestKey: page.requestIdentity.requestKey,
+                ordinal: page.ordinal,
+                payload: page.payload,
+                eTag: page.eTag,
+                lastModified: page.lastModified,
+                ssoHeader: nil
+            ))
+            pages.append(.init(
+                values: decoded,
+                payload: page.payload,
+                nextPageURL: nil,
+                etag: page.eTag,
+                lastModified: page.lastModified,
+                ssoHeader: nil
+            ))
+        }
+        let requestedPage = requestedSegment.pages[0]
+        let requested: GitHubRequestedReviewersDTO
+        do {
+            requested = try decoder.decode(GitHubRequestedReviewersDTO.self, from: requestedPage.payload)
+        } catch {
+            return nil
+        }
+        return .init(
+            reviews: .init(reviews: reviews, pages: pages, ssoHeaders: []),
+            reviewRawPages: rawPages,
+            requestedReviewers: .init(
+                value: requested,
+                payload: requestedPage.payload,
+                etag: requestedPage.eTag,
+                lastModified: requestedPage.lastModified,
+                ssoHeader: nil,
+                source: .replay(requestedPage.rawSnapshotID)
+            )
+        )
+    }
+
+    private nonisolated static func matches(
+        _ page: ReviewCandidateTraversalPage,
+        validators: GitHubHTTPValidators?
+    ) -> Bool {
+        guard let validators else { return true }
+        return page.eTag == validators.eTag && page.lastModified == validators.lastModified
+    }
+
+    private nonisolated static func matches(
+        _ response: GitHubResponse<GitHubRequestedReviewersDTO>,
+        validators: GitHubHTTPValidators?
+    ) -> Bool {
+        guard let validators else { return false }
+        return response.etag == validators.eTag && response.lastModified == validators.lastModified
+    }
+
+    private func cachedValidators(
+        for requestKey: String,
+        scope: SynchronizationScope,
+        streamID: SyncStreamID
+    ) async throws -> GitHubHTTPValidators? {
+        try await candidateRepository.writeTransaction(accountID: scope.accountID) { database in
+            try Self.validateCurrentScope(scope, in: database)
+            let identity = ConditionalRequestIdentity(
+                scope: scope, feature: .reviews, streamID: streamID, requestKey: requestKey
+            )
+            guard let cached = try ConditionalRequestCacheRepository.validator(
+                for: identity, expectedAccountID: scope.accountID, in: database
+            ) else { return nil }
+            return try GitHubHTTPValidators(eTag: cached.eTag, lastModified: cached.lastModified)
+        }
+    }
+
+    private nonisolated static func saveValidator(
+        eTag: String?,
+        lastModified: String?,
+        requestKey: String,
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        observedAt: Date,
+        in database: Database
+    ) throws {
+        guard let validators = try? GitHubHTTPValidators(eTag: eTag, lastModified: lastModified) else {
+            return
+        }
+        try ConditionalRequestCacheRepository.save(
+            .init(
+                identity: .init(scope: scope, feature: .reviews, streamID: streamID, requestKey: requestKey),
+                eTag: validators.eTag,
+                lastModified: validators.lastModified,
+                observedAt: observedAt
+            ),
+            expectedAccountID: scope.accountID,
+            in: database
+        )
     }
 
     private func selectCandidates(

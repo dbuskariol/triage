@@ -126,6 +126,7 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
     private var activeSession: ASWebAuthenticationSession?
     private var activeAnchor: ASPresentationAnchor?
     private var continuation: CheckedContinuation<AuthBrokerExchangeRequest, Error>?
+    private var authorizationGeneration = OAuthAuthorizationGeneration()
 
     func authorize(
         configuration: GitHubOAuthConfiguration,
@@ -136,6 +137,7 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
         }
 
         let authorization = try OAuthAuthorizationSession.make(configuration: configuration)
+        let authorizationID = authorizationGeneration.begin()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
@@ -149,20 +151,24 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
                             callbackURL: callbackURL,
                             error: error,
                             authorization: authorization,
-                            redirectURI: configuration.redirectURI
+                            redirectURI: configuration.redirectURI,
+                            authorizationID: authorizationID
                         )
                     }
                 }
                 session.presentationContextProvider = self
                 activeSession = session
                 guard session.start() else {
-                    finish(with: .failure(GitHubOAuthError.failedToStartAuthorization))
+                    finish(
+                        with: .failure(GitHubOAuthError.failedToStartAuthorization),
+                        authorizationID: authorizationID
+                    )
                     return
                 }
             }
         }, onCancel: {
             Task { @MainActor [weak self] in
-                self?.cancel()
+                self?.cancel(authorizationID: authorizationID)
             }
         })
     }
@@ -175,14 +181,19 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
         callbackURL: URL?,
         error: Error?,
         authorization: OAuthAuthorizationSession,
-        redirectURI: URL
+        redirectURI: URL,
+        authorizationID: UUID
     ) {
+        guard authorizationGeneration.isCurrent(authorizationID) else { return }
         if let error {
-            finish(with: .failure(error))
+            finish(with: .failure(error), authorizationID: authorizationID)
             return
         }
         guard let callbackURL else {
-            finish(with: .failure(GitHubOAuthError.invalidCallback))
+            finish(
+                with: .failure(GitHubOAuthError.invalidCallback),
+                authorizationID: authorizationID
+            )
             return
         }
 
@@ -195,23 +206,52 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
                 codeVerifier: authorization.verifier,
                 redirectURI: redirectURI
             )
-            finish(with: .success(request))
+            finish(with: .success(request), authorizationID: authorizationID)
         } catch {
-            finish(with: .failure(error))
+            finish(with: .failure(error), authorizationID: authorizationID)
         }
     }
 
-    private func cancel() {
+    private func cancel(authorizationID: UUID) {
+        guard authorizationGeneration.isCurrent(authorizationID) else { return }
         activeSession?.cancel()
-        finish(with: .failure(CancellationError()))
+        finish(with: .failure(CancellationError()), authorizationID: authorizationID)
     }
 
-    private func finish(with result: Result<AuthBrokerExchangeRequest, Error>) {
+    private func finish(
+        with result: Result<AuthBrokerExchangeRequest, Error>,
+        authorizationID: UUID
+    ) {
+        guard authorizationGeneration.finish(authorizationID) else { return }
         let continuation = continuation
         self.continuation = nil
         activeSession = nil
         activeAnchor = nil
         continuation?.resume(with: result)
+    }
+}
+
+/// Keeps delayed system callbacks and cancellation handlers bound to the
+/// authorization attempt that created them.  `ASWebAuthenticationSession`
+/// invokes callbacks asynchronously, so a stale callback must be unable to
+/// finish a later attempt.
+struct OAuthAuthorizationGeneration: Sendable {
+    private var activeID: UUID?
+
+    mutating func begin() -> UUID {
+        let id = UUID()
+        activeID = id
+        return id
+    }
+
+    func isCurrent(_ id: UUID) -> Bool {
+        activeID == id
+    }
+
+    mutating func finish(_ id: UUID) -> Bool {
+        guard activeID == id else { return false }
+        activeID = nil
+        return true
     }
 }
 

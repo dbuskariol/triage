@@ -303,6 +303,36 @@ final class GitHubGraphQLClientTests: XCTestCase {
             )))
         }
     }
+
+    func testProvenanceAPIKeepsBoundedNonSuccessBodyAndClassificationHeadersPrivate() async throws {
+        let body = Data(#"{"message":"secondary rate limit"}"#.utf8)
+        let client = GitHubGraphQLClient(
+            session: GraphQLStubSession(
+                body: body,
+                statusCode: 403,
+                headers: [
+                    "Retry-After": "60",
+                    "X-GitHub-Request-Id": "request-1",
+                    "X-GitHub-SSO": "required; url=https://github.com/orgs/acme/sso"
+                ]
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await client.executePreservingFailureResponse(
+            try GitHubGraphQLQueries.viewer(),
+            variables: EmptyVariables(),
+            as: ViewerPayload.self
+        )
+        guard case let .failed(response) = result else {
+            return XCTFail("A non-success response must remain available only to provenance-aware callers.")
+        }
+        XCTAssertEqual(response.payload, body)
+        XCTAssertEqual(response.failure.kind, .secondaryRateLimited)
+        XCTAssertEqual(response.metadata.retryAfter, 60)
+        XCTAssertEqual(response.metadata.requestID, "request-1")
+        XCTAssertEqual(response.metadata.ssoHeader, .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso")!))
+    }
 }
 
 private struct EmptyVariables: Codable, Sendable {}

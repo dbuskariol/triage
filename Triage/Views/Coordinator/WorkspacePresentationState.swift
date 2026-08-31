@@ -65,6 +65,16 @@ struct WorkspacePresentationState: Equatable {
     /// queue as a successful result.
     let shouldPresentUnavailableQueue: Bool
 
+    /// Successful empty-queue language is truthful only after the selected
+    /// workspace has current, complete coverage.
+    var canPresentSuccessfulEmptyQueue: Bool {
+        Self.emptyQueueCanUseSuccessCopy(for: synchronizationStatus)
+    }
+
+    static func emptyQueueCanUseSuccessCopy(for status: SynchronizationStatus) -> Bool {
+        status == .upToDate
+    }
+
     init(
         workItems: [WorkItem],
         selectedAccountID: AccountID?,
@@ -74,6 +84,8 @@ struct WorkspacePresentationState: Equatable {
         isRefreshing: Bool,
         refreshError: String?,
         workspaceFreshness: FreshnessState? = nil,
+        workspaceCoverage: CoverageEvaluation? = nil,
+        organizationVisibilityFreshness: FreshnessState? = nil,
         restorationError: String? = nil,
         now: Date
     ) {
@@ -88,6 +100,11 @@ struct WorkspacePresentationState: Equatable {
             )
         }
 
+        let effectiveWorkspaceFreshness = Self.combinedFreshness(
+            workspaceFreshness,
+            workspaceCoverage?.freshness,
+            organizationVisibilityFreshness
+        )
         let status = Self.status(
             workItems: workItems,
             selectedAccountID: selectedAccountID,
@@ -96,13 +113,13 @@ struct WorkspacePresentationState: Equatable {
             hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
             isRefreshing: isRefreshing,
             refreshError: refreshError,
-            workspaceFreshness: workspaceFreshness,
+            workspaceFreshness: effectiveWorkspaceFreshness,
             hasRestorationFailure: restorationError != nil
         )
         synchronizationStatus = status.status
         synchronizationDetail = status.detail
         shouldPresentUnavailableQueue = restorationError != nil && workItems.isEmpty
-        lastSuccessfulSyncAt = workspaceFreshness?.lastSuccessfulSyncAt
+        lastSuccessfulSyncAt = effectiveWorkspaceFreshness?.lastSuccessfulSyncAt
             ?? workItems.compactMap(\.freshness.lastSuccessfulSyncAt).max()
     }
 
@@ -185,6 +202,13 @@ struct WorkspacePresentationState: Equatable {
             return (.partial, "Triage could not load all local work for this organization. Showing available local work.")
         }
 
+        // A terminated workspace observation is newer than its last fresh
+        // projection. Keep cached rows visible, but never describe them as
+        // current after that stream has failed.
+        if let refreshError {
+            return (.partial, refreshError)
+        }
+
         if let workspaceFreshness {
             return status(for: workspaceFreshness, refreshError: refreshError)
         }
@@ -228,6 +252,37 @@ struct WorkspacePresentationState: Equatable {
         }
 
         return (.unavailable, "No current synchronization coverage is available.")
+    }
+
+    /// Freshness from durable workspace state and current-revision coverage
+    /// must both be current before the queue can be presented as successful.
+    private static func combinedFreshness(
+        _ workspaceFreshness: FreshnessState?,
+        _ coverageFreshness: FreshnessState?,
+        _ organizationVisibilityFreshness: FreshnessState?
+    ) -> FreshnessState? {
+        let candidates = [
+            workspaceFreshness,
+            coverageFreshness,
+            organizationVisibilityFreshness
+        ].compactMap { $0 }
+        guard !candidates.isEmpty else { return nil }
+        return candidates.max { freshnessPriority($0.status) < freshnessPriority($1.status) }
+    }
+
+    private static func freshnessPriority(_ status: FreshnessStatus) -> Int {
+        switch status {
+        case .fresh: 0
+        case .refreshing: 1
+        case .partial: 2
+        case .stale: 3
+        case .rateLimited: 4
+        case .failed: 5
+        case .offline: 6
+        case .approvalRequired: 7
+        case .ssoRequired: 8
+        case .authenticationRequired: 9
+        }
     }
 
     /// Freshness details originate with persisted coverage, so preserving one

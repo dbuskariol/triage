@@ -81,6 +81,52 @@ struct AttentionRanker: Sendable {
             if leftScore != rightScore {
                 return leftScore > rightScore
             }
+            let leftDueAt = left.openActionItems.compactMap(\.dueAt).min()
+            let rightDueAt = right.openActionItems.compactMap(\.dueAt).min()
+            switch (leftDueAt, rightDueAt) {
+            case let (leftDueAt?, rightDueAt?) where leftDueAt != rightDueAt:
+                return leftDueAt < rightDueAt
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                break
+            }
+            if left.lastRelevantActivityAt != right.lastRelevantActivityAt {
+                return left.lastRelevantActivityAt > right.lastRelevantActivityAt
+            }
+            return left.id.rawValue < right.id.rawValue
+        })
+    }
+
+    /// Presentation must rank the durable score produced by the derived
+    /// projection, never run a second scoring pass with a different clock or
+    /// missing repository preferences. Workflow and activity fields remain
+    /// stable tie-breakers for an explainable local order.
+    func sortPersisted(_ workItems: [WorkItem]) -> [WorkItem] {
+        workItems.sorted(by: { left, right in
+            if left.workflow.isPinned != right.workflow.isPinned {
+                return left.workflow.isPinned
+            }
+            if left.workflow.priority != right.workflow.priority {
+                return left.workflow.priority > right.workflow.priority
+            }
+            if left.score != right.score {
+                return left.score > right.score
+            }
+            let leftDueAt = left.openActionItems.compactMap(\.dueAt).min()
+            let rightDueAt = right.openActionItems.compactMap(\.dueAt).min()
+            switch (leftDueAt, rightDueAt) {
+            case let (leftDueAt?, rightDueAt?) where leftDueAt != rightDueAt:
+                return leftDueAt < rightDueAt
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                break
+            }
             if left.lastRelevantActivityAt != right.lastRelevantActivityAt {
                 return left.lastRelevantActivityAt > right.lastRelevantActivityAt
             }

@@ -205,13 +205,15 @@ actor GitHubNodeHydrationService {
             case let .response(decoded):
                 response = decoded
             case let .undecodable(rejected):
-                let snapshot = Self.snapshot(
+                let snapshots = Self.snapshots(
                     payload: rejected.payload,
-                    accountID: accountID,
+                    batch: batch,
+                    candidatesByNodeID: candidatesByNodeID,
+                    scope: scope,
                     observedAt: observedAt
                 )
-                try await recordRejectedResponse(
-                    snapshot,
+                try await recordRejectedResponses(
+                    snapshots,
                     scope: scope,
                     observedAt: observedAt,
                     diagnostic: "Hydration response could not be decoded."
@@ -232,14 +234,16 @@ actor GitHubNodeHydrationService {
                 )
                 return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
-            let snapshot = Self.snapshot(
+            let snapshots = Self.snapshots(
                 payload: response.payload,
-                accountID: accountID,
+                batch: batch,
+                candidatesByNodeID: candidatesByNodeID,
+                scope: scope,
                 observedAt: observedAt
             )
             guard let payload = response.data else {
-                try await recordRejectedResponse(
-                    snapshot,
+                try await recordRejectedResponses(
+                    snapshots,
                     scope: scope,
                     observedAt: observedAt,
                     diagnostic: "Hydration response omitted its data payload."
@@ -262,6 +266,25 @@ actor GitHubNodeHydrationService {
                 )
                 return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
+            // Cost is untrusted remote input. Reject a negative value before
+            // metric persistence or batch planning so it cannot become a
+            // precondition crash or a fake authoritative refresh.
+            guard payload.rateLimit.cost >= 0 else {
+                try await recordRejectedResponses(
+                    snapshots,
+                    scope: scope,
+                    observedAt: observedAt,
+                    diagnostic: "Hydration response reported an invalid query cost."
+                )
+                Self.appendTerminalOutcomes(
+                    status: .queryCostExceeded,
+                    batch: batch,
+                    remaining: Array(sortedNodeIDs[endIndex...]),
+                    candidatesByNodeID: candidatesByNodeID,
+                    outcomes: &outcomes
+                )
+                return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
+            }
             try await recordBatchMetric(
                 GitHubHydrationBatchMetric(
                     accountID: accountID,
@@ -276,8 +299,8 @@ actor GitHubNodeHydrationService {
             )
             try await validateCurrentScope(scope)
             guard response.errors.isEmpty else {
-                try await recordRejectedResponse(
-                    snapshot,
+                try await recordRejectedResponses(
+                    snapshots,
                     scope: scope,
                     observedAt: observedAt,
                     diagnostic: "Hydration response contained partial GraphQL errors."
@@ -299,13 +322,13 @@ actor GitHubNodeHydrationService {
                 return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
             }
             guard payload.rateLimit.cost <= GitHubHydrationBatchPlanner.maximumQueryCost else {
-                try await saveRawSnapshot(snapshot, scope: scope)
+                try await saveRawSnapshots(snapshots, scope: scope)
                 try await validateCurrentScope(scope)
                 guard let reducedBatchSize = GitHubHydrationBatchPlanner.retryBatchSize(
                     for: batch.count
                 ) else {
-                    try await recordRejectedResponse(
-                        snapshot,
+                    try await recordRejectedResponses(
+                        snapshots,
                         scope: scope,
                         observedAt: observedAt,
                         diagnostic: "Hydration query exceeded the supported cost limit."
@@ -336,7 +359,8 @@ actor GitHubNodeHydrationService {
                 let diagnostic = Self.redactedDiagnostic(for: error)
                 try await detailsRepository.writeTransaction(accountID: accountID) { database in
                     try Self.validateCurrentScope(scope, in: database)
-                    try RawAPISnapshotRepository.save(snapshot, in: database)
+                    for snapshot in snapshots { try RawAPISnapshotRepository.save(snapshot, in: database) }
+                    guard let snapshot = snapshots.first else { throw CancellationError() }
                     try NormalizationFailureRepository.record(
                         NormalizationFailure(
                             id: UUID(),
@@ -365,7 +389,7 @@ actor GitHubNodeHydrationService {
             do {
                 try await detailsRepository.writeTransaction(accountID: accountID) { database in
                     try Self.validateCurrentScope(scope, in: database)
-                    try RawAPISnapshotRepository.save(snapshot, in: database)
+                    for snapshot in snapshots { try RawAPISnapshotRepository.save(snapshot, in: database) }
                     for actor in payloadActors {
                         try ActorRepository.save(
                             actor,
@@ -385,7 +409,7 @@ actor GitHubNodeHydrationService {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                try await saveRawSnapshot(snapshot, scope: scope)
+                try await saveRawSnapshots(snapshots, scope: scope)
                 throw error
             }
             try await validateCurrentScope(scope)
@@ -405,25 +429,26 @@ actor GitHubNodeHydrationService {
         return GitHubNodeHydrationRefreshResult(outcomes: outcomes)
     }
 
-    private func recordRejectedResponse(
-        _ snapshot: RawAPISnapshot,
+    private func recordRejectedResponses(
+        _ snapshots: [RawAPISnapshot],
         scope: SynchronizationScope,
         observedAt: Date,
         diagnostic: String
     ) async throws {
+        guard let primarySnapshot = snapshots.first else { throw CancellationError() }
         let accountID = scope.accountID
         try await validateCurrentScope(scope)
         try await detailsRepository.writeTransaction(accountID: accountID) { database in
             try Self.validateCurrentScope(scope, in: database)
-            try RawAPISnapshotRepository.save(snapshot, in: database)
+            for snapshot in snapshots { try RawAPISnapshotRepository.save(snapshot, in: database) }
             try NormalizationFailureRepository.record(
                 NormalizationFailure(
                     id: UUID(),
                     accountID: accountID,
-                    rawSnapshotID: snapshot.id,
+                    rawSnapshotID: primarySnapshot.id,
                     githubNodeID: nil,
-                    endpoint: snapshot.endpoint,
-                    parserVersion: snapshot.parserVersion,
+                    endpoint: primarySnapshot.endpoint,
+                    parserVersion: primarySnapshot.parserVersion,
                     occurredAt: observedAt,
                     redactedDiagnostic: diagnostic
                 ),
@@ -433,14 +458,14 @@ actor GitHubNodeHydrationService {
         try await validateCurrentScope(scope)
     }
 
-    private func saveRawSnapshot(
-        _ snapshot: RawAPISnapshot,
+    private func saveRawSnapshots(
+        _ snapshots: [RawAPISnapshot],
         scope: SynchronizationScope
     ) async throws {
         try await validateCurrentScope(scope)
         try await detailsRepository.writeTransaction(accountID: scope.accountID) { database in
             try Self.validateCurrentScope(scope, in: database)
-            try RawAPISnapshotRepository.save(snapshot, in: database)
+            for snapshot in snapshots { try RawAPISnapshotRepository.save(snapshot, in: database) }
         }
         try await validateCurrentScope(scope)
     }
@@ -650,21 +675,43 @@ actor GitHubNodeHydrationService {
         return header.scoped(to: githubOrganizationID)
     }
 
-    private nonisolated static func snapshot(
+    private nonisolated static func snapshots(
         payload: Data,
-        accountID: AccountID,
+        batch: [GitHubNodeID],
+        candidatesByNodeID: [GitHubNodeID: GitHubHydrationCandidate],
+        scope: SynchronizationScope,
         observedAt: Date
-    ) -> RawAPISnapshot {
-        RawAPISnapshot(
-            id: RawAPISnapshotID.make(),
-            accountID: accountID,
-            githubNodeID: nil,
-            endpoint: "graphql:TriageHydrateNodes",
-            eTag: nil,
-            parserVersion: 2,
-            observedAt: observedAt,
-            payload: payload
-        )
+    ) -> [RawAPISnapshot] {
+        batch.compactMap { nodeID in
+            guard let candidate = candidatesByNodeID[nodeID] else { return nil }
+            let feature: CoverageFeature = candidate.kind == .issue ? .issues : .pullRequests
+            let kindComponent = candidate.kind == .issue ? "issues" : "pull-requests"
+            let streamID = SyncStreamID(
+                // Keep raw provenance on the same aggregate stream as the
+                // hydration coverage receipt. A relation cannot safely claim
+                // complete source authority when these identities diverge.
+                rawValue: "hydration-\(kindComponent)-\(scope.organizationID.rawValue)"
+            )!
+            return RawAPISnapshot(
+                id: RawAPISnapshotID.make(),
+                accountID: scope.accountID,
+                githubNodeID: nodeID,
+                endpoint: "graphql:TriageHydrateNodes",
+                eTag: nil,
+                parserVersion: 2,
+                observedAt: observedAt,
+                payload: payload,
+                requestIdentity: .init(
+                    scope: scope,
+                    feature: feature,
+                    streamID: streamID,
+                    // The immutable node ID is represented both by the raw
+                    // record and the request identity; a batch payload is
+                    // never authoritative for a different node or scope.
+                    requestKey: "graphql:TriageHydrateNodes/node=\(nodeID.rawValue)"
+                )
+            )
+        }
     }
 
     private struct Variables: Encodable, Sendable {
@@ -721,6 +768,8 @@ actor GitHubNodeHydrationService {
             "Hydration response omitted required issue details."
         case .invalidRelatedNodeID:
             "Hydration response contained an invalid related GitHub node identifier."
+        case .duplicateRelatedNodeID:
+            "Hydration response contained duplicate related GitHub node identifiers."
         case .incompleteConnection:
             "Hydration response exceeded the supported related-object page size."
         }

@@ -45,6 +45,9 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate, 
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        guard !TriageUITestFixture.isRequested else { return }
+        #endif
         UNUserNotificationCenter.current().delegate = self
     }
 
@@ -88,24 +91,64 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate, 
 @main
 struct TriageApp: App {
     @NSApplicationDelegateAdaptor(TriageApplicationDelegate.self) private var appDelegate
-    @StateObject private var navigation = AppNavigationModel()
+    @StateObject private var navigation: AppNavigationModel
     @StateObject private var appModel: TriageAppModel
-    @StateObject private var preferences = AppPreferences()
+    @StateObject private var preferences: AppPreferences
     @StateObject private var notificationSettings: NativeNotificationSettings
     @StateObject private var notificationAuthorization: NotificationSystemAuthorization
-    @StateObject private var softwareUpdates = SoftwareUpdateController()
-    @StateObject private var externalNavigation = ExternalNavigationConfirmationCoordinator()
+    @StateObject private var softwareUpdates: SoftwareUpdateController
+    @StateObject private var externalNavigation: ExternalNavigationConfirmationCoordinator
     @StateObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
-    private let notificationScheduler = UserNotificationCenterScheduler()
-    private let notificationResponseAdapter = NotificationResponseApplicationAdapter()
+    private let notificationScheduler: UserNotificationCenterScheduler?
+    private let notificationResponseAdapter: NotificationResponseApplicationAdapter?
+    private let rootDefaults: UserDefaults
+    #if DEBUG
+    private let uiTestFixture: TriageUITestFixture?
+    #endif
 
     init() {
+        #if DEBUG
+        do {
+            uiTestFixture = try TriageUITestFixture.makeIfRequested()
+        } catch {
+            fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
+        }
+        #endif
+
         let workspaceAccessibility = WorkspaceAccessibilityCoordinator()
         _workspaceAccessibility = StateObject(wrappedValue: workspaceAccessibility)
+        _externalNavigation = StateObject(wrappedValue: ExternalNavigationConfirmationCoordinator())
+
+        #if DEBUG
+        if let fixture = uiTestFixture {
+            rootDefaults = fixture.defaults
+            let navigation = AppNavigationModel(defaults: fixture.defaults)
+            _navigation = StateObject(wrappedValue: navigation)
+            _preferences = StateObject(wrappedValue: AppPreferences(defaults: fixture.defaults))
+            let notificationSettings = fixture.makeNotificationSettings()
+            _notificationSettings = StateObject(wrappedValue: notificationSettings)
+            _notificationAuthorization = StateObject(wrappedValue: fixture.makeNotificationAuthorization())
+            _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController(startingUpdater: false))
+            notificationScheduler = nil
+            notificationResponseAdapter = nil
+            _appModel = StateObject(wrappedValue: fixture.makeAppModel(
+                workspaceAccessibility: workspaceAccessibility
+            ))
+            return
+        }
+        #endif
+
+        rootDefaults = .standard
+        let navigation = AppNavigationModel()
+        _navigation = StateObject(wrappedValue: navigation)
+        _preferences = StateObject(wrappedValue: AppPreferences())
+        _notificationAuthorization = StateObject(wrappedValue: NotificationSystemAuthorization())
+        _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController())
+        notificationScheduler = UserNotificationCenterScheduler()
+        notificationResponseAdapter = NotificationResponseApplicationAdapter()
         do {
             let notificationSettings = NativeNotificationSettings()
             _notificationSettings = StateObject(wrappedValue: notificationSettings)
-            _notificationAuthorization = StateObject(wrappedValue: NotificationSystemAuthorization())
             let fileManager = FileManager.default
             let applicationSupportDirectory = try fileManager.url(
                 for: .applicationSupportDirectory,
@@ -120,14 +163,27 @@ struct TriageApp: App {
                 create: true
             )
             let vaultRegistry = try VaultRegistry()
+            let secretStore = KeychainSecretStore()
+            notificationSettings.configureEncryptedConsent(
+                vaultRegistry: vaultRegistry,
+                secretStore: secretStore
+            )
             let composition = TriageProductionComposition(
                 vaultRegistry: vaultRegistry,
-                secretStore: KeychainSecretStore(),
+                secretStore: secretStore,
                 applicationSupportDirectory: applicationSupportDirectory,
                 cachesDirectory: cachesDirectory
             )
             _appModel = StateObject(wrappedValue: TriageAppModel(
-                dependencies: composition.dependencies(notificationSettings: notificationSettings),
+                dependencies: composition.dependencies(
+                    notificationSettings: notificationSettings,
+                    purgeAccountNavigationState: { accountID in
+                        navigation.purgeSelectionState(for: accountID)
+                    },
+                    purgeAccountNotificationPreferences: { accountID in
+                        await notificationSettings.removeAccountPreferences(for: accountID)
+                    }
+                ),
                 vaultRegistry: vaultRegistry,
                 workspaceAccessibility: workspaceAccessibility
             ))
@@ -139,7 +195,7 @@ struct TriageApp: App {
     var body: some Scene {
         Window("Triage", id: "main") {
             ExternalNavigationConfirmationHost(coordinator: externalNavigation) {
-                RootView()
+                RootView(defaults: rootDefaults)
                     .environmentObject(appModel)
                     .environmentObject(navigation)
                     .environmentObject(preferences)
@@ -149,6 +205,13 @@ struct TriageApp: App {
                     .environmentObject(workspaceAccessibility)
                     .frame(minWidth: 940, minHeight: 680)
                     .task {
+                        #if DEBUG
+                        if let uiTestFixture {
+                            await uiTestFixture.bootstrap(appModel)
+                            return
+                        }
+                        #endif
+                        guard let notificationResponseAdapter, let notificationScheduler else { return }
                         notificationResponseAdapter.install(routeHandler: appModel)
                         appDelegate.install(
                             appModel: appModel,

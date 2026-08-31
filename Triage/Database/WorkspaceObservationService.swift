@@ -12,6 +12,7 @@ struct WorkspaceObservationSnapshot: Equatable, Sendable {
     let workItems: [WorkspaceWorkItemPresentation]
     let menuCounts: WorkspaceMenuCounts
     let freshness: FreshnessState
+    let organizationVisibilityFreshness: FreshnessState
     let isRefreshing: Bool
     let selectedItemEvidence: WorkspaceSelectedItemEvidence?
 }
@@ -28,6 +29,10 @@ struct WorkspaceObservationRevision: Equatable, Sendable {
     /// Keeps a presentation's optional derived timestamp revision-fenced with
     /// the work rows it summarizes.
     let derivedEvaluatedAt: Date?
+    /// Prevents the full-graph presentation from publishing stale account
+    /// organization visibility after a current-credential inventory receipt
+    /// changes while its graph is loading.
+    let organizationVisibilityValidatedAt: Date?
 }
 
 /// The compact read model for a workspace row. Detail rendering continues to
@@ -45,6 +50,15 @@ struct WorkspaceWorkItemPresentation: Equatable, Sendable, Identifiable {
     let priority: WorkPriority
     let workflowStatus: LocalWorkStatus
     let score: Int
+    /// These revision fields are intentionally not rendered by the compact
+    /// list, but remain part of its Equatable observation value. Without
+    /// them GRDB's `removeDuplicates()` can hide a local-note/follow-up,
+    /// score-breakdown, or secondary membership/context edit from the full
+    /// graph presentation loaded by the observer.
+    let workflowLocalNote: String?
+    let workflowFollowUpAt: Date?
+    let scoreBreakdown: Data?
+    let nestedReferenceFingerprint: String
     let openActionItemCount: Int
     let attentionReasonCount: Int
     let lastRelevantActivityAt: Date
@@ -223,6 +237,10 @@ struct WorkspaceDatabaseObservationService: Sendable {
             scheduler: scheduler
         )
         let refreshing = scheduler?.activeAttemptID != nil
+        let organizationVisibilityValidatedAt = try organizationVisibilityValidatedAt(
+            in: database,
+            scope: scope
+        )
         return WorkspaceObservationSnapshot(
             scope: scope,
             revision: WorkspaceObservationRevision(
@@ -230,7 +248,8 @@ struct WorkspaceDatabaseObservationService: Sendable {
                 durableStateUpdatedAt: durable?.updatedAt,
                 newestWorkItemUpdateAt: newestWorkItemUpdateAt,
                 coverageFingerprint: coverage.map(coverageSignature).joined(separator: "\n"),
-                derivedEvaluatedAt: derivedEvaluatedAt
+                derivedEvaluatedAt: derivedEvaluatedAt,
+                organizationVisibilityValidatedAt: organizationVisibilityValidatedAt
             ),
             workItems: rows,
             menuCounts: counts,
@@ -242,8 +261,60 @@ struct WorkspaceDatabaseObservationService: Sendable {
                     detail: freshness.detail
                 )
                 : freshness,
+            organizationVisibilityFreshness: organizationVisibilityFreshness(
+                validatedAt: organizationVisibilityValidatedAt
+            ),
             isRefreshing: refreshing,
             selectedItemEvidence: evidence
+        )
+    }
+
+    /// A bounded fence for the asynchronous full-graph decode. This avoids
+    /// rerunning the complete observation projection (rows, menu aggregation,
+    /// and selected evidence) after every emission merely to reject a commit
+    /// that landed while the graph was loading.
+    nonisolated static func revision(
+        in database: Database,
+        scope: SynchronizationScope
+    ) throws -> WorkspaceObservationRevision {
+        let coverage = try CoverageRepository.currentRecords(for: scope, in: database)
+        let durable = try durableState(in: database, scope: scope)
+        let scheduler = try schedulerState(in: database, scope: scope)
+        let newestWorkItemUpdateAt = try Int64.fetchOne(
+            database,
+            sql: """
+                SELECT MAX(updated_at_ms)
+                FROM work_items
+                WHERE account_id = ? AND organization_id = ?
+                """,
+            arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+        ).map(date(milliseconds:))
+        let derivedEvaluatedAt = try Int64.fetchOne(
+            database,
+            sql: """
+                SELECT evaluated_at_ms
+                FROM derived_intelligence_runs
+                WHERE account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                """,
+            arguments: [
+                scope.accountID.rawValue,
+                scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue,
+                scope.capabilityRevision.rawValue
+            ]
+        ).map(date(milliseconds:))
+        let organizationVisibilityValidatedAt = try organizationVisibilityValidatedAt(
+            in: database,
+            scope: scope
+        )
+        return WorkspaceObservationRevision(
+            schedulerGeneration: scheduler?.generation,
+            durableStateUpdatedAt: durable?.updatedAt,
+            newestWorkItemUpdateAt: newestWorkItemUpdateAt,
+            coverageFingerprint: coverage.map(coverageSignature).joined(separator: "\n"),
+            derivedEvaluatedAt: derivedEvaluatedAt,
+            organizationVisibilityValidatedAt: organizationVisibilityValidatedAt
         )
     }
 }
@@ -343,6 +414,35 @@ private extension WorkspaceDatabaseObservationService {
         return SchedulerProjection(generation: UInt64(generation), activeAttemptID: attemptID)
     }
 
+    /// `/user/orgs` inventory is account-scoped source authority. A receipt
+    /// for another credential revision must never authorize notifications for
+    /// the currently selected organization.
+    static func organizationVisibilityValidatedAt(
+        in database: Database,
+        scope: SynchronizationScope
+    ) throws -> Date? {
+        try Int64.fetchOne(
+            database,
+            sql: """
+                SELECT validated_at_ms
+                FROM account_organization_inventory_replay_receipts
+                WHERE account_id = ? AND credential_revision = ?
+                  AND request_key = 'GET /user/orgs?per_page=100'
+            """,
+            arguments: [scope.accountID.rawValue, scope.credentialRevision.rawValue]
+        ).map(date(milliseconds:))
+    }
+
+    static func organizationVisibilityFreshness(validatedAt: Date?) -> FreshnessState {
+        guard let validatedAt else {
+            return FreshnessState(
+                status: .partial,
+                detail: "Organization visibility has not been validated for the current account access."
+            )
+        }
+        return FreshnessState(status: .fresh, lastSuccessfulSyncAt: validatedAt)
+    }
+
     static func freshness(
         durable: DurableProjection?,
         persistedCoverage: [CoverageRecord],
@@ -406,7 +506,19 @@ private extension WorkspaceDatabaseObservationService {
                     workflow_states.status AS workflow_status,
                     workflow_states.pinned AS workflow_pinned,
                     workflow_states.priority AS workflow_priority,
+                    workflow_states.local_note AS workflow_local_note,
+                    workflow_states.follow_up_at_ms AS workflow_follow_up_at_ms,
                     attention_scores.score AS attention_score,
+                    attention_scores.breakdown_json AS attention_score_breakdown_json,
+                    COALESCE((
+                        SELECT group_concat(github_node_id || ':' || role, char(30))
+                        FROM work_item_members
+                        WHERE work_item_id = work_items.id
+                    ), '') || char(29) || COALESCE((
+                        SELECT group_concat(github_node_id || ':' || relation, char(30))
+                        FROM work_item_context_links
+                        WHERE work_item_id = work_items.id
+                    ), '') AS nested_reference_fingerprint,
                     (
                         SELECT COUNT(*)
                         FROM action_items
@@ -456,6 +568,10 @@ private extension WorkspaceDatabaseObservationService {
                 priority: priority,
                 workflowStatus: workflowStatus,
                 score: (row["attention_score"] as Int?) ?? 0,
+                workflowLocalNote: row["workflow_local_note"],
+                workflowFollowUpAt: (row["workflow_follow_up_at_ms"] as Int64?).map(date(milliseconds:)),
+                scoreBreakdown: row["attention_score_breakdown_json"],
+                nestedReferenceFingerprint: row["nested_reference_fingerprint"],
                 openActionItemCount: row["open_action_item_count"],
                 attentionReasonCount: row["attention_reason_count"],
                 lastRelevantActivityAt: date(milliseconds: activity)

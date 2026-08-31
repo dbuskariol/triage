@@ -429,6 +429,253 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         XCTAssertEqual(storedAccounts, [account])
     }
 
+    func testCredentialReplacementDuringRefreshCannotPublishOrRewriteRetiredCredential() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = makeExpiringOAuthAccount(now: now)
+        let originalRevision = CredentialRevision(rawValue: "credential-revision-original")!
+        let replacementRevision = CredentialRevision(rawValue: "credential-revision-replacement")!
+        let replacementCredentialID = CredentialID(rawValue: "credential-2")!
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(account, credentialRevision: originalRevision)
+        let secrets = InMemorySecretStore(values: [
+            .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+            .init(
+                kind: .oauthAccessToken,
+                accountID: account.id,
+                credentialID: account.credentialID
+            ): Data("access-original".utf8),
+            .init(
+                kind: .oauthRefreshToken,
+                accountID: account.id,
+                credentialID: account.credentialID
+            ): Data("refresh-original".utf8)
+        ])
+        let broker = ControllableBroker()
+        let service = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: broker
+        )
+        let refreshTask = Task { try await service.refreshIfNeeded(account) }
+
+        await broker.waitForRequest()
+        let replacement = account.replacingCredential(
+            credentialID: replacementCredentialID,
+            login: account.login,
+            displayName: account.displayName,
+            avatarURL: account.avatarURL,
+            accessTokenExpiresAt: now.addingTimeInterval(3_600),
+            refreshTokenExpiresAt: now.addingTimeInterval(7_200),
+            status: .active,
+            validatedAt: now
+        )
+        try await repository.save(replacement, credentialRevision: replacementRevision)
+        await broker.succeed(
+            AuthBrokerTokenResponse(
+                accessToken: OAuthAccessToken("access-retired-credential"),
+                refreshToken: OAuthRefreshToken("refresh-retired-credential"),
+                tokenType: "bearer",
+                scope: nil,
+                expiresIn: 3_600,
+                refreshTokenExpiresIn: 7_200
+            )
+        )
+
+        do {
+            _ = try await refreshTask.value
+            XCTFail("Expected stale account authority.")
+        } catch let error as OAuthCredentialRefreshError {
+            XCTAssertEqual(error, .staleAccountAuthority)
+        }
+
+        let persistedAccounts = try await repository.accounts()
+        XCTAssertEqual(persistedAccounts, [replacement])
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(accessToken, Data("access-original".utf8))
+        XCTAssertEqual(refreshToken, Data("refresh-original".utf8))
+        XCTAssertEqual(writeCount, 0)
+    }
+
+    func testConcurrentRefreshLoserCannotDeleteWinnerTokens() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = makeExpiringOAuthAccount(now: now)
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-original")!
+        )
+        let secrets = InMemorySecretStore(
+            values: [
+                .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+                .init(
+                    kind: .oauthAccessToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("access-original".utf8),
+                .init(
+                    kind: .oauthRefreshToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("refresh-original".utf8)
+            ],
+            blockFirstOAuthRefreshTokenWrite: true
+        )
+        let first = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: StubBroker(result: .success(Self.tokenResponse(access: "access-winner", refresh: "refresh-winner")))
+        )
+        let second = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: StubBroker(result: .success(Self.tokenResponse(access: "access-loser", refresh: "refresh-loser")))
+        )
+
+        let firstTask = Task { try await first.refreshIfNeeded(account) }
+        await secrets.waitForFirstOAuthRefreshTokenWrite()
+
+        let staleRefreshFinishedBeforeWinner = expectation(description: "stale refresh must wait for active credential mutation")
+        staleRefreshFinishedBeforeWinner.isInverted = true
+        let secondTask = Task {
+            defer { staleRefreshFinishedBeforeWinner.fulfill() }
+            return try await second.refreshIfNeeded(account)
+        }
+        await fulfillment(of: [staleRefreshFinishedBeforeWinner], timeout: 0.05)
+
+        await secrets.releaseFirstOAuthRefreshTokenWrite()
+        let refreshed = try await firstTask.value
+        do {
+            _ = try await secondTask.value
+            XCTFail("Expected the queued refresh to observe stale credential authority.")
+        } catch let error as OAuthCredentialRefreshError {
+            XCTAssertEqual(error, .staleAccountAuthority)
+        }
+
+        let persistedAccounts = try await repository.accounts()
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        XCTAssertEqual(persistedAccounts, [refreshed])
+        XCTAssertEqual(accessToken, Data("access-winner".utf8))
+        XCTAssertEqual(refreshToken, Data("refresh-winner".utf8))
+    }
+
+    func testCancelledQueuedRefreshCannotWriteCredentialsAfterLockHandoff() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = makeExpiringOAuthAccount(now: now)
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-original")!
+        )
+        let secrets = InMemorySecretStore(
+            values: [
+                .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+                .init(
+                    kind: .oauthAccessToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("access-original".utf8),
+                .init(
+                    kind: .oauthRefreshToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("refresh-original".utf8)
+            ],
+            blockFirstOAuthRefreshTokenWrite: true
+        )
+        let first = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: StubBroker(result: .success(Self.tokenResponse(access: "access-winner", refresh: "refresh-winner")))
+        )
+        let second = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: StubBroker(result: .success(Self.tokenResponse(access: "access-cancelled", refresh: "refresh-cancelled")))
+        )
+
+        let firstTask = Task { try await first.refreshIfNeeded(account) }
+        await secrets.waitForFirstOAuthRefreshTokenWrite()
+        let secondTask = Task { try await second.refreshIfNeeded(account) }
+        await Task.yield()
+        secondTask.cancel()
+
+        await secrets.releaseFirstOAuthRefreshTokenWrite()
+        let refreshed = try await firstTask.value
+        do {
+            _ = try await secondTask.value
+            XCTFail("Expected cancellation while waiting for the credential mutation lock.")
+        } catch is CancellationError {
+            // Expected: no post-handoff credential mutation is permitted.
+        }
+
+        let persistedAccounts = try await repository.accounts()
+        let writeCount = await secrets.writeCount()
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        XCTAssertEqual(persistedAccounts, [refreshed])
+        XCTAssertEqual(writeCount, 2)
+        XCTAssertEqual(accessToken, Data("access-winner".utf8))
+        XCTAssertEqual(refreshToken, Data("refresh-winner".utf8))
+    }
+
     func testAccessTokenWriteFailurePreservesRotatedRefreshToken() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -437,6 +684,13 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         let now = Date(timeIntervalSinceReferenceDate: 1_000)
         let account = makeExpiringOAuthAccount(now: now)
         let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-original")!
+        )
         let secrets = InMemorySecretStore(
             values: [
                 .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
@@ -456,7 +710,7 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         let service = try OAuthCredentialRefreshService(
             brokerURL: URL(string: "https://oauth.triage.example")!,
             secretStore: secrets,
-            vaultRegistry: try VaultRegistry(rootDirectory: directory),
+            vaultRegistry: registry,
             clock: { now },
             broker: StubBroker(
                 result: .success(
@@ -609,6 +863,17 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
             createdAt: now
         )
     }
+
+    private static func tokenResponse(access: String, refresh: String) -> AuthBrokerTokenResponse {
+        AuthBrokerTokenResponse(
+            accessToken: OAuthAccessToken(access),
+            refreshToken: OAuthRefreshToken(refresh),
+            tokenType: "bearer",
+            scope: nil,
+            expiresIn: 3_600,
+            refreshTokenExpiresIn: 7_200
+        )
+    }
 }
 
 private actor RejectingSecretStore: SecretStore {
@@ -729,14 +994,20 @@ private actor InMemorySecretStore: SecretStore {
 
     private var values: [Key: Data]
     private var failingWritesForKinds: Set<TriageSecretKind>
+    private let blockFirstOAuthRefreshTokenWrite: Bool
+    private var firstOAuthRefreshTokenWriteStarted = false
+    private var firstOAuthRefreshTokenWriteWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstOAuthRefreshTokenWriteRelease: CheckedContinuation<Void, Never>?
     private var writes = 0
 
     init(
         values: [Key: Data],
-        failingWritesForKinds: Set<TriageSecretKind> = []
+        failingWritesForKinds: Set<TriageSecretKind> = [],
+        blockFirstOAuthRefreshTokenWrite: Bool = false
     ) {
         self.values = values
         self.failingWritesForKinds = failingWritesForKinds
+        self.blockFirstOAuthRefreshTokenWrite = blockFirstOAuthRefreshTokenWrite
     }
 
     func read(
@@ -755,6 +1026,19 @@ private actor InMemorySecretStore: SecretStore {
     ) async throws {
         guard !failingWritesForKinds.contains(kind) else {
             throw URLError(.cannotWriteToFile)
+        }
+        if blockFirstOAuthRefreshTokenWrite,
+           kind == .oauthRefreshToken,
+           !firstOAuthRefreshTokenWriteStarted {
+            firstOAuthRefreshTokenWriteStarted = true
+            let waiters = firstOAuthRefreshTokenWriteWaiters
+            firstOAuthRefreshTokenWriteWaiters = []
+            for waiter in waiters {
+                waiter.resume()
+            }
+            await withCheckedContinuation { continuation in
+                firstOAuthRefreshTokenWriteRelease = continuation
+            }
         }
         values[Key(kind: kind, accountID: accountID, credentialID: credentialID)] = value
         writes += 1
@@ -786,5 +1070,17 @@ private actor InMemorySecretStore: SecretStore {
 
     func setFailingWritesForKinds(_ kinds: Set<TriageSecretKind>) {
         failingWritesForKinds = kinds
+    }
+
+    func waitForFirstOAuthRefreshTokenWrite() async {
+        guard !firstOAuthRefreshTokenWriteStarted else { return }
+        await withCheckedContinuation { continuation in
+            firstOAuthRefreshTokenWriteWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstOAuthRefreshTokenWrite() {
+        firstOAuthRefreshTokenWriteRelease?.resume()
+        firstOAuthRefreshTokenWriteRelease = nil
     }
 }

@@ -46,6 +46,9 @@ actor WorkspaceNotificationDeliveryAdapter {
         guard snapshot.coverageEvaluation.freshness.status == .fresh else {
             return .suppressedStaleOrPartial(snapshot.coverageEvaluation.freshness.status)
         }
+        guard snapshot.organizationVisibilityFreshness.status == .fresh else {
+            return .suppressedStaleOrPartial(snapshot.organizationVisibilityFreshness.status)
+        }
         guard candidate.route.accountID == snapshot.scope.accountID,
               candidate.route.organizationID == snapshot.scope.organizationID
         else {

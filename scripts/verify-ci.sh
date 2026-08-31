@@ -10,6 +10,7 @@ HOST_ARCH="$(/usr/bin/uname -m)"
 while IFS= read -r -d '' script; do
   /bin/bash -n "$script"
 done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
+/bin/bash "$ROOT_DIR/scripts/test-performance-benchmark-runner.sh"
 /usr/bin/xcrun swiftc -typecheck "$ROOT_DIR/scripts/sparkle-public-key.swift"
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/Triage-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/Triage.entitlements" >/dev/null

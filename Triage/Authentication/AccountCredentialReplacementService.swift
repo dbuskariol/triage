@@ -4,6 +4,7 @@ enum AccountCredentialReplacementError: Error, Equatable, Sendable {
     case invalidGitHubIdentity
     case immutableIdentityMismatch
     case authenticationKindMismatch
+    case fineGrainedResourceOwnerOrganizationRequired
     case stagedCredentialCleanupFailed
 }
 
@@ -84,6 +85,13 @@ actor AccountCredentialReplacementService {
         guard account.authenticationKind == personalAccessToken.kind.authenticationKind else {
             throw AccountCredentialReplacementError.authenticationKindMismatch
         }
+        // Replacement does not collect a fine-grained token's resource owner.
+        // Continuing would replay `/user/orgs`, which is not authoritative for
+        // that token class. Keep the existing profile intact and require the
+        // owner-qualified connection flow instead.
+        guard personalAccessToken.kind != .fineGrained else {
+            throw AccountCredentialReplacementError.fineGrainedResourceOwnerOrganizationRequired
+        }
         return try await replace(
             accessToken: personalAccessToken.value,
             refreshToken: nil,
@@ -140,6 +148,7 @@ actor AccountCredentialReplacementService {
         }
         let vaultKey = try VaultKey(data: vaultKeyData)
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+        try Task.checkCancellation()
         let accessTokenKind: TriageSecretKind = account.authenticationKind == .oauth
             ? .oauthAccessToken
             : .personalAccessToken
@@ -152,6 +161,7 @@ actor AccountCredentialReplacementService {
                 accountID: account.id,
                 credentialID: replacementCredentialID
             )
+            try Task.checkCancellation()
             if account.authenticationKind == .oauth, let refreshToken {
                 try await secretStore.write(
                     Data(refreshToken.rawValue.utf8),
@@ -159,8 +169,8 @@ actor AccountCredentialReplacementService {
                     accountID: account.id,
                     credentialID: replacementCredentialID
                 )
+                try Task.checkCancellation()
             }
-            try Task.checkCancellation()
             try await AccountRepository(vault: vault).save(
                 updatedAccount,
                 credentialRevision: credentialRevision

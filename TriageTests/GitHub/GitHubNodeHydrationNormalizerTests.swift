@@ -208,12 +208,83 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         let snapshots = try await RawAPISnapshotRepository(vault: vault).snapshots(for: accountID)
         let snapshot = try XCTUnwrap(snapshots.only)
         XCTAssertTrue(snapshot.payload.contains(Data(secret.utf8)))
+        XCTAssertEqual(snapshot.githubNodeID, GitHubNodeID(rawValue: "I_1"))
+        XCTAssertEqual(
+            snapshot.requestIdentity,
+            ConditionalRequestIdentity(
+                scope: hydrationScope(
+                    accountID: accountID,
+                    organizationID: OrganizationID(rawValue: "org-1")!
+                ),
+                feature: .issues,
+                streamID: SyncStreamID(rawValue: "hydration-issues-org-1")!,
+                requestKey: "graphql:TriageHydrateNodes/node=I_1"
+            )
+        )
         let failures = try await NormalizationFailureRepository(vault: vault).failures(for: accountID)
         let failure = try XCTUnwrap(failures.only)
         XCTAssertEqual(failure.rawSnapshotID, snapshot.id)
         XCTAssertEqual(failure.endpoint, "graphql:TriageHydrateNodes")
         XCTAssertFalse(failure.redactedDiagnostic.contains(secret))
         XCTAssertFalse(failure.redactedDiagnostic.contains("ghp_"))
+    }
+
+    func testNegativeQueryCostIsIncompleteBeforeMetricsOrPlannerAndPreservesPriorData() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hydration-negative-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "org-1")!
+        let observedAt = Date(timeIntervalSince1970: 2_000)
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        try await AccountRepository(vault: vault).save(
+            GitHubAccount(
+                id: accountID,
+                githubUserID: 1,
+                nodeID: GitHubNodeID(rawValue: "U_1")!,
+                login: "octocat",
+                authenticationKind: .oauth,
+                credentialID: CredentialID.make(),
+                credentialStatus: .active,
+                createdAt: observedAt
+            ),
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!
+        )
+        try await insertHydrationCandidate(
+            into: vault,
+            accountID: accountID,
+            organizationID: organizationID,
+            observedAt: observedAt
+        )
+        let service = GitHubNodeHydrationService(
+            client: GitHubGraphQLClient(
+                session: HydrationGraphQLSession(
+                    body: Data(#"{"data":{"nodes":[],"rateLimit":{"cost":-1,"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}"#.utf8)
+                ),
+                credential: SecretValue("token")
+            ),
+            detailsRepository: GitHubNodeDetailsRepository(vault: vault),
+            rawSnapshotRepository: RawAPISnapshotRepository(vault: vault),
+            normalizationFailureRepository: NormalizationFailureRepository(vault: vault),
+            batchMetricRepository: GitHubHydrationBatchMetricRepository(vault: vault),
+            clock: { observedAt }
+        )
+
+        let result = try await service.hydrate(
+            nodeIDs: [GitHubNodeID(rawValue: "I_1")!],
+            scope: hydrationScope(accountID: accountID, organizationID: organizationID),
+            repositoryID: { _ in nil }
+        )
+
+        XCTAssertEqual(result.outcomes.map(\.status), [.queryCostExceeded])
+        XCTAssertFalse(result.isComplete)
+        let durable = try await hydrationDurableState(in: vault)
+        XCTAssertEqual(durable.batchMetrics, 0)
+        XCTAssertEqual(durable.sourceRevision, "search-revision")
+        XCTAssertEqual(durable.rawSnapshots, 1)
     }
 
     func testHydrationCancellationAfterResponseDoesNotPublishRawOrFailureState() async throws {
@@ -536,6 +607,60 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         }
     }
 
+    func testNestedConnectionsRejectMoreThanFiftyDecodedObjects() throws {
+        let actors = (1 ... 51).map { GitHubNodeHydrationPayload.Actor(id: "U_\($0)", login: "user\($0)", avatarUrl: nil) as GitHubNodeHydrationPayload.Actor? }
+        let labels = (1 ... 51).map { GitHubNodeHydrationPayload.Label(id: "L_\($0)", name: "label-\($0)", color: "000000") as GitHubNodeHydrationPayload.Label? }
+        let reviewRequests = (1 ... 51).map { GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_\($0)", login: "reviewer\($0)", avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest? }
+        let closingReferences = (1 ... 51).map { GitHubNodeHydrationPayload.NodeReference(id: "I_CLOSE_\($0)") as GitHubNodeHydrationPayload.NodeReference? }
+        let nodes = [
+            pullRequest(assigneeNodes: actors),
+            pullRequest(labelNodes: labels),
+            pullRequest(reviewRequestNodes: reviewRequests),
+            pullRequest(closingReferenceNodes: closingReferences)
+        ]
+        for node in nodes {
+            XCTAssertThrowsError(
+                try GitHubNodeHydrationNormalizer.normalize(
+                    payload(node: node),
+                    requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                    accountID: AccountID(rawValue: "account")!,
+                    organizationID: OrganizationID(rawValue: "organization")!,
+                    repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                    observedAt: Date()
+                )
+            ) { error in
+                XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .incompleteConnection)
+            }
+        }
+    }
+
+    func testNestedConnectionsRejectDuplicateDecodedObjects() throws {
+        let duplicateActor = GitHubNodeHydrationPayload.Actor(id: "U_1", login: "user", avatarUrl: nil) as GitHubNodeHydrationPayload.Actor?
+        let duplicateLabel = GitHubNodeHydrationPayload.Label(id: "L_1", name: "label", color: "000000") as GitHubNodeHydrationPayload.Label?
+        let duplicateRequest = GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_1", login: "reviewer", avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest?
+        let duplicateReference = GitHubNodeHydrationPayload.NodeReference(id: "I_CLOSE_1") as GitHubNodeHydrationPayload.NodeReference?
+        let nodes = [
+            pullRequest(assigneeNodes: [duplicateActor, duplicateActor]),
+            pullRequest(labelNodes: [duplicateLabel, duplicateLabel]),
+            pullRequest(reviewRequestNodes: [duplicateRequest, duplicateRequest]),
+            pullRequest(closingReferenceNodes: [duplicateReference, duplicateReference])
+        ]
+        for node in nodes {
+            XCTAssertThrowsError(
+                try GitHubNodeHydrationNormalizer.normalize(
+                    payload(node: node),
+                    requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                    accountID: AccountID(rawValue: "account")!,
+                    organizationID: OrganizationID(rawValue: "organization")!,
+                    repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                    observedAt: Date()
+                )
+            ) { error in
+                XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .duplicateRelatedNodeID)
+            }
+        }
+    }
+
     private func payload(node: GitHubNodeHydrationPayload.Node) -> GitHubNodeHydrationPayload {
         GitHubNodeHydrationPayload(
             nodes: [node],
@@ -547,7 +672,11 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         createdAt: Date = Date(timeIntervalSince1970: 1_000),
         updatedAt: Date = Date(timeIntervalSince1970: 2_000),
         labelsHasNextPage: Bool = false,
-        containsNilLabel: Bool = false
+        containsNilLabel: Bool = false,
+        assigneeNodes: [GitHubNodeHydrationPayload.Actor?] = [],
+        labelNodes: [GitHubNodeHydrationPayload.Label?]? = nil,
+        reviewRequestNodes: [GitHubNodeHydrationPayload.ReviewRequest?]? = nil,
+        closingReferenceNodes: [GitHubNodeHydrationPayload.NodeReference?]? = nil
     ) -> GitHubNodeHydrationPayload.Node {
         .init(
             typeName: "PullRequest",
@@ -578,13 +707,13 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
                 hasDiscussions: true,
                 url: URL(string: "https://github.com/octo/triage")!
             ),
-            assignees: .init(nodes: [], pageInfo: .init(hasNextPage: false)),
+            assignees: .init(nodes: assigneeNodes, pageInfo: .init(hasNextPage: false)),
             labels: .init(
-                nodes: containsNilLabel ? [nil] : [],
+                nodes: labelNodes ?? (containsNilLabel ? [nil] : []),
                 pageInfo: .init(hasNextPage: labelsHasNextPage)
             ),
-            reviewRequests: nil,
-            closingIssuesReferences: nil
+            reviewRequests: reviewRequestNodes.map { .init(nodes: $0, pageInfo: .init(hasNextPage: false)) },
+            closingIssuesReferences: closingReferenceNodes.map { .init(nodes: $0, pageInfo: .init(hasNextPage: false)) }
         )
     }
 }

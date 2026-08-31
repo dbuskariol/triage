@@ -311,10 +311,18 @@ actor DerivedIntelligenceRepository {
         let rows = try Row.fetchAll(
             database,
             sql: """
-                SELECT id, primary_node_id
+                SELECT work_items.id, work_items.primary_node_id
                 FROM work_items
-                WHERE account_id = ? AND organization_id = ?
-                ORDER BY id
+                LEFT JOIN work_item_group_memberships
+                  ON work_item_group_memberships.constituent_work_item_id = work_items.id
+                 AND work_item_group_memberships.account_id = work_items.account_id
+                 AND work_item_group_memberships.organization_id = work_items.organization_id
+                WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                  AND (
+                      work_item_group_memberships.constituent_work_item_id IS NULL
+                      OR work_item_group_memberships.canonical_work_item_id = work_items.id
+                  )
+                ORDER BY work_items.id
                 """,
             arguments: [snapshot.scope.accountID.rawValue, snapshot.scope.organizationID.rawValue]
         )
@@ -366,8 +374,16 @@ actor DerivedIntelligenceRepository {
                 SELECT work_items.id, github_nodes.source_revision
                 FROM work_items
                 JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                LEFT JOIN work_item_group_memberships
+                  ON work_item_group_memberships.constituent_work_item_id = work_items.id
+                 AND work_item_group_memberships.account_id = work_items.account_id
+                 AND work_item_group_memberships.organization_id = work_items.organization_id
                 WHERE work_items.account_id = ? AND work_items.organization_id = ?
                   AND github_nodes.account_id = ? AND github_nodes.organization_id = ?
+                  AND (
+                      work_item_group_memberships.constituent_work_item_id IS NULL
+                      OR work_item_group_memberships.canonical_work_item_id = work_items.id
+                  )
                 ORDER BY work_items.id
                 """,
             arguments: [
@@ -390,12 +406,17 @@ actor DerivedIntelligenceRepository {
             }
         }
         do {
+            var supplementalSources = try DerivedIntelligenceSourceRevision.supplementalSources(
+                for: scope,
+                in: database
+            )
+            supplementalSources += try RepositoryRankingPreferenceRepository.sourceRevisions(
+                for: scope,
+                in: database
+            )
             return DerivedIntelligenceSourceRevision.aggregate(
                 primaryRevisions: primaryRevisions,
-                supplementalSources: try DerivedIntelligenceSourceRevision.supplementalSources(
-                    for: scope,
-                    in: database
-                )
+                supplementalSources: supplementalSources
             )
         } catch {
             throw DerivedIntelligenceRepositoryError.staleSourceRevision

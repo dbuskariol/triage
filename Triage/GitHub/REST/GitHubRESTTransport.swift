@@ -59,13 +59,17 @@ struct GitHubRESTRequest: Sendable {
     private let absoluteURL: URL?
     private let query: [URLQueryItem]
     let headers: [String: String]
+    /// Source-specific decoded body ceiling. Most REST sources use the shared
+    /// 2 MiB contract limit, while a few smaller endpoints have stricter caps.
+    let maximumResponseBodyBytes: Int
 
     init(
         method: GitHubReadMethod = .get,
         path: String,
         query: [URLQueryItem] = [],
         headers: [String: String] = [:],
-        validators: GitHubHTTPValidators? = nil
+        validators: GitHubHTTPValidators? = nil,
+        maximumResponseBodyBytes: Int = GitHubRESTTransport.maximumResponseBodyBytes
     ) throws {
         guard path.hasPrefix("/"),
               !path.split(separator: "/").contains("..")
@@ -77,13 +81,18 @@ struct GitHubRESTRequest: Sendable {
         absoluteURL = nil
         self.query = query
         self.headers = try Self.merging(headers: headers, validators: validators)
+        guard maximumResponseBodyBytes > 0,
+              maximumResponseBodyBytes <= GitHubRESTTransport.maximumResponseBodyBytes
+        else { throw GitHubTransportError.invalidResponseBodyLimit }
+        self.maximumResponseBodyBytes = maximumResponseBodyBytes
     }
 
     init(
         method: GitHubReadMethod = .get,
         nextPageURL: URL,
         headers: [String: String] = [:],
-        validators: GitHubHTTPValidators? = nil
+        validators: GitHubHTTPValidators? = nil,
+        maximumResponseBodyBytes: Int = GitHubRESTTransport.maximumResponseBodyBytes
     ) throws {
         guard nextPageURL.scheme == "https", nextPageURL.host == "api.github.com" else {
             throw GitHubTransportError.invalidBaseURL
@@ -93,6 +102,10 @@ struct GitHubRESTRequest: Sendable {
         absoluteURL = nextPageURL
         query = []
         self.headers = try Self.merging(headers: headers, validators: validators)
+        guard maximumResponseBodyBytes > 0,
+              maximumResponseBodyBytes <= GitHubRESTTransport.maximumResponseBodyBytes
+        else { throw GitHubTransportError.invalidResponseBodyLimit }
+        self.maximumResponseBodyBytes = maximumResponseBodyBytes
     }
 
     func resolvedURL(baseURL: URL) throws -> URL {
@@ -145,6 +158,7 @@ enum GitHubTransportError: Error, Equatable, Sendable {
     case invalidURL
     case unexpectedResponse
     case responseTooLarge
+    case invalidResponseBodyLimit
     case conditionalHeadersRequireTypedValidator
 }
 
@@ -259,8 +273,11 @@ actor GitHubRESTTransport {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (body, response) = try await boundedData(for: urlRequest)
-        guard body.count <= Self.maximumResponseBodyBytes else {
+        let (body, response) = try await boundedData(
+            for: urlRequest,
+            maximumResponseBodyBytes: request.maximumResponseBodyBytes
+        )
+        guard body.count <= request.maximumResponseBodyBytes else {
             throw GitHubTransportError.responseTooLarge
         }
 
@@ -276,15 +293,18 @@ actor GitHubRESTTransport {
         )
     }
 
-    private func boundedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    private func boundedData(
+        for request: URLRequest,
+        maximumResponseBodyBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
         if let boundedSession = session as? any BoundedHTTPSession {
             return try await boundedSession.data(
                 for: request,
-                maximumResponseBodyBytes: Self.maximumResponseBodyBytes
+                maximumResponseBodyBytes: maximumResponseBodyBytes
             )
         }
         let result = try await session.data(for: request)
-        guard result.0.count <= Self.maximumResponseBodyBytes else {
+        guard result.0.count <= maximumResponseBodyBytes else {
             throw GitHubTransportError.responseTooLarge
         }
         return result

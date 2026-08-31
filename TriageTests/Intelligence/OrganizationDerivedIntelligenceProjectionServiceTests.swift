@@ -235,7 +235,11 @@ final class OrganizationDerivedIntelligenceProjectionServiceTests: XCTestCase {
             ),
             sourceStates: [],
             sourceRevisions: [:],
-            aggregateSourceRevision: "source-v1"
+            aggregateSourceRevision: "source-v1",
+            publicationMarker: DerivedIntelligenceSourceRevisionMarker(
+                scope: scope,
+                sourceRevision: "source-v1"
+            )
         )
     }
 }

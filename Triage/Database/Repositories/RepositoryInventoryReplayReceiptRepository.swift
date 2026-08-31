@@ -69,6 +69,14 @@ actor RepositoryInventoryReplayReceiptRepository {
         self.vault = vault
     }
 
+    /// Shared grammar for GitHub owner and organization logins accepted by
+    /// the repository-backed replay receipts.
+    static func validGitHubLogin(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 39 && value.unicodeScalars.allSatisfy {
+            $0.isASCII && ($0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "-")
+        }
+    }
+
     func replaceModifiedResponseReceipt(
         _ input: RepositoryInventoryReplayReceiptInput,
         organization: GitHubOrganization
@@ -1357,12 +1365,6 @@ private extension RepositoryInventoryReplayReceiptRepository {
             && suffix.allSatisfy {
                 ("0"..."9").contains(String($0)) || ("a"..."f").contains(String($0))
             }
-    }
-
-    static func validGitHubLogin(_ value: String) -> Bool {
-        !value.isEmpty && value.count <= 39 && value.unicodeScalars.allSatisfy {
-            $0.isASCII && ($0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "-")
-        }
     }
 
     static func validRepositoryName(_ value: String) -> Bool {

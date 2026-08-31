@@ -205,6 +205,142 @@ final class AccountCredentialReplacementTests: XCTestCase {
         XCTAssertEqual(removeCount, 0)
     }
 
+    func testFineGrainedReplacementFailsClosedWithoutAnOwnerOrCredentialMutation() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let account = GitHubAccount(
+            id: AccountID(rawValue: "fine-grained-account")!,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
+            login: "octocat",
+            authenticationKind: .fineGrainedPersonalAccessToken,
+            credentialID: CredentialID(rawValue: "fine-grained-credential")!,
+            credentialStatus: .active,
+            createdAt: date
+        )
+        let secrets = ReplacementSecretStore(values: [:])
+        let service = AccountCredentialReplacementService(
+            secretStore: secrets,
+            vaultRegistry: try VaultRegistry(rootDirectory: directory),
+            loadAuthenticatedUser: { _ in
+                return GitHubUserDTO(
+                    id: account.githubUserID,
+                    nodeID: account.nodeID.rawValue,
+                    login: account.login,
+                    name: nil,
+                    avatarURL: nil
+                )
+            }
+        )
+
+        do {
+            _ = try await service.replace(
+                personalAccessToken: try PersonalAccessToken(
+                    rawValue: "github_pat_abcdefghijklmnopqrstuvwxyz"
+                ),
+                for: account
+            )
+            XCTFail("Fine-grained replacement must require an owner-qualified connection.")
+        } catch let error as AccountCredentialReplacementError {
+            XCTAssertEqual(error, .fineGrainedResourceOwnerOrganizationRequired)
+        }
+
+        let writeCount = await secrets.writeCount()
+        let removeCount = await secrets.removeCount()
+        XCTAssertEqual(writeCount, 0)
+        XCTAssertEqual(removeCount, 0)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent("Vaults", isDirectory: true).path
+            )
+        )
+    }
+
+    func testCancellationAfterStagingAccessCredentialRemovesEveryReplacementSecret() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let account = makeAccount()
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-original")!
+        )
+        let secrets = ReplacementSecretStore(
+            values: [
+                .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+                .init(
+                    kind: .oauthAccessToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("access-original".utf8),
+                .init(
+                    kind: .oauthRefreshToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("refresh-original".utf8)
+            ],
+            blockFirstWrite: true
+        )
+        let service = AccountCredentialReplacementService(
+            secretStore: secrets,
+            vaultRegistry: registry,
+            loadAuthenticatedUser: { _ in
+                GitHubUserDTO(
+                    id: account.githubUserID,
+                    nodeID: account.nodeID.rawValue,
+                    login: account.login,
+                    name: account.displayName,
+                    avatarURL: account.avatarURL
+                )
+            }
+        )
+
+        let replacementTask = Task {
+            try await service.replace(
+                oauthTokenResponse: AuthBrokerTokenResponse(
+                    accessToken: OAuthAccessToken("access-replacement"),
+                    refreshToken: OAuthRefreshToken("refresh-replacement"),
+                    tokenType: "bearer",
+                    scope: nil,
+                    expiresIn: 3_600,
+                    refreshTokenExpiresIn: 7_200
+                ),
+                for: account
+            )
+        }
+        await secrets.waitForFirstWrite()
+        replacementTask.cancel()
+        await secrets.releaseFirstWrite()
+
+        do {
+            _ = try await replacementTask.value
+            XCTFail("Expected cancellation after the staged access credential write.")
+        } catch is CancellationError {
+            // Expected: cancellation runs staged-credential cleanup before return.
+        }
+
+        let storedAccounts = try await repository.accounts()
+        let hasStagedAccessToken = await secrets.hasCredential(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            otherThan: account.credentialID
+        )
+        let hasStagedRefreshToken = await secrets.hasCredential(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            otherThan: account.credentialID
+        )
+        XCTAssertEqual(storedAccounts, [account])
+        XCTAssertFalse(hasStagedAccessToken)
+        XCTAssertFalse(hasStagedRefreshToken)
+    }
+
     private func makeAccount() -> GitHubAccount {
         GitHubAccount(
             id: AccountID(rawValue: "account-1")!,
@@ -229,9 +365,14 @@ private actor ReplacementSecretStore: SecretStore {
     private var values: [Key: Data]
     private var writes = 0
     private var removals = 0
+    private let blockFirstWrite: Bool
+    private var firstWriteStarted = false
+    private var firstWriteWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstWriteRelease: CheckedContinuation<Void, Never>?
 
-    init(values: [Key: Data]) {
+    init(values: [Key: Data], blockFirstWrite: Bool = false) {
         self.values = values
+        self.blockFirstWrite = blockFirstWrite
     }
 
     func read(
@@ -250,6 +391,17 @@ private actor ReplacementSecretStore: SecretStore {
     ) async throws {
         values[Key(kind: kind, accountID: accountID, credentialID: credentialID)] = value
         writes += 1
+        if blockFirstWrite, !firstWriteStarted {
+            firstWriteStarted = true
+            let waiters = firstWriteWaiters
+            firstWriteWaiters = []
+            for waiter in waiters {
+                waiter.resume()
+            }
+            await withCheckedContinuation { continuation in
+                firstWriteRelease = continuation
+            }
+        }
     }
 
     func remove(
@@ -279,5 +431,27 @@ private actor ReplacementSecretStore: SecretStore {
 
     func removeCount() -> Int {
         removals
+    }
+
+    func hasCredential(
+        kind: TriageSecretKind,
+        accountID: AccountID,
+        otherThan credentialID: CredentialID
+    ) -> Bool {
+        values.keys.contains {
+            $0.kind == kind && $0.accountID == accountID && $0.credentialID != credentialID
+        }
+    }
+
+    func waitForFirstWrite() async {
+        guard !firstWriteStarted else { return }
+        await withCheckedContinuation { continuation in
+            firstWriteWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstWrite() {
+        firstWriteRelease?.resume()
+        firstWriteRelease = nil
     }
 }

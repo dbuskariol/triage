@@ -1,6 +1,36 @@
 import AppKit
 import SwiftUI
 
+/// Separates a persisted user preference from the system-managed adaptive
+/// split-view state. In particular, `.detailOnly` is a temporary layout state,
+/// not a request to persistently hide the sidebar.
+struct WorkspaceSplitViewVisibilityState {
+    private(set) var visibility: NavigationSplitViewVisibility
+
+    /// The standard sidebar command must describe what is on screen, rather
+    /// than the separately persisted preference. macOS may temporarily
+    /// collapse an otherwise preferred sidebar during resize.
+    var isSidebarPresented: Bool {
+        visibility == .all
+    }
+
+    init(isSidebarVisible: Bool = true) {
+        visibility = isSidebarVisible ? .all : .doubleColumn
+    }
+
+    mutating func restoreExplicitSidebarPreference(_ isSidebarVisible: Bool) {
+        applyExplicitSidebarPreference(isSidebarVisible)
+    }
+
+    mutating func applyExplicitSidebarPreference(_ isSidebarVisible: Bool) {
+        visibility = isSidebarVisible ? .all : .doubleColumn
+    }
+
+    mutating func receiveSystemVisibility(_ visibility: NavigationSplitViewVisibility) {
+        self.visibility = visibility
+    }
+}
+
 struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openSettings) private var openSettings
@@ -9,6 +39,18 @@ struct RootView: View {
     @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
     @State private var isRetryingUnavailableWorkspace = false
+    // Keep the complete system visibility value local to this window. The
+    // persisted preference records only a deliberate sidebar toggle; it must
+    // not overwrite `.detailOnly` when macOS temporarily collapses columns.
+    @State private var splitViewVisibility = WorkspaceSplitViewVisibilityState()
+
+    init(defaults: UserDefaults = .standard) {
+        _hasCompletedOnboarding = AppStorage(
+            wrappedValue: false,
+            "interface.onboarding.completed",
+            store: defaults
+        )
+    }
 
     var body: some View {
         Group {
@@ -26,6 +68,11 @@ struct RootView: View {
             if !hasConnectedAccount {
                 hasCompletedOnboarding = false
             }
+        }
+        .onAppear {
+            splitViewVisibility.restoreExplicitSidebarPreference(
+                navigation.isSidebarVisible
+            )
         }
         .onChange(of: navigation.section) { _, section in
             workspaceAccessibility.sidebarSelectionChanged(to: section)
@@ -64,7 +111,7 @@ struct RootView: View {
     }
 
     private var workspace: some View {
-            NavigationSplitView(columnVisibility: sidebarVisibility) {
+            NavigationSplitView(columnVisibility: splitViewColumnVisibility) {
                 WorkspaceSidebar(
                     accounts: appModel.accounts,
                     organizations: appModel.organizations,
@@ -82,18 +129,20 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
+            .focusedSceneValue(\.triageSidebarVisibility, sidebarVisibilityBinding)
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     Button {
-                        navigation.isSidebarVisible.toggle()
+                        setSidebarVisibility(!splitViewVisibility.isSidebarPresented)
                     } label: {
                         Label(
-                            navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar",
+                            splitViewVisibility.isSidebarPresented ? "Hide Sidebar" : "Show Sidebar",
                             systemImage: "sidebar.left"
                         )
                     }
-                    .help(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
-                    .accessibilityLabel(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
+                    .help(splitViewVisibility.isSidebarPresented ? "Hide Sidebar" : "Show Sidebar")
+                    .accessibilityLabel(splitViewVisibility.isSidebarPresented ? "Hide Sidebar" : "Show Sidebar")
+                    .accessibilityHint("Shows or hides the navigation sidebar in this window.")
                 }
                 ToolbarItemGroup(placement: .navigation) {
                     Button {
@@ -133,13 +182,40 @@ struct RootView: View {
                     .help("Refresh GitHub Work")
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let localAccountRecovery {
+                    LocalAccountRecoveryNotice(
+                        recovery: localAccountRecovery,
+                        onOpenAccountSettings: openAccountSettings,
+                        onRetry: {
+                            Task {
+                                await appModel.restoreAccounts()
+                            }
+                        }
+                    )
+                }
+            }
     }
 
-    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
+    private var splitViewColumnVisibility: Binding<NavigationSplitViewVisibility> {
         Binding(
-            get: { navigation.isSidebarVisible ? .all : .doubleColumn },
-            set: { navigation.isSidebarVisible = $0 == .all }
+            get: { splitViewVisibility.visibility },
+            set: { visibility in
+                splitViewVisibility.receiveSystemVisibility(visibility)
+            }
         )
+    }
+
+    private var sidebarVisibilityBinding: Binding<Bool> {
+        Binding(
+            get: { splitViewVisibility.isSidebarPresented },
+            set: { setSidebarVisibility($0) }
+        )
+    }
+
+    private func setSidebarVisibility(_ isVisible: Bool) {
+        navigation.isSidebarVisible = isVisible
+        splitViewVisibility.applyExplicitSidebarPreference(isVisible)
     }
 
     private var validWorkItemIDs: Set<WorkItemID> {
@@ -208,7 +284,10 @@ struct RootView: View {
                 action: refreshSelectedOrganization
             )
         default:
-            WorkListView()
+            WorkListView(
+                workspaceStatus: presentation.synchronizationStatus,
+                workspaceStatusDetail: presentation.synchronizationDetail
+            )
         }
         }
     }
@@ -252,6 +331,8 @@ struct RootView: View {
             isRefreshing: appModel.isRefreshing,
             refreshError: appModel.refreshError,
             workspaceFreshness: appModel.selectedOrganizationFreshness,
+            workspaceCoverage: appModel.selectedWorkspaceCoverage,
+            organizationVisibilityFreshness: appModel.selectedOrganizationVisibilityFreshness,
             restorationError: appModel.workspaceRestorationError,
             now: Date()
         )
@@ -270,8 +351,32 @@ struct RootView: View {
             refreshError: appModel.refreshError,
             aiAccess: .unavailable(
                 "Copilot analysis has not been enabled for this organization."
-            )
+            ),
+            localAccountRecovery: localAccountRecovery,
+            hasSSOAuthorizationURL: {
+                guard let ssoAuthorizationHeader = appModel.ssoAuthorizationHeader else {
+                    return false
+                }
+                if case .authorizationRequired = ssoAuthorizationHeader {
+                    return true
+                }
+                return false
+            }()
         )
+    }
+
+    /// Converts model state to fixed UI copy so no Keychain, vault, or local
+    /// filesystem error text can reach a visible recovery surface.
+    private var localAccountRecovery: LocalAccountRecoveryPresentation? {
+        guard appModel.restorationError != nil else { return nil }
+        return appModel.unavailableAccountIDs.isEmpty
+            ? .encryptedLocalDataUnavailable
+            : .unavailableVaultKey
+    }
+
+    private func openAccountSettings() {
+        navigation.openSettings(.accounts)
+        openSettings()
     }
 
     private var onboardingActions: OnboardingActions {
@@ -305,8 +410,45 @@ struct RootView: View {
                 navigation.openSettings(.notifications)
                 openSettings()
             },
-            recordAIConsent: { _ in }
+            recordAIConsent: { isEnabled in
+                Task { await appModel.recordSelectedOrganizationAIConsent(isEnabled) }
+            },
+            openAccountSettings: {
+                openAccountSettings()
+            },
+            retryLocalAccountRestoration: {
+                await appModel.restoreAccounts()
+            }
         )
+    }
+}
+
+private struct LocalAccountRecoveryNotice: View {
+    let recovery: LocalAccountRecoveryPresentation
+    let onOpenAccountSettings: () -> Void
+    let onRetry: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Label(recovery.title, systemImage: recovery.systemImage)
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text(recovery.detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if recovery.canOpenAccountSettings {
+                Button("Open Account Settings…", action: onOpenAccountSettings)
+            }
+            Button("Try Again", action: onRetry)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(recovery.accessibilityLabel)
     }
 }
 

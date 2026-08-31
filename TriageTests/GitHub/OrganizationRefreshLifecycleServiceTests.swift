@@ -106,6 +106,40 @@ final class OrganizationRefreshLifecycleServiceTests: XCTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func testEvictionTearsDownRuntimeResolvedAfterItsLifecycleGenerationWasCancelled() async throws {
+        let accountID = AccountID.make()
+        let staleRuntime = LifecycleRuntimeSpy()
+        let freshRuntime = LifecycleRuntimeSpy()
+        let resolver = SuspendedLifecycleRuntimeResolver(
+            stale: staleRuntime,
+            fresh: freshRuntime
+        )
+        let currentScope = scope(accountID: accountID)
+        let service = OrganizationRefreshLifecycleService(
+            enumerateScopes: { [currentScope] },
+            activeAccountID: { accountID },
+            resolveRuntime: { accountID in try await resolver.runtime(for: accountID) }
+        )
+
+        let firstLaunch = Task { try await service.launch() }
+        await resolver.waitUntilFirstResolutionStarts()
+        await service.evictRuntime(for: accountID)
+        await resolver.resumeFirstResolution()
+
+        let cancelled = try await firstLaunch.value
+        let staleCancels = await staleRuntime.cancelCount()
+        let staleActivations = await staleRuntime.activationCallCount()
+        XCTAssertTrue(cancelled.wasCancelled)
+        XCTAssertEqual(staleCancels, 1)
+        XCTAssertEqual(staleActivations, 0)
+
+        let replacement = try await service.applicationDidBecomeActive()
+        let freshActivations = await freshRuntime.activationCallCount()
+        XCTAssertFalse(replacement.wasCancelled)
+        XCTAssertEqual(replacement.refreshedAccountIDs, [accountID])
+        XCTAssertEqual(freshActivations, 1)
+    }
+
     func testOpportunisticBackgroundHookUsesInjectedSchedulerAndStopsCleanly() async throws {
         let accountID = AccountID.make()
         let runtime = LifecycleRuntimeSpy()
@@ -171,6 +205,51 @@ private actor LifecycleRuntimeResolver {
 
     func resolveCount(for accountID: AccountID) -> Int {
         counts[accountID, default: 0]
+    }
+}
+
+private actor SuspendedLifecycleRuntimeResolver {
+    private let stale: any AccountOrganizationLifecycleRunning
+    private let fresh: any AccountOrganizationLifecycleRunning
+    private var resolutionCount = 0
+    private var firstResolutionStarted = false
+    private var firstResolutionWaiters = [CheckedContinuation<Void, Never>]()
+    private var firstResolutionContinuation: CheckedContinuation<Void, Never>?
+
+    init(
+        stale: any AccountOrganizationLifecycleRunning,
+        fresh: any AccountOrganizationLifecycleRunning
+    ) {
+        self.stale = stale
+        self.fresh = fresh
+    }
+
+    func runtime(for _: AccountID) async throws -> any AccountOrganizationLifecycleRunning {
+        resolutionCount += 1
+        guard resolutionCount == 1 else { return fresh }
+        firstResolutionStarted = true
+        let waiters = firstResolutionWaiters
+        firstResolutionWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            firstResolutionContinuation = continuation
+        }
+        return stale
+    }
+
+    func waitUntilFirstResolutionStarts() async {
+        guard !firstResolutionStarted else { return }
+        await withCheckedContinuation { continuation in
+            firstResolutionWaiters.append(continuation)
+        }
+    }
+
+    func resumeFirstResolution() {
+        let continuation = firstResolutionContinuation
+        firstResolutionContinuation = nil
+        continuation?.resume()
     }
 }
 

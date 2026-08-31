@@ -89,6 +89,21 @@ enum GitHubGraphQLDecodingResult<Value: Decodable & Sendable>: Sendable {
     case undecodable(GitHubGraphQLUndecodableResponse)
 }
 
+/// Bounded evidence from a non-2xx GraphQL response. It is intentionally
+/// returned only through provenance-aware APIs so response bodies never become
+/// user-facing errors or diagnostics.
+struct GitHubGraphQLFailedResponse: Equatable, Sendable {
+    let failure: GitHubFailure
+    let payload: Data
+    let metadata: GitHubGraphQLResponseMetadata
+}
+
+enum GitHubGraphQLProvenanceResult<Value: Decodable & Sendable>: Sendable {
+    case response(GitHubGraphQLResponse<Value>)
+    case undecodable(GitHubGraphQLUndecodableResponse)
+    case failed(GitHubGraphQLFailedResponse)
+}
+
 actor GitHubGraphQLClient {
     private static let endpoint = URL(string: "https://api.github.com/graphql")!
     private static let maximumResponseBodyBytes = 4 * 1_024 * 1_024
@@ -134,6 +149,27 @@ actor GitHubGraphQLClient {
         variables: Variables,
         as type: Value.Type
     ) async throws -> GitHubGraphQLDecodingResult<Value> {
+        switch try await executePreservingFailureResponse(query, variables: variables, as: type) {
+        case let .response(response):
+            return .response(response)
+        case let .undecodable(response):
+            return .undecodable(response)
+        case let .failed(response):
+            throw GitHubGraphQLError.requestFailed(response.failure)
+        }
+    }
+
+    /// Preserves bounded non-2xx evidence for source-specific synchronizers.
+    /// The existing decoding API intentionally retains its historical typed
+    /// error boundary for callers that do not own durable raw provenance.
+    func executePreservingFailureResponse<
+        Value: Decodable & Sendable,
+        Variables: Encodable & Sendable
+    >(
+        _ query: GitHubGraphQLQuery,
+        variables: Variables,
+        as type: Value.Type
+    ) async throws -> GitHubGraphQLProvenanceResult<Value> {
         try Self.validateCommittedQuery(query)
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
@@ -155,14 +191,14 @@ actor GitHubGraphQLClient {
             headers: Self.headers(from: response),
             body: body
         )
-        if let failure = GitHubFailureClassifier.classify(metadata) {
-            throw GitHubGraphQLError.requestFailed(failure)
-        }
         let responseMetadata = GitHubGraphQLResponseMetadata(
             requestID: metadata.header(named: "X-GitHub-Request-Id"),
             retryAfter: metadata.header(named: "Retry-After").flatMap(TimeInterval.init),
             ssoHeader: GitHubSSOHeader(value: metadata.header(named: "X-GitHub-SSO"))
         )
+        if let failure = GitHubFailureClassifier.classify(metadata) {
+            return .failed(.init(failure: failure, payload: body, metadata: responseMetadata))
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         do {

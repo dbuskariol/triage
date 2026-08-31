@@ -13,7 +13,9 @@ struct WorkItemGrouper: Sendable {
         .containsReview,
         .containsThread,
         .containsComment,
-        .projectWrapsContent
+        .projectWrapsContent,
+        .parentOf,
+        .childOf
     ]
 
     func group(

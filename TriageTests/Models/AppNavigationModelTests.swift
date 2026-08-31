@@ -259,6 +259,136 @@ final class AppNavigationModelTests: XCTestCase {
         XCTAssertEqual(visited.last, items[2])
     }
 
+    func testAccountPurgeErasesPersistedSelectionsAndHistoryOnlyForThatAccount() {
+        let defaults = makeDefaults()
+        let navigation = AppNavigationModel(defaults: defaults)
+        let removedAccount = AccountID(rawValue: "removed-account")!
+        let retainedAccount = AccountID(rawValue: "retained-account")!
+        let organization = OrganizationID(rawValue: "organization")!
+        let removedFirst = WorkItemID(rawValue: "removed-first")!
+        let removedCurrent = WorkItemID(rawValue: "removed-current")!
+        let retained = WorkItemID(rawValue: "retained")!
+
+        navigation.setSelectedWorkItem(removedFirst, accountID: removedAccount, organizationID: organization)
+        navigation.setSelectedWorkItem(removedCurrent, accountID: removedAccount, organizationID: organization)
+        navigation.setSelectedWorkItem(retained, accountID: retainedAccount, organizationID: organization)
+
+        navigation.purgeSelectionState(for: removedAccount)
+
+        XCTAssertNil(navigation.validatedSelectedWorkItem(
+            accountID: removedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [removedCurrent]
+        ))
+        XCTAssertFalse(navigation.canNavigateSelectionBack(
+            accountID: removedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [removedFirst, removedCurrent]
+        ))
+        XCTAssertEqual(navigation.validatedSelectedWorkItem(
+            accountID: retainedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [retained]
+        ), retained)
+
+        let restored = AppNavigationModel(defaults: defaults)
+        XCTAssertNil(restored.validatedSelectedWorkItem(
+            accountID: removedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [removedCurrent]
+        ))
+        XCTAssertEqual(restored.validatedSelectedWorkItem(
+            accountID: retainedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [retained]
+        ), retained)
+    }
+
+    func testStartupDeletionRecoveryPurgerClearsSelectedAccountOrganizationAndNavigationHistory() {
+        let defaults = makeDefaults()
+        let navigation = AppNavigationModel(defaults: defaults)
+        let removedAccount = AccountID(rawValue: "removed-account")!
+        let retainedAccount = AccountID(rawValue: "retained-account")!
+        let organization = OrganizationID(rawValue: "organization")!
+        let firstRemovedItem = WorkItemID(rawValue: "first-removed")!
+        let currentRemovedItem = WorkItemID(rawValue: "current-removed")!
+        let retainedItem = WorkItemID(rawValue: "retained")!
+
+        defaults.set(removedAccount.rawValue, forKey: "workspace.selected-account-id")
+        defaults.set(organization.rawValue, forKey: "workspace.selected-organization-id")
+        navigation.setSelectedWorkItem(firstRemovedItem, accountID: removedAccount, organizationID: organization)
+        navigation.setSelectedWorkItem(currentRemovedItem, accountID: removedAccount, organizationID: organization)
+        navigation.setSelectedWorkItem(retainedItem, accountID: retainedAccount, organizationID: organization)
+        AccountDeletionRecoveryStatePurger.purgeSelectedAccountAndOrganization(
+            for: removedAccount,
+            defaults: defaults
+        )
+        navigation.purgeSelectionState(for: removedAccount)
+
+        XCTAssertNil(defaults.string(forKey: "workspace.selected-account-id"))
+        XCTAssertNil(defaults.string(forKey: "workspace.selected-organization-id"))
+        XCTAssertNil(navigation.validatedSelectedWorkItem(
+            accountID: removedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [currentRemovedItem]
+        ))
+        XCTAssertFalse(navigation.canNavigateSelectionBack(
+            accountID: removedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [firstRemovedItem, currentRemovedItem]
+        ))
+        XCTAssertEqual(navigation.validatedSelectedWorkItem(
+            accountID: retainedAccount,
+            organizationID: organization,
+            validWorkItemIDs: [retainedItem]
+        ), retainedItem)
+    }
+
+    func testOrganizationAndWorkItemPurgeDoNotCrossScopes() {
+        let navigation = AppNavigationModel(defaults: makeDefaults())
+        let account = AccountID(rawValue: "account")!
+        let firstOrganization = OrganizationID(rawValue: "first-organization")!
+        let secondOrganization = OrganizationID(rawValue: "second-organization")!
+        let first = WorkItemID(rawValue: "first")!
+        let deleted = WorkItemID(rawValue: "deleted")!
+        let current = WorkItemID(rawValue: "current")!
+        let other = WorkItemID(rawValue: "other")!
+
+        navigation.setSelectedWorkItem(first, accountID: account, organizationID: firstOrganization)
+        navigation.setSelectedWorkItem(deleted, accountID: account, organizationID: firstOrganization)
+        navigation.setSelectedWorkItem(current, accountID: account, organizationID: firstOrganization)
+        navigation.setSelectedWorkItem(other, accountID: account, organizationID: secondOrganization)
+
+        navigation.purgeSelectionState(
+            for: deleted,
+            accountID: account,
+            organizationID: firstOrganization
+        )
+
+        XCTAssertEqual(navigation.navigateSelectionBack(
+            accountID: account,
+            organizationID: firstOrganization,
+            validWorkItemIDs: [first, current, deleted]
+        ), first)
+        XCTAssertEqual(navigation.validatedSelectedWorkItem(
+            accountID: account,
+            organizationID: secondOrganization,
+            validWorkItemIDs: [other]
+        ), other)
+
+        navigation.purgeSelectionState(for: account, organizationID: firstOrganization)
+        XCTAssertNil(navigation.validatedSelectedWorkItem(
+            accountID: account,
+            organizationID: firstOrganization,
+            validWorkItemIDs: [first, current]
+        ))
+        XCTAssertEqual(navigation.validatedSelectedWorkItem(
+            accountID: account,
+            organizationID: secondOrganization,
+            validWorkItemIDs: [other]
+        ), other)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suiteName = "AppNavigationModelTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

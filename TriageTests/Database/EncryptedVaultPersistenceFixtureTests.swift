@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 import XCTest
@@ -112,10 +113,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
 
         XCTAssertEqual(firstMigrations, reopenedMigrations)
         XCTAssertEqual(reopenedMigrations.count, TriageDatabaseMigrator.migrationCount)
-        XCTAssertEqual(reopenedMigrations.last?.id, "046-post-account-identity-replay-receipts-v1")
+        XCTAssertEqual(reopenedMigrations.last?.id, "054-project-item-raw-provenance-v1")
         XCTAssertEqual(
             reopenedMigrations.last?.checksum,
-            "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
+            "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
         )
         XCTAssertTrue(reopenedMigrations.allSatisfy { migration in
             migration.checksum.range(
@@ -126,26 +127,33 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         try await reopenedRegistry.closeAll()
     }
 
-    func testPersistedSchema039EncryptedVaultUpgradesThrough046WithStableChecksums() async throws {
+    func testFrozenSchema039EncryptedVaultUpgradesThroughCurrentMigrations() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "encrypted-schema-039-upgrade")!
-        let key = try VaultKey.generate()
-        let paths = try await makePersistedSchema039Fixture(
+        let accountID = AccountID(rawValue: "frozen-schema-039")!
+        let key = try frozenSchema039FixtureKey()
+        let paths = try installFrozenSchema039Fixture(
             root: root,
-            accountID: accountID,
-            key: key
+            accountID: accountID
         )
         let schema039State = try persistedSchemaState(at: paths.database, key: key)
         let schema039Migrations = schema039State.migrations
+        XCTAssertEqual(schema039Migrations.count, 39)
+        XCTAssertEqual(schema039Migrations.first?.id, "001-vault-metadata")
         XCTAssertEqual(schema039Migrations.last?.id, "039-timeline-current-page-membership")
+        XCTAssertEqual(
+            schema039Migrations.last?.checksum,
+            "498de3f54c04aa6d9c271a9f18a235859ae1fdbbe1d806b566038ed6115f64b7"
+        )
         XCTAssertFalse(schema039State.hasFailureEnvelopes)
+        XCTAssertTrue(schema039State.hasTimelinePageMembership)
 
         let registry = try VaultRegistry(rootDirectory: root)
         let upgradedVault = try await registry.open(accountID: accountID, vaultKey: key)
         let upgradedMigrations = try await migrationRows(in: upgradedVault)
-        XCTAssertEqual(Array(upgradedMigrations.suffix(7)), [
+        XCTAssertEqual(Array(upgradedMigrations.prefix(schema039Migrations.count)), schema039Migrations)
+        XCTAssertEqual(Array(upgradedMigrations.dropFirst(schema039Migrations.count)), [
             MigrationRow(
                 id: "040-review-candidate-failure-envelopes",
                 checksum: "9241fecb2d6cffcfc87a91e553b8599f0913dc2e16b705fcd2b038cad30c5a81"
@@ -173,8 +181,41 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             MigrationRow(
                 id: "046-post-account-identity-replay-receipts-v1",
                 checksum: "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
+            ),
+            MigrationRow(
+                id: "047-work-item-graph-revision-v1",
+                checksum: "f149203a03a55c374e285177e05b7d13b80bf12d9104ddedc653666c5ef4a9e7"
+            ),
+            MigrationRow(
+                id: "048-review-candidate-incremental-state-v1",
+                checksum: "ad313bbe07cfc7c98d3783a006db26aea26637edbda5e8a87801c3101d5a8902"
+            ),
+            MigrationRow(
+                id: "049-authenticated-user-replay-receipts-v1",
+                checksum: "79113d268c469caf4c7b2641c443768e8aced6ec4956a64248887e5a08c5d209"
+            ),
+            MigrationRow(
+                id: "050-review-thread-root-checkpoints-v1",
+                checksum: "5ce9b7c173f946abfd8f4fbbfdc663401a8d4a77ed673d36787da2ce4f5939b6"
+            ),
+            MigrationRow(
+                id: "051-work-item-canonical-groups-v1",
+                checksum: "7e5c14941fd63d377605b07c96a19d923715a5119774120c1cb470156ee382d7"
+            ),
+            MigrationRow(
+                id: "052-repository-ranking-preferences-v1",
+                checksum: "84b477e7573f5fe89d48f412aefca3146b7794dcd3f474f2bfd59bb7fc9222bb"
+            ),
+            MigrationRow(
+                id: "053-notification-preferences-v1",
+                checksum: "2be45e4714b196a094c3f8d8f68d1d1ca5490f8604c899aad50b63977b5dc690"
+            ),
+            MigrationRow(
+                id: "054-project-item-raw-provenance-v1",
+                checksum: "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
             )
         ])
+        XCTAssertEqual(upgradedMigrations.count, TriageDatabaseMigrator.migrationCount)
         let upgradedSchema = try await upgradedVault.read { database -> (tables: Set<String>, indexes: Set<String>, triggers: Set<String>) in
             let tables = Set(try String.fetchAll(
                 database,
@@ -197,19 +238,36 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "review_candidate_complete_traversal_receipts",
             "account_organization_inventory_replay_receipts",
             "account_organization_inventory_replay_receipt_pages",
-            "organization_metadata_replay_receipts"
+            "organization_metadata_replay_receipts",
+            "work_item_graph_runs",
+            "review_candidate_incremental_states",
+            "authenticated_user_replay_receipts",
+            "review_candidate_thread_checkpoint_pages",
+            "work_item_group_memberships",
+            "repository_ranking_preferences",
+            "notification_preferences",
+            "project_item_raw_provenance"
         ])))
         XCTAssertTrue(upgradedSchema.indexes.isSuperset(of: Set([
             "workspace_work_items_scope_activity",
             "account_organization_inventory_replay_receipts_scope",
             "account_organization_inventory_replay_pages_snapshot",
-            "organization_metadata_replay_receipts_scope"
+            "organization_metadata_replay_receipts_scope",
+            "review_candidate_incremental_states_lookup",
+            "authenticated_user_replay_receipts_scope",
+            "review_candidate_thread_checkpoint_lookup",
+            "work_item_group_memberships_canonical_scope",
+            "repository_ranking_preferences_scope",
+            "notification_preferences_scope",
+            "project_item_raw_provenance_current_scope"
         ])))
         XCTAssertTrue(upgradedSchema.triggers.isSuperset(of: Set([
             "account_organization_inventory_replay_protect_snapshot_delete",
             "account_organization_inventory_replay_protect_snapshot_update",
             "organization_metadata_replay_protect_snapshot_delete",
-            "organization_metadata_replay_protect_snapshot_update"
+            "organization_metadata_replay_protect_snapshot_update",
+            "authenticated_user_replay_protect_snapshot_delete",
+            "authenticated_user_replay_protect_snapshot_update"
         ])))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.database.path))
         try await registry.closeAll()
@@ -504,108 +562,43 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         return VaultPaths(rootDirectory: root, accountID: accountID)
     }
 
-    private func makePersistedSchema039Fixture(
+    /// Frozen SQLCipher fixture generated in an isolated worktree at commit
+    /// `3ae4072`, whose migrator ended at schema 039. It is intentionally not
+    /// rebuilt by the current migrator: changing an old migration therefore
+    /// makes this acceptance test fail instead of silently updating its input.
+    private func installFrozenSchema039Fixture(
         root: URL,
-        accountID: AccountID,
-        key: VaultKey
-    ) async throws -> VaultPaths {
-        let registry = try VaultRegistry(rootDirectory: root)
-        let vault = try await registry.open(accountID: accountID, vaultKey: key)
-        try await vault.write { database in
-            for index in [
-                "workspace_work_items_scope_activity",
-                "workspace_attention_reasons_order",
-                "workspace_attention_reasons_rule",
-                "workspace_relations_subject_kind",
-                "workspace_relation_evidence_order",
-                "search_comments_parent_updated",
-                "search_reviews_parent_updated",
-                "search_project_items_content_updated",
-                "search_action_items_work_updated",
-                "derived_work_items_scope_id",
-                "derived_team_memberships_account_state_expiry",
-                "derived_timeline_events_subject_occurred_id",
-                "derived_review_threads_pull_request_updated",
-                "derived_project_items_content_node",
-                "review_candidate_complete_traversal_pages_raw_snapshot",
-                "review_candidate_complete_traversal_receipts_current_scope",
-                "rule_evaluation_evidence_authority",
-                "rule_evaluation_evidence_raw_snapshot",
-                "rule_evaluations_current_scope",
-                "ai_action_candidates_current_scope",
-                "notification_threads_current_scope",
-                "notification_threads_raw_snapshot",
-                "notification_current_pages_scope",
-                "notification_current_pages_raw_snapshot",
-                "notification_replay_receipts_scope",
-                "notification_failure_envelopes_scope",
-                "notification_failure_pages_raw_snapshot",
-                "review_candidate_failure_envelopes_scope_candidate_terminal",
-                "review_candidate_failure_pages_raw_snapshot",
-                "account_organization_inventory_replay_receipts_scope",
-                "account_organization_inventory_replay_pages_snapshot",
-                "organization_metadata_replay_receipts_scope"
-            ] {
-                try database.execute(sql: "DROP INDEX IF EXISTS \(index)")
-            }
-            for trigger in [
-                "review_candidate_complete_traversal_receipt_no_update",
-                "review_candidate_complete_traversal_receipt_no_delete",
-                "review_candidate_complete_traversal_segment_no_update",
-                "review_candidate_complete_traversal_segment_no_delete",
-                "review_candidate_complete_traversal_page_no_update",
-                "review_candidate_complete_traversal_page_no_delete",
-                "review_candidate_complete_traversal_protect_snapshot_delete",
-                "review_candidate_complete_traversal_protect_snapshot_update",
-                "derived_intelligence_protect_evidence_snapshot_delete",
-                "derived_intelligence_protect_evidence_snapshot_update",
-                "notification_protect_provenance_snapshot_delete",
-                "notification_protect_provenance_snapshot_update",
-                "account_organization_inventory_replay_protect_snapshot_delete",
-                "account_organization_inventory_replay_protect_snapshot_update",
-                "organization_metadata_replay_protect_snapshot_delete",
-                "organization_metadata_replay_protect_snapshot_update"
-            ] {
-                try database.execute(sql: "DROP TRIGGER IF EXISTS \(trigger)")
-            }
-            for table in [
-                "review_candidate_complete_traversal_pages",
-                "review_candidate_complete_traversal_segments",
-                "review_candidate_complete_traversal_receipts",
-                "ai_action_candidates",
-                "rule_evaluation_evidence",
-                "rule_evaluations",
-                "derived_intelligence_runs",
-                "notification_failure_pages",
-                "notification_failure_envelopes",
-                "notification_replay_receipts",
-                "notification_current_pages",
-                "notification_threads",
-                "review_candidate_failure_pages",
-                "review_candidate_failure_envelopes",
-                "account_organization_inventory_replay_receipt_pages",
-                "account_organization_inventory_replay_receipts",
-                "organization_metadata_replay_receipts"
-            ] {
-                try database.execute(sql: "DROP TABLE IF EXISTS \(table)")
-            }
-            try database.execute(
-                sql: """
-                    DELETE FROM schema_migrations
-                    WHERE id IN (
-                        '040-review-candidate-failure-envelopes',
-                        '041-notification-source-authority-v1',
-                        '042-derived-intelligence-revision-evidence-v1',
-                        '043-review-candidate-complete-traversal-receipts-v1',
-                        '044-workspace-query-performance-indexes-v1',
-                        '045-review-candidate-receipt-append-only-v1',
-                        '046-post-account-identity-replay-receipts-v1'
-                    )
-                    """
-            )
-        }
-        try await registry.closeAll()
-        return VaultPaths(rootDirectory: root, accountID: accountID)
+        accountID: AccountID
+    ) throws -> VaultPaths {
+        let fixture = fixtureURL(named: "encrypted-schema-039.sqlite")
+        let data = try Data(contentsOf: fixture)
+        XCTAssertEqual(data.count, 860_160)
+        XCTAssertEqual(
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "425088ee64f5d7a9f8a8c803582e3b3ca76d6bbb144c5805474c22630734bacf"
+        )
+        XCTAssertFalse(data.starts(with: Data("SQLite format 3\0".utf8)))
+
+        let paths = VaultPaths(rootDirectory: root, accountID: accountID)
+        try FileManager.default.createDirectory(
+            at: paths.directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.copyItem(at: fixture, to: paths.database)
+        return paths
+    }
+
+    private func fixtureURL(named name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: false)
+    }
+
+    private func frozenSchema039FixtureKey() throws -> VaultKey {
+        // Fixed test-only bytes. This key protects no user data or production vault.
+        try VaultKey(data: Data((0..<VaultKey.byteCount).map(UInt8.init)))
     }
 
     private func migrationRows(in vault: AccountVault) async throws -> [MigrationRow] {
@@ -634,7 +627,11 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
     private func persistedSchemaState(
         at databaseURL: URL,
         key: VaultKey
-    ) throws -> (migrations: [MigrationRow], hasFailureEnvelopes: Bool) {
+    ) throws -> (
+        migrations: [MigrationRow],
+        hasFailureEnvelopes: Bool,
+        hasTimelinePageMembership: Bool
+    ) {
         var configuration = Configuration()
         configuration.readonly = true
         configuration.prepareDatabase { database in
@@ -643,14 +640,21 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let pool = try DatabasePool(path: databaseURL.path, configuration: configuration)
         defer { try? pool.close() }
         return try pool.read { database in
-            (
+            let hasTimelinePageMembership = try database.tableExists("timeline_current_pages")
+                && (try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    arguments: ["timeline_current_pages_subject_scope"]
+                ) == 1)
+            return (
                 try Row.fetchAll(
                     database,
                     sql: "SELECT id, checksum FROM schema_migrations ORDER BY id"
                 ).map { row in
                     MigrationRow(id: row["id"], checksum: row["checksum"])
                 },
-                try database.tableExists("review_candidate_failure_envelopes")
+                try database.tableExists("review_candidate_failure_envelopes"),
+                hasTimelinePageMembership
             )
         }
     }

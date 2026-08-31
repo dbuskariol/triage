@@ -3,12 +3,13 @@ import XCTest
 
 @MainActor
 final class WorkspaceAccessibilityCoordinatorTests: XCTestCase {
-    func testRefreshStatusAndFailureUseGenericMessages() {
+    func testRefreshStatusAndCachedWorkFailureUseGenericMessages() {
         let recorder = AnnouncementRecorder()
         let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
 
         coordinator.synchronizationStatusChanged(to: .refreshing)
         coordinator.synchronizationStatusChanged(to: .offline)
+        coordinator.workspaceContentAvailabilityChanged(hasCachedWork: true)
         coordinator.refreshFailed(diagnostic: "Private issue body: do not announce this")
 
         XCTAssertEqual(
@@ -20,6 +21,36 @@ final class WorkspaceAccessibilityCoordinatorTests: XCTestCase {
             ]
         )
         XCTAssertFalse(recorder.announcements.joined(separator: " ").contains("Private issue body"))
+    }
+
+    func testRefreshFailureWithNoCachedRowsDoesNotClaimContentIsAvailable() {
+        let recorder = AnnouncementRecorder()
+        let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
+
+        coordinator.workspaceContentAvailabilityChanged(hasCachedWork: false)
+        coordinator.refreshFailed()
+
+        XCTAssertEqual(
+            recorder.announcements,
+            ["Triage could not refresh local work. No local work is available yet."]
+        )
+    }
+
+    func testActionItemInsertionAnnouncementContainsOnlyACount() {
+        let recorder = AnnouncementRecorder()
+        let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
+
+        coordinator.actionItemsInserted(count: 1)
+        coordinator.actionItemsInserted(count: 2)
+        coordinator.actionItemsInserted(count: 0)
+
+        XCTAssertEqual(
+            recorder.announcements,
+            [
+                "A new local action item is available in Triage.",
+                "2 new local action items are available in Triage."
+            ]
+        )
     }
 
     func testWorkspaceRestorationAnnouncementsAreActionableAndPrivate() {

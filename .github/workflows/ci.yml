@@ -33,3 +33,17 @@ jobs:
           swift --version
       - name: Run verification gate
         run: scripts/verify-ci.sh
+      - name: Run declared Apple silicon performance baseline
+        if: matrix.runner == 'macos-26' && vars.TRIAGE_PERFORMANCE_APPLE_SILICON_PROFILE != ''
+        env:
+          TRIAGE_PERFORMANCE_BASELINE_PROFILE: ${{ vars.TRIAGE_PERFORMANCE_APPLE_SILICON_PROFILE }}
+          TRIAGE_PERFORMANCE_INCLUDE_UI: ${{ vars.TRIAGE_PERFORMANCE_APPLE_SILICON_UI_PROFILE == vars.TRIAGE_PERFORMANCE_APPLE_SILICON_PROFILE && '1' || '0' }}
+          TRIAGE_PERFORMANCE_COPY_REPORT_TO: ${{ runner.temp }}/triage-performance-${{ matrix.runner }}.json
+        run: scripts/run-performance-benchmarks.sh
+      - name: Run declared Intel performance baseline
+        if: matrix.runner == 'macos-26-intel' && vars.TRIAGE_PERFORMANCE_INTEL_PROFILE != ''
+        env:
+          TRIAGE_PERFORMANCE_BASELINE_PROFILE: ${{ vars.TRIAGE_PERFORMANCE_INTEL_PROFILE }}
+          TRIAGE_PERFORMANCE_INCLUDE_UI: ${{ vars.TRIAGE_PERFORMANCE_INTEL_UI_PROFILE == vars.TRIAGE_PERFORMANCE_INTEL_PROFILE && '1' || '0' }}
+          TRIAGE_PERFORMANCE_COPY_REPORT_TO: ${{ runner.temp }}/triage-performance-${{ matrix.runner }}.json
+        run: scripts/run-performance-benchmarks.sh

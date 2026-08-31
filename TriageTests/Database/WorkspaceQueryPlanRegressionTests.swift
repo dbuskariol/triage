@@ -213,6 +213,42 @@ final class WorkspaceQueryPlanRegressionTests: XCTestCase {
             QueryPlanFixture.searchChildLimit * QueryPlanFixture.searchChildBodyBytes
         )
     }
+
+    func testTenThousandWorkspaceRowsUseTheProductionObservationProjectionWithoutASortScan() throws {
+        let fixture = try QueryPlanFixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspaceRows(count: 10_000)
+
+        // Exercise the real production value-projection path, not a
+        // LIMIT-only stand-in. The projection is what feeds the observer
+        // before its bounded full-graph decode.
+        let snapshot = try fixture.pool.read { database in
+            try WorkspaceDatabaseObservationService.snapshot(
+                in: database,
+                scope: fixture.workspaceScope,
+                selectedWorkItemID: nil
+            )
+        }
+        XCTAssertEqual(snapshot.workItems.count, 10_000)
+        XCTAssertEqual(snapshot.menuCounts.allWork, 10_000)
+
+        try fixture.assertIndexSupportsQuery(
+            "workspace_work_items_scope_activity",
+            sql: """
+                SELECT
+                    work_items.id, work_items.primary_node_id, work_items.state,
+                    work_items.last_relevant_activity_at_ms,
+                    github_nodes.kind, github_nodes.title, github_nodes.html_url
+                FROM work_items
+                JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                    AND github_nodes.account_id = work_items.account_id
+                    AND github_nodes.organization_id = work_items.organization_id
+                WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                ORDER BY work_items.last_relevant_activity_at_ms DESC, work_items.id
+                """,
+            arguments: fixture.scopeArguments
+        )
+    }
 }
 
 private final class QueryPlanFixture: @unchecked Sendable {
@@ -227,6 +263,15 @@ private final class QueryPlanFixture: @unchecked Sendable {
 
     var scopeArguments: StatementArguments {
         StatementArguments([accountID, organizationID])
+    }
+
+    var workspaceScope: SynchronizationScope {
+        SynchronizationScope(
+            accountID: AccountID(rawValue: accountID)!,
+            organizationID: OrganizationID(rawValue: organizationID)!,
+            credentialRevision: CredentialRevision(rawValue: "query-plan-revision")!,
+            capabilityRevision: CapabilityRevision(rawValue: "query-plan-capability")!
+        )
     }
 
     init() throws {

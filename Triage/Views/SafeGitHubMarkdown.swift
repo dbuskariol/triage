@@ -5,7 +5,12 @@ enum GitHubMarkdownPolicy {
 
     static func sanitizedSource(_ source: String) -> String {
         let bounded = String(source.prefix(maximumSourceCharacters))
-        let withoutExecutableElements = bounded.replacingOccurrences(
+        let withoutComments = bounded.replacingOccurrences(
+            of: #"<!--[\s\S]*?-->"#,
+            with: "",
+            options: .regularExpression
+        )
+        let withoutExecutableElements = withoutComments.replacingOccurrences(
             of: #"<(script|style|iframe|object|embed|img|video|audio|svg)\b[^>]*>[\s\S]*?</\1>"#,
             with: "",
             options: [.regularExpression, .caseInsensitive]
@@ -17,11 +22,37 @@ enum GitHubMarkdownPolicy {
             with: "[embedded content omitted]",
             options: [.regularExpression, .caseInsensitive]
         )
-        return withoutOpenUnsupportedElements.replacingOccurrences(
+        let withoutMarkdownImages = withoutOpenUnsupportedElements.replacingOccurrences(
             of: #"!\[[^\]]*\]\([^\)]*\)"#,
             with: "[remote image omitted]",
             options: .regularExpression
         )
+        // HTML links and other tags bypass Markdown's URL handling. Strip
+        // them rather than preserving attributes that could carry tracking or
+        // an unvalidated destination. Native Markdown links remain intact.
+        let withoutHTMLTags = withoutMarkdownImages.replacingOccurrences(
+            of: #"</?(?!https?://|mailto:)[A-Za-z][^>]*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        return taskListAccessibleSource(withoutHTMLTags)
+    }
+
+    /// `AttributedString` keeps GitHub task-list brackets as plain punctuation.
+    /// Expand them into text so VoiceOver communicates the checked state while
+    /// retaining native Markdown list layout.
+    private static func taskListAccessibleSource(_ source: String) -> String {
+        source
+            .replacingOccurrences(
+                of: #"(?m)^(\s*[-*+]\s*)\[\s\]\s+"#,
+                with: "$1To do: ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?mi)^(\s*[-*+]\s*)\[x\]\s+"#,
+                with: "$1Completed: ",
+                options: .regularExpression
+            )
     }
 
     static func permitsExternalNavigation(to url: URL) -> Bool {

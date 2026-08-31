@@ -4,6 +4,8 @@ struct WorkListView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
+    let workspaceStatus: WorkspacePresentationState.SynchronizationStatus
+    let workspaceStatusDetail: String?
     @State private var searchText = ""
     @State private var searchResults: [SearchResult] = []
     @State private var searchResultsRequest: WorkListSearchRequest?
@@ -40,23 +42,11 @@ struct WorkListView: View {
         }
         .toolbar {
             ToolbarItem(placement: .secondaryAction) {
-                Menu("List Options") {
-                    Picker("Filter", selection: listFilter) {
-                        ForEach(WorkspaceListFilter.allCases) { filter in
-                            Text(filter.title).tag(filter)
-                        }
-                    }
-
-                    Divider()
-
-                    Picker("Sort Results", selection: searchSort) {
-                        ForEach(WorkspaceSearchSort.allCases) { sort in
-                            Text(sort.title).tag(sort)
-                        }
-                    }
-                    .disabled(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .accessibilityHint("Filters and sorts only the local Triage work queue.")
+                WorkListOptionsMenu(
+                    listFilter: listFilter,
+                    searchSort: searchSort,
+                    isSearchActive: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
         }
         .task(id: searchRequest) { [request = searchRequest] in
@@ -81,13 +71,18 @@ struct WorkListView: View {
             return .handled
         }
         .overlay {
-            if !isSearching, filteredWorkItems.isEmpty {
-                ContentUnavailableView(
-                    navigation.section == .inbox ? "Inbox zero" : "No work",
-                    systemImage: navigation.section.systemImage,
-                    description: Text(emptyDescription)
-                )
-            }
+            WorkListEmptyStateOverlay(
+                query: searchText,
+                isSearching: isSearching,
+                searchError: searchError,
+                hasNoWorkItems: filteredWorkItems.isEmpty,
+                workspaceStatus: workspaceStatus,
+                workspaceStatusDetail: workspaceStatusDetail,
+                emptyQueueTitle: navigation.section == .inbox ? "Inbox zero" : "No work",
+                emptyQueueSystemImage: navigation.section.systemImage,
+                emptyDescription: emptyDescription,
+                clearSearch: { searchText = "" }
+            )
         }
         .safeAreaInset(edge: .bottom) {
             if appModel.isRefreshing {
@@ -97,11 +92,6 @@ struct WorkListView: View {
             } else if isSearching {
                 ProgressView("Searching encrypted cache…")
                     .controlSize(.small)
-                    .padding(8)
-            } else if let searchError {
-                Text(searchError)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                     .padding(8)
             } else if let refreshError = appModel.refreshError {
                 HStack(spacing: 10) {
@@ -124,32 +114,19 @@ struct WorkListView: View {
 
     private var filteredWorkItems: [WorkItem] {
         let now = Date()
-        let currentViewItems = appModel.workItems.filter { item in
-            switch navigation.section {
-            case .inbox:
-                InboxEligibilityRule().disposition(for: item, at: now) == .inbox
-            case .waiting:
-                InboxEligibilityRule().disposition(for: item, at: now) == .waiting
-            case .snoozed:
-                InboxEligibilityRule().disposition(for: item, at: now) == .snoozed
-            case .myWork:
-                item.relations.contains { $0.kind == .assigned || $0.kind == .authored }
-            case .reviews:
-                item.relations.contains {
-                    $0.kind == .reviewRequestedDirectly || $0.kind == .reviewRequestedFromTeam
-                }
-            case .allWork:
-                true
-            }
-        }.filter(matchesListFilter)
+        let currentViewItems = WorkListPresentation.items(
+            from: appModel.workItems,
+            section: navigation.section,
+            at: now
+        ).filter(matchesListFilter)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            return AttentionRanker().sort(currentViewItems, at: now)
+            return currentViewItems
         }
 
         let allowedItems = navigation.searchScope == .currentView
             ? currentViewItems
-            : appModel.workItems.filter(matchesListFilter)
+            : WorkListPresentation.rankedPersisted(appModel.workItems.filter(matchesListFilter))
         let itemsByID = Dictionary(uniqueKeysWithValues: allowedItems.map { ($0.id, $0) })
         // Results only belong to the exact query and workspace that produced
         // them. This prevents an old query (or another organization with an
@@ -175,7 +152,7 @@ struct WorkListView: View {
                 return $0.id.rawValue < $1.id.rawValue
             }
         case .attention:
-            return AttentionRanker().sort(matching, at: now)
+            return WorkListPresentation.rankedPersisted(matching)
         case .recent:
             return matching.sorted {
                 if $0.lastRelevantActivityAt != $1.lastRelevantActivityAt {
@@ -373,45 +350,171 @@ struct WorkListView: View {
     }
 }
 
+/// Keeps the toolbar's menu generic inference out of `WorkListView.body`.
+/// The bindings still write directly to the same window-scoped presentation
+/// state, so filtering and sort behavior are unchanged.
+private struct WorkListOptionsMenu: View {
+    @Binding var listFilter: WorkspaceListFilter
+    @Binding var searchSort: WorkspaceSearchSort
+    let isSearchActive: Bool
+
+    var body: some View {
+        Menu("List Options") {
+            WorkListFilterPicker(selection: $listFilter)
+            Divider()
+            WorkListSortPicker(
+                selection: $searchSort,
+                isSearchActive: isSearchActive
+            )
+        }
+        .accessibilityHint("Filters and sorts only the local Triage work queue.")
+    }
+}
+
+private struct WorkListFilterPicker: View {
+    @Binding var selection: WorkspaceListFilter
+
+    var body: some View {
+        Picker("Filter", selection: $selection) {
+            ForEach(WorkspaceListFilter.allCases) { filter in
+                Text(filter.title).tag(filter)
+            }
+        }
+    }
+}
+
+private struct WorkListSortPicker: View {
+    @Binding var selection: WorkspaceSearchSort
+    let isSearchActive: Bool
+
+    var body: some View {
+        Picker("Sort Results", selection: $selection) {
+            ForEach(WorkspaceSearchSort.allCases) { sort in
+                Text(sort.title).tag(sort)
+            }
+        }
+        .disabled(!isSearchActive)
+    }
+}
+
+/// Keeps the overlay's mutually exclusive empty, search-error, and workspace
+/// status states out of the list's main generic view expression.
+private struct WorkListEmptyStateOverlay: View {
+    let query: String
+    let isSearching: Bool
+    let searchError: String?
+    let hasNoWorkItems: Bool
+    let workspaceStatus: WorkspacePresentationState.SynchronizationStatus
+    let workspaceStatusDetail: String?
+    let emptyQueueTitle: String
+    let emptyQueueSystemImage: String
+    let emptyDescription: String
+    let clearSearch: () -> Void
+
+    var body: some View {
+        let presentation = WorkListPresentation.emptyQueuePresentation(
+            query: query,
+            isSearching: isSearching,
+            searchError: searchError,
+            workspaceStatus: workspaceStatus
+        )
+        if presentation == .searchUnavailable, let searchError {
+            ContentUnavailableView {
+                Label("Search unavailable", systemImage: "magnifyingglass")
+            } description: {
+                Text(searchError)
+            } actions: {
+                Button("Clear Search", action: clearSearch)
+            }
+        } else if !isSearching, hasNoWorkItems, let presentation {
+            emptyState(for: presentation)
+        }
+    }
+
+    @ViewBuilder
+    private func emptyState(for presentation: WorkListEmptyQueuePresentation) -> some View {
+        switch presentation {
+        case .successfulEmptyQueue:
+            ContentUnavailableView(
+                emptyQueueTitle,
+                systemImage: emptyQueueSystemImage,
+                description: Text(emptyDescription)
+            )
+        case .noMatchingWork:
+            ContentUnavailableView(
+                "No matching work",
+                systemImage: "magnifyingglass",
+                description: Text(emptyDescription)
+            )
+        case .workspaceStatus:
+            ContentUnavailableView(
+                workspaceStatus.title,
+                systemImage: workspaceStatus.systemImage,
+                description: Text(workspaceStatusDetail ?? "Triage is showing the current local workspace status.")
+            )
+        case .searchUnavailable:
+            EmptyView()
+        }
+    }
+}
+
 private struct WorkItemRow: View {
     let item: WorkItem
     let highlightedQuery: String
     let onWorkflowOperation: (WorkItemContextMenuOperation, WorkItem) -> Void
+    @State private var areActionItemsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 7) {
-                Image(systemName: symbol)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                highlightedTitle
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if item.workflow.isPinned {
-                    Image(systemName: "pin.fill")
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 7) {
+                    Image(systemName: symbol)
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel("Pinned")
+                        .accessibilityHidden(true)
+                    highlightedTitle
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    if item.workflow.isPinned {
+                        Image(systemName: "pin.fill")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Pinned")
+                    }
                 }
-            }
-            HStack(spacing: 6) {
-                if let repository = item.repository {
-                    Text(repository.fullName)
+                HStack(spacing: 6) {
+                    if let repository = item.repository {
+                        Text(repository.fullName)
+                    }
+                    if let reason = item.attentionReasons.max(by: { $0.strength < $1.strength }) {
+                        Text(reason.title)
+                    }
                 }
-                if let reason = item.attentionReasons.max(by: { $0.strength < $1.strength }) {
-                    Text(reason.title)
-                }
-                if !item.openActionItems.isEmpty {
-                    Text("\(item.openActionItems.count) action\(item.openActionItems.count == 1 ? "" : "s")")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
-            WorkItemRowMetadata(item: item)
+                WorkItemRowMetadata(item: item)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(accessibilityLabel)
+
+            if let disclosure = WorkListPresentation.actionDisclosure(for: item) {
+                DisclosureGroup(isExpanded: $areActionItemsExpanded) {
+                    ForEach(item.openActionItems) { action in
+                        Text(action.title)
+                            .lineLimit(1)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Open action item: \(action.title)")
+                    }
+                } label: {
+                    Text(disclosure.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel(disclosure.accessibilityLabel)
+                .accessibilityHint("Shows locally stored action item titles. It does not modify GitHub.")
+            }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
         .contextMenu {
             WorkItemContextMenu(
                 item: item,

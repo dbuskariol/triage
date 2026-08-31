@@ -41,6 +41,10 @@ enum CredentialLifecycle {
                 return .missing
             case .refreshTokenUnavailable, .refreshTokenEncodingInvalid, .credentialRollbackFailed:
                 return .expired
+            case .staleAccountAuthority:
+                // A newer credential authority superseded this refresh. It is
+                // not evidence that the current credential is invalid.
+                return nil
             }
         case let error as AuthBrokerClientError:
             guard case let .broker(failure) = error else { return nil }

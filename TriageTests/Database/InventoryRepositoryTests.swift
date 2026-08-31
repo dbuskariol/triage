@@ -4,6 +4,81 @@ import XCTest
 @testable import Triage
 
 final class InventoryRepositoryTests: XCTestCase {
+    func testRepositoryRankingPreferenceIsVaultScopedAndReplacesItsPriorValue() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let inventory = RepositoryInventoryRepository(vault: fixture.vault)
+        let summaries = try await inventory.replace(
+            [fixture.repository(id: 1, nodeID: "R_preference", name: "preference")],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+        let repositoryID = try XCTUnwrap(summaries.first?.id)
+        let scope = SynchronizationScope(
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+        let preferences = RepositoryRankingPreferenceRepository(vault: fixture.vault)
+
+        try await preferences.save(15, for: repositoryID, scope: scope, at: fixture.date)
+        try await preferences.save(-25, for: repositoryID, scope: scope, at: fixture.date.addingTimeInterval(1))
+
+        let storedPreferences = try await preferences.preferences(for: scope)
+        XCTAssertEqual(storedPreferences, [repositoryID: -25])
+        let persisted = try await fixture.vault.read { database in
+            try Int.fetchOne(
+                database,
+                sql: "SELECT preference FROM repository_ranking_preferences WHERE repository_id = ?",
+                arguments: [repositoryID.rawValue]
+            )
+        }
+        XCTAssertEqual(persisted, -25)
+
+        try await preferences.remove(repositoryID: repositoryID, scope: scope)
+        let removedPreferences = try await preferences.preferences(for: scope)
+        XCTAssertEqual(removedPreferences, [:])
+    }
+
+    func testRepositoryRankingPreferenceRejectsForeignRepositoryAndStaleScope() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let scope = SynchronizationScope(
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+        let preferences = RepositoryRankingPreferenceRepository(vault: fixture.vault)
+
+        do {
+            try await preferences.save(
+                1,
+                for: RepositoryID(rawValue: "missing-repository")!,
+                scope: scope,
+                at: fixture.date
+            )
+            XCTFail("A repository outside the selected organization must not receive a preference.")
+        } catch {
+            XCTAssertEqual(error as? RepositoryRankingPreferenceRepositoryError, .repositoryOutsideOrganization)
+        }
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE accounts SET credential_revision = ? WHERE id = ?",
+                arguments: ["credential-new", fixture.account.id.rawValue]
+            )
+        }
+        do {
+            _ = try await preferences.preferences(for: scope)
+            XCTFail("A preference read must be revision-fenced.")
+        } catch {
+            XCTAssertEqual(error as? RepositoryRankingPreferenceRepositoryError, .staleSynchronizationScope)
+        }
+    }
+
     func testRepositoryReconciliationHandlesRenameWithoutChangingImmutableIdentity() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
