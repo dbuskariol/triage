@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import Triage
 
@@ -13,6 +14,10 @@ final class PrivateDataArtifactsTests: XCTestCase {
         XCTAssertTrue(artifacts.artifacts.allSatisfy { $0.url.path.contains("account-1") })
         XCTAssertTrue(artifacts.artifacts.contains { $0.kind == .vault })
         XCTAssertTrue(artifacts.artifacts.contains { $0.kind == .copilotState })
+        XCTAssertEqual(
+            artifacts.artifacts.first(where: { $0.kind == .copilotScratch })?.url.path,
+            "/support/Triage/CopilotXPC/account-1"
+        )
     }
 
     func testDeletionClosesOpenVaultBeforeSecretErasureAndRemovesEveryArtifact() async throws {
@@ -36,6 +41,12 @@ final class PrivateDataArtifactsTests: XCTestCase {
             applicationSupportDirectory: support,
             cachesDirectory: caches
         ).artifacts
+        let scratch = try XCTUnwrap(artifacts.first(where: { $0.kind == .copilotScratch }))
+        let staleScratch = scratch.url.appendingPathComponent("crashed-helper", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleScratch, withIntermediateDirectories: true)
+        try Data("private copilot input".utf8).write(
+            to: staleScratch.appendingPathComponent("request.json", isDirectory: false)
+        )
         for artifact in artifacts where artifact.kind != .vault {
             try FileManager.default.createDirectory(
                 at: artifact.url,
@@ -71,6 +82,7 @@ final class PrivateDataArtifactsTests: XCTestCase {
         XCTAssertTrue(artifacts.allSatisfy {
             !FileManager.default.fileExists(atPath: $0.url.path)
         })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleScratch.path))
         XCTAssertFalse(vaultIsOpen)
         XCTAssertTrue(removalIsActive)
     }
@@ -196,6 +208,39 @@ final class PrivateDataArtifactsTests: XCTestCase {
         XCTAssertEqual(marker, "kept")
         XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
         try await registry.closeAll()
+    }
+
+    func testCryptoErasureWaitsForPreErasureControllerDrain() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let registry = try VaultRegistry(rootDirectory: support.appendingPathComponent("Triage", isDirectory: true))
+        let events = DeletionEventLog()
+        let drain = DeletionBarrier()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in
+                await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true)
+            },
+            willBeginCryptoErasure: { await drain.pause() }
+        )
+
+        let removal = Task { try await service.removeAllPrivateData(for: accountID) }
+        await drain.waitUntilPaused()
+        let erasuresBeforeDrain = await events.secretErasures()
+        XCTAssertEqual(erasuresBeforeDrain, 0)
+
+        await drain.resume()
+        try await removal.value
+        let erasuresAfterDrain = await events.secretErasures()
+        XCTAssertEqual(erasuresAfterDrain, 1)
     }
 
     func testInterruptedPostErasureDeletionReplaysItsJournalAfterProcessRestart() async throws {
@@ -364,9 +409,11 @@ final class PrivateDataArtifactsTests: XCTestCase {
         )
         try await assertInterruptedDeletion(interrupted, accountID: accountID)
         let journalURL = journalURL(for: accountID, support: support)
-        try Data(
-            "{\"version\":1,\"accountID\":\"\(accountID.rawValue)\",\"checksum\":\"tampered\"}".utf8
-        ).write(to: journalURL, options: .atomic)
+        var tamperedV2 = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as? [String: Any]
+        )
+        tamperedV2["signature"] = Data(repeating: 0, count: 32).base64EncodedString()
+        try JSONSerialization.data(withJSONObject: tamperedV2).write(to: journalURL, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: journalURL.path
@@ -398,6 +445,27 @@ final class PrivateDataArtifactsTests: XCTestCase {
 
         XCTAssertEqual(unsupportedReplay, [])
         XCTAssertEqual(erasuresAfterUnsupportedVersion, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
+
+        // Version 1's public SHA-256 checksum was forgeable. A syntactically
+        // valid legacy journal must not authorize irreversible recovery after
+        // the authenticated v2 format ships.
+        let legacyMaterial = "triage-account-deletion-journal\u{1F}1\u{1F}\(accountID.rawValue)"
+        let legacyChecksum = SHA256.hash(data: Data(legacyMaterial.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try Data(
+            "{\"version\":1,\"accountID\":\"\(accountID.rawValue)\",\"checksum\":\"\(legacyChecksum)\"}".utf8
+        ).write(to: journalURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: journalURL.path
+        )
+        let forgedLegacyReplay = try await recovery.recoverInterruptedRemovals()
+        let erasuresAfterForgedLegacy = await events.secretErasures()
+
+        XCTAssertEqual(forgedLegacyReplay, [])
+        XCTAssertEqual(erasuresAfterForgedLegacy, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
     }
 

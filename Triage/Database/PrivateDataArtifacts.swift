@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 enum PrivateDataArtifactKind: String, CaseIterable, Sendable {
     case vault
@@ -8,6 +9,7 @@ enum PrivateDataArtifactKind: String, CaseIterable, Sendable {
     case previews
     case notificationMetadata
     case copilotState
+    case copilotScratch
     case recovery
 }
 
@@ -39,6 +41,12 @@ struct AccountPrivateDataArtifacts: Sendable {
                 kind: .copilotState,
                 url: support
                     .appendingPathComponent("Copilot", isDirectory: true)
+                    .appendingPathComponent(accountID.rawValue, isDirectory: true)
+            ),
+            PrivateDataArtifact(
+                kind: .copilotScratch,
+                url: support
+                    .appendingPathComponent("CopilotXPC", isDirectory: true)
                     .appendingPathComponent(accountID.rawValue, isDirectory: true)
             ),
             PrivateDataArtifact(
@@ -88,31 +96,102 @@ enum AccountDataRemovalError: Error, Equatable, Sendable {
 }
 
 private struct AccountDeletionJournal: Codable, Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     let version: Int
     let accountID: AccountID
-    let checksum: String
+    let signature: Data
 
-    init(accountID: AccountID) {
+    init(accountID: AccountID, signature: Data) {
         version = Self.currentVersion
         self.accountID = accountID
-        checksum = Self.checksum(version: version, accountID: accountID)
+        self.signature = signature
     }
 
-    var isValid: Bool {
-        version == Self.currentVersion
-            && checksum == Self.checksum(version: version, accountID: accountID)
-    }
-
-    private static func checksum(version: Int, accountID: AccountID) -> String {
-        let material = "triage-account-deletion-journal\u{1F}\(version)\u{1F}\(accountID.rawValue)"
-        return SHA256.hash(data: Data(material.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+    func isValid(using authority: any AccountDeletionJournalAuthenticating) throws -> Bool {
+        guard version == Self.currentVersion else { return false }
+        return try authority.verify(signature: signature, accountID: accountID)
     }
 }
 
+/// The recovery journal authorizes irreversible key erasure after restart, so
+/// its authentication key must not live beside the journal. This separate,
+/// device-only Keychain item survives per-account secret removal long enough
+/// to validate an interrupted deletion, but is never synced or exposed to XPC.
+protocol AccountDeletionJournalAuthenticating: Sendable {
+    func sign(accountID: AccountID) throws -> Data
+    func verify(signature: Data, accountID: AccountID) throws -> Bool
+}
+
+private final class AccountDeletionJournalKeychainAuthority: AccountDeletionJournalAuthenticating, @unchecked Sendable {
+    static let shared = AccountDeletionJournalKeychainAuthority()
+
+    private static let service = "com.triage.mac.deletion-journal-authority"
+    private static let account = "v2"
+    private static let keyLength = 32
+
+    func sign(accountID: AccountID) throws -> Data {
+        try mac(for: accountID, createIfMissing: true)
+    }
+
+    func verify(signature: Data, accountID: AccountID) throws -> Bool {
+        let expected = try mac(for: accountID, createIfMissing: false)
+        return constantTimeEqual(signature, expected)
+    }
+
+    private func mac(for accountID: AccountID, createIfMissing: Bool) throws -> Data {
+        let material = Data("triage-account-deletion-journal\u{1F}2\u{1F}\(accountID.rawValue)".utf8)
+        let key = SymmetricKey(data: try keyData(createIfMissing: createIfMissing))
+        return Data(HMAC<SHA256>.authenticationCode(for: material, using: key))
+    }
+
+    private func keyData(createIfMissing: Bool) throws -> Data {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let readStatus = SecItemCopyMatching(query as CFDictionary, &result)
+        if readStatus == errSecSuccess {
+            guard let key = result as? Data, key.count == Self.keyLength else {
+                throw SecretStoreError.unexpectedKeychainValue
+            }
+            return key
+        }
+        guard readStatus == errSecItemNotFound, createIfMissing else {
+            throw SecretStoreError.keychain(readStatus)
+        }
+
+        var bytes = [UInt8](repeating: 0, count: Self.keyLength)
+        let randomStatus = bytes.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, Self.keyLength, $0.baseAddress!)
+        }
+        guard randomStatus == errSecSuccess else { throw SecretStoreError.keychain(randomStatus) }
+        let generated = Data(bytes)
+        var insert = baseQuery
+        insert[kSecValueData as String] = generated
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let insertStatus = SecItemAdd(insert as CFDictionary, nil)
+        if insertStatus == errSecSuccess { return generated }
+        guard insertStatus == errSecDuplicateItem else { throw SecretStoreError.keychain(insertStatus) }
+        // A concurrent deletion began first. Read the established authority;
+        // never replace it while a journal may already depend on it.
+        return try keyData(createIfMissing: false)
+    }
+
+    private var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: Self.account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+        ]
+    }
+
+    private func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
+    }
+}
 actor AccountDataRemovalService {
     private let vaultRegistry: VaultRegistry
     private let applicationSupportDirectory: URL
@@ -120,12 +199,14 @@ actor AccountDataRemovalService {
     private let eraseSecrets: @Sendable (AccountID) async throws -> Void
     private let eraseArtifacts: @Sendable ([PrivateDataArtifact]) throws -> Void
     private let willBeginCryptoErasure: @Sendable () async -> Void
+    private let journalAuthority: any AccountDeletionJournalAuthenticating
 
     init(
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
         applicationSupportDirectory: URL,
-        cachesDirectory: URL
+        cachesDirectory: URL,
+        willBeginCryptoErasure: @escaping @Sendable () async -> Void = {}
     ) {
         self.vaultRegistry = vaultRegistry
         self.applicationSupportDirectory = applicationSupportDirectory
@@ -134,7 +215,8 @@ actor AccountDataRemovalService {
             try await secretStore.removeAllSecrets(for: accountID)
         }
         eraseArtifacts = Self.removeArtifacts
-        willBeginCryptoErasure = {}
+        self.willBeginCryptoErasure = willBeginCryptoErasure
+        journalAuthority = AccountDeletionJournalKeychainAuthority.shared
     }
 
     init(
@@ -143,7 +225,8 @@ actor AccountDataRemovalService {
         cachesDirectory: URL,
         eraseSecrets: @escaping @Sendable (AccountID) async throws -> Void,
         eraseArtifacts: (@Sendable ([PrivateDataArtifact]) throws -> Void)? = nil,
-        willBeginCryptoErasure: (@Sendable () async -> Void)? = nil
+        willBeginCryptoErasure: (@Sendable () async -> Void)? = nil,
+        journalAuthority: (any AccountDeletionJournalAuthenticating)? = nil
     ) {
         self.vaultRegistry = vaultRegistry
         self.applicationSupportDirectory = applicationSupportDirectory
@@ -151,6 +234,7 @@ actor AccountDataRemovalService {
         self.eraseSecrets = eraseSecrets
         self.eraseArtifacts = eraseArtifacts ?? Self.removeArtifacts
         self.willBeginCryptoErasure = willBeginCryptoErasure ?? {}
+        self.journalAuthority = journalAuthority ?? AccountDeletionJournalKeychainAuthority.shared
     }
 
     func removeAllPrivateData(for accountID: AccountID) async throws {
@@ -185,7 +269,7 @@ actor AccountDataRemovalService {
             // Persist intent before deleting the vault key. If the process is
             // interrupted after this point, only this explicit account-removal
             // journal authorizes startup recovery to resume erasure.
-            try Self.writeDeletionJournal(
+            try writeDeletionJournal(
                 for: accountID,
                 applicationSupportDirectory: applicationSupportDirectory
             )
@@ -220,7 +304,7 @@ actor AccountDataRemovalService {
     /// account removal. It never treats a missing source response, a missing
     /// key, or an unjournaled vault directory as authorization to delete data.
     func recoverInterruptedRemovals() async throws -> [AccountID] {
-        let accountIDs = try Self.interruptedDeletionAccountIDs(
+        let accountIDs = try interruptedDeletionAccountIDs(
             applicationSupportDirectory: applicationSupportDirectory
         )
         for accountID in accountIDs {
@@ -231,47 +315,56 @@ actor AccountDataRemovalService {
 
     private static func removeArtifacts(_ artifacts: [PrivateDataArtifact]) throws {
         for artifact in artifacts {
-            if FileManager.default.fileExists(atPath: artifact.url.path) {
-                try FileManager.default.removeItem(at: artifact.url)
-            }
+            let root = artifact.kind == .vault
+                || artifact.kind == .copilotState
+                || artifact.kind == .copilotScratch
+                || artifact.kind == .recovery
+                ? artifact.url.deletingLastPathComponent().deletingLastPathComponent()
+                : artifact.url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let components = artifact.url.standardizedFileURL.path
+                .dropFirst(root.standardizedFileURL.path.count + 1)
+                .split(separator: "/")
+                .map(String.init)
+            try NoFollowFilesystem.removeTreeIfPresent(beneath: root, components: components)
         }
     }
 
-    private static func writeDeletionJournal(
+    private func writeDeletionJournal(
         for accountID: AccountID,
         applicationSupportDirectory: URL
     ) throws {
-        let journalURL = deletionJournalURL(
-            for: accountID,
-            applicationSupportDirectory: applicationSupportDirectory
+        let components = ["Triage", "Recovery", accountID.rawValue]
+        do {
+            try NoFollowFilesystem.ensureDirectory(
+                at: applicationSupportDirectory,
+                components: components
+            )
+        } catch {
+            throw AccountDataRemovalError.unsafeArtifactPath
+        }
+        let journal = AccountDeletionJournal(
+            accountID: accountID,
+            signature: try journalAuthority.sign(accountID: accountID)
         )
-        try ensurePrivateDirectory(
-            journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent(),
-            beneath: applicationSupportDirectory
-        )
-        try ensurePrivateDirectory(
-            journalURL.deletingLastPathComponent().deletingLastPathComponent(),
-            beneath: applicationSupportDirectory
-        )
-        try ensurePrivateDirectory(
-            journalURL.deletingLastPathComponent(),
-            beneath: applicationSupportDirectory
-        )
-        let journal = AccountDeletionJournal(accountID: accountID)
-        try JSONEncoder().encode(journal).write(to: journalURL, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: journalURL.path
-        )
+        do {
+            try NoFollowFilesystem.writeFileAtomically(
+                beneath: applicationSupportDirectory,
+                directoryComponents: components,
+                name: "account-deletion.json",
+                data: try JSONEncoder().encode(journal)
+            )
+        } catch {
+            throw AccountDataRemovalError.unsafeArtifactPath
+        }
     }
 
-    private static func interruptedDeletionAccountIDs(
+    private func interruptedDeletionAccountIDs(
         applicationSupportDirectory: URL
     ) throws -> [AccountID] {
         let recoveryDirectory = applicationSupportDirectory
             .appendingPathComponent("Triage", isDirectory: true)
             .appendingPathComponent("Recovery", isDirectory: true)
-        try assertSafePath(recoveryDirectory, beneath: applicationSupportDirectory)
+        try Self.assertSafePath(recoveryDirectory, beneath: applicationSupportDirectory)
         let triageDirectory = recoveryDirectory.deletingLastPathComponent()
         // A normal vault-only installation has no recovery directory and is
         // never deletion authorization. Return before inspecting the ordinary
@@ -280,8 +373,8 @@ actor AccountDataRemovalService {
             return []
         }
         guard FileManager.default.fileExists(atPath: triageDirectory.path),
-              try isPrivateDirectoryWithoutSymlink(triageDirectory),
-              try isPrivateDirectoryWithoutSymlink(recoveryDirectory)
+              try Self.isPrivateDirectoryWithoutSymlink(triageDirectory),
+              try Self.isPrivateDirectoryWithoutSymlink(recoveryDirectory)
         else {
             throw AccountDataRemovalError.unsafeArtifactPath
         }
@@ -291,18 +384,21 @@ actor AccountDataRemovalService {
             options: [.skipsHiddenFiles]
         )
         return directories.compactMap { directory in
-            guard (try? isPrivateDirectoryWithoutSymlink(directory)) == true,
+            guard (try? Self.isPrivateDirectoryWithoutSymlink(directory)) == true,
                   let accountID = AccountID(rawValue: directory.lastPathComponent),
-                  isOpaqueAccountID(accountID)
+                  Self.isOpaqueAccountID(accountID)
             else {
                 return nil
             }
-            let journalURL = directory.appendingPathComponent("account-deletion.json")
-            guard !isSymbolicLink(journalURL),
-                  hasExactPermissions(journalURL, expected: 0o600),
-                  let data = try? Data(contentsOf: journalURL),
+            guard let data = try? NoFollowFilesystem.readRegularFileIfPresent(
+                    beneath: applicationSupportDirectory,
+                    directoryComponents: ["Triage", "Recovery", accountID.rawValue],
+                    name: "account-deletion.json",
+                    maximumBytes: 16 * 1_024,
+                    expectedPermissions: 0o600
+                  ),
                   let journal = try? JSONDecoder().decode(AccountDeletionJournal.self, from: data),
-                  journal.isValid,
+                  (try? journal.isValid(using: journalAuthority)) == true,
                   journal.accountID == accountID
             else {
                 return nil
@@ -337,7 +433,10 @@ actor AccountDataRemovalService {
         let cacheRoot = cachesDirectory.standardizedFileURL
             .appendingPathComponent("Triage", isDirectory: true)
         for artifact in artifacts {
-            let expectedRoot = artifact.kind == .vault || artifact.kind == .copilotState || artifact.kind == .recovery
+            let expectedRoot = artifact.kind == .vault
+                || artifact.kind == .copilotState
+                || artifact.kind == .copilotScratch
+                || artifact.kind == .recovery
                 ? supportRoot
                 : cacheRoot
             try assertSafePath(artifact.url, beneath: expectedRoot.deletingLastPathComponent())
