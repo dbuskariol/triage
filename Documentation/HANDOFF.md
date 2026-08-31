@@ -1,14 +1,17 @@
 # Triage development handoff
 
-**Handoff state:** `d61c378` (`Close coordinator authority and native acceptance
-gaps`) is the current committed local acceptance checkpoint. Its combined Debug
-test bundle, focused selectors, unit/XPC suite, and unsigned universal Release
-bundle are validated below. Triage is **not** globally complete: the final UI
-runner remains host-environment blocked, two identity replay/cardinality contract
-items remain local work, and controlled live validation, the
-approved Copilot runtime, and release operations remain external or explicitly
-authorized work. This document records the local closure chronology and the
-exact residual order.
+**Handoff state:** `a77fa56` (`Align native Settings sidebar chrome`) is the
+current committed local acceptance checkpoint. The production integration graph,
+post-account identity replay, GraphQL cardinality closure, native workspace, and
+Settings chrome are complete locally. Combined Debug builds, focused selectors,
+the deterministic unit/XPC suite, runtime accessibility geometry, and the
+unsigned universal Release bundle are validated below. Triage is **not** globally
+complete: the macOS UI-test runner still cannot bootstrap on this host, OAuth
+deployment values and controlled live GitHub access are not supplied, Copilot
+remains intentionally fail-closed without an approved runtime, and signing,
+notarization, and release operations remain external or explicitly authorized
+work. This document records the local closure chronology and the exact residual
+order.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -22,12 +25,12 @@ boundaries, sequencing, and acceptance criteria.
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
 - Production integration commit: `9d9a566`
-- Current committed local acceptance checkpoint: `d61c378`
+- Current committed local acceptance checkpoint: `a77fa56`
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
   tag, publication, notarization, release finalization, or release-automation
   change was performed during this continuation.
-- The product is **not complete**. The final acceptance walkthrough and the
-  remaining work below are still mandatory.
+- The product is **not globally complete**. The externally dependent acceptance
+  and release work below remains mandatory.
 
 The application is a Swift 6 native macOS 26 app. It uses SwiftUI, AppKit only
 where Mac-specific behavior requires it, GRDB/SQLCipher for per-account
@@ -47,11 +50,14 @@ content, local-repository scanning, or GitHub mutations.
 | Security and accessibility | Passed | 143/143 focused security/accessibility coverage. |
 | Current acceptance regression set | Passed | 180/180 from the freshly regenerated canonical bundle, including cache revision fencing, background/wake scheduling, derived batching/cancellation, notifications, native workflow/navigation, accessibility, and encrypted migration fixtures. |
 | Review authority/failure regression set | Passed | 36/36: semantic REST raw binding, accumulated and zero-body classified failures, corroboration, and atomic reconciliation. |
-| Full unit and fail-closed XPC suite | Passed | 943/943, zero failures or skips, from `/tmp/triage-final-unit-xpc-20260831-1125.xcresult`. |
-| Unsigned universal Release build | Passed | `Triage` and `TriageCopilotXPC` both contain `x86_64 arm64`; privacy manifest passes `plutil`; bundle identifier/version/minimum OS are `com.triage.mac` / `0.1.0` / `26.0`. |
-| `git diff --check` | Passed | No whitespace errors at this handoff update. |
-| Previous full-verifier attempt | Environment-blocked | 883 unit tests passed; the UI runner received `SIGKILL` before bootstrap. This is not a UI/product acceptance result. |
-| Final `scripts/verify-ci.sh` | Environment-blocked | Its product/unit phase is covered by the green canonical runs above, but this host still cannot bootstrap `TriageUITests-Runner`; no overall verifier-green claim is made. |
+| Final convergence selectors | Passed | 192/192 across identity replay, daily identity refresh, inventory, GraphQL/Projects V2, review receipts, derived inputs, workspace state/accessibility, work-list selection, and account persistence. |
+| Native Settings layout selector | Passed | 10/10 `AppNavigationModelTests`, including the explicit Settings sidebar width/alignment contract. |
+| Full unit and fail-closed XPC suite | Passed | 997/997, zero failures or skips, from `/tmp/triage-residual-full.xcresult`. |
+| Canonical verifier deterministic phase | Passed | 998 deterministic tests passed with zero skips in `/Users/nftdannyboy/Library/Developer/Xcode/DerivedData/Triage/CI/Logs/Test/Test-Triage-2026.08.31_12-28-59-+1000.xcresult`; its only reported failure is the pre-test UI-runner bootstrap below. |
+| Native Settings runtime geometry | Passed | Live Accessibility inspection on macOS 27 proves one unified full-size titlebar; the system sidebar control occupies y=206--246 beside the traffic lights, and the first sidebar row and detail heading both begin at y=266. PAT presentation was also inspected without an inherited pre-submission OAuth configuration error. |
+| Unsigned universal Release build | Passed | Post-Settings-fix `Triage` and `TriageCopilotXPC` both contain `x86_64 arm64`; app, XPC, and privacy plists pass `plutil`; bundle identifier/version/build/minimum OS are `com.triage.mac` / `0.1.0` / `1` / `26.0`. |
+| `git diff --check` | Passed | No whitespace errors before the handoff documentation update. |
+| Final `scripts/verify-ci.sh` | Environment-blocked | The ad-hoc canonical runner could not load `TriageUITests.xctest` because the sandboxed runner and mapped bundle were treated as different Team IDs. An isolated Apple Development-signed retry cleared that error but hung before XCTest bootstrap in `libsecinit` waiting on its sandbox XPC reply. No UI test method ran and no overall verifier-green claim is made. |
 
 Focused evidence proves the committed local slices only. It does not replace
 the blocked UI runner, controlled live GitHub, Copilot, signing, notarization,
@@ -123,15 +129,26 @@ Subsequent local continuation commits, also on `main`, are:
   corroboration, derived provisional/batching/cancellation hardening,
   notification-vault lifecycle, accessibility injection, follow-up dates,
   scope-safe navigation history, and native workspace completion: `d61c378`.
+- production selected-organization metadata replay, credential-replacement and
+  daily active-account identity refresh, migration `046` identity receipts,
+  exact `/user/orgs` and `/orgs/{org}` conditional authority, GraphQL
+  connection-cardinality closure, REST team `304` retry, review traversal
+  bounds, stable work-list multi-selection, PAT/OAuth error isolation, and
+  adversarial fixtures: `40a835a`.
+- native Settings `NavigationSplitView`, wider non-truncating sidebar, unified
+  full-size titlebar, system sidebar-toggle placement, exact sidebar/detail
+  vertical alignment, and focused layout coverage: `a77fa56`.
 
 ### Current local acceptance validation wave
 
-The acceptance corrections are committed in `d61c378`. The canonical Debug
-bundle compiled, focused selectors passed 180/180 plus the review group 36/36,
-the full unit/XPC suite passed 943/943, and the unsigned universal Release
-bundle passed architecture/privacy/bundle inspection. These results do not
-imply UI-runner, live GitHub, Copilot, signing, notarization, or release
-acceptance.
+The final local corrections are committed through `a77fa56`. The canonical
+Debug bundle compiled, focused convergence selectors passed 192/192, the
+Settings selector passed 10/10, the independent full unit/XPC suite passed
+997/997, and the latest canonical verifier passed 998 deterministic tests
+before its UI runner failed to bootstrap. The post-fix unsigned universal
+Release bundle passed architecture/privacy/bundle inspection. These results do
+not imply UI-runner, live GitHub, Copilot, Developer ID signing, notarization,
+or release acceptance.
 
 The crash reports supplied during this checkpoint both describe the same old
 `OrganizationInventoryRefreshService.validateCurrentScope` GRDB row-subscript
@@ -425,34 +442,37 @@ artifact and release signing identity.
 
 ## Residual order after local integration
 
-The production integration graph is complete through the committed local
-acceptance checkpoint `d61c378`; do not reopen those finished edges merely
-because the work was originally split across tracks. The known remaining work,
-in required order, is:
+The production integration graph and every repository-local product slice are
+complete through the committed local acceptance checkpoint `a77fa56`; do not
+reopen those finished edges merely because the work was originally split across
+tracks. The known remaining work is externally dependent or host-environment
+acceptance, in this required order:
 
-1. Complete the remaining local GitHub contract work: encrypted exact-scope
-   replay owners for post-account `/user/orgs` and `/orgs/{org}` conditional
-   responses, plus the static connection-cardinality audit for committed
-   GraphQL documents (`labels(first: 100)` must either be independently paged
-   or explicitly fail incomplete within the mandatory `<= 50` contract). Keep
-   pre-account `/user` unconditional because no trusted account vault exists.
-2. Re-run `scripts/verify-ci.sh` when the host XCTest/LaunchServices UI-runner
-   bootstrap is healthy. The current canonical unit/XPC suite is 943/943 green,
-   but the prior UI runner was killed before XCTest connection and a later
-   isolated attempt hung before any test method launched.
+1. Supply a real GitHub OAuth App client ID and trusted HTTPS authentication
+   broker URL as deployment configuration. These values must not be guessed or
+   committed. PAT authentication remains independently usable and must not show
+   OAuth configuration errors before its own submission.
+2. Re-run `scripts/verify-ci.sh` on a host where the macOS XCTest runner can
+   bootstrap. The current run passed 998 deterministic tests, then the ad-hoc UI
+   runner failed its Team-ID mapping check before any UI test method. A locally
+   Apple Development-signed retry passed bundle signing but hung in `libsecinit`
+   before XCTest bootstrap. Do not classify either result as a product/UI test
+   failure or as UI acceptance.
 3. With controlled access to a real GitHub account and explicit authorization,
    run the live GitHub scenario matrix. Validate source authority, redacted
    failures, bodyless REST `403`/`404`, SSO/approval, pagination, conditional
-   reuse, deletion/recovery, and no-write behavior without adding live data to
-   the repository.
+   reuse, identity mismatch revocation, deletion/recovery, and no-write behavior
+   without adding live data to the repository.
 4. Keep Copilot fail-closed. Resume only after an approved redistributable
    runtime, SDK/entitlement, consent and policy decisions, signing identity,
    and their explicit authorization are supplied; then perform its isolated
    security and end-to-end acceptance.
-5. After a green local verifier and authorized live validation, perform the
-   final runtime acceptance walkthrough (native windows, commands, keyboard,
-   VoiceOver, appearance, resizing, restoration, performance, and security)
-   against the assembled app.
+5. On a UI-runner-capable host and with the authorized live configuration,
+   complete the final runtime walkthrough: windows, commands, keyboard,
+   VoiceOver, light/dark appearance, resizing, restoration, performance, and
+   security. The current host has direct runtime Accessibility evidence for
+   launch, Settings structure/alignment, and PAT presentation, but not the full
+   automated UI matrix.
 6. Release packaging, Developer ID signing, notarization, tag/publish, and
    release automation require their external credentials, a clean exact tag,
    and explicit authorization. They are not implied by this handoff.
@@ -461,13 +481,13 @@ in required order, is:
 
 | Track | Local status | Residual boundary |
 | --- | --- | --- |
-| Identity and organization metadata | Conditional client APIs reject validatorless `304` and expose exact validator evidence. | Add encrypted post-account `/user/orgs` and `/orgs/{org}` replay receipts; keep first-connect `/user` unconditional. |
+| Identity and organization metadata | Complete locally: encrypted exact-scope post-account `/user/orgs` and `/orgs/{org}` replay, daily `/user` identity revalidation, credential-replacement reconciliation, and mismatch revocation. First-connect `/user` remains correctly unconditional. | OAuth deployment values and controlled live GitHub validation. |
 | REST reviews and review threads | Complete: durable scoped failure provenance, narrow bodyless `403`/`404` grammar, fair retry, reconciliation, and derived input. | Controlled live GitHub validation. |
 | Discussions, comments, Projects V2, notifications | Complete: independently scoped retrieval, normalization, coverage, organization-work integration, and production notification/Settings wiring. | Controlled live GitHub validation. |
-| Account/organization lifecycle and derived intelligence | Complete: production composition, launch/active/wake/background/stop reachability, scope fences, post-normalized derived projection, and explicit outcome handling. | Full verifier and live acceptance. |
-| Observations and AppModel injection | Complete: explicit production dependencies and scoped UI publication. | Full verifier and runtime acceptance. |
-| Native UI, commands, and secure navigation | Complete locally, including production bindings and accessibility/security coverage. | Manual native runtime acceptance. |
-| Deletion/recovery, encrypted fixtures, performance, accessibility, security | Complete local implementation and focused test coverage, including encrypted `039` to `045` migration/tamper, privacy diagnostics, and deletion disclosure. | Controlled live/final acceptance where applicable. |
+| Account/organization lifecycle and derived intelligence | Complete: production composition, launch/active/wake/background/stop reachability, scope fences, post-normalized derived projection, and explicit outcome handling. | UI-runner and live acceptance. |
+| Observations and AppModel injection | Complete: explicit production dependencies and scoped UI publication. | UI-runner and runtime acceptance. |
+| Native UI, commands, and secure navigation | Complete locally, including production bindings, stable multi-selection, restoration, PAT error isolation, wider native Settings sidebar, unified titlebar, and accessibility/security coverage. | Full UI-runner and authorized runtime acceptance. |
+| Deletion/recovery, encrypted fixtures, performance, accessibility, security | Complete local implementation and focused test coverage, including encrypted `039` through `046` migration/tamper, privacy diagnostics, and deletion disclosure. | Controlled live/final acceptance where applicable. |
 | Copilot XPC | Hardened and intentionally fail-closed. | Approved runtime, signing, consent, and authorization. |
 
 ## Safety and release reminders
@@ -484,11 +504,12 @@ in required order, is:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- Focused tests through the committed `d61c378` checkpoint are recorded above;
-  the canonical unit/XPC suite is 943/943 green and the unsigned universal
-  Release bundle is valid. The prior verifier ended after 883 unit passes when
-  the UI runner was `SIGKILL`ed before bootstrap, so full UI/verifier acceptance
-  is still pending. Controlled live GitHub
-  validation, the externally approved Copilot runtime/signing/consent path,
-  Developer ID signing/notarization/publish, and final release acceptance remain
-  open and are not implied by local coverage.
+- Focused tests through the committed `a77fa56` checkpoint are recorded above;
+  the independent unit/XPC suite is 997/997 green, the latest canonical verifier
+  passed 998 deterministic tests before its sole UI-runner bootstrap failure,
+  and the post-fix unsigned universal Release bundle is valid. Full UI/verifier
+  acceptance is still pending because no UI test method launched on this host.
+  OAuth deployment configuration, controlled live GitHub validation, the
+  externally approved Copilot runtime/signing/consent path, Developer ID
+  signing/notarization/publish, and final release acceptance remain open and are
+  not implied by local coverage.
