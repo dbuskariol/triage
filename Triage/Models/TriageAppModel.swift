@@ -133,6 +133,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     @Published private(set) var connectionError: String?
     @Published private(set) var credentialActionNotice: String?
     @Published private(set) var refreshError: String?
+    @Published private(set) var searchIndexError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var isConnecting = false
     /// Serializes explicit encrypted-account restoration so recovery controls
@@ -1727,6 +1728,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
 
         ssoAuthorizationHeader = nil
         refreshError = nil
+        searchIndexError = nil
         isRefreshing = true
         defer {
             if refreshGeneration == generation {
@@ -1789,7 +1791,24 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             replaceWorkspaceObservation(for: scope)
             // Search indexing is independent from first Inbox presentation.
             // The page observer above can render while it catches up.
-            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
+            do {
+                try await rebuildSearchIndex(
+                    in: vault,
+                    accountID: account.id,
+                    organizationID: organization.id
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard
+                    refreshGeneration == generation,
+                    selectedAccountID == account.id,
+                    selectedOrganizationID == organization.id
+                else {
+                    return
+                }
+                searchIndexError = "GitHub work is current, but local search could not be updated."
+            }
         } catch is CancellationError {
             return
         } catch let error as OrganizationRefreshError {
@@ -1844,6 +1863,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         foregroundRefreshTaskID = nil
         ssoAuthorizationHeader = nil
         refreshError = nil
+        searchIndexError = nil
         selectedOrganizationFreshness = nil
         isRefreshing = false
     }
