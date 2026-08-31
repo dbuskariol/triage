@@ -52,14 +52,315 @@ final class TriageAppModelSelectionTests: XCTestCase {
         XCTAssertEqual(cache[thirdScope], 3)
     }
 
-    private func scope(account: AccountID, organization: OrganizationID) -> SynchronizationScope {
+    func testCredentialRotationEvictsEveryQualifiedWorkspaceForThatAccount() {
+        let accountA = AccountID.make()
+        let accountB = AccountID.make()
+        let organizationA = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let organizationB = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let scopeA = scope(account: accountA, organization: organizationA)
+        let scopeB = scope(account: accountB, organization: organizationB)
+        var cache = WorkspacePresentationCache<Int>()
+
+        cache[scopeA] = 1
+        cache[scopeB] = 2
+        cache.removeAll(for: accountA)
+
+        XCTAssertNil(cache[scopeA])
+        XCTAssertEqual(cache[scopeB], 2)
+    }
+
+    func testCapabilityRotationEvictsOnlyThatOrganizationsQualifiedWorkspace() {
+        let account = AccountID.make()
+        let firstOrganization = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let secondOrganization = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let firstScope = scope(account: account, organization: firstOrganization)
+        let secondScope = scope(account: account, organization: secondOrganization)
+        var cache = WorkspacePresentationCache<Int>()
+
+        cache[firstScope] = 1
+        cache[secondScope] = 2
+        cache.removeAll(for: account, organizationID: firstOrganization)
+
+        XCTAssertNil(cache[firstScope])
+        XCTAssertEqual(cache[secondScope], 2)
+    }
+
+    func testAccountSwitchPublishesItsLatestQualifiedCachedWorkspaceSynchronously() async throws {
+        let accountA = AccountID.make()
+        let accountB = AccountID.make()
+        let organizationA = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let organizationB = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let oldScopeA = scope(account: accountA, organization: organizationA, credential: "credential-a-old")
+        let currentScopeA = scope(account: accountA, organization: organizationA, credential: "credential-a-current")
+        let scopeB = scope(account: accountB, organization: organizationB, credential: "credential-b")
+        let oldItemA = workItem(account: accountA, organization: organizationA, id: "old-a")
+        let currentItemA = workItem(account: accountA, organization: organizationA, id: "current-a")
+        let itemB = workItem(account: accountB, organization: organizationB, id: "b")
+        let model = try makeModel()
+
+        model.install(
+            accounts: [account(accountA, suffix: "a"), account(accountB, suffix: "b")],
+            organizations: [organization(organizationA, suffix: "a")],
+            organizationAccesses: [organizationA: access(account: accountA, organization: organizationA)],
+            for: accountA
+        )
+        model.install(
+            accounts: [account(accountA, suffix: "a"), account(accountB, suffix: "b")],
+            organizations: [organization(organizationB, suffix: "b")],
+            organizationAccesses: [organizationB: access(account: accountB, organization: organizationB)],
+            for: accountB
+        )
+        model.install(workItems: [oldItemA], scope: oldScopeA)
+        model.install(workItems: [currentItemA], scope: currentScopeA)
+        model.install(workItems: [itemB], scope: scopeB)
+
+        model.selectAccount(accountA)
+
+        XCTAssertEqual(model.workItems, [currentItemA])
+        XCTAssertNotEqual(model.workItems, [oldItemA])
+        XCTAssertNotEqual(model.workItems, [itemB])
+        await model.shutdown()
+    }
+
+    func testOrganizationSwitchPublishesOnlyThatOrganizationsQualifiedCacheSynchronously() async throws {
+        let accountID = AccountID.make()
+        let firstOrganization = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let secondOrganization = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let firstScope = scope(account: accountID, organization: firstOrganization, credential: "credential-first")
+        let secondScope = scope(account: accountID, organization: secondOrganization, credential: "credential-second")
+        let firstItem = workItem(account: accountID, organization: firstOrganization, id: "first")
+        let secondItem = workItem(account: accountID, organization: secondOrganization, id: "second")
+        let model = try makeModel()
+
+        model.install(
+            accounts: [account(accountID, suffix: "only")],
+            organizations: [
+                organization(firstOrganization, suffix: "first"),
+                organization(secondOrganization, suffix: "second")
+            ],
+            organizationAccesses: [
+                firstOrganization: access(account: accountID, organization: firstOrganization),
+                secondOrganization: access(account: accountID, organization: secondOrganization)
+            ],
+            for: accountID
+        )
+        model.install(workItems: [firstItem], scope: firstScope)
+        model.install(workItems: [secondItem], scope: secondScope)
+
+        model.selectOrganization(secondOrganization)
+
+        XCTAssertEqual(model.workItems, [secondItem])
+        XCTAssertNotEqual(model.workItems, [firstItem])
+        await model.shutdown()
+    }
+
+    func testAccountRemovalEvictsNotificationDeliveryStateBeforeVaultRemoval() async throws {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let recorder = AccountRemovalOrderRecorder()
+        let model = try makeModel(
+            accountSession: AccountRemovalOrderSessionSpy(recorder: recorder),
+            workspaceObservationLifecycle: AccountRemovalObservationLifecycleSpy(recorder: recorder)
+        )
+        model.install(
+            accounts: [account(accountID, suffix: "removed")],
+            organizations: [organization(organizationID, suffix: "removed")],
+            organizationAccesses: [organizationID: access(account: accountID, organization: organizationID)],
+            for: accountID
+        )
+
+        try await model.removeAccount(accountID)
+
+        let events = await recorder.events()
+        XCTAssertEqual(events, [.evicted, .sessionRemoval])
+    }
+
+    private func scope(
+        account: AccountID,
+        organization: OrganizationID,
+        credential: String = "credential"
+    ) -> SynchronizationScope {
         SynchronizationScope(
             accountID: account,
             organizationID: organization,
-            credentialRevision: CredentialRevision(rawValue: "credential")!,
+            credentialRevision: CredentialRevision(rawValue: credential)!,
             capabilityRevision: CapabilityRevision(rawValue: "capability")!
         )
     }
+
+    private func makeModel(
+        accountSession: any AccountSessionServing = CacheSessionSpy(),
+        workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle()
+    ) throws -> TriageAppModel {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-app-model-cache-\(UUID().uuidString)", isDirectory: true)
+        return TriageAppModel(
+            dependencies: TriageApplicationDependencies(
+                accountSession: accountSession,
+                workspaceCoordinator: CacheCoordinatorSpy(),
+                refreshLifecycle: CacheLifecycleSpy(),
+                workspaceObserver: CacheObserverSpy(),
+                workspaceObservationLifecycle: workspaceObservationLifecycle,
+                workspaceMutator: CacheMutatorSpy()
+            ),
+            vaultRegistry: try VaultRegistry(rootDirectory: root),
+            defaults: UserDefaults(suiteName: "triage-app-model-cache-\(UUID().uuidString)")!
+        )
+    }
+
+    private func account(_ id: AccountID, suffix: String) -> GitHubAccount {
+        GitHubAccount(
+            id: id,
+            githubUserID: UInt64(abs(suffix.hashValue)),
+            nodeID: GitHubNodeID(rawValue: "account-\(suffix)")!,
+            login: "account-\(suffix)",
+            authenticationKind: .oauth,
+            credentialID: CredentialID(rawValue: "credential-\(suffix)")!,
+            credentialStatus: .active,
+            createdAt: .now
+        )
+    }
+
+    private func organization(_ id: OrganizationID, suffix: String) -> GitHubOrganization {
+        GitHubOrganization(
+            id: id,
+            githubOrganizationID: UInt64(abs(suffix.hashValue)),
+            nodeID: GitHubNodeID(rawValue: "organization-\(suffix)")!,
+            login: "organization-\(suffix)"
+        )
+    }
+
+    private func access(account: AccountID, organization: OrganizationID) -> OrganizationAccess {
+        OrganizationAccess(
+            accountID: account,
+            organizationID: organization,
+            state: .available,
+            capabilityRevision: CapabilityRevision(rawValue: "capability")!,
+            capabilities: [],
+            checkedAt: .now
+        )
+    }
+
+    private func workItem(account: AccountID, organization: OrganizationID, id: String) -> WorkItem {
+        WorkItem(
+            id: WorkItemID(rawValue: "work-\(id)")!,
+            accountID: account,
+            organizationID: organization,
+            primaryNodeID: GitHubNodeID(rawValue: "node-\(id)")!,
+            title: id,
+            state: .active,
+            sourceKind: .issue,
+            sourceURL: nil,
+            repository: nil,
+            members: [],
+            contextLinks: [],
+            relations: [],
+            attentionReasons: [],
+            actionItems: [],
+            workflow: WorkflowState(updatedAt: .now),
+            freshness: FreshnessState(status: .fresh),
+            lastRelevantActivityAt: .now,
+            score: AttentionScore(value: 0, breakdown: [:])
+        )
+    }
+}
+
+private actor CacheSessionSpy: AccountSessionServing {
+    func restoreAccounts() async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func connectOAuth(_: AuthBrokerExchangeRequest) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func connectPersonalAccessToken(_: PersonalAccessToken, resourceOwnerOrganization _: String?) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func reconnectOAuth(_: AuthBrokerExchangeRequest, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func replacePersonalAccessToken(_: PersonalAccessToken, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func removeAccount(_: AccountID) async throws {}
+
+    private func emptySnapshot() throws -> AccountSessionSnapshot {
+        try AccountSessionSnapshot(
+            accounts: [], organizationsByAccount: [:], organizationAccessesByAccount: [:], accountCapabilitiesByAccount: [:]
+        )
+    }
+}
+
+private actor AccountRemovalOrderRecorder {
+    enum Event: Equatable, Sendable {
+        case evicted
+        case sessionRemoval
+    }
+
+    private var storage: [Event] = []
+
+    func append(_ event: Event) {
+        storage.append(event)
+    }
+
+    func events() -> [Event] { storage }
+}
+
+private actor AccountRemovalOrderSessionSpy: AccountSessionServing {
+    private let recorder: AccountRemovalOrderRecorder
+
+    init(recorder: AccountRemovalOrderRecorder) {
+        self.recorder = recorder
+    }
+
+    func restoreAccounts() async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func connectOAuth(_: AuthBrokerExchangeRequest) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func connectPersonalAccessToken(_: PersonalAccessToken, resourceOwnerOrganization _: String?) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func reconnectOAuth(_: AuthBrokerExchangeRequest, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func replacePersonalAccessToken(_: PersonalAccessToken, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+
+    func removeAccount(_: AccountID) async throws {
+        await recorder.append(.sessionRemoval)
+    }
+
+    private func emptySnapshot() throws -> AccountSessionSnapshot {
+        try AccountSessionSnapshot(
+            accounts: [],
+            organizationsByAccount: [:],
+            organizationAccessesByAccount: [:],
+            accountCapabilitiesByAccount: [:]
+        )
+    }
+}
+
+private actor AccountRemovalObservationLifecycleSpy: WorkspaceObservationLifecycleHandling {
+    private let recorder: AccountRemovalOrderRecorder
+
+    init(recorder: AccountRemovalOrderRecorder) {
+        self.recorder = recorder
+    }
+
+    func evictAccount(_: AccountID) async {
+        await recorder.append(.evicted)
+    }
+
+    func shutdown() async {}
+}
+
+private actor CacheCoordinatorSpy: WorkspaceCoordinating {
+    func select(_: SynchronizationScope) async throws -> AccountOrganizationCoordinatorState? { nil }
+    func refresh(_: SynchronizationScope, priority _: AccountOrganizationRefreshPriority) async throws -> AccountOrganizationCoordinatorState? { nil }
+    func cancel(_: SynchronizationScope) async throws {}
+    func cancelAll(for _: AccountID) async throws {}
+    func shutdown() async {}
+}
+
+private actor CacheLifecycleSpy: OrganizationRefreshLifecycleHandling {
+    func launch(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func applicationDidBecomeActive(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func wake(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func scheduleOpportunisticBackgroundRefresh(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func stop() async {}
+}
+
+private actor CacheObserverSpy: WorkspaceObserving {
+    func snapshots(for _: SynchronizationScope) async throws -> AsyncThrowingStream<WorkspacePresentationSnapshot, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private actor CacheMutatorSpy: WorkspaceMutating {
+    func apply(_: WorkflowAction, to _: WorkItemID, in _: SynchronizationScope) async throws {}
+    func completeActionItem(_: ActionItemID, in _: WorkItemID, scope _: SynchronizationScope) async throws {}
 }
 
 private actor ActivationBarrier {

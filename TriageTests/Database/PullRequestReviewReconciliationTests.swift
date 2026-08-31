@@ -391,7 +391,8 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         )
         let service = PullRequestReviewRefreshService(
             client: GitHubPullRequestClient(client: restClient),
-            candidateRepository: PullRequestReviewCandidateRepository(vault: fixture.vault)
+            candidateRepository: PullRequestReviewCandidateRepository(vault: fixture.vault),
+            corroborationOverride: .agreement
         )
 
         let result = try await service.refresh(
@@ -681,7 +682,11 @@ private final class Fixture: @unchecked Sendable {
             number: pullRequestNumber,
             sourceRevision: pullRequest.sourceRevision
         )
-        let page = { (requestKey: String) in
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let reviewPayload = try encoder.encode(reviews)
+        let requestedReviewerPayload = try encoder.encode(requestedReviewers)
+        let page = { (requestKey: String, payload: Data) in
             ReviewCandidateTraversalPage(
                 ordinal: 1,
                 rawSnapshotID: .make(),
@@ -692,7 +697,7 @@ private final class Fixture: @unchecked Sendable {
                     requestKey: requestKey
                 ),
                 endpoint: requestKey,
-                payload: Data("{}".utf8),
+                payload: payload,
                 isTerminal: true
             )
         }
@@ -712,11 +717,17 @@ private final class Fixture: @unchecked Sendable {
                 segments: [
                     .init(
                         kind: .reviewHistory,
-                        pages: [page("GET /repos/github/triage/pulls/\(pullRequestNumber)/reviews?per_page=100")]
+                        pages: [page(
+                            "GET /repos/github/triage/pulls/\(pullRequestNumber)/reviews?per_page=100",
+                            reviewPayload
+                        )]
                     ),
                     .init(
                         kind: .requestedReviewers,
-                        pages: [page("GET /repos/github/triage/pulls/\(pullRequestNumber)/requested_reviewers")]
+                        pages: [page(
+                            "GET /repos/github/triage/pulls/\(pullRequestNumber)/requested_reviewers",
+                            requestedReviewerPayload
+                        )]
                     )
                 ]
             )

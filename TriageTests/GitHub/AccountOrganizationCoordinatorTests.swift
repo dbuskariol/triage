@@ -247,6 +247,26 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(state?.schedulerState?.nextIncrementalRefreshAt, fixture.date(3_600))
     }
 
+    func testWakeBypassesCadenceWithHighPriorityIncrementalRefresh() async throws {
+        let fixture = CoordinatorFixture()
+        let scope = fixture.scope()
+        await fixture.scheduleStore.install(
+            fixture.schedule(scope: scope, incrementalOffset: 3_600, fullOffset: 7_200)
+        )
+
+        try await fixture.coordinator.applicationDidWake(
+            synchronizationScopes: [scope],
+            activeAccountID: scope.accountID
+        )
+
+        let request = try await fixture.operation.request(at: 0)
+        XCTAssertEqual(request.priority, .wake)
+        XCTAssertEqual(request.requestPriority, .selectedOrganizationRefresh)
+        XCTAssertEqual(request.reconciliationIntent, .incremental)
+        try await fixture.coordinator.cancelRefresh(for: fixture.accountOrganizationScope(scope))
+        try await fixture.operation.awaitCancellation(of: request)
+    }
+
     func testRateLimitAndEveryAccessBlockPreventAllDispatch() async throws {
         let fixture = CoordinatorFixture()
         let rateLimited = fixture.scope(organization: "rate")

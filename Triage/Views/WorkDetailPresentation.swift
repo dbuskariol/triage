@@ -31,6 +31,28 @@ enum WorkDetailPresentation {
         hasSelection
     }
 
+    /// The inspector can supply an explicit follow-up date while the keyboard
+    /// command keeps its existing immediate Waiting behavior. Archived work
+    /// never exposes a waiting transition.
+    static func waitingAction(
+        for workflow: WorkflowState,
+        followUpAt: Date? = nil
+    ) -> WorkflowAction? {
+        switch workflow.status {
+        case .active:
+            .markWaiting(followUpAt: followUpAt)
+        case .waiting:
+            .clearWaiting
+        case .archived:
+            nil
+        }
+    }
+
+    static func defaultFollowUpDate(from date: Date, calendar: Calendar = .current) -> Date {
+        calendar.date(byAdding: .day, value: 1, to: date)
+            ?? date.addingTimeInterval(86_400)
+    }
+
     static func sourceTitle(_ kind: GitHubContentKind) -> String {
         switch kind {
         case .issue: "Issue"

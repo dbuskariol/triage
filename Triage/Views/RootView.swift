@@ -6,6 +6,7 @@ struct RootView: View {
     @Environment(\.openSettings) private var openSettings
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var appModel: TriageAppModel
+    @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
 
     var body: some View {
@@ -24,6 +25,21 @@ struct RootView: View {
             if !hasConnectedAccount {
                 hasCompletedOnboarding = false
             }
+        }
+        .onChange(of: navigation.section) { _, section in
+            workspaceAccessibility.sidebarSelectionChanged(to: section)
+        }
+        .onChange(of: appModel.selectedWorkItemID) { previousID, workItemID in
+            guard workItemID != nil, workItemID != previousID else { return }
+            workspaceAccessibility.workItemSelectionChanged()
+        }
+        .onChange(of: presentation.synchronizationStatus) { previousStatus, status in
+            guard status != previousStatus else { return }
+            workspaceAccessibility.synchronizationStatusChanged(to: status)
+        }
+        .onChange(of: appModel.refreshError) { previousError, error in
+            guard error != nil, error != previousError else { return }
+            workspaceAccessibility.refreshFailed()
         }
         .onChange(of: scenePhase) { _, phase in
             Task {
@@ -74,6 +90,32 @@ struct RootView: View {
                     .help(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
                     .accessibilityLabel(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
                 }
+                ToolbarItemGroup(placement: .navigation) {
+                    Button {
+                        navigateSelectionBack()
+                    } label: {
+                        Label("Back", systemImage: "chevron.backward")
+                    }
+                    .disabled(!canNavigateSelectionBack)
+                    .help("Previous work item")
+                    .accessibilityHint("Moves to the previous work item in this organization.")
+
+                    Button {
+                        navigateSelectionForward()
+                    } label: {
+                        Label("Forward", systemImage: "chevron.forward")
+                    }
+                    .disabled(!canNavigateSelectionForward)
+                    .help("Next work item")
+                    .accessibilityHint("Moves to the next work item in this organization.")
+                }
+                if !navigation.isSidebarVisible, let organization = appModel.selectedOrganization {
+                    ToolbarItem(placement: .principal) {
+                        Text(organization.displayName ?? organization.login)
+                            .lineLimit(1)
+                            .accessibilityLabel("Selected organization \(organization.displayName ?? organization.login)")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task {
@@ -93,6 +135,44 @@ struct RootView: View {
             get: { navigation.isSidebarVisible ? .all : .doubleColumn },
             set: { navigation.isSidebarVisible = $0 == .all }
         )
+    }
+
+    private var validWorkItemIDs: Set<WorkItemID> {
+        Set(appModel.workItems.map(\.id))
+    }
+
+    private var canNavigateSelectionBack: Bool {
+        navigation.canNavigateSelectionBack(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
+    }
+
+    private var canNavigateSelectionForward: Bool {
+        navigation.canNavigateSelectionForward(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
+    }
+
+    private func navigateSelectionBack() {
+        guard let workItemID = navigation.navigateSelectionBack(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        ) else { return }
+        appModel.selectedWorkItemID = workItemID
+    }
+
+    private func navigateSelectionForward() {
+        guard let workItemID = navigation.navigateSelectionForward(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        ) else { return }
+        appModel.selectedWorkItemID = workItemID
     }
 
     @ViewBuilder

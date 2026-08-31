@@ -10,10 +10,30 @@ protocol AccountOrganizationLifecycleRunning: Sendable {
         activeAccountID: AccountID?
     ) async throws
 
+    func wake(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID: AccountID?
+    ) async throws
+
     func cancelAll() async throws
 }
 
 extension AccountOrganizationRefreshRuntime: AccountOrganizationLifecycleRunning {}
+
+extension AccountOrganizationLifecycleRunning {
+    /// Runtimes that do not distinguish wake from ordinary activation retain
+    /// their existing behavior. The production runtime overrides this to
+    /// dispatch the wake-specific high-priority incremental trigger.
+    func wake(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID: AccountID?
+    ) async throws {
+        try await applicationDidBecomeActive(
+            synchronizationScopes: synchronizationScopes,
+            activeAccountID: activeAccountID
+        )
+    }
+}
 
 /// An opportunistic process-alive scheduler. Implementations may use
 /// `NSBackgroundActivityScheduler`, but must not imply daemon execution or
@@ -38,6 +58,38 @@ actor DisabledOrganizationRefreshBackgroundScheduler: OrganizationRefreshBackgro
     ) {}
 
     func cancel(identifier _: String) async {}
+}
+
+/// Process-alive opportunistic scheduling for the production app. The system
+/// may defer this work; each execution receives the same lifecycle scope and
+/// cancellation fences as foreground triggers and never represents a daemon.
+actor NSBackgroundOrganizationRefreshScheduler: OrganizationRefreshBackgroundScheduling {
+    private var scheduler: NSBackgroundActivityScheduler?
+
+    func schedule(
+        identifier: String,
+        interval: TimeInterval,
+        operation: @escaping @Sendable () async -> Void
+    ) async {
+        scheduler?.invalidate()
+        let scheduler = NSBackgroundActivityScheduler(identifier: identifier)
+        scheduler.interval = interval
+        scheduler.tolerance = min(interval * 0.1, 60)
+        scheduler.repeats = true
+        scheduler.qualityOfService = .utility
+        scheduler.schedule { completion in
+            Task {
+                await operation()
+                completion(.finished)
+            }
+        }
+        self.scheduler = scheduler
+    }
+
+    func cancel(identifier _: String) async {
+        scheduler?.invalidate()
+        scheduler = nil
+    }
 }
 
 enum OrganizationRefreshLifecycleTrigger: Equatable, Sendable {
@@ -210,8 +262,7 @@ actor OrganizationRefreshLifecycleService {
                     guard isCurrent(expectedGeneration) else {
                         return cancelledResult(trigger: trigger, generation: expectedGeneration)
                     }
-                    try await accountRuntime.applicationDidBecomeActive(
-                        synchronizationScopes: (scopesByAccount[accountID] ?? []).sorted { lhs, rhs in
+                    let accountScopes = (scopesByAccount[accountID] ?? []).sorted { lhs, rhs in
                             if lhs.organizationID.rawValue != rhs.organizationID.rawValue {
                                 return lhs.organizationID.rawValue < rhs.organizationID.rawValue
                             }
@@ -219,9 +270,19 @@ actor OrganizationRefreshLifecycleService {
                                 return lhs.credentialRevision.rawValue < rhs.credentialRevision.rawValue
                             }
                             return lhs.capabilityRevision.rawValue < rhs.capabilityRevision.rawValue
-                        },
-                        activeAccountID: activeAccount
-                    )
+                        }
+                    switch trigger {
+                    case .wake:
+                        try await accountRuntime.wake(
+                            synchronizationScopes: accountScopes,
+                            activeAccountID: activeAccount
+                        )
+                    case .launch, .applicationDidBecomeActive, .opportunisticBackground:
+                        try await accountRuntime.applicationDidBecomeActive(
+                            synchronizationScopes: accountScopes,
+                            activeAccountID: activeAccount
+                        )
+                    }
                     guard isCurrent(expectedGeneration) else {
                         return cancelledResult(trigger: trigger, generation: expectedGeneration)
                     }

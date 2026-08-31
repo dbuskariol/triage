@@ -17,13 +17,14 @@ struct AccountOrganizationRequestToken: Hashable, Sendable {
 enum AccountOrganizationRefreshPriority: Equatable, Sendable {
     case selectedOrganization
     case manual
+    case wake
     case activeApplication
     case inactiveAccount
     case fullReconciliation
 
     var taskPriority: TaskPriority {
         switch self {
-        case .selectedOrganization, .manual:
+        case .selectedOrganization, .manual, .wake:
             .userInitiated
         case .activeApplication:
             .utility
@@ -34,7 +35,7 @@ enum AccountOrganizationRefreshPriority: Equatable, Sendable {
 
     var requestPriority: GitHubRequestPriority {
         switch self {
-        case .selectedOrganization, .manual:
+        case .selectedOrganization, .manual, .wake:
             .selectedOrganizationRefresh
         case .activeApplication:
             .incrementalDiscovery
@@ -574,35 +575,36 @@ actor AccountOrganizationCoordinator {
         synchronizationScopes: [SynchronizationScope],
         activeAccountID: AccountID?
     ) async throws {
-        var uniqueScopes: [AccountOrganizationScope: SynchronizationScope] = [:]
-        for synchronizationScope in synchronizationScopes {
-            uniqueScopes[Self.accountOrganizationScope(synchronizationScope)] = synchronizationScope
-        }
-        let selected = selectedScope()
-        let ordered = uniqueScopes.values.sorted { lhs, rhs in
-            let lhsScope = Self.accountOrganizationScope(lhs)
-            let rhsScope = Self.accountOrganizationScope(rhs)
-            let lhsRank = Self.activationRank(
-                lhsScope,
-                selected: selected,
-                activeAccountID: activeAccountID
-            )
-            let rhsRank = Self.activationRank(
-                rhsScope,
-                selected: selected,
-                activeAccountID: activeAccountID
-            )
-            if lhsRank != rhsRank { return lhsRank < rhsRank }
-            if lhsScope.accountID.rawValue != rhsScope.accountID.rawValue {
-                return lhsScope.accountID.rawValue < rhsScope.accountID.rawValue
-            }
-            return lhsScope.organizationID.rawValue < rhsScope.organizationID.rawValue
-        }
+        let ordered = Self.orderedScopes(
+            synchronizationScopes,
+            selected: selectedScope(),
+            activeAccountID: activeAccountID
+        )
         for synchronizationScope in ordered {
             try await refreshIfDue(
                 synchronizationScope,
                 isActiveAccount: synchronizationScope.accountID == activeAccountID
             )
+        }
+    }
+
+    /// A wake is deliberately different from ordinary activation cadence: it
+    /// starts an overlapping incremental refresh at foreground priority unless
+    /// the durable scheduler reports an in-flight, blocked, or rate-limited
+    /// scope. `refresh` retains the normal authority, generation, and
+    /// cancellation fences.
+    func applicationDidWake(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID: AccountID?
+    ) async throws {
+        let selected = selectedScope()
+        let ordered = Self.orderedScopes(
+            synchronizationScopes,
+            selected: selected,
+            activeAccountID: activeAccountID
+        )
+        for synchronizationScope in ordered {
+            try await refresh(synchronizationScope, priority: .wake)
         }
     }
 
@@ -1617,6 +1619,8 @@ actor AccountOrganizationCoordinator {
             .selectedOrganization
         case .manual:
             .manual
+        case .wake:
+            .wake
         case .activeApplication:
             .activeApplication
         case .inactiveAccount:
@@ -1634,5 +1638,35 @@ actor AccountOrganizationCoordinator {
         if scope == selected { return 0 }
         if scope.accountID == activeAccountID { return 1 }
         return 2
+    }
+
+    private static func orderedScopes(
+        _ synchronizationScopes: [SynchronizationScope],
+        selected: AccountOrganizationScope?,
+        activeAccountID: AccountID?
+    ) -> [SynchronizationScope] {
+        var uniqueScopes: [AccountOrganizationScope: SynchronizationScope] = [:]
+        for synchronizationScope in synchronizationScopes {
+            uniqueScopes[accountOrganizationScope(synchronizationScope)] = synchronizationScope
+        }
+        return uniqueScopes.values.sorted { lhs, rhs in
+            let lhsScope = accountOrganizationScope(lhs)
+            let rhsScope = accountOrganizationScope(rhs)
+            let lhsRank = activationRank(
+                lhsScope,
+                selected: selected,
+                activeAccountID: activeAccountID
+            )
+            let rhsRank = activationRank(
+                rhsScope,
+                selected: selected,
+                activeAccountID: activeAccountID
+            )
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            if lhsScope.accountID.rawValue != rhsScope.accountID.rawValue {
+                return lhsScope.accountID.rawValue < rhsScope.accountID.rawValue
+            }
+            return lhsScope.organizationID.rawValue < rhsScope.organizationID.rawValue
+        }
     }
 }

@@ -8,13 +8,14 @@ enum SynchronizationReconciliationIntent: Equatable, Sendable {
 enum OrganizationRefreshScheduleTrigger: Equatable, Sendable {
     case selectedOrganization
     case manual
+    case wake
     case activeApplication
     case inactiveAccount
     case fullReconciliation
 
     var bypassesCadence: Bool {
         switch self {
-        case .selectedOrganization, .manual:
+        case .selectedOrganization, .manual, .wake:
             true
         case .activeApplication, .inactiveAccount, .fullReconciliation:
             false
@@ -322,7 +323,7 @@ struct OrganizationRefreshSchedulingPolicy: Sendable {
         for trigger: OrganizationRefreshScheduleTrigger
     ) -> RefreshCadence {
         switch trigger {
-        case .selectedOrganization, .manual, .activeApplication:
+        case .selectedOrganization, .manual, .wake, .activeApplication:
             selectedCadence
         case .inactiveAccount, .fullReconciliation:
             inactiveCadence

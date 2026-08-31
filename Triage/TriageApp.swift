@@ -95,10 +95,13 @@ struct TriageApp: App {
     @StateObject private var notificationAuthorization: NotificationSystemAuthorization
     @StateObject private var softwareUpdates = SoftwareUpdateController()
     @StateObject private var externalNavigation = ExternalNavigationConfirmationCoordinator()
+    @StateObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     private let notificationScheduler = UserNotificationCenterScheduler()
     private let notificationResponseAdapter = NotificationResponseApplicationAdapter()
 
     init() {
+        let workspaceAccessibility = WorkspaceAccessibilityCoordinator()
+        _workspaceAccessibility = StateObject(wrappedValue: workspaceAccessibility)
         do {
             let notificationSettings = NativeNotificationSettings()
             _notificationSettings = StateObject(wrappedValue: notificationSettings)
@@ -125,7 +128,8 @@ struct TriageApp: App {
             )
             _appModel = StateObject(wrappedValue: TriageAppModel(
                 dependencies: composition.dependencies(notificationSettings: notificationSettings),
-                vaultRegistry: vaultRegistry
+                vaultRegistry: vaultRegistry,
+                workspaceAccessibility: workspaceAccessibility
             ))
         } catch {
             fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
@@ -142,6 +146,7 @@ struct TriageApp: App {
                     .environmentObject(notificationSettings)
                     .environmentObject(notificationAuthorization)
                     .environmentObject(softwareUpdates)
+                    .environmentObject(workspaceAccessibility)
                     .frame(minWidth: 940, minHeight: 680)
                     .task {
                         notificationResponseAdapter.install(routeHandler: appModel)

@@ -61,6 +61,23 @@ final class WorkspaceAccessibilityCoordinatorTests: XCTestCase {
 
         XCTAssertNil(coordinator.requestedFocus)
     }
+
+    func testEveryNativeFocusDestinationIsIndependentlyConsumable() {
+        let recorder = AnnouncementRecorder()
+        let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
+
+        for target in [
+            WorkspaceAccessibilityFocusTarget.search,
+            .inspectorToggle,
+            .inspectorFirstWorkflowControl
+        ] {
+            coordinator.requestFocus(target)
+            coordinator.consumeFocusRequest(target)
+            XCTAssertNil(coordinator.requestedFocus)
+        }
+
+        XCTAssertTrue(recorder.announcements.isEmpty)
+    }
 }
 
 @MainActor

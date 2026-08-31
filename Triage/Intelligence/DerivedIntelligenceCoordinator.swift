@@ -73,6 +73,10 @@ struct DerivedIntelligenceInput: Sendable {
     let businessDayPolicy: BusinessDayPolicy
     let calendar: Calendar
     let aiPolicy: DerivedAIPolicy
+    /// Indicates that one or more scoped source inputs were unavailable or
+    /// excluded. Rule results remain useful, but AI work must not be queued
+    /// from an incomplete source snapshot.
+    let isProvisional: Bool
     let evaluatedAt: Date
     let items: [DerivedIntelligenceItemInput]
 
@@ -85,6 +89,7 @@ struct DerivedIntelligenceInput: Sendable {
         businessDayPolicy: BusinessDayPolicy = .init(),
         calendar: Calendar,
         aiPolicy: DerivedAIPolicy,
+        isProvisional: Bool = false,
         evaluatedAt: Date,
         items: [DerivedIntelligenceItemInput]
     ) {
@@ -96,6 +101,7 @@ struct DerivedIntelligenceInput: Sendable {
         self.businessDayPolicy = businessDayPolicy
         self.calendar = calendar
         self.aiPolicy = aiPolicy
+        self.isProvisional = isProvisional
         self.evaluatedAt = evaluatedAt
         self.items = items
     }
@@ -190,6 +196,7 @@ struct DerivedIntelligenceCoordinator: Sendable {
         let candidates = aiCandidates(
             for: results,
             coverageState: coverageState,
+            isProvisional: input.isProvisional,
             policy: input.aiPolicy,
             inputsByID: Dictionary(uniqueKeysWithValues: input.items.map { ($0.workItem.id, $0) })
         )
@@ -591,13 +598,14 @@ struct DerivedIntelligenceCoordinator: Sendable {
     private func aiCandidates(
         for items: [DerivedIntelligenceItemResult],
         coverageState: DerivedIntelligenceCoverageState,
+        isProvisional: Bool,
         policy: DerivedAIPolicy,
         inputsByID: [WorkItemID: DerivedIntelligenceItemInput]
     ) -> (candidates: [DerivedAICandidate], exclusions: [DerivedAICandidateExclusion]) {
         var candidates: [DerivedAICandidate] = []
         var exclusions: [DerivedAICandidateExclusion] = []
         for item in items where item.disposition == .inbox && !item.attentionReasons.isEmpty {
-            if coverageState != .trusted {
+            if coverageState != .trusted || isProvisional {
                 exclusions.append(.init(workItemID: item.workItemID, reason: .incompleteCoverage))
             } else if !policy.permitsCandidates {
                 exclusions.append(.init(workItemID: item.workItemID, reason: .policyUnavailable))

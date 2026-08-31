@@ -91,6 +91,21 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationDetail, "Review-thread coverage is incomplete.")
     }
 
+    func testCachedPartialItemPreservesItsConcreteCoverageDetail() {
+        let state = makeState(
+            workItems: [
+                makeWorkItem(
+                    id: "partial",
+                    freshness: .partial,
+                    freshnessDetail: "Discussion reply coverage is incomplete."
+                )
+            ]
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(state.synchronizationDetail, "Discussion reply coverage is incomplete.")
+    }
+
     func testSSOWorkspaceFreshnessCannotRenderFreshCachedItemsAsUpToDate() {
         let state = makeState(
             workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
@@ -124,6 +139,21 @@ final class WorkspacePresentationStateTests: XCTestCase {
         )
 
         XCTAssertEqual(state.synchronizationStatus, .upToDate)
+    }
+
+    func testSynchronizationPresentationExposesWorkspaceLastSuccessfulSync() {
+        let successfulAt = now.addingTimeInterval(-3_600)
+        let state = makeState(
+            workItems: [makeWorkItem(id: "cached", freshness: .partial)],
+            workspaceFreshness: FreshnessState(
+                status: .partial,
+                lastSuccessfulSyncAt: successfulAt,
+                detail: "Review-thread coverage is incomplete."
+            )
+        )
+
+        XCTAssertEqual(state.lastSuccessfulSyncAt, successfulAt)
+        XCTAssertEqual(state.synchronizationDetail, "Review-thread coverage is incomplete.")
     }
 
     func testExplicitOrganizationAccessTakesPrecedenceOverWorkspaceFreshness() {

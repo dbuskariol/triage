@@ -476,6 +476,11 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             }
             try validateRESTReviewPages(reviews.pages, candidate: traversal.candidate)
             try validateRESTRequestedReviewerPage(requested.pages[0], candidate: traversal.candidate)
+            try validateRESTNormalizedMembership(
+                reviewPages: reviews.pages,
+                requestedReviewerPage: requested.pages[0],
+                normalizedDigest: traversal.normalizedDigest
+            )
         case .reviewThreads:
             let roots = traversal.segments.filter { $0.kind == .reviewThreads && $0.parentThreadNodeID == nil }
             let comments = traversal.segments.filter { $0.kind == .threadComments }
@@ -532,6 +537,34 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         let expected = "GET \(candidate.repository.path)/pulls/\(candidate.number)/requested_reviewers"
         guard page.endpoint == expected, page.requestIdentity.requestKey == expected else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
+        }
+    }
+
+    private nonisolated static func validateRESTNormalizedMembership(
+        reviewPages: [ReviewCandidateTraversalPage],
+        requestedReviewerPage: ReviewCandidateTraversalPage,
+        normalizedDigest: Data
+    ) throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let reviews: [GitHubPullRequestReviewDTO]
+        let requestedReviewers: GitHubRequestedReviewersDTO
+        do {
+            reviews = try reviewPages.flatMap { page in
+                try decoder.decode([GitHubPullRequestReviewDTO].self, from: page.payload)
+            }
+            requestedReviewers = try decoder.decode(
+                GitHubRequestedReviewersDTO.self,
+                from: requestedReviewerPage.payload
+            )
+        } catch {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
+        }
+        guard PullRequestReviewReplacementProof.normalizedDigest(
+            reviews: reviews,
+            requestedReviewers: requestedReviewers
+        ) == normalizedDigest else {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
         }
     }
 

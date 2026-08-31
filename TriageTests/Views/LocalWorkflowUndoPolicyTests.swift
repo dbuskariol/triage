@@ -13,6 +13,19 @@ final class LocalWorkflowUndoPolicyTests: XCTestCase {
         )
     }
 
+    func testChosenFollowUpDateRoundTripsThroughWaitingUndo() {
+        let chosenDate = date
+        let initial = state()
+        let action = WorkflowAction.markWaiting(followUpAt: chosenDate)
+        let updated = WorkflowTransitionEngine.apply(action, to: initial, at: date).next
+
+        XCTAssertEqual(updated.status, .waiting)
+        XCTAssertEqual(updated.followUpAt, chosenDate)
+        guard case .clearWaiting? = LocalWorkflowUndoPolicy.inverse(for: action, previous: initial) else {
+            return XCTFail("Waiting with a chosen follow-up date must undo to active work.")
+        }
+    }
+
     func testReversibleActionsRestorePriorLocalValues() {
         let previous = state(isPinned: true, priority: .high, snoozedUntil: date)
 

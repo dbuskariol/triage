@@ -39,7 +39,8 @@ struct WorkspaceSidebar: View {
             Section("Synchronization") {
                 SynchronizationStatusLabel(
                     status: presentation.synchronizationStatus,
-                    detail: presentation.synchronizationDetail
+                    detail: presentation.synchronizationDetail,
+                    lastSuccessfulSyncAt: presentation.lastSuccessfulSyncAt
                 )
             }
         }
@@ -104,6 +105,17 @@ struct WorkspaceSidebar: View {
 struct SynchronizationStatusLabel: View {
     let status: WorkspacePresentationState.SynchronizationStatus
     let detail: String?
+    let lastSuccessfulSyncAt: Date?
+
+    init(
+        status: WorkspacePresentationState.SynchronizationStatus,
+        detail: String?,
+        lastSuccessfulSyncAt: Date? = nil
+    ) {
+        self.status = status
+        self.detail = detail
+        self.lastSuccessfulSyncAt = lastSuccessfulSyncAt
+    }
 
     var body: some View {
         Label {
@@ -116,14 +128,28 @@ struct SynchronizationStatusLabel: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
+                if let lastSuccessfulSyncAt {
+                    Text("Last successful sync \(lastSuccessfulSyncAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
         } icon: {
             Image(systemName: status.systemImage)
                 .foregroundStyle(tint)
         }
         .help(detail ?? status.title)
-        .accessibilityLabel(detail.map { "\(status.title). \($0)" } ?? status.title)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Synchronization and coverage status for the selected organization.")
+    }
+
+    private var accessibilityLabel: String {
+        [status.title, detail, lastSuccessfulSyncAt.map {
+            "Last successful sync \($0.formatted(date: .abbreviated, time: .shortened))"
+        }]
+        .compactMap { $0 }
+        .joined(separator: ". ")
     }
 
     private var tint: Color {

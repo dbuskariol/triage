@@ -4,7 +4,7 @@ import Foundation
 /// Wraps the durable workspace observation stream. Notification failures are
 /// deliberately isolated from presentation: they never suppress, alter, or
 /// retry a workspace snapshot through another source.
-actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving {
+actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObservationLifecycleHandling {
     private let source: any WorkspaceObserving
     private let vaultRegistry: VaultRegistry
     private let secretStore: KeychainSecretStore
@@ -52,6 +52,17 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving {
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
+    }
+
+    /// Drops the only retained strong path to this account's scheduler and
+    /// delivery ledger before `VaultRegistry` can close or delete its vault.
+    /// A later account with the same opaque ID must construct a new adapter.
+    func evictAccount(_ accountID: AccountID) {
+        adapters.removeValue(forKey: accountID)
+    }
+
+    func shutdown() {
+        adapters.removeAll(keepingCapacity: false)
     }
 
     private func deliverIfAuthorized(_ snapshot: WorkspacePresentationSnapshot) async {

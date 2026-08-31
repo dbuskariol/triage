@@ -63,6 +63,25 @@ final class OrganizationRefreshLifecycleServiceTests: XCTestCase {
         XCTAssertEqual(healthyCalls.count, 1)
     }
 
+    func testWakeUsesTheRuntimeWakePathRatherThanOrdinaryActivation() async throws {
+        let accountID = AccountID.make()
+        let runtime = LifecycleRuntimeSpy()
+        let resolver = LifecycleRuntimeResolver([accountID: runtime])
+        let currentScope = scope(accountID: accountID)
+        let service = OrganizationRefreshLifecycleService(
+            enumerateScopes: { [currentScope] },
+            activeAccountID: { accountID },
+            resolveRuntime: { accountID in try await resolver.runtime(for: accountID) }
+        )
+
+        _ = try await service.wake()
+
+        let wakeCallCount = await runtime.wakeCallCount()
+        let activationCallCount = await runtime.activationCallCount()
+        XCTAssertEqual(wakeCallCount, 1)
+        XCTAssertEqual(activationCallCount, 0)
+    }
+
     func testNewLifecycleTriggerSupersedesAnInFlightGeneration() async throws {
         let accountID = AccountID.make()
         let runtime = SuspendingLifecycleRuntime()
@@ -164,6 +183,8 @@ private actor LifecycleRuntimeSpy: AccountOrganizationLifecycleRunning {
     private let shouldFail: Bool
     private var recordedCalls = [Call]()
     private var recordedCancelCount = 0
+    private var recordedWakeCallCount = 0
+    private var recordedActivationCallCount = 0
 
     init(shouldFail: Bool = false) {
         self.shouldFail = shouldFail
@@ -173,6 +194,16 @@ private actor LifecycleRuntimeSpy: AccountOrganizationLifecycleRunning {
         synchronizationScopes: [SynchronizationScope],
         activeAccountID: AccountID?
     ) async throws {
+        recordedActivationCallCount += 1
+        recordedCalls.append(.init(scopes: synchronizationScopes, activeAccountID: activeAccountID))
+        if shouldFail { throw TestError.expected }
+    }
+
+    func wake(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID: AccountID?
+    ) async throws {
+        recordedWakeCallCount += 1
         recordedCalls.append(.init(scopes: synchronizationScopes, activeAccountID: activeAccountID))
         if shouldFail { throw TestError.expected }
     }
@@ -183,6 +214,8 @@ private actor LifecycleRuntimeSpy: AccountOrganizationLifecycleRunning {
 
     func calls() -> [Call] { recordedCalls }
     func cancelCount() -> Int { recordedCancelCount }
+    func wakeCallCount() -> Int { recordedWakeCallCount }
+    func activationCallCount() -> Int { recordedActivationCallCount }
 }
 
 private actor SuspendingLifecycleRuntime: AccountOrganizationLifecycleRunning {

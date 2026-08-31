@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+@preconcurrency import UserNotifications
 
 enum AccountRemovalPresentation {
     static let externalBackupDisclosure = "Triage cannot erase Time Machine backups, user-created copies, filesystem snapshots, or other external backups."
@@ -13,6 +15,36 @@ enum AccountRemovalPresentation {
     }
 }
 
+enum NotificationAuthorizationAction: Equatable {
+    case requestAuthorization
+    case openSystemSettings
+    case unavailable
+}
+
+enum NotificationSettingsPresentation {
+    static let systemNotificationSettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    )!
+
+    static func action(for status: UNAuthorizationStatus) -> NotificationAuthorizationAction {
+        switch status {
+        case .notDetermined, .ephemeral:
+            .requestAuthorization
+        case .denied:
+            .openSystemSettings
+        case .authorized, .provisional:
+            .unavailable
+        @unknown default:
+            .unavailable
+        }
+    }
+
+    static func organizationScopeName(displayName: String?, login: String) -> String {
+        guard let displayName, !displayName.isEmpty, displayName != login else { return login }
+        return "\(displayName) (@\(login))"
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var navigation: AppNavigationModel
@@ -24,6 +56,7 @@ struct SettingsView: View {
     @State private var accountReplacingToken: GitHubAccount?
     @State private var accountPendingRemoval: GitHubAccount?
     @State private var accountRemovalError: String?
+    @State private var notificationSettingsOpenError: String?
 
     var body: some View {
         TabView(selection: selectedCategory) {
@@ -100,6 +133,19 @@ struct SettingsView: View {
             }
         } message: {
             Text(accountRemovalError ?? "Try again after resolving any listed account or storage issue.")
+        }
+        .alert(
+            "Triage could not open macOS Notification Settings",
+            isPresented: Binding(
+                get: { notificationSettingsOpenError != nil },
+                set: { if !$0 { notificationSettingsOpenError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                notificationSettingsOpenError = nil
+            }
+        } message: {
+            Text(notificationSettingsOpenError ?? "Open System Settings, select Notifications, then allow Triage notifications.")
         }
     }
 
@@ -327,13 +373,19 @@ struct SettingsView: View {
             }
 
             SettingsCard(title: "Selected Organization") {
-                if let organizationID = appModel.selectedOrganizationID {
-                    Toggle("Allow notifications for this organization", isOn: Binding(
-                        get: { notificationSettings.isEnabled(for: organizationID) },
-                        set: { notificationSettings.setEnabled($0, for: organizationID) }
+                if let organization = appModel.selectedOrganization {
+                    let organizationName = NotificationSettingsPresentation.organizationScopeName(
+                        displayName: organization.displayName,
+                        login: organization.login
+                    )
+                    Toggle("Allow notifications for \(organizationName)", isOn: Binding(
+                        get: { notificationSettings.isEnabled(for: organization.id) },
+                        set: { notificationSettings.setEnabled($0, for: organization.id) }
                     ))
+                    .accessibilityLabel("Allow notifications for \(organizationName)")
+                    .accessibilityHint("Permits Triage notifications for \(organizationName) only. It does not change GitHub notification settings.")
                 } else {
-                    Text("Select an organization before enabling its notifications.")
+                    Text("Select an available organization before enabling its notifications.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -366,10 +418,7 @@ struct SettingsView: View {
                     Text(notificationAuthorization.status.notificationAuthorizationTitle)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Allow Notifications") {
-                        Task { await notificationAuthorization.requestAuthorization() }
-                    }
-                    .disabled(notificationAuthorization.status == .authorized || notificationAuthorization.status == .provisional)
+                    notificationAuthorizationControl
                 }
             }
         }
@@ -384,6 +433,31 @@ struct SettingsView: View {
                 notificationSettings.setQuietSchedule(.init(startMinute: value, endMinute: end))
             }
         )
+    }
+
+    @ViewBuilder
+    private var notificationAuthorizationControl: some View {
+        switch NotificationSettingsPresentation.action(for: notificationAuthorization.status) {
+        case .requestAuthorization:
+            Button("Allow Notifications") {
+                Task { await notificationAuthorization.requestAuthorization() }
+            }
+            .accessibilityHint("Asks macOS to allow Triage notifications.")
+        case .openSystemSettings:
+            Button("Open macOS Notification Settings") {
+                openMacOSNotificationSettings()
+            }
+            .accessibilityHint("Opens macOS Notification Settings so you can allow Triage notifications.")
+        case .unavailable:
+            EmptyView()
+        }
+    }
+
+    private func openMacOSNotificationSettings() {
+        guard NSWorkspace.shared.open(NotificationSettingsPresentation.systemNotificationSettingsURL) else {
+            notificationSettingsOpenError = "macOS Notification Settings could not be opened. Open System Settings, select Notifications, then allow Triage notifications."
+            return
+        }
     }
 
     private var quietEndMinute: Binding<Int> {

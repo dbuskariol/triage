@@ -171,6 +171,17 @@ struct TriageWorkspaceCommands: Commands {
         }
 
         CommandMenu("Navigate") {
+            Button("Back") {
+                navigateSelectionBack()
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(!canNavigateSelectionBack)
+            Button("Forward") {
+                navigateSelectionForward()
+            }
+            .keyboardShortcut("]", modifiers: .command)
+            .disabled(!canNavigateSelectionForward)
+            Divider()
             navigationCommand("Inbox", section: .inbox, key: "1")
             navigationCommand("My Work", section: .myWork, key: "2")
             navigationCommand("Reviews", section: .reviews, key: "3")
@@ -255,14 +266,20 @@ struct TriageWorkspaceCommands: Commands {
             .accessibilityHint(localWorkflowHint)
 
             Button("Mark Waiting") {
-                apply(.markWaiting(followUpAt: nil))
+                guard let workflow = selectedWorkItem?.workflow,
+                      let action = WorkDetailPresentation.waitingAction(for: workflow)
+                else { return }
+                apply(action)
             }
             .keyboardShortcut("w", modifiers: [.control, .command])
             .disabled(!availability.canMarkWaiting)
             .accessibilityHint(localWorkflowHint)
 
             Button("Stop Waiting") {
-                apply(.clearWaiting)
+                guard let workflow = selectedWorkItem?.workflow,
+                      let action = WorkDetailPresentation.waitingAction(for: workflow)
+                else { return }
+                apply(action)
             }
             .disabled(!availability.canClearWaiting)
             .accessibilityHint(localWorkflowHint)
@@ -275,6 +292,44 @@ struct TriageWorkspaceCommands: Commands {
 
     private var availability: TriageWorkflowCommandAvailability {
         TriageWorkflowCommandAvailability(item: selectedWorkItem)
+    }
+
+    private var validWorkItemIDs: Set<WorkItemID> {
+        Set(appModel.workItems.map(\.id))
+    }
+
+    private var canNavigateSelectionBack: Bool {
+        navigation.canNavigateSelectionBack(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
+    }
+
+    private var canNavigateSelectionForward: Bool {
+        navigation.canNavigateSelectionForward(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
+    }
+
+    private func navigateSelectionBack() {
+        guard let workItemID = navigation.navigateSelectionBack(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        ) else { return }
+        appModel.selectedWorkItemID = workItemID
+    }
+
+    private func navigateSelectionForward() {
+        guard let workItemID = navigation.navigateSelectionForward(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: validWorkItemIDs
+        ) else { return }
+        appModel.selectedWorkItemID = workItemID
     }
 
     private var localWorkflowHint: String {

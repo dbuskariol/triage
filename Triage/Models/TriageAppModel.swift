@@ -101,6 +101,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private let defaults: UserDefaults
     private let dependencies: TriageApplicationDependencies
     private let vaultRegistry: VaultRegistry
+    private let workspaceAccessibility: WorkspaceAccessibilityCoordinator?
     private var refreshGeneration = 0
     private var backgroundRefreshGeneration: UInt64 = 0
     private var accountsBeingRemoved: Set<AccountID> = []
@@ -111,6 +112,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private var isCredentialMutationInProgress = false
     private var isShuttingDown = false
     private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
+    /// The most recently installed revision-qualified scope for each cached
+    /// workspace. This remains independent from the live observation scope:
+    /// selection invalidates the latter before showing cached content, while
+    /// this map keeps the cache lookup bound to its original authority.
+    private var cachedWorkspaceScopes: [AccountID: [OrganizationID: SynchronizationScope]] = [:]
     private let workspaceActivation = WorkspaceActivationTaskController()
     private var workspaceObservationTask: Task<Void, Never>?
     private var workspaceSelectionGeneration: UInt64 = 0
@@ -134,11 +140,13 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     init(
         dependencies: TriageApplicationDependencies,
         vaultRegistry: VaultRegistry,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        workspaceAccessibility: WorkspaceAccessibilityCoordinator? = nil
     ) {
         self.dependencies = dependencies
         self.vaultRegistry = vaultRegistry
         self.defaults = defaults
+        self.workspaceAccessibility = workspaceAccessibility
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID)
             .flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
@@ -166,6 +174,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         await cancelForegroundRefresh()
         await workspaceActivation.cancelAndWait()
         await cancelWorkspaceObservationAndWait()
+        cachedWorkItems = WorkspacePresentationCache()
+        cachedWorkspaceScopes = [:]
         accounts = session.accounts
         organizationsByAccount = session.organizationsByAccount
         organizationAccessesByAccount = session.organizationAccessesByAccount
@@ -184,6 +194,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         scope: SynchronizationScope
     ) {
         cachedWorkItems[scope] = workItems
+        cachedWorkspaceScopes[scope.accountID, default: [:]][scope.organizationID] = scope
         present(workItems: workItems)
     }
 
@@ -257,6 +268,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               selectedOrganizationID == scope.organizationID
         else { return }
         cachedWorkItems[scope] = snapshot.workItems
+        cachedWorkspaceScopes[scope.accountID, default: [:]][scope.organizationID] = scope
         selectedOrganizationFreshness = snapshot.durableState.freshness
         selectedWorkspaceCoverage = snapshot.coverageEvaluation
         present(workItems: snapshot.workItems)
@@ -338,6 +350,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
         await cancelForegroundRefreshes(for: accountID)
         try await cancelInactiveRefreshes(for: accountID)
+        // Account-session removal closes and deletes the encrypted vault. Drop
+        // any notification delivery ledger reference first so a later account
+        // reusing this opaque ID cannot retain a closed vault handle.
+        await dependencies.workspaceObservationLifecycle.evictAccount(accountID)
         try await dependencies.accountSession.removeAccount(accountID)
 
         accounts.removeAll { $0.id == accountID }
@@ -345,6 +361,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         organizationAccessesByAccount[accountID] = nil
         accountCapabilitiesByAccount[accountID] = nil
         cachedWorkItems.removeAll(for: accountID)
+        cachedWorkspaceScopes[accountID] = nil
         if isRemovingSelectedAccount {
             selectedAccountID = accounts.first?.id
             selectedOrganizationID = selectedAccountID
@@ -591,6 +608,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 // vault cannot retain the final interruption projection.
             }
         }
+        await dependencies.workspaceObservationLifecycle.shutdown()
         await dependencies.workspaceCoordinator.shutdown()
     }
 
@@ -828,8 +846,15 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             else {
                 return .completed
             }
+            let previousAccess = organizationAccessesByAccount[initialAccount.id]?[organization.id]
             organizationAccessesByAccount[initialAccount.id, default: [:]][organization.id] = access
             accountCapabilitiesByAccount[initialAccount.id] = accountCapabilities
+            if previousAccess?.capabilityRevision != access.capabilityRevision {
+                invalidateCachedWorkspaceAuthority(
+                    for: initialAccount.id,
+                    organizationID: organization.id
+                )
+            }
             guard result.accessState == .available else {
                 ssoAuthorizationHeader = result.ssoHeader
                 refreshError = accessMessage(for: result.accessState)
@@ -1206,6 +1231,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             validatedAt: account.lastValidatedAt ?? account.createdAt
         )
         accounts[index] = updatedAccount
+        invalidateCachedWorkspaceAuthority(for: account.id)
+        if selectedAccountID == account.id {
+            workspaceActivation.cancel()
+        }
         refreshError = message ?? "Triage could not refresh this organization. Cached work remains available."
         do {
             let secretStore = KeychainSecretStore()
@@ -1283,6 +1312,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         do {
             let scope = try await synchronizationScope(for: workItem)
             try await dependencies.workspaceMutator.apply(action, to: workItem.id, in: scope)
+            workspaceAccessibility?.workflowCompleted(action)
         } catch {
             refreshError = "Triage could not save this local workflow change."
         }
@@ -1297,6 +1327,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 in: workItem.id,
                 scope: scope
             )
+            workspaceAccessibility?.actionItemCompleted()
         } catch {
             refreshError = "Triage could not complete this local action item."
         }
@@ -1465,7 +1496,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             else {
                 return
             }
+            let previousAccess = organizationAccessesByAccount[account.id]?[organization.id]
             organizationAccessesByAccount[account.id, default: [:]][organization.id] = access
+            if previousAccess?.capabilityRevision != access.capabilityRevision {
+                invalidateCachedWorkspaceAuthority(for: account.id, organizationID: organization.id)
+            }
             guard selectedAccountID == account.id, selectedOrganizationID == organization.id else {
                 return
             }
@@ -1484,15 +1519,40 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private func presentCachedWorkItems() {
         guard let accountID = selectedAccountID,
               let organizationID = selectedOrganizationID,
-              let scope = workspaceObservationScope,
-              scope.accountID == accountID,
-              scope.organizationID == organizationID,
+              let scope = cachedWorkspaceScopes[accountID]?[organizationID],
               let cachedWorkItems = cachedWorkItems[scope]
         else {
             present(workItems: [])
             return
         }
         present(workItems: cachedWorkItems)
+    }
+
+    /// A credential or capability revision rotation invalidates cached
+    /// projections bound to the superseded authority. The currently visible
+    /// projection remains until its replacement arrives, but cannot be reused
+    /// by a later account or organization switch.
+    private func invalidateCachedWorkspaceAuthority(for accountID: AccountID) {
+        cachedWorkItems.removeAll(for: accountID)
+        cachedWorkspaceScopes[accountID] = nil
+        if workspaceObservationScope?.accountID == accountID {
+            invalidateWorkspaceObservation()
+        }
+    }
+
+    private func invalidateCachedWorkspaceAuthority(
+        for accountID: AccountID,
+        organizationID: OrganizationID
+    ) {
+        cachedWorkItems.removeAll(for: accountID, organizationID: organizationID)
+        cachedWorkspaceScopes[accountID]?[organizationID] = nil
+        if cachedWorkspaceScopes[accountID]?.isEmpty == true {
+            cachedWorkspaceScopes[accountID] = nil
+        }
+        if workspaceObservationScope?.accountID == accountID,
+           workspaceObservationScope?.organizationID == organizationID {
+            invalidateWorkspaceObservation()
+        }
     }
 
     private func lifecycleSynchronizationScopes() async -> [SynchronizationScope] {

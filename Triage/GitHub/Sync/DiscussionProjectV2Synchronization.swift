@@ -8,10 +8,6 @@ enum DiscussionProjectV2SynchronizationError: Error, Equatable, Sendable {
 struct DiscussionSynchronizationResult: Sendable {
     let discussions: [GitHubDiscussionRecord]
     let coverage: CoverageRecord
-    /// Discussion comments and replies are deliberately unavailable: their source
-    /// connection is not committed by this slice.
-    let commentCoverage: CoverageStatus
-    let replyCoverage: CoverageStatus
 }
 
 struct ProjectV2SynchronizationResult: Sendable {
@@ -54,16 +50,6 @@ actor DiscussionSynchronizationService {
             try Task.checkCancellation()
             try await validateCurrentScope(scope)
             let result = recordCoverage(.complete, detail: nil)
-            let comments = unavailableCoverage(
-                feature: .discussionComments,
-                component: "discussion-comments",
-                detail: "Discussion comments are unavailable until their independently paginated source is implemented."
-            )
-            let replies = unavailableCoverage(
-                feature: .discussionReplies,
-                component: "discussion-replies",
-                detail: "Discussion replies are unavailable until their independently paginated source is implemented."
-            )
             try await repository.replace(
                 inventory.discussions,
                 rawPages: inventory.rawPages,
@@ -74,14 +60,12 @@ actor DiscussionSynchronizationService {
                 repositoryNodeID: repositoryNodeID,
                 streamID: streamID,
                 observedAt: observedAt,
-                coverageRecords: [result, comments, replies]
+                coverageRecords: [result]
             )
             try await validateCurrentScope(scope)
             return .init(
                 discussions: inventory.discussions,
-                coverage: result,
-                commentCoverage: comments.status,
-                replyCoverage: replies.status
+                coverage: result
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -109,29 +93,6 @@ actor DiscussionSynchronizationService {
                 throw CancellationError()
             }
             throw mapped(error, githubOrganizationID: organization.githubOrganizationID)
-        }
-
-        func unavailableCoverage(
-            feature: CoverageFeature,
-            component: String,
-            detail: String
-        ) -> CoverageRecord {
-            CoverageRecord(
-                accountID: scope.accountID,
-                organizationID: scope.organizationID,
-                repositoryID: repositoryID,
-                feature: feature,
-                streamID: SyncStreamID(
-                    rawValue: "\(component)-\(scope.organizationID.rawValue)-\(repositoryID.rawValue)"
-                )!,
-                intervalStart: intervalStart,
-                intervalEnd: observedAt,
-                credentialRevision: scope.credentialRevision,
-                capabilityRevision: scope.capabilityRevision,
-                status: .unavailable,
-                lastSuccessfulAt: nil,
-                failureDetail: detail
-            )
         }
 
         func recordCoverage(_ status: CoverageStatus, detail: String?) -> CoverageRecord {

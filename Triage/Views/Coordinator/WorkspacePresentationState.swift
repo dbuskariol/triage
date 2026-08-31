@@ -59,6 +59,7 @@ struct WorkspacePresentationState: Equatable {
     let sectionCounts: [SectionCount]
     let synchronizationStatus: SynchronizationStatus
     let synchronizationDetail: String?
+    let lastSuccessfulSyncAt: Date?
 
     init(
         workItems: [WorkItem],
@@ -94,6 +95,8 @@ struct WorkspacePresentationState: Equatable {
         )
         synchronizationStatus = status.status
         synchronizationDetail = status.detail
+        lastSuccessfulSyncAt = workspaceFreshness?.lastSuccessfulSyncAt
+            ?? workItems.compactMap(\.freshness.lastSuccessfulSyncAt).max()
     }
 
     func count(for section: AppSection) -> Int {
@@ -188,7 +191,12 @@ struct WorkspacePresentationState: Equatable {
                 || $0.freshness.status == .rateLimited
                 || $0.freshness.status == .failed
         }) {
-            return (.partial, refreshError ?? "Some work could not be refreshed.")
+            return (
+                .partial,
+                refreshError
+                    ?? coverageDetail(in: workItems)
+                    ?? "Some work could not be refreshed."
+            )
         }
 
         if workItems.contains(where: { $0.freshness.status == .ssoRequired }) {
@@ -204,6 +212,20 @@ struct WorkspacePresentationState: Equatable {
         }
 
         return (.unavailable, "No current synchronization coverage is available.")
+    }
+
+    /// Freshness details originate with persisted coverage, so preserving one
+    /// here lets the sidebar name the incomplete stream instead of replacing
+    /// it with a generic partial-state message.
+    private static func coverageDetail(in workItems: [WorkItem]) -> String? {
+        workItems.lazy.compactMap { item in
+            switch item.freshness.status {
+            case .partial, .stale, .rateLimited, .failed:
+                item.freshness.detail
+            default:
+                nil
+            }
+        }.first
     }
 
     private static func status(

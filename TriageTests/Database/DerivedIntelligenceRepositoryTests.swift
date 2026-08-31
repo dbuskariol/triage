@@ -147,6 +147,29 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         ])
     }
 
+    func testCancelledProjectionStopsBeforeOpeningVaultRead() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+        let gate = ProjectionGate()
+        let task = Task {
+            await gate.wait()
+            return try await repository.projection(for: fixture.scope)
+        }
+
+        await gate.waitUntilEntered()
+        task.cancel()
+        await gate.open()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected the cancelled projection to stop before its vault read.")
+        } catch is CancellationError {
+            // Expected: projection checks cancellation before opening the vault.
+        }
+    }
+
     func testStaleScopeRollsBackCompleteReplacement() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -373,6 +396,173 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .invalidPersistedData)
         }
+    }
+
+    func testProjectionValidationBatchesHighCardinalityEvidenceAndCandidates() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let count = 1_001
+        try await DerivedIntelligenceRepository(vault: fixture.vault).replace(
+            fixture.snapshot(reasonID: "batch-seed", title: "Batch seed")
+        )
+
+        var revisions = [fixture.workItemID: "revision"]
+        let workItemIDs = (0 ..< count).map { index in
+            WorkItemID(rawValue: "batch-work-item-\(index)")!
+        }
+        for workItemID in workItemIDs {
+            revisions[workItemID] = "revision"
+        }
+        let sourceRevision = DerivedIntelligenceSourceRevision.aggregate(
+            primaryRevisions: revisions,
+            supplementalSources: []
+        )
+        let scoreBreakdown = try JSONEncoder().encode(["attentionReason": 900])
+        let observedAt = Fixture.milliseconds(fixture.date)
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE derived_intelligence_runs SET source_revision = ?",
+                arguments: [sourceRevision]
+            )
+            try database.execute(
+                sql: "UPDATE rule_evaluations SET source_revision = ?",
+                arguments: [sourceRevision]
+            )
+            for index in 0 ..< count {
+                let nodeID = "batch-node-\(index)"
+                let workItemID = workItemIDs[index].rawValue
+                let reasonID = "batch-reason-\(index)"
+                let rawSnapshotID = "batch-raw-\(index)"
+                try database.execute(
+                    sql: """
+                        INSERT INTO github_nodes (
+                            github_node_id, account_id, organization_id, repository_id, kind,
+                            numeric_id, number, title, state, html_url, body_markdown, author_id,
+                            created_at_ms, updated_at_ms, closed_at_ms, merged_at_ms,
+                            source_revision, last_observed_at_ms, accessibility_state
+                        ) VALUES (?, ?, ?, NULL, 'issue', ?, ?, 'Batch', 'open', ?, NULL, NULL,
+                                  ?, ?, NULL, NULL, 'revision', ?, 'accessible')
+                        """,
+                    arguments: [
+                        nodeID, fixture.accountID.rawValue, fixture.organizationID.rawValue,
+                        "batch-number-\(index)", index + 10_000,
+                        "https://github.com/github/triage/issues/\(index + 10_000)",
+                        observedAt, observedAt, observedAt
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO work_items (
+                            id, account_id, organization_id, primary_node_id, state,
+                            last_relevant_activity_at_ms, created_at_ms, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?)
+                        """,
+                    arguments: [
+                        workItemID, fixture.accountID.rawValue, fixture.organizationID.rawValue,
+                        nodeID, observedAt, observedAt, observedAt
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO attention_reasons (
+                            id, work_item_id, rule_id, rule_version, category, strength,
+                            title, explanation, evaluated_at_ms
+                        ) VALUES (?, ?, 'changesRequested', 1, 'pullRequest', 900,
+                                  'Batch', 'Batch', ?)
+                        """,
+                    arguments: [reasonID, workItemID, observedAt]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO rule_evaluations (
+                            id, account_id, organization_id, work_item_id,
+                            credential_revision, capability_revision, source_revision,
+                            rule_id, rule_version, category, strength, title, explanation,
+                            evaluated_at_ms
+                        ) VALUES (?, ?, ?, ?, 'credential', 'capability', ?,
+                                  'changesRequested', 1, 'pullRequest', 900, 'Batch', 'Batch', ?)
+                        """,
+                    arguments: [
+                        reasonID, fixture.accountID.rawValue, fixture.organizationID.rawValue,
+                        workItemID, sourceRevision, observedAt
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO attention_scores (work_item_id, score, breakdown_json, evaluated_at_ms)
+                        VALUES (?, 900, ?, ?)
+                        """,
+                    arguments: [workItemID, scoreBreakdown, observedAt]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO ai_action_candidates (
+                            account_id, organization_id, work_item_id, credential_revision,
+                            capability_revision, source_revision, candidate_id, disposition,
+                            exclusion_reason, score, score_breakdown_json,
+                            trigger_reason_ids_json, evaluated_at_ms
+                        ) VALUES (?, ?, ?, 'credential', 'capability', ?, ?, 'candidate',
+                                  NULL, 900, ?, ?, ?)
+                        """,
+                    arguments: [
+                        fixture.accountID.rawValue, fixture.organizationID.rawValue, workItemID,
+                        sourceRevision, "batch-candidate-\(index)", scoreBreakdown,
+                        try JSONEncoder().encode([reasonID]), observedAt
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO raw_api_snapshots (
+                            id, account_id, github_node_id, endpoint, etag, parser_version,
+                            observed_at_ms, payload, last_modified, authority_organization_id,
+                            authority_feature, authority_stream_id, authority_request_key,
+                            authority_credential_revision, authority_capability_revision
+                        ) VALUES (?, ?, ?, '/repos/github/triage/pulls/1/reviews', ?, 1,
+                                  ?, X'', NULL, ?, 'reviews', 'reviews', ?, 'credential', 'capability')
+                        """,
+                    arguments: [
+                        rawSnapshotID, fixture.accountID.rawValue, fixture.nodeID.rawValue,
+                        "batch-etag-\(index)", observedAt, fixture.organizationID.rawValue,
+                        "batch-request-\(index)"
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO rule_evaluation_evidence (
+                            rule_evaluation_id, evidence_id, source, source_locator_kind,
+                            source_locator, authority_kind, authority_account_id,
+                            authority_organization_id, authority_feature, authority_stream_id,
+                            authority_credential_revision, authority_capability_revision,
+                            source_node_id, source_event_id, source_revision, raw_snapshot_id,
+                            confidence, confirmation, observed_at_ms, excerpt
+                        ) VALUES ('batch-seed', ?, 'restReview', 'endpoint',
+                                  '/repos/github/triage/pulls/1/reviews', 'github', ?, ?,
+                                  'reviews', 'reviews', 'credential', 'capability', ?, NULL,
+                                  'batch-source', ?, 'provisional', 'provisional', ?, NULL)
+                        """,
+                    arguments: [
+                        "batch-evidence-\(index)", fixture.accountID.rawValue,
+                        fixture.organizationID.rawValue, fixture.nodeID.rawValue,
+                        rawSnapshotID, observedAt
+                    ]
+                )
+            }
+        }
+
+        let counter = ProjectionValidationQueryCounter()
+        let repository = DerivedIntelligenceRepository(
+            vault: fixture.vault,
+            projectionValidationBatchQueryObserver: { counter.record() }
+        )
+        let loadedProjection = try await repository.projection(for: fixture.scope)
+        let projection = try XCTUnwrap(loadedProjection)
+        XCTAssertEqual(projection.candidates.compactMap(\.candidate).count, count)
+        XCTAssertEqual(
+            counter.value,
+            9,
+            "1,001 candidates and raw evidence references require three raw batches plus three score and three reason batches."
+        )
     }
 
     func testExplicitLegacyEvidencePersistsOnlyAsProvisionalEvidence() async throws {
@@ -788,6 +978,50 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         static func milliseconds(_ date: Date) -> Int64 {
             Int64((date.timeIntervalSince1970 * 1_000).rounded())
         }
+    }
+}
+
+private final class ProjectionValidationQueryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func record() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
+private actor ProjectionGate {
+    private var opened = false
+    private var didEnter = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var entered: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        didEnter = true
+        entered?.resume()
+        entered = nil
+        guard !opened else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        guard !didEnter else { return }
+        await withCheckedContinuation { entered = $0 }
+    }
+
+    func open() {
+        opened = true
+        let currentWaiters = waiters
+        waiters.removeAll()
+        currentWaiters.forEach { $0.resume() }
     }
 }
 

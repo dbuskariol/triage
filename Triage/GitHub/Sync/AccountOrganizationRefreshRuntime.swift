@@ -138,6 +138,31 @@ actor AccountOrganizationRefreshRuntime {
         )
     }
 
+    /// Wakes force an overlapping incremental pass at foreground priority,
+    /// while retaining the same vault-backed authority revalidation used by
+    /// ordinary lifecycle scheduling.
+    func wake(
+        synchronizationScopes: [SynchronizationScope],
+        activeAccountID: AccountID?
+    ) async throws {
+        try ensureActive()
+        var currentScopesByOrganization: [OrganizationID: SynchronizationScope] = [:]
+        for requestedScope in synchronizationScopes where requestedScope.accountID == accountID {
+            let currentScope = try await currentScope(for: requestedScope.organizationID)
+            guard currentScope == requestedScope else {
+                throw CancellationError()
+            }
+            currentScopesByOrganization[currentScope.organizationID] = currentScope
+        }
+        try ensureActive()
+        try await coordinator.applicationDidWake(
+            synchronizationScopes: currentScopesByOrganization.values.sorted {
+                $0.organizationID.rawValue < $1.organizationID.rawValue
+            },
+            activeAccountID: activeAccountID
+        )
+    }
+
     func cancel(organizationID: OrganizationID) async throws {
         if let teardownTask {
             return try await teardownTask.value

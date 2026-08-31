@@ -64,6 +64,20 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         XCTAssertEqual(output.aiCandidateExclusions.first?.reason, .incompleteCoverage)
     }
 
+    func testProvisionalInputExcludesAIWhilePreservingTrustedCoverage() throws {
+        let output = try DerivedIntelligenceCoordinator().recompute(
+            input(items: [item(id: "provisional")], isProvisional: true)
+        )
+
+        XCTAssertEqual(output.coverageState, .trusted)
+        XCTAssertEqual(output.menuCounts.inbox, 1)
+        XCTAssertTrue(output.aiCandidates.isEmpty)
+        XCTAssertEqual(
+            output.aiCandidateExclusions,
+            [.init(workItemID: WorkItemID(rawValue: "provisional")!, reason: .incompleteCoverage)]
+        )
+    }
+
     func testLegacyUnverifiedRelationsCannotDriveCurrentOwnershipOrConversationReasons() throws {
         let output = try DerivedIntelligenceCoordinator().recompute(
             input(items: [item(id: "legacy", trustRelations: false)])
@@ -192,7 +206,8 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
     private func input(
         items: [DerivedIntelligenceItemInput],
         requirements: [CoverageRequirement]? = nil,
-        records: [CoverageRecord]? = nil
+        records: [CoverageRecord]? = nil,
+        isProvisional: Bool = false
     ) -> DerivedIntelligenceInput {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -215,6 +230,7 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                 isEntitled: true,
                 hasAvailableBudget: true
             ),
+            isProvisional: isProvisional,
             evaluatedAt: now,
             items: items
         )

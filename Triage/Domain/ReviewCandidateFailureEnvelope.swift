@@ -18,12 +18,20 @@ enum ReviewCandidateFailureClassification: String, CaseIterable, Codable, Sendab
 /// Distinguishes a request that reached a durable terminal response from a
 /// source attempt for which a response body must not be retained as raw
 /// provenance. The latter is deliberately limited to transport failures and
-/// bodyless GitHub access responses, never arbitrary HTTP error payloads.
+/// classified bodyless GitHub HTTP responses, never arbitrary HTTP error
+/// payloads.
 enum ReviewCandidateFailureRawProvenance: Equatable, Sendable {
     case terminalRawPage
     case zeroRawTransportFailure
     case zeroRawBodylessHTTPAccessFailure(statusCode: Int)
     case zeroRawBodylessSelectedOrganizationSSOFailure
+    /// A classified terminal HTTP response whose body was deliberately not
+    /// retained. The exact attempted REST request remains bound by the
+    /// publication; this is distinct from an accumulated traversal whose
+    /// terminal request had no safe raw page.
+    case zeroRawBodylessTerminalHTTPFailure(statusCode: Int)
+    case accumulatedPagesBodylessTerminalTransportFailure
+    case accumulatedPagesBodylessTerminalHTTPFailure(statusCode: Int)
 }
 
 /// A raw page accumulated before a terminal candidate failure. `ordinal` is

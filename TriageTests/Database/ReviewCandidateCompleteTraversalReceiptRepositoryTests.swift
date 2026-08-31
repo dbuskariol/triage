@@ -37,6 +37,42 @@ final class ReviewCandidateCompleteTraversalReceiptRepositoryTests: XCTestCase {
         }
     }
 
+    func testRejectsMalformedOrDigestMismatchedRESTReceiptPayloads() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let source = fixture.reviewTraversal()
+        let malformedHistory = ReviewCandidateTraversalPage(
+            ordinal: 1, rawSnapshotID: .make(),
+            requestIdentity: source.segments[0].pages[0].requestIdentity,
+            endpoint: source.segments[0].pages[0].endpoint,
+            payload: Data("not-json".utf8), isTerminal: false
+        )
+        let malformed = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: source.normalizedDigest,
+            segments: [
+                .init(kind: .reviewHistory, pages: [malformedHistory, source.segments[0].pages[1]]),
+                source.segments[1]
+            ]
+        )
+        let digestMismatch = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: Data(repeating: 0, count: 32), segments: source.segments
+        )
+        for traversal in [malformed, digestMismatch] {
+            await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+                XCTAssertTrue(
+                    error as? ReviewCandidateCompleteTraversalReceiptRepositoryError == .invalidRawPage
+                        || error as? ReviewCandidateCompleteTraversalReceiptRepositoryError == .invalidTraversal
+                )
+            }
+        }
+    }
+
     func testRejectsArbitraryOrCrossEndpointRESTReceiptPages() async throws {
         let fixture = try await ReviewTraversalReceiptFixture()
         defer { fixture.remove() }
@@ -422,19 +458,22 @@ private final class ReviewTraversalReceiptFixture: @unchecked Sendable {
     }
 
     func reviewTraversal() -> ReviewCandidateCompleteTraversal {
-        .init(scope: scope, feature: .reviews, streamID: streamID, candidate: candidate,
+        let requestedReviewers = GitHubRequestedReviewersDTO(users: [], teams: [])
+        return .init(scope: scope, feature: .reviews, streamID: streamID, candidate: candidate,
               candidateSourceRevision: "rev-1", parserVersion: 1, observedAt: date,
-              normalizedDigest: Data(repeating: 7, count: 32), segments: [
+              normalizedDigest: PullRequestReviewReplacementProof.normalizedDigest(
+                  reviews: [], requestedReviewers: requestedReviewers
+              ), segments: [
                 .init(kind: .reviewHistory, pages: [
-                    page(ordinal: 1, requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100", terminal: false),
-                    page(ordinal: 2, requestKey: "GET /repos/acme/repo/pulls/7/reviews?page=2&per_page=100", terminal: true)
+                    page(ordinal: 1, requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100", terminal: false, payload: Data("[]".utf8)),
+                    page(ordinal: 2, requestKey: "GET /repos/acme/repo/pulls/7/reviews?page=2&per_page=100", terminal: true, payload: Data("[]".utf8))
                 ]),
-                .init(kind: .requestedReviewers, pages: [page(ordinal: 1, requestKey: "GET /repos/acme/repo/pulls/7/requested_reviewers", terminal: true)])
+                .init(kind: .requestedReviewers, pages: [page(ordinal: 1, requestKey: "GET /repos/acme/repo/pulls/7/requested_reviewers", terminal: true, payload: Data("{\"users\":[],\"teams\":[]}".utf8))])
               ])
     }
 
-    func page(ordinal: Int, requestKey: String, terminal: Bool) -> ReviewCandidateTraversalPage {
-        .init(ordinal: ordinal, rawSnapshotID: .make(), requestIdentity: .init(scope: scope, feature: .reviews, streamID: streamID, requestKey: requestKey), endpoint: requestKey, eTag: "etag-\(requestKey)", lastModified: "Mon, 01 Jan 2024 00:00:00 GMT", payload: Data("{}".utf8), isTerminal: terminal)
+    func page(ordinal: Int, requestKey: String, terminal: Bool, payload: Data = Data("[]".utf8)) -> ReviewCandidateTraversalPage {
+        .init(ordinal: ordinal, rawSnapshotID: .make(), requestIdentity: .init(scope: scope, feature: .reviews, streamID: streamID, requestKey: requestKey), endpoint: requestKey, eTag: "etag-\(requestKey)", lastModified: "Mon, 01 Jan 2024 00:00:00 GMT", payload: payload, isTerminal: terminal)
     }
 
     func threadPage(ordinal: Int, key: String, terminal: Bool) -> ReviewCandidateTraversalPage {

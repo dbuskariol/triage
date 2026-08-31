@@ -99,6 +99,39 @@ private struct WorkspaceStoredSelection: Codable, Equatable {
     let workItemID: WorkItemID
 }
 
+/// Ephemeral, scope-keyed selection history. It intentionally is not restored
+/// across launches: a persisted selection is useful, whereas replaying old
+/// navigation after coverage changes can be misleading.
+private struct WorkspaceSelectionHistory: Equatable {
+    static let maximumEntries = 20
+
+    var back = [WorkItemID]()
+    var forward = [WorkItemID]()
+
+    mutating func appendBack(_ workItemID: WorkItemID) {
+        back = appending(workItemID, to: back)
+    }
+
+    mutating func appendForward(_ workItemID: WorkItemID) {
+        forward = appending(workItemID, to: forward)
+    }
+
+    mutating func prune(using validWorkItemIDs: Set<WorkItemID>) {
+        back.removeAll { !validWorkItemIDs.contains($0) }
+        forward.removeAll { !validWorkItemIDs.contains($0) }
+    }
+
+    private func appending(_ workItemID: WorkItemID, to entries: [WorkItemID]) -> [WorkItemID] {
+        var entries = entries
+        entries.removeAll { $0 == workItemID }
+        entries.append(workItemID)
+        if entries.count > Self.maximumEntries {
+            entries.removeFirst(entries.count - Self.maximumEntries)
+        }
+        return entries
+    }
+}
+
 @MainActor
 final class AppNavigationModel: ObservableObject {
     private enum PreferenceKey {
@@ -136,6 +169,7 @@ final class AppNavigationModel: ObservableObject {
 
     private let defaults: UserDefaults
     private var selectedWorkItems: [WorkspaceSelectionScope: WorkItemID]
+    private var selectionHistories = [WorkspaceSelectionScope: WorkspaceSelectionHistory]()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -168,8 +202,78 @@ final class AppNavigationModel: ObservableObject {
         organizationID: OrganizationID
     ) {
         let scope = WorkspaceSelectionScope(accountID: accountID, organizationID: organizationID)
+        let previousSelection = selectedWorkItems[scope]
+        guard previousSelection != workItemID else { return }
+
+        guard let workItemID else {
+            selectedWorkItems[scope] = nil
+            selectionHistories[scope] = nil
+            persistSelectedWorkItems()
+            return
+        }
+
+        if let previousSelection {
+            var history = selectionHistories[scope] ?? WorkspaceSelectionHistory()
+            history.appendBack(previousSelection)
+            history.forward.removeAll()
+            selectionHistories[scope] = history
+        }
         selectedWorkItems[scope] = workItemID
         persistSelectedWorkItems()
+    }
+
+    func canNavigateSelectionBack(
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        validWorkItemIDs: Set<WorkItemID>
+    ) -> Bool {
+        guard let scope = selectionScope(accountID: accountID, organizationID: organizationID),
+              selectedWorkItems[scope] != nil
+        else {
+            return false
+        }
+        return selectionHistories[scope]?.back.contains(where: validWorkItemIDs.contains) ?? false
+    }
+
+    func canNavigateSelectionForward(
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        validWorkItemIDs: Set<WorkItemID>
+    ) -> Bool {
+        guard let scope = selectionScope(accountID: accountID, organizationID: organizationID),
+              selectedWorkItems[scope] != nil
+        else {
+            return false
+        }
+        return selectionHistories[scope]?.forward.contains(where: validWorkItemIDs.contains) ?? false
+    }
+
+    /// Moves within the active workspace scope only. Entries unavailable in
+    /// the current cache are pruned before a target can be returned.
+    func navigateSelectionBack(
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        validWorkItemIDs: Set<WorkItemID>
+    ) -> WorkItemID? {
+        navigateSelection(
+            direction: .back,
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
+    }
+
+    func navigateSelectionForward(
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        validWorkItemIDs: Set<WorkItemID>
+    ) -> WorkItemID? {
+        navigateSelection(
+            direction: .forward,
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: validWorkItemIDs
+        )
     }
 
     /// Returns the selection for exactly this scope. A stored selection that
@@ -181,6 +285,7 @@ final class AppNavigationModel: ObservableObject {
         validWorkItemIDs: Set<WorkItemID>
     ) -> WorkItemID? {
         let scope = WorkspaceSelectionScope(accountID: accountID, organizationID: organizationID)
+        pruneSelectionHistory(for: scope, validWorkItemIDs: validWorkItemIDs)
         guard let workItemID = selectedWorkItems[scope] else { return nil }
         guard validWorkItemIDs.contains(workItemID) else {
             selectedWorkItems[scope] = nil
@@ -188,6 +293,65 @@ final class AppNavigationModel: ObservableObject {
             return nil
         }
         return workItemID
+    }
+
+    private enum SelectionHistoryDirection {
+        case back
+        case forward
+    }
+
+    private func navigateSelection(
+        direction: SelectionHistoryDirection,
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        validWorkItemIDs: Set<WorkItemID>
+    ) -> WorkItemID? {
+        guard let scope = selectionScope(accountID: accountID, organizationID: organizationID),
+              let currentSelection = selectedWorkItems[scope],
+              validWorkItemIDs.contains(currentSelection)
+        else {
+            return nil
+        }
+
+        var history = selectionHistories[scope] ?? WorkspaceSelectionHistory()
+        history.prune(using: validWorkItemIDs)
+        let target: WorkItemID?
+        switch direction {
+        case .back:
+            target = history.back.popLast()
+            if let target {
+                history.appendForward(currentSelection)
+                selectedWorkItems[scope] = target
+            }
+        case .forward:
+            target = history.forward.popLast()
+            if let target {
+                history.appendBack(currentSelection)
+                selectedWorkItems[scope] = target
+            }
+        }
+        selectionHistories[scope] = history
+        if target != nil {
+            persistSelectedWorkItems()
+        }
+        return target
+    }
+
+    private func selectionScope(
+        accountID: AccountID?,
+        organizationID: OrganizationID?
+    ) -> WorkspaceSelectionScope? {
+        guard let accountID, let organizationID else { return nil }
+        return WorkspaceSelectionScope(accountID: accountID, organizationID: organizationID)
+    }
+
+    private func pruneSelectionHistory(
+        for scope: WorkspaceSelectionScope,
+        validWorkItemIDs: Set<WorkItemID>
+    ) {
+        guard var history = selectionHistories[scope] else { return }
+        history.prune(using: validWorkItemIDs)
+        selectionHistories[scope] = history
     }
 
     private static func decodeSelectedWorkItems(from defaults: UserDefaults) -> [WorkspaceSelectionScope: WorkItemID] {

@@ -61,6 +61,19 @@ protocol WorkspaceObserving: Sendable {
     ) async throws -> AsyncThrowingStream<WorkspacePresentationSnapshot, Error>
 }
 
+/// Releases observation-side state before an account vault is removed or the
+/// process closes every vault. This is deliberately separate from observing so
+/// read-only observers without retained vault state need no lifecycle logic.
+protocol WorkspaceObservationLifecycleHandling: Sendable {
+    func evictAccount(_ accountID: AccountID) async
+    func shutdown() async
+}
+
+struct NoopWorkspaceObservationLifecycle: WorkspaceObservationLifecycleHandling {
+    func evictAccount(_: AccountID) async {}
+    func shutdown() async {}
+}
+
 /// Performs local workflow mutations. Implementations commit the mutation and
 /// its derived/search consequences before the observation stream publishes the
 /// replacement projection.
@@ -101,6 +114,7 @@ struct TriageApplicationDependencies: Sendable {
     let workspaceCoordinator: any WorkspaceCoordinating
     let refreshLifecycle: any OrganizationRefreshLifecycleHandling
     let workspaceObserver: any WorkspaceObserving
+    let workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling
     let workspaceMutator: any WorkspaceMutating
 
     init(
@@ -108,12 +122,14 @@ struct TriageApplicationDependencies: Sendable {
         workspaceCoordinator: any WorkspaceCoordinating,
         refreshLifecycle: any OrganizationRefreshLifecycleHandling,
         workspaceObserver: any WorkspaceObserving,
+        workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle(),
         workspaceMutator: any WorkspaceMutating
     ) {
         self.accountSession = accountSession
         self.workspaceCoordinator = workspaceCoordinator
         self.refreshLifecycle = refreshLifecycle
         self.workspaceObserver = workspaceObserver
+        self.workspaceObservationLifecycle = workspaceObservationLifecycle
         self.workspaceMutator = workspaceMutator
     }
 }

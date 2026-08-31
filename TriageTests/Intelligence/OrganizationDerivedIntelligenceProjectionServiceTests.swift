@@ -35,7 +35,7 @@ final class OrganizationDerivedIntelligenceProjectionServiceTests: XCTestCase {
         )
     }
 
-    func testProvisionalSnapshotIsPersistedButReportedAsPartial() async throws {
+    func testProvisionalInputIsPersistedButReportedAsPartial() async throws {
         let log = EventLog()
         let gate = ScopeGate(log: log)
         let snapshot = makeSnapshot(isProvisional: true, completeCoverage: false)
@@ -51,6 +51,28 @@ final class OrganizationDerivedIntelligenceProjectionServiceTests: XCTestCase {
             return XCTFail("Expected a partial publication, got \(outcome).")
         }
         XCTAssertEqual(publication.coverageState, .incomplete)
+        XCTAssertTrue(publication.isProvisional)
+        let persistedSourceRevisions = await log.persistedSourceRevisions()
+        XCTAssertEqual(persistedSourceRevisions, ["source-v1"])
+    }
+
+    func testInputProvisionalStateCannotDivergeFromSnapshotPublication() async throws {
+        let log = EventLog()
+        let gate = ScopeGate(log: log)
+        let snapshot = makeSnapshot(isProvisional: true, completeCoverage: true)
+        XCTAssertTrue(snapshot.input.isProvisional)
+        XCTAssertTrue(snapshot.isProvisional)
+        let service = makeService(log: log, gate: gate, snapshot: snapshot)
+
+        let outcome = try await service.recomputeAfterNormalizedCommit(
+            for: scope,
+            aiPolicy: policy,
+            evaluatedAt: evaluatedAt
+        )
+
+        guard case let .partial(publication) = outcome else {
+            return XCTFail("A provisional input must not be published as trusted.")
+        }
         XCTAssertTrue(publication.isProvisional)
         let persistedSourceRevisions = await log.persistedSourceRevisions()
         XCTAssertEqual(persistedSourceRevisions, ["source-v1"])
@@ -207,13 +229,13 @@ final class OrganizationDerivedIntelligenceProjectionServiceTests: XCTestCase {
                 coverageRecords: [record],
                 calendar: calendar,
                 aiPolicy: policy,
+                isProvisional: isProvisional,
                 evaluatedAt: evaluatedAt,
                 items: []
             ),
             sourceStates: [],
             sourceRevisions: [:],
-            aggregateSourceRevision: "source-v1",
-            isProvisional: isProvisional
+            aggregateSourceRevision: "source-v1"
         )
     }
 }

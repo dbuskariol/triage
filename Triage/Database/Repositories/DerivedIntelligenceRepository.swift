@@ -127,9 +127,17 @@ actor DerivedIntelligenceRepository {
     }
 
     private let vault: AccountVault
+    /// Test-only observability for bounded validation `IN` queries. This
+    /// intentionally excludes unrelated projection reads, allowing a stable
+    /// query-budget regression without timing assertions.
+    private let projectionValidationBatchQueryObserver: (@Sendable () -> Void)?
 
-    init(vault: AccountVault) {
+    init(
+        vault: AccountVault,
+        projectionValidationBatchQueryObserver: (@Sendable () -> Void)? = nil
+    ) {
         self.vault = vault
+        self.projectionValidationBatchQueryObserver = projectionValidationBatchQueryObserver
     }
 
     /// Replaces the complete derived projection for an organization in one
@@ -162,7 +170,10 @@ actor DerivedIntelligenceRepository {
         guard scope.accountID == vault.accountID else {
             throw DerivedIntelligenceRepositoryError.accountScopeMismatch
         }
+        try Task.checkCancellation()
+        let batchQueryObserver = projectionValidationBatchQueryObserver
         return try await vault.read { database in
+            try Task.checkCancellation()
             try Self.validateCurrentScope(scope, in: database)
             guard let run = try Self.fetchRun(scope: scope, in: database) else {
                 return nil
@@ -173,15 +184,22 @@ actor DerivedIntelligenceRepository {
                 in: database
             )
             let candidates = try Self.fetchCandidates(scope: scope, in: database)
-            try Self.validatePersistedEvaluations(scope: scope, sourceRevision: run.sourceRevision, in: database)
+            try Self.validatePersistedEvaluations(
+                scope: scope,
+                sourceRevision: run.sourceRevision,
+                batchQueryObserver: batchQueryObserver,
+                in: database
+            )
             try Self.validatePersistedCandidates(
                 scope: scope,
                 sourceRevision: run.sourceRevision,
                 coverageState: run.coverageState,
                 isProvisional: run.isProvisional,
                 candidates: candidates,
+                batchQueryObserver: batchQueryObserver,
                 in: database
             )
+            try Task.checkCancellation()
             return DerivedIntelligencePersistedProjection(run: run, candidates: candidates)
         }
     }
@@ -797,10 +815,14 @@ actor DerivedIntelligenceRepository {
     /// on the write path.
     private nonisolated static func validatePersistedRawSnapshotReferences(
         _ evidence: [EvidenceReference],
+        batchQueryObserver: (@Sendable () -> Void)?,
         in database: Database
     ) throws {
         var expectedAuthorities = [String: RawSnapshotAuthority]()
-        for reference in evidence {
+        for (index, reference) in evidence.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
             guard let rawSnapshotID = reference.rawSnapshotID else { continue }
             let authority = evidenceAuthorityColumns(reference.authority)
             guard authority.kind == "github",
@@ -832,6 +854,8 @@ actor DerivedIntelligenceRepository {
         }
         var persistedAuthorities = [String: RawSnapshotAuthority]()
         for batch in batches(expectedAuthorities.keys.sorted()) {
+            try Task.checkCancellation()
+            batchQueryObserver?()
             let rows = try Row.fetchAll(
                 database,
                 sql: """
@@ -843,7 +867,10 @@ actor DerivedIntelligenceRepository {
                     """,
                 arguments: StatementArguments(batch)
             )
-            for row in rows {
+            for (index, row) in rows.enumerated() {
+                if index.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
                 guard let id: String = row["id"],
                       let accountID: String = row["account_id"],
                       let organizationID: String = row["authority_organization_id"],
@@ -865,6 +892,7 @@ actor DerivedIntelligenceRepository {
                 )
             }
         }
+        try Task.checkCancellation()
         guard expectedAuthorities == persistedAuthorities else {
             throw DerivedIntelligenceRepositoryError.invalidEvidence
         }
@@ -932,7 +960,7 @@ actor DerivedIntelligenceRepository {
         scope: SynchronizationScope,
         in database: Database
     ) throws -> [DerivedIntelligencePersistedCandidate] {
-        try Row.fetchAll(
+        let rows = try Row.fetchAll(
             database,
             sql: """
                 SELECT work_item_id, candidate_id, disposition, exclusion_reason, score,
@@ -946,7 +974,11 @@ actor DerivedIntelligenceRepository {
                 scope.accountID.rawValue, scope.organizationID.rawValue,
                 scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue
             ]
-        ).map { row in
+        )
+        return try rows.enumerated().map { index, row in
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
             guard let workItemID = WorkItemID(rawValue: row["work_item_id"]),
                   let disposition: String = row["disposition"]
             else {
@@ -1009,8 +1041,10 @@ actor DerivedIntelligenceRepository {
     private nonisolated static func validatePersistedEvaluations(
         scope: SynchronizationScope,
         sourceRevision: String,
+        batchQueryObserver: (@Sendable () -> Void)?,
         in database: Database
     ) throws {
+        try Task.checkCancellation()
         let malformedCount = try Int.fetchOne(
             database,
             sql: """
@@ -1110,11 +1144,24 @@ actor DerivedIntelligenceRepository {
                 """,
             arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
         )
-        let evidence = try rows.map { try evidence(from: $0) }
-        for reference in evidence {
+        let evidence = try rows.enumerated().map { index, row in
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            return try evidence(from: row)
+        }
+        for (index, reference) in evidence.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
             try validate(evidence: reference, scope: scope)
         }
-        try validatePersistedRawSnapshotReferences(evidence, in: database)
+        try validatePersistedRawSnapshotReferences(
+            evidence,
+            batchQueryObserver: batchQueryObserver,
+            in: database
+        )
+        try Task.checkCancellation()
     }
 
     private nonisolated static func validatePersistedCandidates(
@@ -1123,8 +1170,10 @@ actor DerivedIntelligenceRepository {
         coverageState: DerivedIntelligenceCoverageState,
         isProvisional: Bool,
         candidates: [DerivedIntelligencePersistedCandidate],
+        batchQueryObserver: (@Sendable () -> Void)?,
         in database: Database
     ) throws {
+        try Task.checkCancellation()
         let malformedCount = try Int.fetchOne(
             database,
             sql: """
@@ -1171,6 +1220,8 @@ actor DerivedIntelligenceRepository {
         var scores = [WorkItemID: AttentionScore]()
         var reasonIDs = [WorkItemID: Set<String>]()
         for batch in batches(rawWorkItemIDs) {
+            try Task.checkCancellation()
+            batchQueryObserver?()
             let rows = try Row.fetchAll(
                 database,
                 sql: """
@@ -1180,7 +1231,10 @@ actor DerivedIntelligenceRepository {
                     """,
                 arguments: StatementArguments(batch)
             )
-            for row in rows {
+            for (index, row) in rows.enumerated() {
+                if index.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
                 guard let rawWorkItemID: String = row["work_item_id"],
                       let workItemID = WorkItemID(rawValue: rawWorkItemID),
                       let score: Int = row["score"],
@@ -1198,6 +1252,7 @@ actor DerivedIntelligenceRepository {
                     throw DerivedIntelligenceRepositoryError.invalidPersistedData
                 }
             }
+            batchQueryObserver?()
             let reasonRows = try Row.fetchAll(
                 database,
                 sql: """
@@ -1207,7 +1262,10 @@ actor DerivedIntelligenceRepository {
                     """,
                 arguments: StatementArguments(batch)
             )
-            for row in reasonRows {
+            for (index, row) in reasonRows.enumerated() {
+                if index.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
                 guard let rawWorkItemID: String = row["work_item_id"],
                       let workItemID = WorkItemID(rawValue: rawWorkItemID),
                       let reasonID: String = row["id"],
@@ -1218,7 +1276,10 @@ actor DerivedIntelligenceRepository {
                 reasonIDs[workItemID, default: []].insert(reasonID)
             }
         }
-        for candidate in persistedCandidates {
+        for (index, candidate) in persistedCandidates.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
             guard let persistedScore = scores[candidate.workItemID],
                   candidate.score == persistedScore,
                   Set(candidate.triggerReasonIDs).isSubset(
@@ -1228,6 +1289,7 @@ actor DerivedIntelligenceRepository {
                 throw DerivedIntelligenceRepositoryError.invalidPersistedData
             }
         }
+        try Task.checkCancellation()
     }
 
     private nonisolated static func evidence(from row: Row) throws -> EvidenceReference {
