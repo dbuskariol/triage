@@ -1726,6 +1726,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
 
         ssoAuthorizationHeader = nil
+        refreshError = nil
         isRefreshing = true
         defer {
             if refreshGeneration == generation {
