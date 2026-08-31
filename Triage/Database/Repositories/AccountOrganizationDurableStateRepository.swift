@@ -704,8 +704,8 @@ actor AccountOrganizationDurableStateRepository {
         _ requirement: CoverageRequirement
     ) -> String {
         canonicalFields([
-            requirement.repositoryID?.rawValue ?? "",
             requirement.feature.rawValue,
+            requirement.repositoryID?.rawValue ?? "",
             requirement.streamID.rawValue,
             requirement.intervalStart.flatMap(canonicalMilliseconds).map(String.init) ?? "",
             requirement.intervalEnd.flatMap(canonicalMilliseconds).map(String.init) ?? ""
