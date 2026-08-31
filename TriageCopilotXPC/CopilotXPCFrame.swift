@@ -32,11 +32,13 @@ enum CopilotXPCFrame {
     }
     guard header.protocolVersion == 2,
       UUID(uuidString: header.requestID)?.uuidString.lowercased() == header.requestID,
-      UUID(uuidString: header.accountID)?.uuidString.lowercased() == header.accountID,
       !header.organizationID.isEmpty,
       header.organizationID.utf8.count <= 256,
       Operation(rawValue: header.operation) != nil
     else { throw CopilotXPCServiceError.malformedFrame }
+    guard UUID(uuidString: header.accountID)?.uuidString.lowercased() == header.accountID else {
+      throw CopilotXPCServiceError.invalidAccountID
+    }
     return header
   }
 

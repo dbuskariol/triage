@@ -29,7 +29,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
       processLauncher: { _ in didLaunch = true }
     )
 
-    XCTAssertThrowsError(try process.exchange(frame: Data())) { error in
+    XCTAssertThrowsError(try process.exchange(frame: framedRequest(accountID: fixtureAccountID))) { error in
       XCTAssertEqual(error as? CopilotXPCServiceError, .helperUnavailable)
     }
     XCTAssertFalse(didLaunch)
@@ -46,7 +46,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
       processLauncher: { _ in didLaunch = true }
     )
 
-    XCTAssertThrowsError(try process.exchange(frame: Data())) { error in
+    XCTAssertThrowsError(try process.exchange(frame: framedRequest(accountID: fixtureAccountID))) { error in
       XCTAssertEqual(error as? CopilotXPCServiceError, .helperNotExecutable)
     }
     XCTAssertFalse(didValidate)
@@ -63,7 +63,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
       processLauncher: { _ in didLaunch = true }
     )
 
-    XCTAssertThrowsError(try process.exchange(frame: Data())) { error in
+    XCTAssertThrowsError(try process.exchange(frame: framedRequest(accountID: fixtureAccountID))) { error in
       XCTAssertEqual(error as? CopilotXPCServiceError, .codeSignatureNotValidated)
     }
     XCTAssertFalse(didLaunch)
@@ -79,7 +79,10 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
       runtimeVerifier: TestRuntimeVerifier.trusted(),
       processLauncher: { _ in didLaunch = true }
     )
-    let payload = Data(#"{"protocol_version":2,"account_id":"not-an-opaque-account"}"#.utf8)
+    let payload = Data(
+      #"{"protocol_version":2,"request_id":"00000000-0000-4000-8000-000000000001","account_id":"not-an-opaque-account","organization_id":"org-1","operation":"authenticate","credential":"test-fixture-credential"}"#
+        .utf8
+    )
     var length = UInt32(payload.count).bigEndian
     var frame = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
     frame.append(payload)
@@ -87,7 +90,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     XCTAssertThrowsError(try process.exchange(frame: frame)) { error in
       XCTAssertEqual(error as? CopilotXPCServiceError, .invalidAccountID)
     }
-    XCTAssertEqual(signedIdentifier, "com.triage.mac.TriageCopilotHelper")
+    XCTAssertNil(signedIdentifier)
     XCTAssertFalse(didLaunch)
   }
 
@@ -676,12 +679,19 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     return try XCTUnwrap(Bundle(url: directory))
   }
 
+  private var fixtureAccountID: String {
+    "00000000-0000-4000-8000-000000000002"
+  }
+
   private func framedRequest(accountID: String) -> Data {
-    let payload = Data("{\"protocol_version\":2,\"account_id\":\"\(accountID)\"}".utf8)
-    var length = UInt32(payload.count).bigEndian
-    var frame = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
-    frame.append(payload)
-    return frame
+    try! framedJSON([
+      "protocol_version": 2,
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "account_id": accountID,
+      "organization_id": "org-1",
+      "operation": "authenticate",
+      "credential": "test-fixture-credential",
+    ])
   }
 
   private func authenticatedRequest(accountID: String, requestID: String, credential: String) throws -> Data {
