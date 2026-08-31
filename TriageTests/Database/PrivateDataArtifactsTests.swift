@@ -66,7 +66,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
                     vaultWasOpen: await registry.isOpen(accountID: accountID),
                     removalWasActive: await registry.isBeingRemoved(accountID: accountID)
                 )
-            }
+            },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         try await service.removeAllPrivateData(for: accountID)
@@ -115,7 +116,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: registry,
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         let cancelled = await Task { () -> Bool in
@@ -171,7 +173,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             eraseSecrets: { _ in
                 await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false)
             },
-            willBeginCryptoErasure: { await barrier.pause() }
+            willBeginCryptoErasure: { await barrier.pause() },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         let removalTask = Task {
             try await service.removeAllPrivateData(for: accountID)
@@ -229,7 +232,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             eraseSecrets: { _ in
                 await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true)
             },
-            willBeginCryptoErasure: { await drain.pause() }
+            willBeginCryptoErasure: { await drain.pause() },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         let removal = Task { try await service.removeAllPrivateData(for: accountID) }
@@ -266,7 +270,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             applicationSupportDirectory: support,
             cachesDirectory: caches,
             eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
-            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         do {
@@ -319,7 +324,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             },
             willBeginCryptoErasureForAccount: { recoveredAccountID in
                 await recoveryOrdering.record(.drained(recoveredAccountID))
-            }
+            },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         let recoveredAccountIDs = try await recovery.recoverInterruptedRemovals()
 
@@ -371,7 +377,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
                         try FileManager.default.removeItem(at: artifact.url)
                     }
                 }
-            }
+            },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         try await assertInterruptedDeletion(interrupted, accountID: accountID)
@@ -381,7 +388,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: try VaultRegistry(rootDirectory: vaultRoot),
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         let recoveredAccountIDs = try await recovery.recoverInterruptedRemovals()
         let secretErasures = await events.secretErasures()
@@ -416,7 +424,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             applicationSupportDirectory: support,
             cachesDirectory: caches,
             eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
-            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         try await assertInterruptedDeletion(interrupted, accountID: accountID)
         let journalURL = journalURL(for: accountID, support: support)
@@ -435,7 +444,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: restartedRegistry,
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         let tamperedReplay = try await recovery.recoverInterruptedRemovals()
         let erasuresAfterTamper = await events.secretErasures()
@@ -503,7 +513,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             applicationSupportDirectory: support,
             cachesDirectory: caches,
             eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
-            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
         try await assertInterruptedDeletion(interrupted, accountID: accountID)
 
@@ -513,7 +524,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: try VaultRegistry(rootDirectory: vaultRoot),
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: journal.path)
@@ -571,7 +583,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: registry,
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         let replayed = try await service.recoverInterruptedRemovals()
@@ -605,7 +618,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: try VaultRegistry(rootDirectory: support.appendingPathComponent("separate", isDirectory: true)),
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         do {
@@ -634,7 +648,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             vaultRegistry: try VaultRegistry(rootDirectory: support.appendingPathComponent("Triage", isDirectory: true)),
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         do {
@@ -670,7 +685,8 @@ final class PrivateDataArtifactsTests: XCTestCase {
             cachesDirectory: caches,
             eraseSecrets: { _ in
                 await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false)
-            }
+            },
+            journalAuthority: TestAccountDeletionJournalAuthority()
         )
 
         let recoveredAccountIDs = try await service.recoverInterruptedRemovals()
@@ -679,6 +695,22 @@ final class PrivateDataArtifactsTests: XCTestCase {
         XCTAssertEqual(recoveredAccountIDs, [])
         XCTAssertEqual(secretErasures, 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: vaultDirectory.path))
+    }
+}
+
+/// Tests exercise journal authenticity without reading or creating the app's
+/// production device-only Keychain authority.
+private struct TestAccountDeletionJournalAuthority: AccountDeletionJournalAuthenticating {
+    func sign(accountID: AccountID) throws -> Data {
+        Data(SHA256.hash(data: material(for: accountID)))
+    }
+
+    func verify(signature: Data, accountID: AccountID) throws -> Bool {
+        signature == Data(SHA256.hash(data: material(for: accountID)))
+    }
+
+    private func material(for accountID: AccountID) -> Data {
+        Data("triage-test-deletion-journal\u{1F}\(accountID.rawValue)".utf8)
     }
 }
 

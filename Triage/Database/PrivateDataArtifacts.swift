@@ -233,7 +233,7 @@ actor AccountDataRemovalService {
         eraseArtifacts: (@Sendable ([PrivateDataArtifact]) throws -> Void)? = nil,
         willBeginCryptoErasure: (@Sendable () async -> Void)? = nil,
         willBeginCryptoErasureForAccount: (@Sendable (AccountID) async -> Void)? = nil,
-        journalAuthority: (any AccountDeletionJournalAuthenticating)? = nil
+        journalAuthority: any AccountDeletionJournalAuthenticating
     ) {
         self.vaultRegistry = vaultRegistry
         self.applicationSupportDirectory = applicationSupportDirectory
@@ -242,7 +242,7 @@ actor AccountDataRemovalService {
         self.eraseArtifacts = eraseArtifacts ?? Self.removeArtifacts
         self.willBeginCryptoErasure = willBeginCryptoErasure ?? {}
         self.willBeginCryptoErasureForAccount = willBeginCryptoErasureForAccount ?? { _ in }
-        self.journalAuthority = journalAuthority ?? AccountDeletionJournalKeychainAuthority.shared
+        self.journalAuthority = journalAuthority
     }
 
     func removeAllPrivateData(for accountID: AccountID) async throws {
