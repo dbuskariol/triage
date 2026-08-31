@@ -5,11 +5,13 @@ import XCTest
 @MainActor
 final class TriageAppModelSelectionTests: XCTestCase {
     private enum RuntimeStateCase: CustomStringConvertible {
+        case missing
         case downloading
         case verifying
 
         var description: String {
             switch self {
+            case .missing: "missing"
             case .downloading: "downloading"
             case .verifying: "verifying"
             }
@@ -530,6 +532,34 @@ final class TriageAppModelSelectionTests: XCTestCase {
         XCTAssertFalse(model.isCopilotRuntimeOperationInProgress)
     }
 
+    func testCopilotAcquisitionCancellationSettlesBackToMissing() async throws {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let runtimeAuthorization = RuntimeProgressAuthorizationSpy()
+        let model = try makeModel(copilotRuntimeAuthorization: runtimeAuthorization)
+        model.install(
+            accounts: [account(accountID, suffix: "runtime-cancel")],
+            organizations: [organization(organizationID, suffix: "runtime-cancel")],
+            organizationAccesses: [organizationID: access(account: accountID, organization: organizationID)],
+            for: accountID
+        )
+        model.selectedAccountID = accountID
+        model.selectedOrganizationID = organizationID
+
+        model.startCopilotRuntimeAcquisitionAtUserRequest()
+        await runtimeAuthorization.waitForDownloading()
+        await assertRuntimeState(model, matches: .downloading)
+
+        model.cancelCopilotRuntimeOperation()
+
+        await assertRuntimeState(model, matches: .missing)
+        for _ in 0..<100 {
+            if await runtimeAuthorization.cancellationCallCount() == 1 { return }
+            await Task.yield()
+        }
+        XCTFail("The app model did not forward the explicit runtime cancellation.")
+    }
+
     func testSuccessfulCredentialReplacementClearsResolvedRecoveryState() async throws {
         let accountID = AccountID.make()
         let unavailableAccountID = AccountID.make()
@@ -839,7 +869,7 @@ final class TriageAppModelSelectionTests: XCTestCase {
     ) async {
         for _ in 0..<100 {
             switch (expected, model.selectedCopilotAuthorizationState.runtime) {
-            case (.downloading, .downloading), (.verifying, .verifying):
+            case (.missing, .missing), (.downloading, .downloading), (.verifying, .verifying):
                 return
             default:
                 await Task.yield()
@@ -1005,6 +1035,7 @@ private actor RuntimeProgressAuthorizationSpy: CopilotRuntimeAuthorizationProvid
     private var acquireRelease: CheckedContinuation<Void, Never>?
     private var verificationRelease: CheckedContinuation<Void, Never>?
     private var disconnectedAccounts = [AccountID]()
+    private var cancellationCalls = 0
 
     func state(for _: AccountID) async -> CopilotAccountAuthorizationState {
         .init(
@@ -1056,6 +1087,17 @@ private actor RuntimeProgressAuthorizationSpy: CopilotRuntimeAuthorizationProvid
     }
 
     func acquireCallCount() -> Int { acquireCalls }
+
+    func cancelRuntimeOperationAtUserRequest() {
+        cancellationCalls += 1
+        acquireRelease?.resume()
+        acquireRelease = nil
+        verificationRelease?.resume()
+        verificationRelease = nil
+        publish(.missing)
+    }
+
+    func cancellationCallCount() -> Int { cancellationCalls }
 
     func repairRuntimeAtUserRequest() async throws { throw CancellationError() }
     func removeRuntimeAtUserRequest() async throws {}

@@ -331,6 +331,7 @@ protocol CopilotRuntimeAuthorizationProviding: Sendable {
     func runtimeStateUpdates() async -> AsyncStream<CopilotRuntimeStatus>?
     func acquireRuntimeAtUserRequest() async throws
     func repairRuntimeAtUserRequest() async throws
+    func cancelRuntimeOperationAtUserRequest() async
     func removeRuntimeAtUserRequest() async throws
     func authenticate(
         account: GitHubAccount,
@@ -345,6 +346,7 @@ protocol CopilotRuntimeAuthorizationProviding: Sendable {
 
 extension CopilotRuntimeAuthorizationProviding {
     func runtimeStateUpdates() async -> AsyncStream<CopilotRuntimeStatus>? { nil }
+    func cancelRuntimeOperationAtUserRequest() async {}
 }
 
 /// Account-scoped authentication adapter. OAuth and fine-grained PAT values
@@ -462,6 +464,10 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         invalidateAllModelIDs()
         _ = try await runtime.repairAtUserRequest()
         _ = try await runtime.runtimeForUse()
+    }
+
+    func cancelRuntimeOperationAtUserRequest() async {
+        await runtime?.cancelAtUserRequest()
     }
 
     func removeRuntimeAtUserRequest() async throws {
