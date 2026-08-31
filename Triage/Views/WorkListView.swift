@@ -131,6 +131,11 @@ struct WorkListView: View {
                     }
                 }
                 .padding(8)
+            } else if let searchIndexError = appModel.searchIndexError {
+                Label(searchIndexError, systemImage: "magnifyingglass.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(8)
             }
         }
     }
