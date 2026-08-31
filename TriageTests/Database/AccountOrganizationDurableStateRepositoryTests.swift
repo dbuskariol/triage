@@ -36,6 +36,49 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         XCTAssertEqual(persistedSchedule, completed)
     }
 
+    func testRepositoryBackedManifestRetainsCanonicalOrderingAcrossReload() async throws {
+        let fixture = try await DurableStateFixture()
+        defer { fixture.remove() }
+        let repository = AccountOrganizationDurableStateRepository(vault: fixture.vault)
+        let scheduler = OrganizationSchedulerStateRepository(vault: fixture.vault)
+        let scope = fixture.scope()
+        _ = try await fixture.installRepositoryBackedWorkflow()
+        let requirements = try await fixture.vault.read { database in
+            try CoverageRequirementProfile.build(for: scope, coverage: [], in: database)
+        }
+        let coverage = requirements.map { fixture.completeCoverage($0, scope: scope) }
+        for record in coverage {
+            try await CoverageRepository(vault: fixture.vault).save(
+                record,
+                attemptedAt: fixture.now
+            )
+        }
+        let candidate = AccountOrganizationDurableState(
+            cachedState: AccountOrganizationCachedState(
+                coverage: coverage,
+                lastSuccessfulSyncAt: fixture.successDate
+            )
+        )
+        let attemptID = fixture.attemptID("00000000-0000-0000-0000-000000000122")
+        try await scheduler.save(
+            fixture.activeSchedule(scope: scope, attemptID: attemptID, generation: 1)
+        )
+
+        let finalized = try await repository.finalize(
+            candidate,
+            schedule: fixture.completedSchedule(scope: scope, generation: 1),
+            for: scope,
+            ifOwnedBy: attemptID,
+            generation: 1
+        )
+        let committed = try XCTUnwrap(finalized)
+        let loaded = try await repository.loadState(for: scope)
+
+        XCTAssertEqual(loaded, committed)
+        XCTAssertEqual(loaded?.cachedState?.coverageRequirements, requirements)
+        XCTAssertEqual(loaded?.freshness.status, .fresh)
+    }
+
     func testEncryptedVaultReopenRetainsDurableProjectionWithoutPlaintextPayload() async throws {
         let fixture = try await DurableStateFixture()
         defer { fixture.remove() }
