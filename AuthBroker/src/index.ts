@@ -1,13 +1,28 @@
 const PROTOCOL_VERSION = 1;
 const MAX_REQUEST_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024;
+const REQUEST_LIFETIME_MS = 60_000;
 const GITHUB_TOKEN_ENDPOINT = "https://github.com/login/oauth/access_token";
 const PKCE_VERIFIER = /^[A-Za-z0-9\-._~]{43,128}$/;
+const REQUEST_NONCE = /^[A-Za-z0-9_-]{43,128}$/;
+const APPLICATION_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+interface RequestGuardNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): {
+    fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  };
+}
 
 export interface Env {
   GITHUB_OAUTH_CLIENT_ID: string;
   GITHUB_OAUTH_CLIENT_SECRET: string;
   ALLOWED_REDIRECT_URI: string;
+  MINIMUM_APPLICATION_VERSION: string;
+  REQUEST_RATE_LIMIT_PER_MINUTE: string;
+  IP_RATE_LIMIT_PER_MINUTE: string;
+  REQUEST_CONTROL_HASH_KEY: string;
+  OAUTH_REQUEST_GUARD: RequestGuardNamespace;
   CORS_ALLOWED_ORIGINS?: string;
 }
 
@@ -29,7 +44,22 @@ interface BrokerConfiguration {
   clientID: string;
   clientSecret: string;
   redirectURI: string;
+  minimumApplicationVersion: ApplicationVersion;
+  requestRateLimitPerMinute: number;
+  ipRateLimitPerMinute: number;
   corsOrigins: Set<string>;
+}
+
+interface ApplicationVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+interface RequestControl {
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
 }
 
 interface GitHubTokenResponse {
@@ -85,7 +115,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         );
       }
 
-      if (!readConfiguration(env, corsOrigins)) {
+      const configuration = readConfiguration(env, corsOrigins);
+      if (!configuration || !(await isRequestGuardAvailable(env))) {
         return healthResponse("unavailable", corsOrigins, request, 503);
       }
       return healthResponse("ok", corsOrigins, request);
@@ -119,10 +150,23 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     }
 
     const input = await parseJSONBody(request);
+    const applicationVersion = requireApplicationVersion(
+      request.headers.get("x-triage-application-version"),
+      configuration.minimumApplicationVersion,
+    );
+    const control = requestControl(input);
     const form =
       requestURL.pathname === "/oauth/exchange"
-        ? exchangeForm(input, configuration)
-        : refreshForm(input, configuration);
+        ? exchangeForm(input, configuration, control)
+        : refreshForm(input, configuration, control);
+    await consumeRequestControl(
+      env,
+      request,
+      requestURL.pathname,
+      applicationVersion,
+      control,
+      configuration,
+    );
     const token = await exchangeWithGitHub(form);
 
     return tokenResponse(token, corsOrigins, request);
@@ -170,7 +214,12 @@ function readConfiguration(env: Env, corsOrigins: Set<string>): BrokerConfigurat
   if (
     !isSafeBinding(env.GITHUB_OAUTH_CLIENT_ID, 512) ||
     !isSafeBinding(env.GITHUB_OAUTH_CLIENT_SECRET, 512) ||
-    !isValidConfiguredRedirectURI(env.ALLOWED_REDIRECT_URI)
+    !isValidConfiguredRedirectURI(env.ALLOWED_REDIRECT_URI) ||
+    !parseApplicationVersion(env.MINIMUM_APPLICATION_VERSION) ||
+    !parsePositiveInteger(env.REQUEST_RATE_LIMIT_PER_MINUTE, 10_000) ||
+    !parsePositiveInteger(env.IP_RATE_LIMIT_PER_MINUTE, 1_000) ||
+    !isValidRequestControlHashKey(env.REQUEST_CONTROL_HASH_KEY) ||
+    !env.OAUTH_REQUEST_GUARD
   ) {
     return undefined;
   }
@@ -179,6 +228,9 @@ function readConfiguration(env: Env, corsOrigins: Set<string>): BrokerConfigurat
     clientID: env.GITHUB_OAUTH_CLIENT_ID,
     clientSecret: env.GITHUB_OAUTH_CLIENT_SECRET,
     redirectURI: env.ALLOWED_REDIRECT_URI,
+    minimumApplicationVersion: parseApplicationVersion(env.MINIMUM_APPLICATION_VERSION)!,
+    requestRateLimitPerMinute: parsePositiveInteger(env.REQUEST_RATE_LIMIT_PER_MINUTE, 10_000)!,
+    ipRateLimitPerMinute: parsePositiveInteger(env.IP_RATE_LIMIT_PER_MINUTE, 1_000)!,
     corsOrigins,
   };
 }
@@ -190,6 +242,10 @@ function isSafeBinding(value: string | undefined, maximumLength: number): value 
     value.length <= maximumLength &&
     !/[\u0000-\u001F\u007F]/.test(value)
   );
+}
+
+function isValidRequestControlHashKey(value: string | undefined): value is string {
+  return isSafeBinding(value, 512) && value.length >= 32;
 }
 
 function isValidConfiguredRedirectURI(value: string | undefined): value is string {
@@ -237,7 +293,7 @@ async function handlePreflight(
 
   const headers = responseHeaders(corsOrigins, request);
   headers.set("Access-Control-Allow-Methods", "POST");
-  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  headers.set("Access-Control-Allow-Headers", "Content-Type, X-Triage-Application-Version");
   headers.set("Access-Control-Max-Age", "600");
   return new Response(null, { status: 204, headers });
 }
@@ -248,7 +304,10 @@ function requestedHeadersAreAllowed(value: string | null): boolean {
   }
   return value
     .split(",")
-    .every((header) => header.trim().toLowerCase() === "content-type");
+    .every((header) => {
+      const normalized = header.trim().toLowerCase();
+      return normalized === "content-type" || normalized === "x-triage-application-version";
+    });
 }
 
 function isJSONContentType(value: string | null): boolean {
@@ -323,9 +382,16 @@ async function readBoundedBody(
   return result;
 }
 
-function exchangeForm(input: Record<string, unknown>, config: BrokerConfiguration): URLSearchParams {
-  requireExactKeys(input, ["version", "authorizationCode", "codeVerifier", "redirectURI"]);
+function exchangeForm(
+  input: Record<string, unknown>,
+  config: BrokerConfiguration,
+  control: RequestControl,
+): URLSearchParams {
+  requireExactKeys(input, [
+    "version", "authorizationCode", "codeVerifier", "redirectURI", "nonce", "issuedAt", "expiresAt",
+  ]);
   requireVersion(input.version);
+  requireRequestControl(input, control);
   const authorizationCode = requireSecret(input.authorizationCode);
   const codeVerifier = requireString(input.codeVerifier, 128);
   const redirectURI = requireRedirectURI(input.redirectURI, config.redirectURI);
@@ -343,9 +409,14 @@ function exchangeForm(input: Record<string, unknown>, config: BrokerConfiguratio
   });
 }
 
-function refreshForm(input: Record<string, unknown>, config: BrokerConfiguration): URLSearchParams {
-  requireExactKeys(input, ["version", "refreshToken"]);
+function refreshForm(
+  input: Record<string, unknown>,
+  config: BrokerConfiguration,
+  control: RequestControl,
+): URLSearchParams {
+  requireExactKeys(input, ["version", "refreshToken", "nonce", "issuedAt", "expiresAt"]);
   requireVersion(input.version);
+  requireRequestControl(input, control);
   const refreshToken = requireSecret(input.refreshToken);
 
   return new URLSearchParams({
@@ -371,6 +442,139 @@ function requireVersion(value: unknown): void {
   if (value !== PROTOCOL_VERSION) {
     throw invalidRequest("The request version is unsupported.");
   }
+}
+
+function requestControl(input: Record<string, unknown>): RequestControl {
+  const nonce = requireString(input.nonce, 128);
+  const issuedAt = requireTimestamp(input.issuedAt);
+  const expiresAt = requireTimestamp(input.expiresAt);
+  if (!REQUEST_NONCE.test(nonce)) {
+    throw invalidRequest("The request is invalid or unsupported.");
+  }
+  return { nonce, issuedAt, expiresAt };
+}
+
+function requireRequestControl(input: Record<string, unknown>, control: RequestControl): void {
+  if (
+    input.nonce !== control.nonce ||
+    input.issuedAt !== control.issuedAt ||
+    input.expiresAt !== control.expiresAt
+  ) {
+    throw invalidRequest("The request is invalid or unsupported.");
+  }
+}
+
+function requireTimestamp(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw invalidRequest("The request is invalid or unsupported.");
+  }
+  return value as number;
+}
+
+function requireApplicationVersion(
+  value: string | null,
+  minimumVersion: ApplicationVersion,
+): string {
+  const version = typeof value === "string" ? parseApplicationVersion(value) : undefined;
+  if (!version || compareApplicationVersions(version, minimumVersion) < 0) {
+    throw invalidRequest("This version of Triage is not supported by the OAuth service.");
+  }
+  return value!;
+}
+
+function parseApplicationVersion(value: string | undefined): ApplicationVersion | undefined {
+  if (!value || !APPLICATION_VERSION.test(value)) {
+    return undefined;
+  }
+  const [major, minor, patch] = value.split(".").map(Number);
+  if (![major, minor, patch].every(Number.isSafeInteger)) {
+    return undefined;
+  }
+  return { major, minor, patch };
+}
+
+function compareApplicationVersions(left: ApplicationVersion, right: ApplicationVersion): number {
+  if (left.major !== right.major) return left.major - right.major;
+  if (left.minor !== right.minor) return left.minor - right.minor;
+  return left.patch - right.patch;
+}
+
+function parsePositiveInteger(value: string | undefined, maximum: number): number | undefined {
+  if (!value || !/^\d+$/.test(value)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= maximum ? parsed : undefined;
+}
+
+async function isRequestGuardAvailable(env: Env): Promise<boolean> {
+  try {
+    const id = env.OAUTH_REQUEST_GUARD.idFromName("oauth-request-control-v1");
+    const response = await env.OAUTH_REQUEST_GUARD.get(id).fetch("https://request-guard/health");
+    return response.status === 204;
+  } catch {
+    return false;
+  }
+}
+
+async function consumeRequestControl(
+  env: Env,
+  request: Request,
+  endpoint: string,
+  _applicationVersion: string,
+  control: RequestControl,
+  configuration: BrokerConfiguration,
+): Promise<void> {
+  const clientIP = trustedClientIP(request);
+  const now = Date.now();
+  if (
+    control.issuedAt > now ||
+    control.expiresAt <= now ||
+    control.expiresAt <= control.issuedAt ||
+    control.expiresAt - control.issuedAt > REQUEST_LIFETIME_MS
+  ) {
+    throw invalidRequest("The request has expired. Start GitHub sign-in again.");
+  }
+
+  const id = env.OAUTH_REQUEST_GUARD.idFromName("oauth-request-control-v1");
+  let response: Response;
+  try {
+    response = await env.OAUTH_REQUEST_GUARD.get(id).fetch("https://request-guard/consume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nonce: control.nonce,
+        expiresAt: control.expiresAt,
+        clientIP,
+        endpoint,
+        now,
+        requestRateLimitPerMinute: configuration.requestRateLimitPerMinute,
+        ipRateLimitPerMinute: configuration.ipRateLimitPerMinute,
+      }),
+    });
+  } catch {
+    throw new RequestProblem(503, "unavailable", "The OAuth service is unavailable. Try again later.");
+  }
+
+  if (!response.ok) {
+    if (response.status === 409) {
+      throw invalidRequest("The request has already been used. Start GitHub sign-in again.");
+    }
+    if (response.status === 429) {
+      throw new RequestProblem(429, "temporarilyUnavailable", "Too many OAuth requests. Try again later.");
+    }
+    throw new RequestProblem(503, "unavailable", "The OAuth service is unavailable. Try again later.");
+  }
+}
+
+function trustedClientIP(request: Request): string {
+  // Cloudflare sets this header at its edge. Route deployment must keep
+  // workers.dev disabled so callers cannot bypass the trusted edge.
+  const value = request.headers.get("cf-connecting-ip");
+  if (!value || value.length > 64 || !/^[0-9A-Fa-f:.]+$/.test(value)) {
+    throw new RequestProblem(503, "unavailable", "The OAuth service is unavailable. Try again later.");
+  }
+  return value;
 }
 
 function requireSecret(value: unknown): string {
@@ -627,4 +831,142 @@ function invalidRequest(recoveryDescription: string, status = 400): RequestProbl
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A single Durable Object serializes OAuth nonce consumption and minute-window
+ * counters. It persists only opaque nonce hashes and short-lived HMAC-derived
+ * IP bucket keys; it never stores request bodies, tokens, or raw IP addresses.
+ */
+export class OAuthRequestGuard implements DurableObject {
+  constructor(
+    private readonly state: DurableObjectState,
+    private readonly env: Env,
+  ) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const pathname = new URL(request.url).pathname;
+    if (request.method === "GET" && pathname === "/health") {
+      // A no-op read verifies that the Durable Object can reach its backing
+      // storage without persisting health-check state.
+      await this.state.storage.get<number>("health");
+      return new Response(null, { status: 204 });
+    }
+    if (request.method !== "POST" || pathname !== "/consume") {
+      return new Response(null, { status: 404 });
+    }
+
+    let input: unknown;
+    try {
+      input = await request.json();
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (!isRecord(input) || !isValidGuardInput(input)) {
+      return new Response(null, { status: 400 });
+    }
+
+    const nonceKey = `nonce:${await keyedHash(input.nonce, this.env.REQUEST_CONTROL_HASH_KEY)}`;
+    const ipKey = `ip:${await keyedHash(input.clientIP, this.env.REQUEST_CONTROL_HASH_KEY)}`;
+    const window = Math.floor(input.now / 60_000);
+    const globalRateKey = `rate:global:${window}`;
+    const ipRateKey = `rate:ip:${window}:${ipKey}`;
+
+    const result = await this.state.storage.transaction(async (storage) => {
+      const existingExpiry = await storage.get<number>(nonceKey);
+      if (existingExpiry !== undefined && existingExpiry > input.now) {
+        return 409;
+      }
+      if (existingExpiry !== undefined) {
+        await storage.delete(nonceKey);
+      }
+
+      const globalCount = (await storage.get<number>(globalRateKey)) ?? 0;
+      const ipCount = (await storage.get<number>(ipRateKey)) ?? 0;
+      if (globalCount >= input.requestRateLimitPerMinute || ipCount >= input.ipRateLimitPerMinute) {
+        return 429;
+      }
+      await storage.put({
+        [nonceKey]: input.expiresAt,
+        [globalRateKey]: globalCount + 1,
+        [ipRateKey]: ipCount + 1,
+      });
+      return 204;
+    });
+
+    if (result === 204) {
+      await this.scheduleCleanupAlarm(Math.min(input.expiresAt, rateBucketExpiry(window)));
+    }
+    return new Response(null, { status: result });
+  }
+
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const stored = await this.state.storage.list<number>();
+    let nextExpiry: number | undefined;
+    const currentWindow = Math.floor(now / 60_000);
+    for (const [key, value] of stored) {
+      if (key.startsWith("nonce:") && value <= now) {
+        await this.state.storage.delete(key);
+      } else if (key.startsWith("rate:")) {
+        const rateWindow = Number(key.split(":")[2]);
+        if (!Number.isSafeInteger(rateWindow) || rateWindow < currentWindow) {
+          await this.state.storage.delete(key);
+        } else {
+          nextExpiry = Math.min(nextExpiry ?? Number.MAX_SAFE_INTEGER, rateBucketExpiry(rateWindow));
+        }
+      } else if (key.startsWith("nonce:") && (nextExpiry === undefined || value < nextExpiry)) {
+        nextExpiry = value;
+      }
+    }
+    if (nextExpiry !== undefined) {
+      // The alarm currently running may still be returned by getAlarm(), so
+      // explicitly replace it with the next pending cleanup deadline.
+      await this.state.storage.setAlarm(nextExpiry);
+    }
+  }
+
+  private async scheduleCleanupAlarm(timestamp: number): Promise<void> {
+    const currentAlarm = await this.state.storage.getAlarm();
+    if (currentAlarm === null || currentAlarm > timestamp) {
+      await this.state.storage.setAlarm(timestamp);
+    }
+  }
+}
+
+function rateBucketExpiry(window: number): number {
+  return (window + 1) * 60_000;
+}
+
+function isValidGuardInput(input: Record<string, unknown>): input is {
+  nonce: string;
+  expiresAt: number;
+  clientIP: string;
+  endpoint: "/oauth/exchange" | "/oauth/refresh";
+  now: number;
+  requestRateLimitPerMinute: number;
+  ipRateLimitPerMinute: number;
+} {
+  return (
+    Object.keys(input).length === 7 &&
+    REQUEST_NONCE.test(input.nonce as string) &&
+    typeof input.expiresAt === "number" && Number.isSafeInteger(input.expiresAt) &&
+    typeof input.clientIP === "string" && /^[0-9A-Fa-f:.]{1,64}$/.test(input.clientIP) &&
+    (input.endpoint === "/oauth/exchange" || input.endpoint === "/oauth/refresh") &&
+    typeof input.now === "number" && Number.isSafeInteger(input.now) &&
+    typeof input.requestRateLimitPerMinute === "number" && Number.isSafeInteger(input.requestRateLimitPerMinute) && input.requestRateLimitPerMinute > 0 &&
+    typeof input.ipRateLimitPerMinute === "number" && Number.isSafeInteger(input.ipRateLimitPerMinute) && input.ipRateLimitPerMinute > 0
+  );
+}
+
+async function keyedHash(value: string, key: string): Promise<string> {
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

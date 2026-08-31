@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { handleRequest, type Env } from "../src/index.js";
+import { OAuthRequestGuard, handleRequest, type Env } from "../src/index.js";
 
 const env: Env = {
   GITHUB_OAUTH_CLIENT_ID: "client-id",
   GITHUB_OAUTH_CLIENT_SECRET: "client-secret",
   ALLOWED_REDIRECT_URI: "triage://oauth-callback",
+  MINIMUM_APPLICATION_VERSION: "0.1.0",
+  REQUEST_RATE_LIMIT_PER_MINUTE: "100",
+  IP_RATE_LIMIT_PER_MINUTE: "10",
+  REQUEST_CONTROL_HASH_KEY: "test-request-control-key-with-sufficient-length",
+  OAUTH_REQUEST_GUARD: undefined as never,
 };
 
 const githubToken = {
@@ -17,7 +22,10 @@ const githubToken = {
   refresh_token_expires_in: 15_552_000,
 };
 
+let requestNumber = 0;
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -32,6 +40,12 @@ function request(
 function jsonRequest(path: string, body: unknown, init: RequestInit = {}): Request {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
+  if (!headers.has("CF-Connecting-IP")) {
+    headers.set("CF-Connecting-IP", "203.0.113.1");
+  }
+  if (!headers.has("X-Triage-Application-Version")) {
+    headers.set("X-Triage-Application-Version", "0.1.0");
+  }
   return request(path, {
     ...init,
     method: "POST",
@@ -41,13 +55,103 @@ function jsonRequest(path: string, body: unknown, init: RequestInit = {}): Reque
 }
 
 function exchangeInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const issuedAt = Date.now();
   return {
     version: 1,
     authorizationCode: "authorization-code",
     codeVerifier: "a".repeat(43),
     redirectURI: "triage://oauth-callback",
+    nonce: `n${++requestNumber}`.padEnd(43, "n"),
+    issuedAt,
+    expiresAt: issuedAt + 60_000,
     ...overrides,
   };
+}
+
+function refreshInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const issuedAt = Date.now();
+  return {
+    version: 1,
+    refreshToken: "refresh-token",
+    nonce: `r${++requestNumber}`.padEnd(43, "r"),
+    issuedAt,
+    expiresAt: issuedAt + 60_000,
+    ...overrides,
+  };
+}
+
+class InMemoryRequestGuard {
+  private readonly consumedNonces = new Set<string>();
+
+  idFromName(name: string): string {
+    return name;
+  }
+
+  get(_id: string): { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> } {
+    return {
+      fetch: async (input, init) => {
+        if (new URL(input.toString()).pathname === "/health") {
+          return new Response(null, { status: 204 });
+        }
+        const payload = JSON.parse(init?.body as string) as { nonce: string };
+        if (this.consumedNonces.has(payload.nonce)) {
+          return new Response(null, { status: 409 });
+        }
+        this.consumedNonces.add(payload.nonce);
+        return new Response(null, { status: 204 });
+      },
+    };
+  }
+}
+
+env.OAUTH_REQUEST_GUARD = new InMemoryRequestGuard();
+
+class GuardStorage {
+  private readonly values = new Map<string, number>();
+  readonly reads: string[] = [];
+  alarm: number | undefined;
+
+  async get<T>(key: string): Promise<T | undefined> {
+    this.reads.push(key);
+    return this.values.get(key) as T | undefined;
+  }
+
+  async put(entries: Record<string, number>): Promise<void> {
+    for (const [key, value] of Object.entries(entries)) {
+      this.values.set(key, value);
+    }
+  }
+
+  async delete(key: string): Promise<boolean> {
+    return this.values.delete(key);
+  }
+
+  async list<T>(): Promise<Map<string, T>> {
+    return new Map(this.values) as Map<string, T>;
+  }
+
+  async setAlarm(timestamp: number): Promise<void> {
+    this.alarm = timestamp;
+  }
+
+  async getAlarm(): Promise<number | null> {
+    return this.alarm ?? null;
+  }
+
+  async transaction<T>(callback: (storage: GuardStorage) => Promise<T>): Promise<T> {
+    return callback(this);
+  }
+
+  keys(): string[] {
+    return [...this.values.keys()].sort();
+  }
+}
+
+function guardRequest(body: unknown): Request {
+  return new Request("https://request-guard/consume", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 describe("AuthBroker", () => {
@@ -64,6 +168,31 @@ describe("AuthBroker", () => {
     expect(response.headers.get("strict-transport-security")).toContain("max-age=");
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails health closed when the request guard cannot be reached", async () => {
+    const unavailableGuard: Env = {
+      ...env,
+      OAUTH_REQUEST_GUARD: {
+        idFromName: () => "guard" as never,
+        get: () => ({ fetch: async () => { throw new Error("guard unavailable"); } }),
+      },
+    };
+
+    const response = await handleRequest(request("/health"), unavailableGuard);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ version: 1, status: "unavailable" });
+  });
+
+  it("uses a benign Durable Object storage read for its health probe", async () => {
+    const storage = new GuardStorage();
+    const guard = new OAuthRequestGuard({ storage } as unknown as DurableObjectState, env);
+
+    const response = await guard.fetch(new Request("https://request-guard/health"));
+
+    expect(response.status).toBe(204);
+    expect(storage.reads).toEqual(["health"]);
   });
 
   it("exchanges only validated input and maps GitHub's response to the app schema", async () => {
@@ -112,7 +241,7 @@ describe("AuthBroker", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const response = await handleRequest(
-      jsonRequest("/oauth/refresh", { version: 1, refreshToken: "refresh-token" }),
+      jsonRequest("/oauth/refresh", refreshInput()),
       env,
     );
 
@@ -172,6 +301,131 @@ describe("AuthBroker", () => {
     expect(response.status).toBe(413);
     expect(await response.json()).toMatchObject({ code: "invalidRequest" });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported application versions, invalid timestamps, and a repeated nonce before GitHub", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-31T00:00:00.000Z"));
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(githubToken));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const unsupported = await handleRequest(
+      jsonRequest("/oauth/exchange", exchangeInput(), {
+        headers: { "X-Triage-Application-Version": "0.0.9" },
+      }),
+      env,
+    );
+    expect(unsupported.status).toBe(400);
+
+    const expiredAt = Date.now() - 1;
+    const expired = await handleRequest(
+      jsonRequest("/oauth/exchange", exchangeInput({ issuedAt: expiredAt - 60_000, expiresAt: expiredAt })),
+      env,
+    );
+    expect(expired.status).toBe(400);
+
+    const now = Date.now();
+    const futureIssued = await handleRequest(
+      jsonRequest("/oauth/exchange", exchangeInput({ issuedAt: now + 1, expiresAt: now + 60_001 })),
+      env,
+    );
+    expect(futureIssued.status).toBe(400);
+
+    const overlongLifetime = await handleRequest(
+      jsonRequest("/oauth/exchange", exchangeInput({ issuedAt: now, expiresAt: now + 60_001 })),
+      env,
+    );
+    expect(overlongLifetime.status).toBe(400);
+
+    const payload = exchangeInput();
+    const first = await handleRequest(jsonRequest("/oauth/exchange", payload), env);
+    const replay = await handleRequest(jsonRequest("/oauth/exchange", payload), env);
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(400);
+    expect(await replay.json()).toMatchObject({ code: "invalidRequest" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when the request guard enforces a rate limit", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const rateLimitedEnv: Env = {
+      ...env,
+      OAUTH_REQUEST_GUARD: {
+        idFromName: () => "guard" as never,
+        get: () => ({ fetch: async () => new Response(null, { status: 429 }) }),
+      },
+    };
+
+    const response = await handleRequest(
+      jsonRequest("/oauth/exchange", exchangeInput()),
+      rateLimitedEnv,
+    );
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ code: "temporarilyUnavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("atomically consumes one-use nonces and enforces one global minute rate limit across endpoints", async () => {
+    const storage = new GuardStorage();
+    const guard = new OAuthRequestGuard({ storage } as unknown as DurableObjectState, {
+      ...env,
+      REQUEST_RATE_LIMIT_PER_MINUTE: "1",
+      IP_RATE_LIMIT_PER_MINUTE: "1",
+    });
+    const now = Date.now();
+    const requestBody = {
+      nonce: "g".repeat(43),
+      expiresAt: now + 60_000,
+      clientIP: "203.0.113.1",
+      endpoint: "/oauth/exchange",
+      now,
+      requestRateLimitPerMinute: 1,
+      ipRateLimitPerMinute: 1,
+    };
+
+    expect((await guard.fetch(guardRequest(requestBody))).status).toBe(204);
+    expect((await guard.fetch(guardRequest(requestBody))).status).toBe(409);
+    expect((await guard.fetch(guardRequest({
+      ...requestBody,
+      nonce: "h".repeat(43),
+      clientIP: "2001:db8::2",
+      endpoint: "/oauth/refresh",
+    }))).status).toBe(429);
+  });
+
+  it("reclaims expired rate buckets and reschedules the alarm until every key is removed", async () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 7, 31, 0, 0, 0, 1);
+    vi.setSystemTime(now);
+    const storage = new GuardStorage();
+    const guard = new OAuthRequestGuard({ storage } as unknown as DurableObjectState, env);
+    const requestBody = {
+      nonce: "g".repeat(43),
+      expiresAt: now + 60_000,
+      clientIP: "203.0.113.1",
+      endpoint: "/oauth/exchange",
+      now,
+      requestRateLimitPerMinute: 10,
+      ipRateLimitPerMinute: 10,
+    };
+
+    expect((await guard.fetch(guardRequest(requestBody))).status).toBe(204);
+    const rateExpiry = (Math.floor(now / 60_000) + 1) * 60_000;
+    expect(storage.alarm).toBe(rateExpiry);
+
+    vi.setSystemTime(rateExpiry);
+    storage.alarm = undefined;
+    await guard.alarm();
+    expect(storage.keys()).toHaveLength(1);
+    expect(storage.alarm).toBe(requestBody.expiresAt);
+
+    vi.setSystemTime(requestBody.expiresAt);
+    storage.alarm = undefined;
+    await guard.alarm();
+    expect(storage.keys()).toEqual([]);
+    expect(storage.alarm).toBeUndefined();
   });
 
   it.each([
@@ -263,7 +517,7 @@ describe("AuthBroker", () => {
         headers: {
           Origin: "https://app.example",
           "Access-Control-Request-Method": "POST",
-          "Access-Control-Request-Headers": "Content-Type",
+          "Access-Control-Request-Headers": "Content-Type, X-Triage-Application-Version",
         },
       }),
       corsEnv,

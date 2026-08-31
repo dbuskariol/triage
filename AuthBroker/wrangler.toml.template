@@ -12,10 +12,27 @@ send_metrics = false
 # Set this to the one, exact callback URL registered on the GitHub OAuth App.
 [vars]
 ALLOWED_REDIRECT_URI = "triage://oauth-callback"
+MINIMUM_APPLICATION_VERSION = "0.1.0"
+# These limits are enforced by the Durable Object below. Tune them with an
+# explicit capacity decision; they are not advisory WAF settings.
+REQUEST_RATE_LIMIT_PER_MINUTE = "120"
+IP_RATE_LIMIT_PER_MINUTE = "10"
+
+[[durable_objects.bindings]]
+name = "OAUTH_REQUEST_GUARD"
+class_name = "OAuthRequestGuard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OAuthRequestGuard"]
 
 # Do not put credentials in this file. Before deployment, create bindings:
 #   wrangler secret put GITHUB_OAUTH_CLIENT_ID
 #   wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+#   wrangler secret put REQUEST_CONTROL_HASH_KEY
+# REQUEST_CONTROL_HASH_KEY must be a distinct, random secret used only to
+# derive short-lived opaque request-control keys. The Worker fails closed
+# without it or the Durable Object binding above.
 #
 # CORS is disabled unless this optional comma-separated allowlist is configured.
 # CORS_ALLOWED_ORIGINS = "https://example.com"
