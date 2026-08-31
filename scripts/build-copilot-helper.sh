@@ -52,8 +52,9 @@ done
 
 # Keep Cargo intermediates outside the target's DerivedSources directory so
 # app/test builds that share Xcode DerivedData reuse the compiled Rust crates.
-# Configuration remains part of the path to prevent Debug and Release outputs
-# from ever sharing a Cargo target directory.
+# Configuration and Rust target remain part of the path. Cargo places host-built
+# procedural macros outside the requested target subdirectory, so universal
+# builds must not share one target directory between arm64 and x86_64 slices.
 if [[ -n "${TRIAGE_CI_DERIVED_DATA:-}" ]]; then
   cargo_cache_root="$TRIAGE_CI_DERIVED_DATA"
 elif [[ -n "${OBJROOT:-}" ]]; then
@@ -61,25 +62,26 @@ elif [[ -n "${OBJROOT:-}" ]]; then
 else
   cargo_cache_root="${DERIVED_FILE_DIR:-$TARGET_BUILD_DIR/DerivedSources}"
 fi
-cargo_target_dir="$cargo_cache_root/TriageCopilotHelper-Cargo/$configuration"
+cargo_target_root="$cargo_cache_root/TriageCopilotHelper-Cargo/$configuration"
 resource_directory="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 output_helper="$resource_directory/$HELPER_NAME"
-slice_directory="$cargo_target_dir/triage-helper-slices"
+slice_directory="$cargo_target_root/triage-helper-slices"
 /bin/mkdir -p "$resource_directory" "$slice_directory"
 
 declare -a slices=()
 for index in "${!rust_targets[@]}"; do
   rust_target="${rust_targets[$index]}"
   architecture="${requested_architectures[$index]}"
+  architecture_target_dir="$cargo_target_root/$rust_target"
   cargo_arguments=(build --locked --offline --target "$rust_target")
   if [[ "$cargo_profile" == release ]]; then
     cargo_arguments+=(--release)
   fi
 
-  CARGO_NET_OFFLINE=true COPILOT_SKIP_CLI_DOWNLOAD=1 CARGO_TARGET_DIR="$cargo_target_dir" \
+  CARGO_NET_OFFLINE=true COPILOT_SKIP_CLI_DOWNLOAD=1 CARGO_TARGET_DIR="$architecture_target_dir" \
     "$CARGO" "${cargo_arguments[@]}" --manifest-path "$HELPER_DIR/Cargo.toml"
 
-  slice="$cargo_target_dir/$rust_target/$cargo_profile/triage-copilot-helper"
+  slice="$architecture_target_dir/$rust_target/$cargo_profile/triage-copilot-helper"
   [[ -x "$slice" ]] || { echo "Cargo did not produce the $architecture Copilot helper slice: $slice" >&2; exit 1; }
   copied_slice="$slice_directory/$architecture"
   /bin/cp "$slice" "$copied_slice"
