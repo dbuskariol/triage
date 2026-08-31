@@ -1,21 +1,21 @@
 # Triage development handoff
 
-**Handoff state:** `52460f3` (`Align Settings sidebar with detail content`) is
-the current committed `main` baseline. The checkout also contains an active,
-uncommitted implementation graph. At the time this handoff was updated it held
-112 tracked-file changes and 20 untracked files; that graph includes production
-code, migrations, fixtures, test targets, CI, and this document. It is **not a
-local acceptance checkpoint** and no part of it is complete until it has passed
-the gates recorded below.
+**Handoff state:** the current committed source checkpoint preceding this
+documentation update is `3105e3f` (`Repair full-suite authority fixtures`) on
+`main`. It includes the production acceptance slice committed as `cc46e7e`,
+the focused fixture/race repairs in `65ea09f`, and the three stale full-suite
+fixture repairs in `3105e3f`. Only this documentation update remains in the
+active worktree.
 
 `0f80baf` remains the historical local-integration checkpoint, with focused
 evidence through the later committed Settings work noted below. Historical
-results are retained for traceability only; they do not validate `52460f3` or
-the active worktree. Triage is **not** globally complete: UI XCTest still cannot
-bootstrap on this host, OAuth deployment values and controlled live GitHub
-access are absent, Copilot remains fail-closed without an approved runtime, and
-signing, notarization, and release operations remain external or explicitly
-authorized work. This document records the current graph and its exact gates.
+results are retained for traceability only; they do not validate the current
+tree. Triage is **not** globally complete: the linked-development/“work
+underway” source contract is still undefined, UI XCTest still cannot enter
+automation mode on this host, OAuth deployment values and controlled live GitHub access are
+absent, acquired-runtime Copilot acceptance has not been run, and signing,
+notarization, and release operations remain external or explicitly authorized
+work. This document records the exact remaining gates.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -29,7 +29,7 @@ boundaries, sequencing, and acceptance criteria.
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
 - Production integration commit: `9d9a566`
-- Current committed source baseline: `main` at `52460f3`
+- Source checkpoint preceding this documentation update: `main` at `3105e3f`
 - Historical local-acceptance checkpoint: `0f80baf`; later historical Settings
   evidence is recorded through `a77fa56`, not as evidence for the active tree.
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
@@ -419,8 +419,10 @@ At the historical checkpoint, the workspace was connected to production
 observations and actions, native commands, secure scoped navigation,
 workflow/detail/inspector surfaces, toolbar/search, notification presentation,
 restoration, and Settings. It did not authenticate, persist secrets, or claim a
-non-existent Copilot runtime. Current accessibility, encrypted-fixture,
-deletion/recovery, and performance additions are pending the graph gates below.
+non-existent Copilot runtime. That historical checkpoint predates the current
+explicit-acquisition boundary. Current accessibility, encrypted-fixture,
+deletion/recovery, and performance additions are recorded in the current graph
+below together with their exact local evidence and remaining external gates.
 
 ### Copilot XPC hardening
 
@@ -440,28 +442,30 @@ process reaping, stderr suppression, tighter same-team signature validation,
 and deterministic regressions for malformed response, cancellation, explicit
 cancel, timeout, and shutdown.
 
-The Copilot runtime remains unavailable by product contract. Do not weaken this
-to use an ambient CLI, download a runtime, or accept unsigned artifacts. The
-`copilot-runtime` todo is blocked pending an approved redistributable official
-artifact and release signing identity.
+The earlier statement that the Copilot runtime was unavailable pending an
+artifact/signing decision is superseded by the current explicit-acquisition
+contract. The runtime is absent by default and may only be downloaded after
+explicit user action from the pinned GitHub release through the bounded
+GitHub-to-release-assets redirect. It must retain its GitHub Developer ID
+signature and pass archive, executable, architecture, and signature validation
+before descriptor-safe installation in app-owned Application Support. Do not
+weaken this to use an ambient CLI, re-sign a vendor runtime, accept unsigned
+artifacts, or bypass entitlement, consent, and authenticated account binding.
 
 ## Current implementation and acceptance graph
 
-This section is authoritative for the active checkout. Every row below is
-**in progress and unvalidated** unless it cites a historical result above. The
-graph records the remaining work; it must not be read as a feature-completion
-claim merely because source or tests are present in the worktree.
+This section is authoritative for the current checkout. Implemented source is
+not a claim that external or release acceptance has occurred.
 
-| Graph node | Current implementation boundary | Required local closure before a completion claim |
+| Graph node | Current state | Remaining closure |
 | --- | --- | --- |
-| Original six repair tracks | The existing repair package is being carried forward across revision-qualified lifecycle dispatch, source-bound conditional replay, connection-cardinality/budget enforcement, scope-safe graph publication, credential replacement/cancellation, and account-local deletion/recovery. | Review every changed production boundary and its focused adversarial selector; preserve fail-closed coverage and no-write behavior; then record the result. |
-| Production graph and ranking | The worktree changes observation, work-item graph/relation persistence, derived-intelligence input, ranking, review scheduling, and organization refresh composition. Canonical merge/split and partial-coverage regressions are present; migration `054` now adds item-level raw provenance for project-item wrapper relations. | Prove revision/account/organization fencing, graph stability, ranking order, cancellation, observation publication, and the new project-item provenance boundary with focused tests plus the deterministic suite. |
-| Authentication, recovery, and notifications | The worktree changes connection, OAuth refresh/cancellation, daily identity replay, keyless-vault recovery, notification routing/delivery, account-removal cleanup, encrypted notification preferences, and notification action fencing. Parse and whitespace checks passed for the notification lane; its full SwiftPM tests are queued behind a shared build. | Exercise OAuth/PAT isolation, replacement races, recovery disclosure/resync, notification cancellation/fencing, and account-scoped erasure without leaking identifiers or content. |
-| AI phase A | New consent, analysis/cache, fingerprint, controller, registry, and organization projection code is present. `swiftc -parse` passed for the owned AI sources/tests, and canonical arm64 build-for-testing retry 4 produced no AI/Copilot diagnostic; focused Xcode selectors still have no finalized result (latest incomplete bundle: `/private/tmp/triage-ai-repair-agent/DerivedData/Logs/Test/Test-Triage-2026.08.31_14-14-39-+1000.xcresult`). The product runtime remains unavailable. | Prove consent defaults, exact scope/model/input invalidation, cancellation, crypto-erasure, and fail-closed controller gates. Do not enable a runtime or claim end-to-end Copilot acceptance. |
-| UI fixture and native accessibility | The worktree adds UI-test fixture support and changes onboarding, commands, menu bar, work list, workspace state, Settings, and accessibility coordination. | Run fixture-backed UI selectors on a bootstrapping XCTest host and manually exercise keyboard, pointer, VoiceOver semantics, resize, appearance, menu bar, and restoration. |
-| Performance | Opt-in fixture, budget tests, UI launch test, benchmark runner, and performance documentation are present. `scripts/test-performance-benchmark-runner.sh` has passed; the focused `PerformanceFixtureContractTests` result bundle was incomplete and its SwiftPM fallback was blocked by another `.build` owner. | Re-run the focused contract tests, execute the opted-in measurements on a declared supported host/architecture, and compare p95 results against the documented budgets without treating ordinary tests as benchmarks. |
-| Migrations and frozen encrypted fixture | The worktree registers uncommitted migrations `047` through `054`, including canonical work-item group memberships, account-scoped repository-ranking preferences, notification preferences, and project-item raw provenance. The untracked frozen schema-`039` artifact has SHA-256 `425088ee64f5d7a9f8a8c803582e3b3ca76d6bbb144c5805474c22630734bacf`; its acceptance source asserts `054-project-item-raw-provenance-v1` / `c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a`, `project_item_raw_provenance`, and `project_item_raw_provenance_current_scope`. The focused arm64 result below passed `EncryptedVaultPersistenceFixtureTests.testFrozenSchema039EncryptedVaultUpgradesThroughCurrentMigrations` in 224.393 seconds. | Rerun the exact fixture selector after repairing the focused-suite failures, then verify fresh and upgrade paths, interrupted destructive recovery, wrong-key/tamper failure, and artifact provenance/fingerprint. The fixture must be read as input and never regenerated by its acceptance test. |
-| Test, commit, and verifier gates | The current tree changes production code, tests, UI tests, CI, and scripts. Historical 997/997 and 998 deterministic results do not cover it. Canonical arm64 build-for-testing retries 7 and 8 both succeeded (logs: `/private/tmp/triage-canonical-arm64-20260831-build-retry7.log`, 2026-08-31 14:47:49 AEST; `/private/tmp/triage-canonical-arm64-20260831-build-retry8.log`, 2026-08-31 14:49:48 AEST). The initial selected run produced `/private/tmp/triage-focused-current-r1.xcresult`: 513 passed, 18 failed, 0 skipped, 531 total. Residual closure ran `/private/tmp/triage-residual-r3.xcresult` (finished 2026-08-31 14:48:10 AEST): 6 passed, 1 failed; the final undo selector `/private/tmp/triage-undo-r4.xcresult` (finished 2026-08-31 14:49:57 AEST) passed 1/1. All original 18 focused failures now pass individually on the current build, but the 531-selector matrix has not been rerun and no acceptance claim follows. | Rerun the full 531-selector focused matrix, then run the full deterministic/XPC suite and `scripts/verify-ci.sh`; finally `git diff --check`, review the complete diff, and create a new committed checkpoint only after the recorded gates pass. |
+| Product integration | Organization refresh/coordinator flow, revision-fenced GitHub streams, encrypted observations, derived intelligence, ranking, workflow actions, notification delivery, recovery/deletion, and native workspace/Settings injection are committed through `3105e3f`. | Controlled live GitHub authority testing remains external; local tests cannot prove SSO, approval, or production rate-limit behavior. |
+| Authentication | OAuth/PAT isolation, refresh/replacement fencing, identity replay, broker anti-replay controls, PAT-specific presentation, and account-local key/vault recovery are implemented. | Supply the real OAuth client ID and broker URL as deployment configuration, then run controlled OAuth/PAT acceptance. |
+| Copilot | Explicit pinned CLI acquisition, vendor signature/architecture/hash verification, XPC/Rust session boundary, authenticated model inventory, consent, candidate budgets, caching, cancellation, and fail-closed action claims are implemented. XPC and Rust suites pass locally. | Acquire the pinned runtime and exercise entitled/non-entitled authentication with controlled accounts; shipping helper/XPC/app signatures remain a release gate. |
+| Linked-PR progress rules | The plan still requires linked-PR grouping and two progress predicates, but no production source emits `.linkedPullRequest`; `closingIssuesReferences` is intentionally distinct. Stable Project option identity/underway mapping and a PR-staleness policy are also absent. | Add the typed, revision-fenced source contract recorded in `GITHUB_FEATURE_CONTRACTS.md`; until then these relations/rules remain disabled and unknown. |
+| Native UI and performance | Native windows, sidebar/detail/inspector, Settings navigation, commands, accessibility semantics, restoration, bounded inbox paging, and opt-in deterministic benchmark machinery are implemented. | Fixture-backed UI XCTest must run on a host where the runner bootstraps. Hardware benchmarks must run on a declared supported Mac; this Mac is not a supported baseline. |
+| Encrypted migrations | Current fresh/idempotent paths cover migrations through `060`; the frozen fixture remains immutable. The schema-039 upgrade through current migration `060` passed during the full verifier on 2026-08-31 (35.585 s). | Never regenerate the frozen artifact from acceptance code; repeat on release candidates. |
+| Local verification | Canonical arm64 build-for-testing, the complete 1,415-test non-UI production/XPC suite, the 298-test production plus 25-test fail-closed XPC matrix, focused vault selectors, Rust, broker, performance-runner, helper-build, release-helper, and package-mirror contracts pass. The full verifier's static phases and frozen migration test passed. Its Debug test action reached the app/UI runner but ended on one host automation timeout plus three stale fixture failures; all three fixture selectors and the complete non-UI suite pass after `3105e3f`. | Re-run the full verifier on an XCTest UI host that can enter automation mode, then complete release-candidate validation; do not convert host-only UI or release blocks into a pass. |
 
 ### Known historical results and current blockers
 
@@ -469,26 +473,32 @@ claim merely because source or tests are present in the worktree.
 | --- | --- | --- |
 | Full unit and fail-closed XPC suite | Historical pass: 997/997, zero failures/skips. | Recorded pre-current-worktree result only. |
 | Canonical deterministic verifier phase | Historical pass: 998 deterministic tests, zero skips. | Recorded pre-current-worktree result only. |
-| UI XCTest runner | Blocked: no UI test method ran. The ad-hoc bundle failed Team-ID mapping; an Apple Development-signed retry hung in `libsecinit`. | Host/toolchain blocker, not a product/UI acceptance result. |
-| Initial focused implementation suite | Failed: 513 passed, 18 failed, 0 skipped, 531 total in `/private/tmp/triage-focused-current-r1.xcresult`. | The failures were six derived-input `invalidSourceRevision` cases, five timeline replay/outcome/raw-snapshot cases, four Work Detail foreign-key cases, one relation-evidence foreign-key case, one OAuth refresh stale-authority case, and one local-action undo presentation case. It is not a full suite or acceptance result. |
-| Residual closure selectors | `/private/tmp/triage-residual-r3.xcresult` finished at 2026-08-31 14:48:10 AEST: 6 passed, 1 failed (only `LocalActionItemUndoCoordinatorTests.testEditUndoRedoKeepsHistoryLocalToTriage`). `/private/tmp/triage-undo-r4.xcresult` finished at 2026-08-31 14:49:57 AEST: that undo selector passed 1/1. | All 18 failures from the initial focused run now pass individually on the current build. The complete 531-selector focused matrix still requires a clean rerun; this closure evidence alone is not acceptance. |
+| UI XCTest runner | Blocked: the latest full-verifier run launched the runner but timed out while enabling automation mode before a UI test method ran. Earlier ad-hoc and Apple Development-signed attempts failed Team-ID mapping or hung in `libsecinit`. | Host/toolchain blocker, not a product/UI acceptance result. |
+| Current focused vault/XPC | Passed. | Existing-root open/reopen, absent trusted root under `/var`, relation hydration, and all fail-closed XPC tests pass in current result bundles. |
+| Frozen schema-039 upgrade | Passed through current migration `060`. | The full `scripts/verify-ci.sh` Debug test action completed the immutable schema-039 upgrade selector in 35.585 seconds before the action later failed. |
+| Current focused production/XPC matrix | Passed at `65ea09f`. | `/private/tmp/triage-broad-green-20260831-194203.xcresult`: 298 selected production tests and 25 fail-closed XPC tests, zero failures or skips. This is focused evidence, not a substitute for `scripts/verify-ci.sh`. |
+| Full-suite regression repair | Passed at `3105e3f`. | `/private/tmp/triage-full-regressions-green-20260831.xcresult`: working-day invariant, relation grouping authority, and timeline input source/coverage identity selectors all pass together after their fixture repairs. |
+| Complete non-UI production/XPC suite | Passed at `3105e3f`. | `/private/tmp/triage-full-nonui-green-20260831.xcresult`: 1,415 tests passed with zero failures, skips, or expected failures in 156.563 seconds. UI tests were explicitly excluded because this host cannot enter XCTest automation mode. |
 
 ### External and host-only gates
 
 1. Supply a real GitHub OAuth App client ID and trusted HTTPS authentication
-   broker URL as deployment configuration. These values must not be guessed or
-   committed. PAT authentication remains independently usable and must not show
-   OAuth configuration errors before its own submission.
+   broker URL only as approved deployment configuration. Repository defaults
+   remain blank and fail closed; these values must not be guessed or committed.
+   PAT authentication remains independently usable and must not show OAuth
+   configuration errors before its own submission.
 2. Use a host where the macOS XCTest UI runner can bootstrap; then execute the
    complete fixture-backed UI and accessibility matrix.
 3. With controlled GitHub accounts and explicit authorization, run the live
    source-authority matrix: SSO/approval, bodyless REST `403`/`404`, pagination,
    conditional reuse, identity mismatch, deletion/recovery, and no-write
    behavior. Do not add live data to the repository.
-4. Keep Copilot fail-closed until an approved redistributable runtime,
-   SDK/entitlement, consent/policy decisions, signing identity, and explicit
-   authorization are supplied. No ambient CLI, download, or unsigned artifact is
-   an acceptable substitute.
+4. Keep Copilot fail-closed except for its bounded explicit-acquisition path: an
+   authenticated, consented user may request only the pinned GitHub release
+   through the exact GitHub-to-release-assets redirect, followed by archive,
+   executable, architecture, and GitHub signature verification. No ambient CLI,
+   arbitrary download or redirect, re-signed runtime, or unsigned artifact is an
+   acceptable substitute.
 5. Perform Developer ID signing, notarization/stapling, Gatekeeper, Sparkle,
    release tagging/publishing, and release-automation work only with the
    required credentials, clean exact tag, and explicit authorization.
@@ -508,9 +518,9 @@ claim merely because source or tests are present in the worktree.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
 - The recorded 997/997 unit/XPC and 998 deterministic results are historical
-  only. They do not validate `52460f3` or the active worktree. Full UI/verifier
+  only. They do not validate `3105e3f` or the documentation worktree. Full UI/verifier
   acceptance remains pending because no UI test method launched on this host.
-  OAuth deployment configuration, controlled live GitHub validation, the
-  externally approved Copilot runtime/signing/consent path, Developer ID
+  OAuth deployment configuration, controlled live GitHub validation, production
+  acceptance of the acquired-runtime authentication/consent path, Developer ID
   signing/notarization/publish, and final release acceptance remain open and are
   not implied by local coverage.

@@ -37,7 +37,10 @@ Triage is not a replacement GitHub client. GitHub remains the source of truth fo
 - GitHub Copilot analysis is an optional enhancement.
 - Copilot analysis is explicitly enabled per organization.
 - Copilot defaults to model Auto and provides an advanced model selector.
-- A signed Rust helper and bundled official Copilot CLI runtime provide the Copilot SDK boundary.
+- A bundled universal Rust helper provides the Copilot SDK boundary. The
+  official GitHub Copilot CLI is explicitly acquired and independently
+  vendor-verified; it is never bundled, re-signed, or resolved from the ambient
+  environment.
 - Classic PATs use a separate Copilot sign-in because the SDK does not accept classic PATs.
 - The app discovers work through GitHub activity only; local repository scanning is not included.
 - The app is read-only toward GitHub in the initial product contract.
@@ -127,7 +130,7 @@ Triage SwiftUI application
 │   ├── Swift XPC service client
 │   ├── signed XPC bridge
 │   ├── signed Rust helper
-│   └── bundled Copilot CLI runtime
+│   └── explicitly acquired, vendor-signed Copilot CLI runtime
 └── macOS integrations
     ├── Settings scene
     ├── MenuBarExtra
@@ -143,7 +146,7 @@ The main app owns all GitHub data, credentials, workflow state, rules, synchroni
 
 The OAuth exchange broker is a minimal external security boundary required because GitHub still requires an OAuth client secret during code exchange even when PKCE is used. The broker:
 
-- accepts a short-lived authorization code, PKCE verifier, redirect URI, and signed app request;
+- accepts a short-lived authorization code, PKCE verifier, redirect URI, and a versioned request with one-use nonce and timestamp controls;
 - exchanges or refreshes OAuth tokens with GitHub;
 - returns the response directly;
 - stores no token, account, organization, GitHub content, analytics, or session history;
@@ -350,6 +353,13 @@ Strong merge relations:
 - Project item directly wraps the content node.
 - Review thread belongs to its pull request.
 - Comment or timeline event belongs to its parent.
+
+The linked-pull-request/development-item relation is a required product
+contract, but it is currently unavailable rather than inferred. Production may
+enable it only after `Documentation/GITHUB_FEATURE_CONTRACTS.md` defines and the
+implementation proves a complete revision-fenced typed relation source. GitHub
+`closingIssuesReferences`, generic cross-references, project display text, and
+prose are not substitutes; until then linked-PR strong grouping is disabled.
 
 Context-only relations:
 
@@ -570,7 +580,7 @@ Use `ASWebAuthenticationSession` with:
 
 GitHub requires the OAuth client secret during token exchange even with PKCE. Triage must not embed that secret.
 
-### 8.2 Stateless OAuth exchange broker
+### 8.2 OAuth exchange broker
 
 The repository contains a separately deployable minimal broker.
 
@@ -600,10 +610,12 @@ the authorization code to the initiating client. The broker's controls protect
 its own availability and strict protocol handling, not an invalid claim of
 public-client attestation.
 
-Broker storage:
+Broker request control storage:
 
-- no database;
-- no durable queue;
+- a Cloudflare Durable Object is required to atomically consume short-lived
+  opaque nonce hashes and enforce global and HMAC-derived per-IP minute
+  counters;
+- no database, KV/D1/R2, or durable queue;
 - no token logging;
 - no request-body logging;
 - no analytics identifiers.
@@ -829,6 +841,7 @@ For the selected organization and current user, partition REST Search queries fo
 - open commenter involvement;
 - open review requested;
 - open review involvement;
+- open team mentions;
 - open team review requested;
 - closed involvement within 90 days;
 - merged review involvement within 90 days;
@@ -1211,6 +1224,12 @@ Progress:
 - source issue says work is underway but linked PR is stale or closed without resolution;
 - a committed deadline is approaching or exceeded.
 
+The two linked-PR progress predicates above remain disabled/unknown until the
+mandatory source contract supplies a typed linked-development relation, exact
+current target-PR evidence, stable Project field/option identities with an
+explicit underway mapping, and a defined PR-staleness policy. No name, prose,
+closing-reference, or display-text fallback is permitted.
+
 Waiting:
 
 - current user asked another actor for information or action and no response exists;
@@ -1353,6 +1372,16 @@ Analyze only when:
 - no valid cache entry exists;
 - rate and concurrency budgets permit.
 
+Candidate scheduling is local to the encrypted account vault. The fixed
+production limits are scoped to the exact account and organization: 24
+distinct candidate/source-fingerprint attempts per UTC day, 12 candidates for
+one source fingerprint per UTC day, no more than one start per minute, and one
+active helper lease. A lease is completed or cancelled durably; a stale lease
+may be reclaimed after one minute without adding a second daily attempt. The
+counter contains only opaque candidate IDs, source fingerprints, priorities,
+and timestamps—never prompts, model output, credentials, or telemetry. Rows
+older than two UTC days are deleted locally as part of later scheduling.
+
 ### 17.3 Input contract
 
 Candidate input contains:
@@ -1426,11 +1455,11 @@ automatic entry.
 ```text
 Swift app
   -> NSXPCConnection
-  -> signed TriageCopilotXPC service
+  -> shipping Developer ID-signed TriageCopilotXPC service
   -> length-framed anonymous pipes
-  -> signed universal Rust helper
+  -> shipping universal Developer ID-signed Rust helper
   -> official Rust Copilot SDK in Empty mode
-  -> explicitly bundled official Copilot CLI
+  -> explicitly installed, pinned official Copilot CLI
 ```
 
 The helper:
@@ -1448,17 +1477,38 @@ The helper:
 - serializes or strictly bounds concurrency;
 - supports cancellation and deadlines.
 
+The runtime is never discovered from `PATH`, `gh`, a user cache, or an
+environment override. It is absent by default. A user must explicitly request
+the only permitted acquisition: the pinned GitHub release URL for the running
+architecture. The download uses an ephemeral directory and accepts only the
+exact HTTPS redirect chain `github.com` to
+`release-assets.githubusercontent.com`; each URL must use port 443 (or the
+default), with no userinfo, query, or fragment. It has a fixed size limit,
+streams and checks the pinned SHA-256, and extracts only the expected regular
+`copilot` file.
+Before atomically installing to app-owned Application Support at
+`Triage/CopilotRuntime/<version>/<architecture>/copilot`, it verifies the
+Mach-O architecture and GitHub Developer ID identifier, team, and Hardened
+Runtime. The runtime is revalidated before every use; absent, corrupt, or
+unverifiable state is explicit and leaves Copilot unavailable. Installation,
+repair, removal, and XPC launch share a cross-process lock so no launch can
+race replacement. This narrowly authorized, user-driven acquisition is not an
+ambient fallback and does not enable Copilot until the independent consent,
+credential, account-identity, XPC, and release-signing gates succeed.
+
 ### 17.7 Copilot authentication
 
 - OAuth token: explicit SDK token, no ambient fallback.
 - Fine-grained PAT: explicit SDK token after entitlement validation.
-- Classic PAT: never sent to Copilot; separate bundled CLI sign-in.
+- Classic PAT: never sent to Copilot; separate explicitly acquired official CLI
+  sign-in.
 - Copilot login identity is visibly associated with the Triage account.
 - Identity mismatch blocks analysis.
 
-Separate Copilot sign-in uses the bundled official CLI's device flow inside an
-app-owned isolated `COPILOT_HOME`. Before implementation, the pinned runtime's
-credential storage is verified on macOS. Authentication may proceed only when:
+Separate Copilot sign-in uses the explicitly acquired official GitHub CLI's
+device flow inside an app-owned isolated `COPILOT_HOME`. Before enabling
+production/classic-PAT Copilot sign-in, the pinned runtime's credential storage
+is verified on macOS. Authentication may proceed only when:
 
 - the token is stored in macOS Keychain rather than a plaintext config file;
 - runtime logs and caches contain no token;
@@ -1640,7 +1690,8 @@ Search is local and returns initial results within 150 ms on the target dataset.
 - Command-Delete archives locally.
 - Control-Command-P toggles pin.
 - Control-Command-1/2/3 sets priority.
-- Control-Command-S snoozes.
+- Control-Command-S toggles the standard sidebar.
+- Snooze is available in the Work menu and has no keyboard shortcut.
 - Control-Command-W toggles Waiting.
 - Option-Command-I toggles inspector.
 - Command-Comma opens Settings.
@@ -1811,11 +1862,17 @@ Do not restore:
 ## 23. Security and privacy
 
 - Hardened Runtime for every executable.
-- App, XPC service, Rust helper, Copilot CLI, Sparkle helpers, and broker artifacts are independently verified.
+- Shipping Triage app, XPC service, and Rust helper artifacts must be universal
+  and Developer ID-signed; the acquired Copilot CLI retains and is verified
+  against its GitHub Developer ID signature rather than being re-signed by
+  Triage. Unsigned/ad-hoc development builds do not satisfy this release gate.
 - No embedded OAuth secret.
 - No arbitrary helper path.
-- No writable runtime replacement.
-- No unverified runtime download.
+- No writable or re-signed acquired runtime; the app-owned installation is
+  descriptor-safe and independently revalidated.
+- No ambient, oversized, unverified, arbitrary-redirect, or non-user-invoked
+  runtime download is accepted; acquisition permits only the pinned GitHub to
+  release-assets redirect chain.
 - No token in process arguments or general environment.
 - OSLog uses private interpolation for identifiers and never logs content.
 - Database and WAL are encrypted.
@@ -2004,7 +2061,7 @@ Accessibility acceptance explicitly verifies:
 - Sparkle signing and extraction verification;
 - artifact checksums and manifest;
 - no secret files;
-- no writable bundled runtime.
+- no writable or re-signed acquired runtime.
 
 ## 27. Implementation sequence and commit boundaries
 
@@ -2025,7 +2082,8 @@ Each boundary is independently reviewed and committed only after its targeted te
 13. Add incremental scheduler, daily reconciliation, freshness, offline, and retry behavior.
 14. Replace placeholder UI with onboarding, native sidebar, list, detail, inspector, toolbar, search, and Settings.
 15. Add workflow actions, keyboard commands, undo, menu bar, notifications, and restoration.
-16. Add XPC bridge, Rust helper, official Copilot SDK, bundled runtime, schemas, and signing.
+16. Add XPC bridge, Rust helper, official Copilot SDK, explicit vendor-runtime
+    acquisition and verification, schemas, and signing.
 17. Add consent, models, candidate policy, analysis, caching, evidence, and AI action integration.
 18. Add full integration fixtures, performance tests, accessibility audit, release validation, and final documentation.
 
