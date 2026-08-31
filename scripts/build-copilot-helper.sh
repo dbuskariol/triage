@@ -23,6 +23,13 @@ CARGO="${TRIAGE_COPILOT_HELPER_CARGO:-cargo}"
 LIPO="${TRIAGE_COPILOT_HELPER_LIPO:-/usr/bin/lipo}"
 CODESIGN="${TRIAGE_COPILOT_HELPER_CODESIGN:-/usr/bin/codesign}"
 
+# macOS 27's linker-generated ad-hoc signature can leave proc-macro dylibs with
+# a misaligned LINKEDIT string pool. Cargo only needs those dylibs during the
+# build, and this script explicitly signs the final helper below, so suppress
+# linker ad-hoc signing for Rust intermediates while preserving caller flags.
+rustflags="${RUSTFLAGS:-}"
+rustflags="${rustflags:+$rustflags }-C link-arg=-Wl,-no_adhoc_codesign"
+
 : "${ARCHS:?Xcode must provide ARCHS for the Copilot helper build}"
 : "${TARGET_BUILD_DIR:?Xcode must provide TARGET_BUILD_DIR for the Copilot helper build}"
 : "${UNLOCALIZED_RESOURCES_FOLDER_PATH:?Xcode must provide UNLOCALIZED_RESOURCES_FOLDER_PATH}"
@@ -78,7 +85,7 @@ for index in "${!rust_targets[@]}"; do
     cargo_arguments+=(--release)
   fi
 
-  CARGO_NET_OFFLINE=true COPILOT_SKIP_CLI_DOWNLOAD=1 CARGO_TARGET_DIR="$architecture_target_dir" \
+  CARGO_NET_OFFLINE=true COPILOT_SKIP_CLI_DOWNLOAD=1 CARGO_TARGET_DIR="$architecture_target_dir" RUSTFLAGS="$rustflags" \
     "$CARGO" "${cargo_arguments[@]}" --manifest-path "$HELPER_DIR/Cargo.toml"
 
   slice="$architecture_target_dir/$rust_target/$cargo_profile/triage-copilot-helper"

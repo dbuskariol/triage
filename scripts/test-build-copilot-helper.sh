@@ -26,6 +26,7 @@ printf 'cargo %s\n' "$*" >>"$TRIAGE_TEST_LOG"
 printf 'cargo-target-dir %s\n' "$CARGO_TARGET_DIR" >>"$TRIAGE_TEST_LOG"
 [[ "${CARGO_NET_OFFLINE:-}" == true ]]
 [[ "${COPILOT_SKIP_CLI_DOWNLOAD:-}" == 1 ]]
+[[ " ${RUSTFLAGS:-} " == *' -C link-arg=-Wl,-no_adhoc_codesign '* ]]
 target=""
 for ((index = 1; index <= $#; index++)); do
   if [[ "${!index}" == --target ]]; then
