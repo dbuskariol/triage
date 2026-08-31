@@ -112,18 +112,10 @@ final class WorkRelationRepositoryTests: XCTestCase {
         let fixture = try await Fixture()
         defer { fixture.remove() }
         let workItemID = try await WorkItemRepository(vault: fixture.vault).ensureWorkItem(for: fixture.node)
-        try await fixture.vault.write { database in
-            try database.execute(
-                sql: """
-                    INSERT INTO attention_reasons (
-                        id, work_item_id, rule_id, rule_version, category, strength,
-                        title, explanation, evaluated_at_ms
-                    ) VALUES ('inbox-authority-reason', ?, 'direct', 1,
-                              'directResponsibility', 1, 'Direct', 'Direct', ?)
-                    """,
-                arguments: [workItemID.rawValue, Int64(fixture.date.timeIntervalSince1970 * 1_000)]
-            )
-        }
+        try await WorkflowRepository(vault: fixture.vault).save(
+            WorkflowState(isPinned: true, updatedAt: fixture.date),
+            for: workItemID
+        )
         try await WorkRelationRepository(vault: fixture.vault).replace(
             [fixture.relation],
             accountID: fixture.accountID,
@@ -152,8 +144,9 @@ final class WorkRelationRepositoryTests: XCTestCase {
             limit: 50
         )
         XCTAssertEqual(retired.count, 1)
-        XCTAssertTrue(retired[0].relations.isEmpty)
-        XCTAssertEqual(retired[0].freshness.status, .partial)
+        let retiredItem = try XCTUnwrap(retired.first)
+        XCTAssertTrue(retiredItem.relations.isEmpty)
+        XCTAssertEqual(retiredItem.freshness.status, .partial)
     }
 
     func testRejectsRelationsForAnotherVaultAccount() async throws {
