@@ -3,6 +3,26 @@ import XCTest
 @testable import Triage
 
 final class TriageApplicationDependenciesTests: XCTestCase {
+    func testXCTestHostDetectionKeepsProductionKeychainRestorationOutOfTestProcesses() {
+        XCTAssertTrue(
+            TriageUITestFixture.isUnitTestEnvironment([
+                "XCTestConfigurationFilePath": "/tmp/triage-tests.xctestconfiguration"
+            ])
+        )
+        XCTAssertTrue(
+            TriageUITestFixture.isUnitTestEnvironment([
+                "XCInjectBundleInto": "/tmp/Triage.app/Contents/MacOS/Triage"
+            ])
+        )
+        XCTAssertFalse(TriageUITestFixture.isUnitTestEnvironment([:]))
+        XCTAssertFalse(
+            TriageUITestFixture.isUnitTestEnvironment([
+                "TRIAGE_UI_TEST_MODE": "1",
+                "TRIAGE_UI_TEST_SCENARIO": "workspace"
+            ])
+        )
+    }
+
     func testWorkspaceConstructionFatalDiagnosticNeverIncludesUnderlyingErrorDetails() {
         let sensitiveText = "ghp_sensitive_token_and_private_path_must_not_escape"
         let error = NSError(
