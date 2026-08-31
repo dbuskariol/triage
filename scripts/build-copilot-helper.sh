@@ -29,6 +29,9 @@ CODESIGN="${TRIAGE_COPILOT_HELPER_CODESIGN:-/usr/bin/codesign}"
 # linker ad-hoc signing for Rust intermediates while preserving caller flags.
 rustflags="${RUSTFLAGS:-}"
 rustflags="${rustflags:+$rustflags }-C link-arg=-Wl,-no_adhoc_codesign"
+cargo_executable="$(command -v "$CARGO")" \
+  || { echo "Unable to resolve the configured Cargo executable: $CARGO" >&2; exit 69; }
+cargo_path="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin"
 
 : "${ARCHS:?Xcode must provide ARCHS for the Copilot helper build}"
 : "${TARGET_BUILD_DIR:?Xcode must provide TARGET_BUILD_DIR for the Copilot helper build}"
@@ -85,8 +88,23 @@ for index in "${!rust_targets[@]}"; do
     cargo_arguments+=(--release)
   fi
 
-  CARGO_NET_OFFLINE=true COPILOT_SKIP_CLI_DOWNLOAD=1 CARGO_TARGET_DIR="$architecture_target_dir" RUSTFLAGS="$rustflags" \
-    "$CARGO" "${cargo_arguments[@]}" --manifest-path "$HELPER_DIR/Cargo.toml"
+  cargo_environment=(
+    "HOME=$HOME"
+    "PATH=$cargo_path"
+    'CARGO_NET_OFFLINE=true'
+    'COPILOT_SKIP_CLI_DOWNLOAD=1'
+    "CARGO_TARGET_DIR=$architecture_target_dir"
+    "RUSTFLAGS=$rustflags"
+  )
+  [[ -z "${TMPDIR:-}" ]] || cargo_environment+=("TMPDIR=$TMPDIR")
+  [[ -z "${CARGO_HOME:-}" ]] || cargo_environment+=("CARGO_HOME=$CARGO_HOME")
+  [[ -z "${RUSTUP_HOME:-}" ]] || cargo_environment+=("RUSTUP_HOME=$RUSTUP_HOME")
+  [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]] \
+    || cargo_environment+=("MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET")
+  [[ -z "${TRIAGE_TEST_LOG:-}" ]] || cargo_environment+=("TRIAGE_TEST_LOG=$TRIAGE_TEST_LOG")
+
+  /usr/bin/env -i "${cargo_environment[@]}" \
+    "$cargo_executable" "${cargo_arguments[@]}" --manifest-path "$HELPER_DIR/Cargo.toml"
 
   slice="$architecture_target_dir/$rust_target/$cargo_profile/triage-copilot-helper"
   [[ -x "$slice" ]] || { echo "Cargo did not produce the $architecture Copilot helper slice: $slice" >&2; exit 1; }
