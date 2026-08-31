@@ -45,6 +45,41 @@ enum NotificationSettingsPresentation {
     }
 }
 
+enum SettingsSidebarLayout {
+    static let contentAlignmentInset: CGFloat = 13
+    static let minimumWidth: CGFloat = 240
+    static let idealWidth: CGFloat = 260
+    static let maximumWidth: CGFloat = 320
+    static let minimumWindowWidth: CGFloat = 800
+    static let defaultWindowWidth: CGFloat = 860
+}
+
+private struct SettingsWindowChromeConfigurator: NSViewRepresentable {
+    func makeNSView(context _: Context) -> SettingsWindowChromeView {
+        SettingsWindowChromeView()
+    }
+
+    func updateNSView(_ nsView: SettingsWindowChromeView, context _: Context) {
+        nsView.configureWindow()
+    }
+}
+
+private final class SettingsWindowChromeView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureWindow()
+    }
+
+    func configureWindow() {
+        guard let window else { return }
+        window.title = "Settings"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbarStyle = .unifiedCompact
+        window.styleMask.insert(.fullSizeContentView)
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var navigation: AppNavigationModel
@@ -59,18 +94,30 @@ struct SettingsView: View {
     @State private var notificationSettingsOpenError: String?
 
     var body: some View {
-        TabView(selection: selectedCategory) {
-            settingsPage(.accounts) { accountsSettings }
-            settingsPage(.organizations) { organizationSettings }
-            settingsPage(.inbox) { inboxSettings }
-            settingsPage(.notifications) { notificationSettingsSection }
-            settingsPage(.ai) { aiSettings }
-            settingsPage(.general) { generalSettings }
-            settingsPage(.updates) { updateSettings }
-            settingsPage(.about) { aboutSettings }
+        NavigationSplitView {
+            List(SettingsCategory.allCases, selection: sidebarSelection) { category in
+                Label(categoryTitle(category), systemImage: category.systemImage)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .tag(category)
+            }
+            .listStyle(.sidebar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear
+                    .frame(height: SettingsSidebarLayout.contentAlignmentInset)
+                    .accessibilityHidden(true)
+            }
+            .navigationSplitViewColumnWidth(
+                min: SettingsSidebarLayout.minimumWidth,
+                ideal: SettingsSidebarLayout.idealWidth,
+                max: SettingsSidebarLayout.maximumWidth
+            )
+            .accessibilityLabel("Settings sections")
+        } detail: {
+            selectedSettingsPage
         }
-        .tabViewStyle(.sidebarAdaptable)
-        .navigationTitle("Settings")
+        .navigationSplitViewStyle(.balanced)
+        .background(SettingsWindowChromeConfigurator())
         .onAppear {
             preferences.refreshLaunchAtLoginStatus()
         }
@@ -156,6 +203,30 @@ struct SettingsView: View {
         )
     }
 
+    private var sidebarSelection: Binding<SettingsCategory?> {
+        Binding(
+            get: { selectedCategory.wrappedValue },
+            set: { category in
+                guard let category else { return }
+                selectedCategory.wrappedValue = category
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var selectedSettingsPage: some View {
+        switch selectedCategory.wrappedValue {
+        case .accounts: settingsPage(.accounts) { accountsSettings }
+        case .organizations: settingsPage(.organizations) { organizationSettings }
+        case .inbox: settingsPage(.inbox) { inboxSettings }
+        case .notifications: settingsPage(.notifications) { notificationSettingsSection }
+        case .ai: settingsPage(.ai) { aiSettings }
+        case .general: settingsPage(.general) { generalSettings }
+        case .updates: settingsPage(.updates) { updateSettings }
+        case .about: settingsPage(.about) { aboutSettings }
+        }
+    }
+
     private func settingsPage<Content: View>(
         _ category: SettingsCategory,
         @ViewBuilder content: () -> Content
@@ -175,8 +246,6 @@ struct SettingsView: View {
             .scenePadding()
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .tabItem { Label(categoryTitle(category), systemImage: category.systemImage) }
-        .tag(category)
     }
 
     private func categoryTitle(_ category: SettingsCategory) -> String {
