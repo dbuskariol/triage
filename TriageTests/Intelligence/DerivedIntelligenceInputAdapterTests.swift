@@ -65,6 +65,23 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         )
     }
 
+    func testStaleRelationEvidenceIsExcludedFromTheDerivedInputGraph() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let staleCredentialRevision = CredentialRevision(rawValue: "credential-stale")!
+        try await fixture.insertAuthoredRelation(credentialRevision: staleCredentialRevision)
+
+        let snapshot = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: fixture.aiPolicy,
+            evaluatedAt: fixture.now
+        )
+
+        XCTAssertFalse(snapshot.input.items[0].workItem.relations.contains {
+            $0.kind == .authored && $0.objectNodeID == fixture.userNodeID
+        })
+    }
+
     func testPartialOrUnavailableReviewCoverageNeverAdmitsPersistedRows() async throws {
         for status in [CoverageStatus.partial, .unavailable] {
             let fixture = try await Fixture()
@@ -154,6 +171,36 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         )
     }
 
+    func testCurrentTimelineInputCarriesExactScopeAndSourceRevisionEvidence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.saveCoverage(feature: .pullRequests, status: .complete)
+        try await fixture.saveCoverage(feature: .timelines, status: .complete)
+        try await fixture.saveTimelineCandidateCoverage(status: .complete)
+        try await fixture.insertTimeline(
+            eventRevision: "pull-request-r1",
+            pageRevision: "pull-request-r1"
+        )
+
+        let snapshot = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: fixture.aiPolicy,
+            evaluatedAt: fixture.now
+        )
+        let item = try XCTUnwrap(snapshot.input.items.first)
+        let event = try XCTUnwrap(item.timeline.first)
+        let evidence = try XCTUnwrap(item.timelineEvidence[event.id])
+
+        XCTAssertEqual(evidence.authority, .github(
+            scope: fixture.scope,
+            feature: .timelines,
+            streamID: SyncStreamID(rawValue: "timeline:\(fixture.pullRequestNodeID.rawValue)")!
+        ))
+        XCTAssertEqual(evidence.sourceRevision, "pull-request-r1")
+        XCTAssertEqual(evidence.eventID, event.id)
+        XCTAssertNotNil(item.primaryEvidence)
+    }
+
     func testRejectsARequestedScopeWhoseAuthorityRevisionIsNoLongerCurrent() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -219,9 +266,13 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
             isAuthenticationValid: true,
             isEntitled: true,
             hasAvailableBudget: true,
-            selectedModelID: "selected-model"
+            selectedModelID: "selected-model",
+            effectiveModelID: "selected-model"
         )
-        let key = try fixture.aiCacheKey(selectedModelID: "selected-model")
+        let key = try fixture.aiCacheKey(
+            selectedModelID: "selected-model",
+            effectiveModelID: "selected-model"
+        )
         try await AIAnalysisRepository(vault: fixture.vault).save(
             .init(
                 id: "selected-model-analysis",
@@ -246,7 +297,8 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
             isAuthenticationValid: true,
             isEntitled: true,
             hasAvailableBudget: true,
-            selectedModelID: "different-model"
+            selectedModelID: "different-model",
+            effectiveModelID: "different-model"
         )
         let uncached = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
             for: fixture.scope,
@@ -259,7 +311,7 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
 
     private final class Fixture: @unchecked Sendable {
         let directory: URL
-        let accountID = AccountID(rawValue: "derived-adapter-account")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000202")!
         let organizationID = OrganizationID(rawValue: "derived-adapter-org")!
         let userNodeID = GitHubNodeID(rawValue: "derived-adapter-user")!
         let userActorID = ActorID(rawValue: "derived-adapter-user-actor")!
@@ -434,6 +486,54 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                 ),
                 attemptedAt: now
             )
+        }
+
+        func insertAuthoredRelation(credentialRevision: CredentialRevision) async throws {
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO relations (
+                            id, account_id, subject_node_id, object_node_id, kind,
+                            confidence, observed_at_ms
+                        ) VALUES (?, ?, ?, ?, 'authored', 'confirmed', ?)
+                        """,
+                    arguments: [
+                        "derived-adapter-authored-stale",
+                        accountID.rawValue,
+                        pullRequestNodeID.rawValue,
+                        userNodeID.rawValue,
+                        milliseconds(now)
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO relation_evidence (
+                            relation_id, evidence_id, source, source_locator_kind,
+                            source_locator, authority_kind, authority_account_id,
+                            authority_organization_id, authority_feature,
+                            authority_stream_id, authority_credential_revision,
+                            authority_capability_revision, source_node_id,
+                            source_event_id, source_revision, raw_snapshot_id,
+                            confidence, confirmation, observed_at_ms, excerpt
+                        ) VALUES (?, ?, 'graphQL', 'query', ?, 'github', ?, ?, ?, ?, ?, ?, ?,
+                                  NULL, 'pull-request-r1', NULL, 'confirmed', 'confirmed', ?, ?)
+                        """,
+                    arguments: [
+                        "derived-adapter-authored-stale",
+                        "derived-adapter-authored-stale-evidence",
+                        "TriageHydrateNodes",
+                        accountID.rawValue,
+                        organizationID.rawValue,
+                        CoverageFeature.pullRequests.rawValue,
+                        "hydration-pull-requests-\(organizationID.rawValue)",
+                        credentialRevision.rawValue,
+                        scope.capabilityRevision.rawValue,
+                        pullRequestNodeID.rawValue,
+                        milliseconds(now),
+                        "Stale authored relation"
+                    ]
+                )
+            }
         }
 
         func insertReview(sourceRevision: String) async throws {
@@ -612,7 +712,10 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
             }
         }
 
-        func aiCacheKey(selectedModelID: String?) throws -> AIAnalysisCacheKey {
+        func aiCacheKey(
+            selectedModelID: String?,
+            effectiveModelID: String
+        ) throws -> AIAnalysisCacheKey {
             let input = CopilotAnalysisInput(
                 candidateID: AIRequestID(rawValue: "derived-\(workItemID.rawValue)")!,
                 workItemTitle: "Adapter pull request",
@@ -629,10 +732,12 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                     input: input,
                     sourceRevision: "pull-request-r1",
                     selectedModelID: selectedModelID,
+                    effectiveModelID: effectiveModelID,
                     promptVersion: 1,
                     outputSchemaVersion: 1
                 ),
                 selectedModelID: selectedModelID,
+                effectiveModelID: effectiveModelID,
                 promptVersion: 1,
                 outputSchemaVersion: 1
             )

@@ -143,7 +143,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         let evidence = try XCTUnwrap(persistedEvidence)
         XCTAssertEqual(evidence, [
             "endpoint", "/repos/github/triage/pulls/1/reviews", "github", "credential",
-            "provisional", "provisional", "review-source-revision"
+            "confirmed", "confirmed", "revision"
         ])
     }
 
@@ -539,7 +539,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                         ) VALUES ('batch-seed', ?, 'restReview', 'endpoint',
                                   '/repos/github/triage/pulls/1/reviews', 'github', ?, ?,
                                   'reviews', 'reviews', 'credential', 'capability', ?, NULL,
-                                  'batch-source', ?, 'provisional', 'provisional', ?, NULL)
+                                  'revision', ?, 'confirmed', 'confirmed', ?, NULL)
                         """,
                     arguments: [
                         "batch-evidence-\(index)", fixture.accountID.rawValue,
@@ -565,37 +565,110 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         )
     }
 
-    func testExplicitLegacyEvidencePersistsOnlyAsProvisionalEvidence() async throws {
+    func testCurrentDerivedSnapshotRejectsLegacyEvidence() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
         let repository = DerivedIntelligenceRepository(vault: fixture.vault)
-        try await repository.replace(
-            fixture.snapshot(
-                reasonID: "legacy",
-                title: "Legacy title",
-                usesLegacyEvidence: true
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                fixture.snapshot(
+                    reasonID: "legacy",
+                    title: "Legacy title",
+                    usesLegacyEvidence: true
+                )
             )
+        }
+        let count = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM rule_evaluation_evidence")
+        }
+        XCTAssertEqual(count, 0)
+    }
+
+    func testCurrentDerivedSnapshotRejectsRevisionlessGitHubEvidence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                fixture.snapshot(
+                    reasonID: "revisionless",
+                    title: "Revisionless title",
+                    usesRevisionlessEvidence: true
+                )
+            )
+        }
+    }
+
+    func testCurrentDerivedSnapshotRejectsUnconfirmedAndStaleGitHubEvidence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                fixture.snapshot(
+                    reasonID: "provisional",
+                    title: "Provisional title",
+                    confidence: .provisional
+                )
+            )
+        }
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                fixture.snapshot(
+                    reasonID: "stale-node-revision",
+                    title: "Stale node revision title",
+                    evidenceSourceRevision: "retired-node-revision"
+                )
+            )
+        }
+    }
+
+    func testScopedPresentationRejectsRotatedRunOrEvidenceButHistoricalReadRemainsAvailable() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await DerivedIntelligenceRepository(vault: fixture.vault).replace(
+            fixture.snapshot(reasonID: "current", title: "Current title")
         )
 
-        let persistedAuthority = try await fixture.vault.read { database -> [String]? in
-            guard let row = try Row.fetchOne(
-                database,
-                sql: """
-                    SELECT authority_kind, confidence, confirmation
-                    FROM rule_evaluation_evidence
-                    WHERE rule_evaluation_id = 'legacy'
-                    """
-            ),
-            let authorityKind: String = row["authority_kind"],
-            let confidence: String = row["confidence"],
-            let confirmation: String = row["confirmation"]
-            else {
-                return nil
-            }
-            return [authorityKind, confidence, confirmation]
+        let workItems = WorkItemRepository(vault: fixture.vault)
+        let initial = try await workItems.fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertEqual(initial.first?.attentionReasons.map(\.id), ["current"])
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE rule_evaluation_evidence SET source_revision = 'retired-node-revision'"
+            )
         }
-        let authority = try XCTUnwrap(persistedAuthority)
-        XCTAssertEqual(authority, ["legacyUnverified", "provisional", "provisional"])
+        let staleEvidence = try await workItems.fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertTrue(staleEvidence.first?.attentionReasons.isEmpty ?? false)
+        let historical = try await workItems.fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(historical.first?.attentionReasons.map(\.id), ["current"])
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE github_nodes SET source_revision = 'rotated-revision' WHERE github_node_id = ?",
+                arguments: [fixture.nodeID.rawValue]
+            )
+        }
+        let staleRun = try await workItems.fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertTrue(staleRun.first?.attentionReasons.isEmpty ?? false)
     }
 
     func testCorruptDurableRunFailsClosedInsteadOfReturningEmptyProjection() async throws {
@@ -688,8 +761,29 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         ])))
 
         try await DerivedIntelligenceRepository(vault: fixture.vault).replace(
-            fixture.snapshot(reasonID: "valid-legacy", title: "Valid legacy title", usesLegacyEvidence: true)
+            fixture.snapshot(reasonID: "valid-current", title: "Valid current title")
         )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO rule_evaluation_evidence (
+                        rule_evaluation_id, evidence_id, source, source_locator_kind,
+                        source_locator, authority_kind, authority_account_id,
+                        authority_organization_id, authority_feature, authority_stream_id,
+                        authority_credential_revision, authority_capability_revision,
+                        source_node_id, source_event_id, source_revision, raw_snapshot_id,
+                        confidence, confirmation, observed_at_ms, excerpt
+                    ) VALUES (?, 'historical-legacy', 'legacyUnverified', 'legacyUnverified',
+                              'legacy-unverified', 'legacyUnverified', NULL, NULL, NULL, NULL,
+                              NULL, NULL, NULL, NULL, NULL, NULL, 'provisional', 'provisional', ?, NULL)
+                    """,
+                arguments: ["valid-current", Fixture.milliseconds(fixture.date)]
+            )
+        }
+        await XCTAssertThrowsErrorAsync {
+            _ = try await DerivedIntelligenceRepository(vault: fixture.vault)
+                .projection(for: fixture.scope)
+        }
         await XCTAssertThrowsErrorAsync {
             try await fixture.vault.write { database in
                 try database.execute(
@@ -705,7 +799,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                                   'legacy-unverified', 'legacyUnverified', NULL, NULL, NULL, NULL,
                                   NULL, NULL, NULL, NULL, NULL, NULL, 'confirmed', 'provisional', ?, NULL)
                         """,
-                    arguments: ["valid-legacy", Fixture.milliseconds(fixture.date)]
+                    arguments: ["valid-current", Fixture.milliseconds(fixture.date)]
                 )
             }
         }
@@ -777,7 +871,7 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
 
     private final class Fixture: @unchecked Sendable {
         let directory: URL
-        let accountID = AccountID(rawValue: "derived-account")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000204")!
         let organizationID = OrganizationID(rawValue: "derived-organization")!
         let workItemID: WorkItemID
         let nodeID = GitHubNodeID(rawValue: "derived-node")!
@@ -866,6 +960,10 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
             coverageState: DerivedIntelligenceCoverageState = .trusted,
             isProvisional: Bool = false,
             usesLegacyEvidence: Bool = false,
+            usesRevisionlessEvidence: Bool = false,
+            evidenceSourceRevision: String? = nil,
+            confidence: RelationConfidence = .confirmed,
+            confirmation: EvidenceConfirmation = .confirmed,
             rawSnapshotID: RawAPISnapshotID? = nil,
             aiCandidates: [DerivedAICandidate] = [],
             aiCandidateExclusions: [DerivedAICandidateExclusion] = []
@@ -896,10 +994,12 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                             ? .localWorkflow(accountID: accountID, organizationID: organizationID)
                             : .github(scope: scope, feature: .reviews, streamID: SyncStreamID(rawValue: "reviews")!),
                         nodeID: nodeID,
-                        sourceRevision: usesLegacyEvidence || isWaitingWakeUp ? nil : "review-source-revision",
+                        sourceRevision: usesLegacyEvidence || usesRevisionlessEvidence || isWaitingWakeUp
+                            ? nil
+                            : evidenceSourceRevision ?? "revision",
                         rawSnapshotID: rawSnapshotID,
-                        confidence: .provisional,
-                        confirmation: .provisional,
+                        confidence: confidence,
+                        confirmation: confirmation,
                         observedAt: date
                     )
                 ],

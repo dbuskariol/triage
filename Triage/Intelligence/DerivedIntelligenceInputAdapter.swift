@@ -88,7 +88,8 @@ actor DerivedIntelligenceInputAdapter {
         let before = try await fence(for: scope, evaluatedAt: evaluatedAt)
         let persistedWorkItems = try await workItems.fetch(
             accountID: scope.accountID,
-            organizationID: scope.organizationID
+            organizationID: scope.organizationID,
+            authorityScope: scope
         )
         let after = try await fence(for: scope, evaluatedAt: evaluatedAt)
         guard before == after,
@@ -127,6 +128,11 @@ actor DerivedIntelligenceInputAdapter {
         var inputItems: [DerivedIntelligenceItemInput] = []
         inputItems.reserveCapacity(refreshedItems.count)
         for workItem in refreshedItems {
+            guard let primary = after.primarySources.first(where: { $0.workItemID == workItem.id }),
+                  primary.nodeID == workItem.primaryNodeID
+            else {
+                throw DerivedIntelligenceInputAdapterError.sourceChangedDuringRead
+            }
             let document = support.documents[workItem.id] ?? Self.document(for: workItem)
             let cacheDecision = try await aiCacheDecision(
                 for: workItem,
@@ -134,13 +140,20 @@ actor DerivedIntelligenceInputAdapter {
                 sourceRevision: after.primarySources.first(where: { $0.workItemID == workItem.id })?.sourceRevision,
                 scope: scope,
                 selectedModelID: aiPolicy.selectedModelID,
+                effectiveModelID: aiPolicy.effectiveModelID,
+                automaticActionConfidenceThreshold: aiPolicy.automaticActionConfidenceThreshold,
                 evaluatedAt: evaluatedAt
             )
             inputItems.append(DerivedIntelligenceItemInput(
                 workItem: workItem,
+                primaryEvidence: Self.primaryEvidence(for: primary, scope: scope),
                 timeline: support.timelines[workItem.id] ?? [],
+                timelineEvidence: support.timelineEvidence[workItem.id] ?? [:],
                 pullRequestReviews: support.reviews[workItem.id] ?? [],
                 pullRequestReviewThreads: support.reviewThreads[workItem.id] ?? [],
+                pullRequestStatusChecks: support.statusChecks[workItem.id] ?? [],
+                pullRequestMergeableState: support.mergeableStates[workItem.id],
+                pullRequestStatusCheckMarkerEvidence: support.statusCheckMarkerEvidence[workItem.id],
                 searchDocument: document,
                 hasChangedAIFingerprint: cacheDecision.hasChanged,
                 hasValidCachedAIAnalysis: cacheDecision.hasCachedAnalysis
@@ -221,29 +234,58 @@ actor DerivedIntelligenceInputAdapter {
         sourceRevision: String?,
         scope: SynchronizationScope,
         selectedModelID: String?,
+        effectiveModelID: String?,
+        automaticActionConfidenceThreshold: Double,
         evaluatedAt: Date
     ) async throws -> (hasChanged: Bool, hasCachedAnalysis: Bool) {
         guard let sourceRevision else {
             throw DerivedIntelligenceInputAdapterError.invalidPersistedData
         }
+        // Auto must already have been resolved by the authenticated
+        // organization controller. Without an exact model, no cache entry may
+        // suppress a future authorized request.
+        guard let effectiveModelID else { return (true, false) }
         let reasons = workItem.attentionReasons.map(\.id).sorted()
-        guard let candidateID = AIRequestID(rawValue: "derived-\(workItem.id.rawValue)") else {
-            throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+        let input: CopilotAnalysisInput
+        if !reasons.isEmpty,
+           let candidateID = try? CopilotCandidateInputBuilder.derivedCandidateID(
+               workItemID: workItem.id,
+               triggerReasonIDs: reasons
+           ),
+           let currentInput = try? CopilotCandidateInputBuilder.make(
+               candidateID: candidateID,
+               triggerReasonIDs: reasons,
+               workItem: workItem,
+               document: document,
+               scope: scope
+           ) {
+            // Match the production request exactly so an unchanged candidate
+            // cannot relaunch the helper after the next derived refresh.
+            input = currentInput
+        } else {
+            // Before the first derived publication there may be no current
+            // reason/evidence set. This placeholder is cache-only; it never
+            // leaves the process because no persisted candidate exists yet.
+            guard let candidateID = AIRequestID(rawValue: "derived-\(workItem.id.rawValue)") else {
+                throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+            }
+            input = CopilotAnalysisInput(
+                candidateID: candidateID,
+                workItemTitle: workItem.title,
+                workItemState: workItem.state.rawValue,
+                deterministicReasons: ["derived-input"],
+                body: document.body,
+                conversation: [],
+                evidenceIDs: []
+            )
         }
-        let input = CopilotAnalysisInput(
-            candidateID: candidateID,
-            workItemTitle: workItem.title,
-            workItemState: workItem.state.rawValue,
-            deterministicReasons: reasons.isEmpty ? ["derived-input"] : reasons,
-            body: document.body,
-            conversation: [],
-            evidenceIDs: []
-        )
         let fingerprint = try AIFingerprint.make(
             scope: scope,
             input: input,
             sourceRevision: sourceRevision,
             selectedModelID: selectedModelID,
+            effectiveModelID: effectiveModelID,
+            automaticActionConfidenceThreshold: automaticActionConfidenceThreshold,
             promptVersion: 1,
             outputSchemaVersion: 1
         )
@@ -251,6 +293,7 @@ actor DerivedIntelligenceInputAdapter {
             workItemID: workItem.id,
             fingerprint: fingerprint,
             selectedModelID: selectedModelID,
+            effectiveModelID: effectiveModelID,
             promptVersion: 1,
             outputSchemaVersion: 1
         )
@@ -283,8 +326,12 @@ actor DerivedIntelligenceInputAdapter {
 
     private struct SupplementalData: Sendable {
         let timelines: [WorkItemID: [TimelineEventSummary]]
+        let timelineEvidence: [WorkItemID: [GitHubEventID: EvidenceReference]]
         let reviews: [WorkItemID: [PullRequestReviewFeedback]]
         let reviewThreads: [WorkItemID: [PullRequestReviewThread]]
+        let statusChecks: [WorkItemID: [PullRequestStatusCheck]]
+        let mergeableStates: [WorkItemID: String]
+        let statusCheckMarkerEvidence: [WorkItemID: EvidenceReference]
         let documents: [WorkItemID: SearchDocument]
         let sourceStates: [DerivedIntelligenceSourceState]
     }
@@ -416,8 +463,12 @@ actor DerivedIntelligenceInputAdapter {
     ) async throws -> SupplementalData {
         try await vault.read { database in
             var timelines = [WorkItemID: [TimelineEventSummary]]()
+            var timelineEvidence = [WorkItemID: [GitHubEventID: EvidenceReference]]()
             var reviews = [WorkItemID: [PullRequestReviewFeedback]]()
             var reviewThreads = [WorkItemID: [PullRequestReviewThread]]()
+            var statusChecks = [WorkItemID: [PullRequestStatusCheck]]()
+            var mergeableStates = [WorkItemID: String]()
+            var statusCheckMarkerEvidence = [WorkItemID: EvidenceReference]()
             var documents = [WorkItemID: SearchDocument]()
             var states = [DerivedIntelligenceSourceState]()
 
@@ -468,10 +519,16 @@ actor DerivedIntelligenceInputAdapter {
                         availability: timelineTrusted ? .trusted : .excluded
                     ))
                     if timelineTrusted {
-                        timelines[workItem.id] = try Self.timeline(
+                        let events = try Self.timeline(
                             for: primary,
                             scope: scope,
                             in: database
+                        )
+                        timelines[workItem.id] = events
+                        timelineEvidence[workItem.id] = try Self.timelineEvidence(
+                            for: events,
+                            primary: primary,
+                            scope: scope
                         )
                     }
                 }
@@ -499,6 +556,31 @@ actor DerivedIntelligenceInputAdapter {
                     ))
                     if reviewsTrusted {
                         reviews[workItem.id] = try Self.reviews(for: primary, scope: scope, in: database)
+                    }
+                }
+
+                let statusCheckCoverageTrusted = isPullRequest && itemTrusted && Self.statusCheckCoverageCurrent(
+                    primary,
+                    records: fence.coverageRecords,
+                    scope: scope
+                )
+                let statusChecksCurrent = try Self.statusChecksCurrent(
+                    for: primary,
+                    scope: scope,
+                    in: database
+                )
+                let statusChecksTrusted = statusCheckCoverageTrusted && statusChecksCurrent
+                if isPullRequest {
+                    states.append(.init(
+                        workItemID: workItem.id,
+                        feature: .statusChecks,
+                        availability: statusChecksTrusted ? .trusted : .excluded
+                    ))
+                    if statusChecksTrusted {
+                        let statusSnapshot = try Self.statusChecks(for: primary, scope: scope, in: database)
+                        statusChecks[workItem.id] = statusSnapshot.checks
+                        mergeableStates[workItem.id] = statusSnapshot.mergeableState
+                        statusCheckMarkerEvidence[workItem.id] = statusSnapshot.markerEvidence
                     }
                 }
 
@@ -549,8 +631,12 @@ actor DerivedIntelligenceInputAdapter {
             }
             return SupplementalData(
                 timelines: timelines,
+                timelineEvidence: timelineEvidence,
                 reviews: reviews,
                 reviewThreads: reviewThreads,
+                statusChecks: statusChecks,
+                mergeableStates: mergeableStates,
+                statusCheckMarkerEvidence: statusCheckMarkerEvidence,
                 documents: documents,
                 sourceStates: states
             )
@@ -614,6 +700,83 @@ actor DerivedIntelligenceInputAdapter {
                 body: nil
             )
         }
+    }
+
+    private nonisolated static func primaryEvidence(
+        for primary: PrimarySource,
+        scope: SynchronizationScope
+    ) -> EvidenceReference? {
+        guard primary.isCurrent,
+              let observedAt = primary.lastObservedAt,
+              let streamID = hydrationStreamID(for: primary, scope: scope)
+        else { return nil }
+        return EvidenceReference(
+            id: EvidenceID(rawValue: "hydration-\(primary.nodeID.rawValue)")!,
+            source: .graphQL,
+            locator: .query("graphql:TriageHydrateNodes/node=\(primary.nodeID.rawValue)"),
+            authority: .github(
+                scope: scope,
+                feature: primaryFeature(for: primary.kind),
+                streamID: streamID
+            ),
+            nodeID: primary.nodeID,
+            sourceRevision: primary.sourceRevision,
+            confidence: .confirmed,
+            confirmation: .confirmed,
+            observedAt: observedAt
+        )
+    }
+
+    private nonisolated static func timelineEvidence(
+        for events: [TimelineEventSummary],
+        primary: PrimarySource,
+        scope: SynchronizationScope
+    ) throws -> [GitHubEventID: EvidenceReference] {
+        guard primary.isCurrent,
+              let streamID = SyncStreamID(rawValue: "timeline:\(primary.nodeID.rawValue)")
+        else { return [:] }
+        var result = [GitHubEventID: EvidenceReference]()
+        for event in events {
+            guard event.subjectNodeID == primary.nodeID,
+                  result[event.id] == nil
+            else { throw DerivedIntelligenceInputAdapterError.invalidPersistedData }
+            result[event.id] = EvidenceReference(
+                id: EvidenceID(rawValue: "timeline-\(event.id.rawValue)")!,
+                source: .restTimeline,
+                // A timeline source revision covers the complete page set, so
+                // identify the exact durable stream rather than inventing an
+                // event-to-page endpoint mapping that the schema does not
+                // retain.
+                locator: .query("timeline:\(primary.nodeID.rawValue)"),
+                authority: .github(scope: scope, feature: .timelines, streamID: streamID),
+                nodeID: event.subjectNodeID,
+                eventID: event.id,
+                sourceRevision: primary.sourceRevision,
+                confidence: .confirmed,
+                confirmation: .confirmed,
+                observedAt: event.occurredAt,
+                excerpt: event.body
+            )
+        }
+        return result
+    }
+
+    private nonisolated static func hydrationStreamID(
+        for primary: PrimarySource,
+        scope: SynchronizationScope
+    ) -> SyncStreamID? {
+        let kindComponent: String
+        switch primary.kind {
+        case .issue:
+            kindComponent = "issues"
+        case .pullRequest:
+            kindComponent = "pull-requests"
+        default:
+            return nil
+        }
+        return SyncStreamID(
+            rawValue: "hydration-\(kindComponent)-\(scope.organizationID.rawValue)"
+        )
     }
 
     private nonisolated static func reviews(
@@ -730,6 +893,145 @@ actor DerivedIntelligenceInputAdapter {
                 )
             )
         }
+    }
+
+    private nonisolated static func statusChecksCurrent(
+        for primary: PrimarySource,
+        scope: SynchronizationScope,
+        in database: Database
+    ) throws -> Bool {
+        guard primary.kind == .pullRequest else { return false }
+        // An authoritative empty rollup has no status_check rows. Coverage
+        // plus the PR-scoped current-row marker proves that empty result; a
+        // missing marker remains unknown rather than green.
+        let markerCount = try Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*) FROM status_check_rollup_markers
+                WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND source_revision = ?
+                """,
+            arguments: [
+                primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                primary.sourceRevision
+            ]
+        ) ?? 0
+        return markerCount == 1
+    }
+
+    private nonisolated static func statusCheckCoverageCurrent(
+        _ primary: PrimarySource,
+        records: [CoverageRecord],
+        scope: SynchronizationScope
+    ) -> Bool {
+        guard let repositoryID = primary.repositoryID else { return false }
+        let streamID = PullRequestStatusCheckRefreshService.sourceStreamID(
+            organizationID: scope.organizationID,
+            pullRequestNodeID: primary.nodeID,
+            sourceRevision: primary.sourceRevision
+        )
+        return records.contains {
+            $0.accountID == scope.accountID && $0.organizationID == scope.organizationID
+                && $0.repositoryID == repositoryID && $0.feature == .statusChecks
+                && $0.streamID == streamID
+                && $0.credentialRevision == scope.credentialRevision
+                && $0.capabilityRevision == scope.capabilityRevision
+                && $0.status == .complete && $0.lastSuccessfulAt != nil
+        }
+    }
+
+    private nonisolated static func statusChecks(
+        for primary: PrimarySource,
+        scope: SynchronizationScope,
+        in database: Database
+    ) throws -> (checks: [PullRequestStatusCheck], mergeableState: String, markerEvidence: EvidenceReference) {
+        let streamID = PullRequestStatusCheckRefreshService.sourceStreamID(
+            organizationID: scope.organizationID,
+            pullRequestNodeID: primary.nodeID,
+            sourceRevision: primary.sourceRevision
+        )
+        guard let marker = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT mergeable_state, observed_at_ms FROM status_check_rollup_markers
+                WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND source_revision = ?
+                """,
+            arguments: [
+                primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                primary.sourceRevision
+            ]
+        ), let mergeableState: String = marker["mergeable_state"],
+           let markerObservedAt = date(milliseconds: marker["observed_at_ms"]),
+           ["MERGEABLE", "CONFLICTING", "UNKNOWN"].contains(mergeableState) else {
+            throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+        }
+        let checks = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT context, state, is_required, completed_at_ms, observed_at_ms
+                FROM status_checks
+                WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND source_revision = ?
+                ORDER BY context
+                """,
+            arguments: [
+                primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                primary.sourceRevision
+            ]
+        ).map { row -> PullRequestStatusCheck in
+            guard let context: String = row["context"],
+                  let stateValue: String = row["state"],
+                  let state = GitHubPullRequestStatusCheckState(rawValue: stateValue),
+                  let required: Bool = row["is_required"],
+                  let observedAt = date(milliseconds: row["observed_at_ms"])
+            else { throw DerivedIntelligenceInputAdapterError.invalidPersistedData }
+            return .init(
+                context: context,
+                state: state,
+                isRequired: required,
+                completedAt: date(milliseconds: row["completed_at_ms"]),
+                evidence: EvidenceReference(
+                    id: EvidenceID(rawValue: "status-check-\(primary.nodeID.rawValue)-\(context)")!,
+                    source: .graphQL,
+                    locator: .query("TriagePullRequestStatusChecks"),
+                    authority: .github(
+                        scope: scope,
+                        feature: .statusChecks,
+                        streamID: streamID
+                    ),
+                    nodeID: primary.nodeID,
+                    sourceRevision: primary.sourceRevision,
+                    confidence: .confirmed,
+                    confirmation: .confirmed,
+                    observedAt: observedAt
+                )
+            )
+        }
+        guard Set(checks.map(\.context)).count == checks.count else {
+            throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+        }
+        return (
+            checks,
+            mergeableState,
+            EvidenceReference(
+                id: EvidenceID(rawValue: "status-check-rollup-\(primary.nodeID.rawValue)")!,
+                source: .graphQL,
+                locator: .query("TriagePullRequestStatusChecks"),
+                authority: .github(scope: scope, feature: .statusChecks, streamID: streamID),
+                nodeID: primary.nodeID,
+                sourceRevision: primary.sourceRevision,
+                confidence: .confirmed,
+                confirmation: .confirmed,
+                observedAt: markerObservedAt
+            )
+        )
     }
 
     private nonisolated static func document(

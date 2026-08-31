@@ -19,12 +19,18 @@ enum AIFingerprint {
         input: CopilotAnalysisInput,
         sourceRevision: String,
         selectedModelID: String?,
+        effectiveModelID: String,
+        automaticActionConfidenceThreshold: Double = OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
         promptVersion: Int,
         outputSchemaVersion: Int
     ) throws -> String {
         guard isSourceRevision(sourceRevision) else { throw AIFingerprintError.invalidSourceRevision }
         guard promptVersion > 0, outputSchemaVersion > 0 else { throw AIFingerprintError.invalidVersion }
         guard AIConsentRepository.isValidModelID(selectedModelID) else { throw AIFingerprintError.invalidModelID }
+        guard AIConsentRepository.isValidModelID(effectiveModelID) else { throw AIFingerprintError.invalidModelID }
+        guard AIConsentRepository.isValidAutomaticActionConfidenceThreshold(automaticActionConfidenceThreshold) else {
+            throw AIFingerprintError.invalidInput
+        }
         do {
             try input.validate()
         } catch {
@@ -38,13 +44,21 @@ enum AIFingerprint {
         append(scope.capabilityRevision.rawValue, to: &material)
         append(sourceRevision, to: &material)
         append(selectedModelID ?? "", to: &material)
+        append(effectiveModelID, to: &material)
+        append(automaticActionConfidenceThreshold.bitPattern, to: &material)
         append(UInt64(promptVersion), to: &material)
         append(UInt64(outputSchemaVersion), to: &material)
         append(input.candidateID.rawValue, to: &material)
+        append(input.contentIsUntrusted ? "1" : "0", to: &material)
         append(input.workItemTitle, to: &material)
         append(input.workItemState, to: &material)
         for reason in input.deterministicReasons.sorted() { append(reason, to: &material) }
         append(input.body, to: &material)
+        for label in input.labels.sorted() { append(label, to: &material) }
+        for field in input.projectFields.sorted(by: { $0.key < $1.key }) {
+            append(field.key, to: &material)
+            append(field.value, to: &material)
+        }
         // Conversation order is semantic and therefore intentionally retained.
         for excerpt in input.conversation {
             append(excerpt.evidenceID.rawValue, to: &material)
@@ -54,6 +68,13 @@ enum AIFingerprint {
         }
         for evidenceID in input.evidenceIDs.sorted(by: { $0.rawValue < $1.rawValue }) {
             append(evidenceID.rawValue, to: &material)
+        }
+        for evidence in input.evidence.sorted(by: { $0.id.rawValue < $1.id.rawValue }) {
+            append(evidence.id.rawValue, to: &material)
+            append(evidence.actorRole, to: &material)
+            append(evidence.text, to: &material)
+            append(UInt64(evidence.timestamp.timeIntervalSince1970.bitPattern), to: &material)
+            append(UInt64(evidence.explicitDeadline?.timeIntervalSince1970.bitPattern ?? 0), to: &material)
         }
         return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
     }

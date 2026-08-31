@@ -1,0 +1,4 @@
+[env]
+# The SDK must never fetch, extract, or resolve a CLI during a Triage build.
+# Runtime use is limited to an XPC-verified explicit CliProgram::Path.
+COPILOT_SKIP_CLI_DOWNLOAD = { value = "1", force = true }

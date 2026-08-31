@@ -29,6 +29,7 @@ final class GitHubRESTTransportTests: XCTestCase {
         XCTAssertEqual(captured.url?.absoluteString, "https://api.github.com/user?per_page=100")
         XCTAssertEqual(captured.value(forHTTPHeaderField: "Authorization"), "Bearer token")
         XCTAssertEqual(captured.value(forHTTPHeaderField: "X-GitHub-Api-Version"), "2026-03-10")
+        XCTAssertEqual(captured.value(forHTTPHeaderField: "User-Agent"), GitHubRESTTransport.defaultUserAgent)
         XCTAssertEqual(captured.value(forHTTPHeaderField: "If-None-Match"), "\"etag\"")
     }
 
@@ -125,6 +126,68 @@ final class GitHubRESTTransportTests: XCTestCase {
         }
     }
 
+    func testTransportRejectsRedirectedFinalResponseOutsideGitHubAPI() async throws {
+        for url in [
+            URL(string: "https://example.invalid/user")!,
+            URL(string: "http://api.github.com/user")!
+        ] {
+            let transport = try GitHubRESTTransport(
+                session: RecordingSession(responseURL: url)
+            )
+
+            do {
+                _ = try await transport.send(
+                    try GitHubRESTRequest(path: "/user"),
+                    credential: SecretValue("token")
+                )
+                XCTFail("A final response outside the GitHub HTTPS API authority must fail closed.")
+            } catch let error as GitHubTransportError {
+                XCTAssertEqual(error, .invalidResponseAuthority)
+            }
+        }
+    }
+
+    func testTransportAcceptsExactGitHubAPIFinalResponseAuthority() async throws {
+        let responseURL = URL(string: "https://api.github.com/user?redirected=true")!
+        let transport = try GitHubRESTTransport(
+            session: RecordingSession(responseURL: responseURL)
+        )
+
+        let response = try await transport.send(
+            try GitHubRESTRequest(path: "/user"),
+            credential: SecretValue("token")
+        )
+
+        XCTAssertEqual(response.url, responseURL)
+    }
+
+    func testTransportRejectsNonExactOutboundBaseAuthorityBeforeSending() throws {
+        for url in [
+            URL(string: "https://api.github.com:444")!,
+            URL(string: "https://user@api.github.com")!
+        ] {
+            XCTAssertThrowsError(
+                try GitHubRESTTransport(
+                    session: RecordingSession(),
+                    baseURL: url
+                )
+            ) { error in
+                XCTAssertEqual(error as? GitHubTransportError, .invalidBaseURL)
+            }
+        }
+    }
+
+    func testRequestRejectsNonExactPaginationAuthorityBeforeSending() {
+        for url in [
+            URL(string: "https://api.github.com:444/user?page=2")!,
+            URL(string: "https://user@api.github.com/user?page=2")!
+        ] {
+            XCTAssertThrowsError(try GitHubRESTRequest(nextPageURL: url)) { error in
+                XCTAssertEqual(error as? GitHubTransportError, .invalidBaseURL)
+            }
+        }
+    }
+
     func testTransportPropagatesCancellation() async throws {
         let transport = try GitHubRESTTransport(session: CancellingSession())
 
@@ -141,10 +204,16 @@ private actor RecordingSession: HTTPSession {
     private var capturedRequest: URLRequest?
     private let headers: [String: String]
     private let body: Data
+    private let responseURL: URL?
 
-    init(headers: [String: String] = [:], body: Data = Data()) {
+    init(
+        headers: [String: String] = [:],
+        body: Data = Data(),
+        responseURL: URL? = nil
+    ) {
         self.headers = headers
         self.body = body
+        self.responseURL = responseURL
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -152,7 +221,7 @@ private actor RecordingSession: HTTPSession {
         return (
             body,
             HTTPURLResponse(
-                url: request.url!,
+                url: responseURL ?? request.url!,
                 statusCode: 200,
                 httpVersion: nil,
                 headerFields: headers

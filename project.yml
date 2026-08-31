@@ -91,6 +91,27 @@ targets:
         PRODUCT_NAME: TriageCopilotXPC
         SKIP_INSTALL: YES
         TRIAGE_DEVELOPMENT_TEAM: ""
+    postCompileScripts:
+      - path: scripts/build-copilot-helper.sh
+        name: Build Triage Copilot Helper
+        shell: /bin/bash
+        showEnvVars: false
+        basedOnDependencyAnalysis: true
+        inputFiles:
+          - $(SRCROOT)/scripts/build-copilot-helper.sh
+          - $(SRCROOT)/TriageCopilotHelper/Cargo.toml
+          - $(SRCROOT)/TriageCopilotHelper/Cargo.lock
+          - $(SRCROOT)/TriageCopilotHelper/.cargo/config.toml
+          - $(SRCROOT)/TriageCopilotHelper/src
+          - $(SRCROOT)/TriageCopilotHelper/src/cache.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/engine.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/environment.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/lib.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/main.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/protocol.rs
+          - $(SRCROOT)/TriageCopilotHelper/src/schema.rs
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/TriageCopilotHelper
 
   TriageTests:
     type: bundle.unit-test
@@ -115,6 +136,11 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.uitests
+      configs:
+        Debug:
+          # XCUITest injects into the Debug-only test bundle; this exception
+          # does not apply to the app or any Release configuration.
+          ENABLE_HARDENED_RUNTIME: NO
 
   TriageCopilotXPCTests:
     type: bundle.unit-test

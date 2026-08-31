@@ -24,20 +24,48 @@ struct TriageProductionComposition: Sendable {
 
     func dependencies(
         notificationSettings: (any NotificationDeliveryPreferencesProviding)? = nil,
+        notificationDeliveryLeaseGate: NotificationDeliveryLeaseGate? = nil,
+        businessDayPolicyProvider: @escaping @Sendable () -> BusinessDayPolicy = { .init() },
         purgeAccountNavigationState: @escaping AccountNavigationStatePurging = { _ in },
         purgeAccountNotificationPreferences: @escaping AccountNotificationPreferencePurging = { _ in }
     ) -> TriageApplicationDependencies {
         let deletionRecoveryStatePurger = AccountDeletionRecoveryStatePurger(
             purgeAccountNavigationState: purgeAccountNavigationState
         )
-        let organizationAIControllers = OrganizationAIControllerRegistry()
+        let copilotRuntimeAuthorization = CopilotRuntimeAuthenticationService(
+            applicationSupportDirectory: applicationSupportDirectory,
+            secretStore: secretStore
+        )
+        let copilotCandidateBudgetAvailability = OrganizationCopilotCandidateBudgetAvailabilityProvider(
+            vaultRegistry: vaultRegistry,
+            secretStore: secretStore
+        )
+        let organizationAIControllers = OrganizationAIControllerRegistry { scope, account in
+            let authorizationState = await copilotRuntimeAuthorization.externalState(
+                for: scope,
+                account: account
+            )
+            return OrganizationAIExternalState(
+                isRuntimeAvailable: authorizationState.isRuntimeAvailable,
+                isAuthenticatedIdentityMatch: authorizationState.isAuthenticatedIdentityMatch,
+                isEntitled: authorizationState.isEntitled,
+                supportsAutoModel: authorizationState.supportsAutoModel,
+                availableModelIDs: authorizationState.availableModelIDs,
+                hasAvailableBudget: await copilotCandidateBudgetAvailability.hasAvailableBudget(for: scope)
+            )
+        }
         let workspaceCoordinator = TriageWorkspaceCoordinator(
             vaultRegistry: vaultRegistry,
             secretStore: secretStore,
             backgroundScheduler: NSBackgroundOrganizationRefreshScheduler(),
-            organizationAIControllers: organizationAIControllers
+            organizationAIControllers: organizationAIControllers,
+            businessDayPolicyProvider: businessDayPolicyProvider
         )
         let databaseObserver = DatabaseWorkspaceObserver(
+            vaultRegistry: vaultRegistry,
+            secretStore: secretStore
+        )
+        let inboxPageObserver = DatabaseInboxPageObserver(
             vaultRegistry: vaultRegistry,
             secretStore: secretStore
         )
@@ -48,7 +76,8 @@ struct TriageProductionComposition: Sendable {
                 source: databaseObserver,
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
-                settings: notificationSettings
+                settings: notificationSettings,
+                deliveryLeaseGate: notificationDeliveryLeaseGate ?? .init()
             )
             workspaceObserver = notificationObserver
             workspaceObservationLifecycle = notificationObserver
@@ -62,17 +91,21 @@ struct TriageProductionComposition: Sendable {
                 secretStore: secretStore,
                 applicationSupportDirectory: applicationSupportDirectory,
                 cachesDirectory: cachesDirectory,
+                organizationAIControllers: organizationAIControllers,
+                copilotRuntimeAuthorization: copilotRuntimeAuthorization,
                 deletionRecoveryStatePurger: deletionRecoveryStatePurger
             ),
             workspaceCoordinator: workspaceCoordinator,
             refreshLifecycle: workspaceCoordinator,
             workspaceObserver: workspaceObserver,
+            inboxPageObserver: inboxPageObserver,
             workspaceObservationLifecycle: workspaceObservationLifecycle,
             workspaceMutator: TriageWorkspaceMutator(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore
             ),
             organizationAIControllers: organizationAIControllers,
+            copilotRuntimeAuthorization: copilotRuntimeAuthorization,
             purgeAccountNavigationState: purgeAccountNavigationState,
             purgeAccountNotificationPreferences: purgeAccountNotificationPreferences
         )
@@ -87,6 +120,8 @@ actor TriageAccountSessionService: AccountSessionServing {
     private let restoreAccountState: @Sendable () async throws -> AccountRestorationResult
     private let recoverInterruptedRemovals: @Sendable () async throws -> [AccountID]
     private let deletionRecoveryStatePurger: any AccountDeletionRecoveryStatePurging
+    private let organizationAIControllers: any OrganizationAIControllerProviding
+    private let copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding
 
     init(
         vaultRegistry: VaultRegistry,
@@ -95,6 +130,8 @@ actor TriageAccountSessionService: AccountSessionServing {
         cachesDirectory: URL,
         restoreAccountState: (@Sendable () async throws -> AccountRestorationResult)? = nil,
         recoverInterruptedRemovals: (@Sendable () async throws -> [AccountID])? = nil,
+        organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry(),
+        copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding = NoopCopilotRuntimeAuthorizationProvider(),
         deletionRecoveryStatePurger: any AccountDeletionRecoveryStatePurging = NoopAccountDeletionRecoveryStatePurger()
     ) {
         self.vaultRegistry = vaultRegistry
@@ -115,6 +152,8 @@ actor TriageAccountSessionService: AccountSessionServing {
                 cachesDirectory: cachesDirectory
             ).recoverInterruptedRemovals()
         }
+        self.organizationAIControllers = organizationAIControllers
+        self.copilotRuntimeAuthorization = copilotRuntimeAuthorization
         self.deletionRecoveryStatePurger = deletionRecoveryStatePurger
     }
 
@@ -132,6 +171,7 @@ actor TriageAccountSessionService: AccountSessionServing {
         let configuration = try RuntimeOAuthConfiguration()
         _ = try await AccountConnectionService(
             brokerURL: configuration.brokerURL,
+            applicationVersion: configuration.applicationVersion,
             secretStore: secretStore,
             vaultRegistry: vaultRegistry
         ).connectOAuth(exchangeRequest: request)
@@ -154,7 +194,10 @@ actor TriageAccountSessionService: AccountSessionServing {
         replacing account: GitHubAccount
     ) async throws -> AccountSessionSnapshot {
         let configuration = try RuntimeOAuthConfiguration()
-        let response = try await AuthBrokerClient(baseURL: configuration.brokerURL).exchange(request)
+        let response = try await AuthBrokerClient(
+            baseURL: configuration.brokerURL,
+            applicationVersion: configuration.applicationVersion
+        ).exchange(request)
         let replacement = try await AccountCredentialReplacementService(
             secretStore: secretStore,
             vaultRegistry: vaultRegistry
@@ -188,9 +231,42 @@ actor TriageAccountSessionService: AccountSessionServing {
             vaultRegistry: vaultRegistry,
             secretStore: secretStore,
             applicationSupportDirectory: applicationSupportDirectory,
-            cachesDirectory: cachesDirectory
+            cachesDirectory: cachesDirectory,
+            willBeginCryptoErasure: { [organizationAIControllers, copilotRuntimeAuthorization] in
+                // A deletion journal fences future helper scratch, but an
+                // already-running controller can still own a helper process.
+                // Drain it before crossing the irreversible key-erasure
+                // boundary so it cannot recreate account-scoped artifacts.
+                await organizationAIControllers.evict(accountID: accountID)
+                // This closure is also reached by recovery/deletion paths
+                // that do not pass through the view model.
+                await copilotRuntimeAuthorization.disconnect(accountID: accountID)
+            }
         ).removeAllPrivateData(for: accountID)
         await GitHubRateLimitControllerRegistry.shared.removeController(for: accountID)
+    }
+
+    func restoreVerifiedMigrationBackup(
+        for accountID: AccountID,
+        migrationID: String
+    ) async throws -> AccountSessionSnapshot {
+        guard let keyData = try await secretStore.read(
+            kind: .vaultKey,
+            accountID: accountID,
+            credentialID: nil
+        ) else {
+            throw VaultError.invalidMigrationBackup
+        }
+        let vaultKey = try VaultKey(data: keyData)
+        // The registry repeats verification immediately before installing the
+        // copy, so the UI's earlier recovery snapshot cannot authorize a
+        // stale or replaced backup.
+        try await vaultRegistry.restoreVerifiedMigrationBackup(
+            accountID: accountID,
+            vaultKey: vaultKey,
+            migrationID: migrationID
+        )
+        return try await restoredSnapshot()
     }
 
     private func restoredSnapshot(credentialActionNotice: String? = nil) async throws -> AccountSessionSnapshot {
@@ -201,6 +277,7 @@ actor TriageAccountSessionService: AccountSessionServing {
             organizationAccessesByAccount: result.organizationAccessesByAccount,
             accountCapabilitiesByAccount: result.accountCapabilitiesByAccount,
             unavailableAccountIDs: Set(result.unavailableAccountIDs),
+            vaultRecoveryIssues: result.vaultRecoveryIssues,
             credentialActionNotice: credentialActionNotice
         )
     }
@@ -352,7 +429,8 @@ actor TriageWorkspaceCoordinator: WorkspaceCoordinating, OrganizationRefreshLife
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
         backgroundScheduler: any OrganizationRefreshBackgroundScheduling,
-        organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry()
+        organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry(),
+        businessDayPolicyProvider: @escaping @Sendable () -> BusinessDayPolicy = { .init() }
     ) {
         self.backgroundScheduler = backgroundScheduler
         self.organizationAIControllers = organizationAIControllers
@@ -368,7 +446,8 @@ actor TriageWorkspaceCoordinator: WorkspaceCoordinating, OrganizationRefreshLife
                 credentialReader: AccountCredentialReader(secretStore: secretStore),
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
-                organizationAIController: await organizationAIControllers.controller(for: vault)
+                organizationAIController: await organizationAIControllers.controller(for: vault),
+                businessDayPolicyProvider: businessDayPolicyProvider
             )
         }
     }
@@ -433,6 +512,11 @@ actor TriageWorkspaceCoordinator: WorkspaceCoordinating, OrganizationRefreshLife
         for runtime in active.values {
             try? await runtime.cancelAll()
         }
+        // Settings-owned controllers can outlive a refresh runtime. They
+        // retain their account vault and may still be draining a
+        // non-cooperative analysis operation, so release them before the
+        // registry closes every vault.
+        await organizationAIControllers.evictAll()
         try? await closeAllVaults()
     }
 
@@ -526,6 +610,76 @@ actor TriageWorkspaceMutator: WorkspaceMutating {
         )
     }
 
+    func apply(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws {
+        _ = try await applyWorkflowHistory(action, to: workItemIDs, in: scope)
+    }
+
+    func applyWorkflowHistory(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws -> WorkflowHistoryTransaction {
+        try Task.checkCancellation()
+        let vault = try await vault(for: scope.accountID)
+        let transaction = try await WorkflowHistoryRepository(vault: vault).apply(
+            action,
+            to: workItemIDs,
+            in: scope
+        )
+        try Task.checkCancellation()
+        try await SearchRepository(vault: vault).rebuild(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
+        return transaction
+    }
+
+    func undoLatestWorkflow(in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        try Task.checkCancellation()
+        let vault = try await vault(for: scope.accountID)
+        let transaction = try await WorkflowHistoryRepository(vault: vault).undoLatest(in: scope)
+        try Task.checkCancellation()
+        try await SearchRepository(vault: vault).rebuild(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
+        return transaction
+    }
+
+    func redoLatestWorkflow(in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        try Task.checkCancellation()
+        let vault = try await vault(for: scope.accountID)
+        let transaction = try await WorkflowHistoryRepository(vault: vault).redoLatest(in: scope)
+        try Task.checkCancellation()
+        try await SearchRepository(vault: vault).rebuild(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
+        return transaction
+    }
+
+    func undoWorkflow(transactionID: String, in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        try Task.checkCancellation()
+        let vault = try await vault(for: scope.accountID)
+        let transaction = try await WorkflowHistoryRepository(vault: vault).undo(transactionID, in: scope)
+        try Task.checkCancellation()
+        try await SearchRepository(vault: vault).rebuild(accountID: scope.accountID, organizationID: scope.organizationID)
+        return transaction
+    }
+
+    func redoWorkflow(transactionID: String, in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        try Task.checkCancellation()
+        let vault = try await vault(for: scope.accountID)
+        let transaction = try await WorkflowHistoryRepository(vault: vault).redo(transactionID, in: scope)
+        try Task.checkCancellation()
+        try await SearchRepository(vault: vault).rebuild(accountID: scope.accountID, organizationID: scope.organizationID)
+        return transaction
+    }
+
     func applyNotificationAction(
         _ action: WorkflowAction,
         to workItemID: WorkItemID,
@@ -563,12 +717,8 @@ actor TriageWorkspaceMutator: WorkspaceMutating {
                 throw NotificationActionAuthorizationError.staleEvidence
             }
         }
-        let transition = WorkflowTransitionEngine.apply(action, to: item.workflow, at: .now)
-        try await WorkflowRepository(vault: vault).save(transition.next, for: item.id)
-        try await SearchRepository(vault: vault).rebuild(
-            accountID: scope.accountID,
-            organizationID: scope.organizationID
-        )
+        try Task.checkCancellation()
+        _ = try await applyWorkflowHistory(action, to: [item.id], in: scope)
     }
 
     func completeActionItem(
@@ -614,6 +764,45 @@ actor TriageWorkspaceMutator: WorkspaceMutating {
             organizationID: scope.organizationID
         )
         return updated
+    }
+
+    func applyGroupingMutation(
+        _ mutation: WorkItemGroupingMutation,
+        in scope: SynchronizationScope
+    ) async throws -> WorkItemGroupingMutationHistory {
+        let vault = try await vault(for: scope.accountID)
+        return try await WorkItemGroupingDecisionService(vault: vault)
+            .apply(mutation, scope: scope)
+    }
+
+    func restoreGroupingDecisions(
+        _ decisions: [WorkItemGroupingDecision],
+        expectedCurrent: [WorkItemGroupingDecision],
+        in scope: SynchronizationScope
+    ) async throws {
+        let vault = try await vault(for: scope.accountID)
+        try await WorkItemGroupingDecisionService(vault: vault).restore(
+            decisions,
+            expectedCurrent: expectedCurrent,
+            scope: scope
+        )
+    }
+
+    func assignActionItem(
+        _ actionItemID: ActionItemID,
+        expectedOwnerWorkItemID: WorkItemID,
+        visibleWorkItemID: WorkItemID,
+        destinationNodeID: GitHubNodeID,
+        in scope: SynchronizationScope
+    ) async throws {
+        let vault = try await vault(for: scope.accountID)
+        try await WorkItemGroupingDecisionService(vault: vault).assignActionItem(
+            actionItemID,
+            expectedOwnerWorkItemID: expectedOwnerWorkItemID,
+            visibleWorkItemID: visibleWorkItemID,
+            destinationNodeID: destinationNodeID,
+            scope: scope
+        )
     }
 
     nonisolated static func editedActionItem(

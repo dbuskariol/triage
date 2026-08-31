@@ -12,6 +12,18 @@ enum WorkingWeekday: Int, CaseIterable, Codable, Sendable {
     static let defaultWorkweek: Set<WorkingWeekday> = [
         .monday, .tuesday, .wednesday, .thursday, .friday
     ]
+
+    var title: String {
+        switch self {
+        case .sunday: "Sunday"
+        case .monday: "Monday"
+        case .tuesday: "Tuesday"
+        case .wednesday: "Wednesday"
+        case .thursday: "Thursday"
+        case .friday: "Friday"
+        case .saturday: "Saturday"
+        }
+    }
 }
 
 struct BusinessDayPolicy: Codable, Equatable, Sendable {

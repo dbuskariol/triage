@@ -61,6 +61,45 @@ final class AppNavigationModelTests: XCTestCase {
         XCTAssertFalse(restored.isSidebarVisible)
     }
 
+    func testRestoresBoundedNativeSplitWidthsAndTimelineDisclosure() {
+        let defaults = makeDefaults()
+        let navigation = AppNavigationModel(defaults: defaults)
+
+        navigation.recordWorkspaceSidebarWidth(244)
+        navigation.recordWorkspaceContentWidth(476)
+        navigation.recordWorkspaceInspectorWidth(412)
+        navigation.isTimelineExpanded = false
+
+        let restored = AppNavigationModel(defaults: defaults)
+
+        XCTAssertEqual(restored.workspaceSidebarWidth, 244)
+        XCTAssertEqual(restored.workspaceContentWidth, 476)
+        XCTAssertEqual(restored.workspaceInspectorWidth, 412)
+        XCTAssertFalse(restored.isTimelineExpanded)
+    }
+
+    func testRejectsInvalidRestoredSplitWidthsWithoutPersistingThem() {
+        let defaults = makeDefaults()
+        defaults.set(WorkspaceSplitLayout.sidebarMinimumWidth - 1, forKey: "workspace.sidebar-width")
+        defaults.set(WorkspaceSplitLayout.contentMaximumWidth + 1, forKey: "workspace.content-width")
+        defaults.set(WorkspaceSplitLayout.inspectorMaximumWidth + 1, forKey: "workspace.inspector-width")
+
+        let navigation = AppNavigationModel(defaults: defaults)
+
+        XCTAssertEqual(navigation.workspaceSidebarWidth, WorkspaceSplitLayout.sidebarDefaultWidth)
+        XCTAssertEqual(navigation.workspaceContentWidth, WorkspaceSplitLayout.contentDefaultWidth)
+        XCTAssertEqual(navigation.workspaceInspectorWidth, WorkspaceSplitLayout.inspectorDefaultWidth)
+        navigation.recordWorkspaceContentWidth(.nan)
+        XCTAssertEqual(navigation.workspaceContentWidth, WorkspaceSplitLayout.contentDefaultWidth)
+        XCTAssertNil(defaults.object(forKey: "workspace.sidebar-width"))
+        XCTAssertNil(defaults.object(forKey: "workspace.content-width"))
+        XCTAssertNil(defaults.object(forKey: "workspace.inspector-width"))
+    }
+
+    func testMainWindowUsesStableSystemFrameRestorationIdentifier() {
+        XCTAssertEqual(WorkspaceWindowRestoration.mainWindowFrameIdentifier, "main")
+    }
+
     func testRestoresSelectionOnlyForMatchingAccountAndOrganization() {
         let suiteName = "AppNavigationModelTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

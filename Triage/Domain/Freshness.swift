@@ -7,6 +7,10 @@ enum CoverageFeature: String, CaseIterable, Codable, Sendable {
     case pullRequests
     case reviews
     case reviewThreads
+    /// The exact, pull-request-scoped GraphQL status-check rollup. This is
+    /// intentionally distinct from review history: an unavailable rollup must
+    /// never be interpreted as an all-green pull request.
+    case statusChecks
     case timelines
     case notifications
     case discussions

@@ -245,6 +245,83 @@ final class TimelineEventRepositoryTests: XCTestCase {
         XCTAssertEqual(persisted.coverageLastSuccessfulAtMilliseconds, fixture.observedAtMilliseconds)
     }
 
+    func testCompleteTimelinePersistsOnlyTypedCrossReferenceAsContextualEvidence() async throws {
+        let fixture = try await TimelineFixture()
+        defer { fixture.remove() }
+        let repository = TimelineEventRepository(vault: fixture.vault)
+        let referringIssue = GitHubNodeID(rawValue: "I_cross_reference")!
+        try await fixture.saveRelatedIssue(referringIssue)
+        let payload = Data("""
+        [{"id":"cross-reference-1","event":"cross-referenced","created_at":"2026-01-01T00:00:00Z","source":{"issue":{"node_id":"\(referringIssue.rawValue)","title":"Never parse #999 from this text"}}}]
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let events = try decoder.decode([GitHubTimelineEventDTO].self, from: payload)
+        let snapshotID = try await repository.saveRawPage(
+            GitHubPage(values: events, payload: payload, nextPageURL: nil, etag: nil, lastModified: nil, ssoHeader: nil),
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt
+        )
+        try await repository.commitValidatedRawPage(
+            snapshotID,
+            candidate: fixture.candidate,
+            pageIndex: 1,
+            requestKey: fixture.timelineRequestKey,
+            scope: fixture.scope,
+            nextPageURL: nil,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            attemptedAt: fixture.observedAt
+        )
+        let saved = try await repository.savedPages(
+            for: fixture.candidate,
+            scope: fixture.scope,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        let normalized = try GitHubTimelineNormalizer.normalize(saved.events)
+        try await repository.replaceAndComplete(
+            normalized,
+            candidate: fixture.candidate,
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            observedAt: fixture.observedAt,
+            relationReconciliation: .complete(
+                scope: fixture.scope,
+                pageProvenances: saved.pageProvenances,
+                eventPageProvenances: saved.eventPageProvenances
+            )
+        )
+        let persisted = try await fixture.vault.read { database in
+            let row = try Row.fetchOne(database, sql: """
+                SELECT relations.kind, relations.subject_node_id, relations.object_node_id,
+                       relation_evidence.source, relation_evidence.source_event_id,
+                       relation_evidence.raw_snapshot_id
+                FROM relations
+                JOIN relation_evidence ON relation_evidence.relation_id = relations.id
+                """)
+            return (
+                kind: row?["kind"] as String?,
+                subjectNodeID: row?["subject_node_id"] as String?,
+                objectNodeID: row?["object_node_id"] as String?,
+                source: row?["source"] as String?,
+                eventID: row?["source_event_id"] as String?,
+                snapshotID: row?["raw_snapshot_id"] as String?
+            )
+        }
+        XCTAssertEqual(persisted.kind, WorkRelationKind.crossReferences.rawValue)
+        XCTAssertEqual(persisted.subjectNodeID, fixture.nodeID.rawValue)
+        XCTAssertEqual(persisted.objectNodeID, referringIssue.rawValue)
+        XCTAssertEqual(persisted.source, EvidenceSource.restTimeline.rawValue)
+        XCTAssertEqual(persisted.eventID, "cross-reference-1")
+        XCTAssertEqual(persisted.snapshotID, snapshotID.rawValue)
+    }
+
     func testRelationRawAuthorityFailureRollsBackTimelineAndCoverage() async throws {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
@@ -2179,6 +2256,35 @@ private final class TimelineFixture: @unchecked Sendable {
             occurredAt: observedAt,
             payload: Data(payload.utf8)
         )
+    }
+
+    func saveRelatedIssue(_ relatedNodeID: GitHubNodeID) async throws {
+        let milliseconds = observedAtMilliseconds
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO github_nodes (
+                        github_node_id, account_id, organization_id, repository_id, kind, numeric_id, number,
+                        title, state, html_url, body_markdown, author_id, created_at_ms, updated_at_ms,
+                        closed_at_ms, merged_at_ms, source_revision, last_observed_at_ms, accessibility_state
+                    ) VALUES (?, ?, ?, ?, 'issue', '2', 2, 'Related issue', 'open', ?, NULL, NULL, ?, ?,
+                              NULL, NULL, 'revision-related', ?, 'accessible')
+                    """,
+                arguments: [
+                    relatedNodeID.rawValue, accountID.rawValue, organizationID.rawValue, repositoryID.rawValue,
+                    "https://github.com/github/triage/issues/2", milliseconds, milliseconds, milliseconds
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO issues (
+                        github_node_id, locked, comments_count, assignee_node_ids_json, label_node_ids_json,
+                        milestone_node_id, updated_at_ms
+                    ) VALUES (?, 0, 0, '[]', '[]', NULL, ?)
+                    """,
+                arguments: [relatedNodeID.rawValue, milliseconds]
+            )
+        }
     }
 
     func pageBoundComment(

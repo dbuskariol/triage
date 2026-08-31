@@ -53,7 +53,7 @@ struct WorkItemGrouper: Sendable {
             }
             join(relation.subjectNodeID, object)
         }
-        for decision in decisions where decision.strength != .contextual {
+        for decision in decisions where decision.strength == .userConfirmed {
             guard parent[decision.sourceNodeID] != nil,
                   parent[decision.destinationNodeID] != nil
             else {

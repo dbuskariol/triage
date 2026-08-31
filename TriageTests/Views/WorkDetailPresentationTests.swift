@@ -112,6 +112,43 @@ final class WorkDetailPresentationTests: XCTestCase {
         )
     }
 
+    func testGroupingCandidatesUseOnlyContextualNormalizedLinksInStableOrder() {
+        var item = makeWorkItem()
+        item = WorkItem(
+            id: item.id,
+            accountID: item.accountID,
+            organizationID: item.organizationID,
+            primaryNodeID: item.primaryNodeID,
+            title: item.title,
+            state: item.state,
+            sourceKind: item.sourceKind,
+            sourceURL: item.sourceURL,
+            repository: item.repository,
+            members: item.members,
+            contextLinks: [
+                WorkItemContextLink(
+                    id: GitHubNodeID(rawValue: "z")!, relation: .crossReferences,
+                    content: member(id: "z", role: .linkedIssue, title: "Zebra", kind: .issue, actor: nil).content,
+                    evidence: []
+                ),
+                WorkItemContextLink(
+                    id: GitHubNodeID(rawValue: "a")!, relation: .blocks,
+                    content: member(id: "a", role: .linkedIssue, title: "Alpha", kind: .issue, actor: nil).content,
+                    evidence: []
+                )
+            ],
+            relations: item.relations,
+            attentionReasons: item.attentionReasons,
+            actionItems: item.actionItems,
+            workflow: item.workflow,
+            freshness: item.freshness,
+            lastRelevantActivityAt: item.lastRelevantActivityAt,
+            score: item.score
+        )
+
+        XCTAssertEqual(WorkDetailPresentation.groupingCandidates(for: item).map(\.title), ["Alpha", "Zebra"])
+    }
+
     func testConciseSourceBodyTrimsAndMarksOnlyOversizedBodies() throws {
         XCTAssertEqual(
             WorkDetailPresentation.conciseSourceBody("\n  Local body  \n"),

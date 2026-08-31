@@ -94,6 +94,18 @@ final class WorkspaceAccessibilityCoordinator: ObservableObject {
         post("Triage could not load local work. Try Again remains available.")
     }
 
+    func accountRestorationRetryStarted() {
+        post("Retrying encrypted local account data.")
+    }
+
+    func accountRestorationRetrySucceeded() {
+        post("Encrypted local account restoration finished.")
+    }
+
+    func accountRestorationRetryFailed() {
+        post("Triage could not restore encrypted local account data. Try Again remains available.")
+    }
+
     func workflowCompleted(_ action: WorkflowAction) {
         post(Self.workflowAnnouncement(for: action))
     }

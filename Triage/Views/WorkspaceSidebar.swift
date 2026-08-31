@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct WorkspaceSidebar: View {
+    @EnvironmentObject private var preferences: AppPreferences
     let accounts: [GitHubAccount]
     let organizations: [GitHubOrganization]
     let presentation: WorkspacePresentationState
@@ -49,6 +50,7 @@ struct WorkspaceSidebar: View {
             }
         }
         .listStyle(.sidebar)
+        .controlSize(preferences.appearanceDensity == .compact ? .small : .regular)
         .accessibilityLabel("Triage sidebar")
     }
 

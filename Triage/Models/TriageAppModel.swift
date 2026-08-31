@@ -5,8 +5,32 @@ struct OrganizationAISettingsState: Equatable {
     let consent: OrganizationAIConsent
     let isEffectivelyAvailable: Bool
     let status: String
+    let availableModels: [CopilotModel]
+    let modelSelectionNotice: String?
 
-    var selectedModelTitle: String { consent.selectedModelID ?? "Auto" }
+    init(
+        consent: OrganizationAIConsent,
+        isEffectivelyAvailable: Bool,
+        status: String,
+        availableModels: [CopilotModel] = [],
+        modelSelectionNotice: String? = nil
+    ) {
+        self.consent = consent
+        self.isEffectivelyAvailable = isEffectivelyAvailable
+        self.status = status
+        self.availableModels = availableModels
+        self.modelSelectionNotice = modelSelectionNotice
+    }
+
+    var selectedModelTitle: String {
+        guard let selectedModelID = consent.selectedModelID else { return "Auto" }
+        guard !availableModels.isEmpty else { return selectedModelID }
+        return availableModels.first(where: { $0.id == selectedModelID })?.displayName ?? "Auto"
+    }
+
+    var automaticActionConfidenceTitle: String {
+        "\(Int((consent.automaticActionConfidenceThreshold * 100).rounded()))% minimum"
+    }
 }
 
 /// Serializes workspace activation. Replacement cancels the predecessor and
@@ -84,10 +108,20 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// Opaque local account identities whose vault key is unavailable. They
     /// cannot be selected or refreshed, but remain removable from Settings.
     @Published private(set) var unavailableAccountIDs: Set<AccountID> = []
+    /// Vault-repair candidates retain a valid encryption key and are never
+    /// eligible for the unavailable-key deletion path.
+    @Published private(set) var vaultRecoveryIssues: [AccountVaultRecoveryIssue] = []
     @Published private(set) var organizationsByAccount: [AccountID: [GitHubOrganization]] = [:]
     @Published private(set) var organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]] = [:]
     @Published private(set) var accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot] = [:]
     @Published private(set) var workItems: [WorkItem] = []
+    /// The revision-fenced, persisted-rank first Inbox page. This is optional
+    /// while a cached workspace is restoring; callers then retain the complete
+    /// local graph instead of showing an empty Inbox.
+    @Published private(set) var inboxPage: [WorkItem]?
+    @Published private(set) var inboxPageHasMore = false
+    @Published private(set) var inboxPageEvaluatedAt: Date?
+    @Published private(set) var isLoadingMoreInboxPage = false
     @Published var selectedAccountID: AccountID? {
         didSet { defaults.set(selectedAccountID?.rawValue, forKey: PreferenceKey.selectedAccountID) }
     }
@@ -95,11 +129,15 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         didSet { defaults.set(selectedOrganizationID?.rawValue, forKey: PreferenceKey.selectedOrganizationID) }
     }
     @Published var selectedWorkItemID: WorkItemID?
+    @Published private(set) var selectedWorkItemIDs = Set<WorkItemID>()
     @Published private(set) var connectionError: String?
     @Published private(set) var credentialActionNotice: String?
     @Published private(set) var refreshError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var isConnecting = false
+    /// Serializes explicit encrypted-account restoration so recovery controls
+    /// can remain visible and accurately disabled while storage is in use.
+    @Published private(set) var isRestoringAccounts = false
     @Published private(set) var restorationError: String?
     /// Scoped to the currently selected workspace. Account-session recovery
     /// notices remain in `restorationError` and must not make a later,
@@ -113,6 +151,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// inventory attempt fails but cached organization rows are retained.
     @Published private(set) var organizationVisibilityFreshnessByAccount: [AccountID: FreshnessState] = [:]
     @Published private(set) var organizationAISettingsByAccount: [AccountID: [OrganizationID: OrganizationAISettingsState]] = [:]
+    @Published private(set) var selectedCopilotAuthorizationState: CopilotAccountAuthorizationState = .unavailable
+    @Published private(set) var copilotAuthenticationError: String?
+    /// A user-requested runtime operation is active. The companion published
+    /// authorization state carries its real downloading/verifying progress.
+    @Published private(set) var isCopilotRuntimeOperationInProgress = false
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
@@ -135,7 +178,13 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private var foregroundRefreshTasksAwaitingAccountRemoval: [AccountID: [Task<ForegroundRefreshResult, Never>]] = [:]
     private var isCredentialMutationInProgress = false
     private var isShuttingDown = false
+    /// Read once from the persisted General preference during construction.
+    /// Manual mode suppresses lifecycle and cadence-triggered refreshes while
+    /// leaving every user-invoked Refresh path available.
+    private let automaticRefreshEnabled: Bool
     private var cachedWorkItems = WorkspacePresentationCache<[WorkItem]>()
+    private var cachedInboxPages = WorkspacePresentationCache<[WorkItem]>()
+    private var cachedInboxPageSnapshots = WorkspacePresentationCache<InboxPagePresentationSnapshot>()
     /// The most recently installed revision-qualified scope for each cached
     /// workspace. This remains independent from the live observation scope:
     /// selection invalidates the latter before showing cached content, while
@@ -143,8 +192,22 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private var cachedWorkspaceScopes: [AccountID: [OrganizationID: SynchronizationScope]] = [:]
     private let workspaceActivation = WorkspaceActivationTaskController()
     private var workspaceObservationTask: Task<Void, Never>?
+    /// A replacement waits for this cancelled predecessor before it opens its
+    /// own complete-graph stream, so vault shutdown and scope switches do not
+    /// leave an old graph reader behind.
+    private var workspaceObservationPredecessor: Task<Void, Never>?
+    /// Records the scope whose expensive complete graph has been started. The
+    /// first bounded Inbox page is the admission gate for this observer.
+    private var workspaceFullGraphObservationScope: SynchronizationScope?
+    private var inboxPageObservationTask: Task<Void, Never>?
+    private var inboxPageTimeRefreshTask: Task<Void, Never>?
+    private var inboxPageSnapshot: InboxPagePresentationSnapshot?
     private var workspaceSelectionGeneration: UInt64 = 0
     private var workspaceObservationScope: SynchronizationScope?
+    private var copilotRuntimeStateObservationTask: Task<Void, Never>?
+    /// The model, rather than a transient Settings view, owns the explicit
+    /// runtime operation so its cancel action survives Settings recreation.
+    private var copilotRuntimeOperationTask: Task<Void, Never>?
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
     var organizations: [GitHubOrganization] {
@@ -176,13 +239,15 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         vaultRegistry: VaultRegistry,
         defaults: UserDefaults = .standard,
         workspaceAccessibility: WorkspaceAccessibilityCoordinator? = nil,
-        usesInMemoryUITestFixture: Bool = false
+        usesInMemoryUITestFixture: Bool = false,
+        automaticRefreshEnabled: Bool = true
     ) {
         self.dependencies = dependencies
         self.vaultRegistry = vaultRegistry
         self.defaults = defaults
         self.workspaceAccessibility = workspaceAccessibility
         self.usesInMemoryUITestFixture = usesInMemoryUITestFixture
+        self.automaticRefreshEnabled = automaticRefreshEnabled
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID)
             .flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
@@ -222,17 +287,20 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             return
         }
         cachedWorkItems = WorkspacePresentationCache()
+        cachedInboxPages = WorkspacePresentationCache()
+        cachedInboxPageSnapshots = WorkspacePresentationCache()
         cachedWorkspaceScopes = [:]
         workspaceRestorationError = nil
         accounts = session.accounts
         unavailableAccountIDs = session.unavailableAccountIDs
+        vaultRecoveryIssues = session.vaultRecoveryIssues
         organizationsByAccount = session.organizationsByAccount
         organizationAccessesByAccount = session.organizationAccessesByAccount
         accountCapabilitiesByAccount = session.accountCapabilitiesByAccount
         organizationVisibilityFreshnessByAccount = [:]
         organizationAISettingsByAccount = [:]
         credentialActionNotice = session.credentialActionNotice
-        if session.unavailableAccountIDs.isEmpty {
+        if session.unavailableAccountIDs.isEmpty, session.vaultRecoveryIssues.isEmpty {
             restorationError = nil
         }
         if !accounts.contains(where: { $0.id == selectedAccountID }) {
@@ -277,13 +345,33 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         for scope: SynchronizationScope
     ) {
         workspaceSelectionGeneration &+= 1
-        let generation = workspaceSelectionGeneration
-        let previousTask = workspaceObservationTask
-        previousTask?.cancel()
+        if let task = workspaceObservationTask {
+            task.cancel()
+            workspaceObservationTask = nil
+            workspaceObservationPredecessor = task
+        }
+        workspaceFullGraphObservationScope = nil
         workspaceObservationScope = scope
+        // The bounded projection is the admission gate for the independent
+        // full graph. A 10k-item decode must not even contend for the vault
+        // before the Inbox has one interactive persisted-rank page.
+        replaceInboxPageObservation(for: scope)
+    }
+
+    private func startWorkspaceObservationAfterFirstInboxPage(
+        for scope: SynchronizationScope
+    ) {
+        guard inboxPageSnapshot?.scope == scope,
+              workspaceObservationScope == scope,
+              workspaceFullGraphObservationScope != scope
+        else { return }
+        workspaceFullGraphObservationScope = scope
+        let generation = workspaceSelectionGeneration
+        let predecessor = workspaceObservationPredecessor
+        workspaceObservationPredecessor = nil
         workspaceObservationTask = Task { [weak self, dependencies] in
-            if let previousTask {
-                await previousTask.value
+            if let predecessor {
+                await predecessor.value
             }
             guard !Task.isCancelled else { return }
             do {
@@ -304,21 +392,153 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
     }
 
+    private func replaceInboxPageObservation(for scope: SynchronizationScope) {
+        inboxPageObservationTask?.cancel()
+        inboxPageSnapshot = nil
+        inboxPageObservationTask = Task { [weak self, dependencies] in
+            do {
+                let snapshots = try await dependencies.inboxPageObserver.snapshots(for: scope)
+                for try await snapshot in snapshots {
+                    guard !Task.isCancelled else { return }
+                    self?.installInboxPage(snapshot)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                // A full cached graph remains usable if the bounded page read
+                // fails. Do not turn a local cache problem into an empty Inbox.
+                return
+            }
+        }
+    }
+
+    private func installInboxPage(_ snapshot: InboxPagePresentationSnapshot) {
+        guard workspaceObservationScope == snapshot.scope,
+              selectedAccountID == snapshot.scope.accountID,
+              selectedOrganizationID == snapshot.scope.organizationID
+        else { return }
+        inboxPageSnapshot = snapshot
+        inboxPage = snapshot.items
+        inboxPageHasMore = snapshot.hasMore
+        inboxPageEvaluatedAt = snapshot.evaluatedAt
+        cachedInboxPages[snapshot.scope] = snapshot.items
+        cachedInboxPageSnapshots[snapshot.scope] = snapshot
+        scheduleInboxPageTimeRefresh(for: snapshot)
+        if selectedWorkItem == nil {
+            selectedWorkItemID = snapshot.items.first?.id
+        }
+        startWorkspaceObservationAfterFirstInboxPage(for: snapshot.scope)
+    }
+
+    private func scheduleInboxPageTimeRefresh(for snapshot: InboxPagePresentationSnapshot) {
+        inboxPageTimeRefreshTask?.cancel()
+        let nextKnownBoundary = workItems
+            .flatMap { [$0.workflow.snoozedUntil, $0.workflow.followUpAt] }
+            .compactMap { $0 }
+            .filter { $0 > snapshot.evaluatedAt }
+            .min()
+        // A first page can arrive before the independent full graph, so no
+        // local boundary may be known yet. Reopen the lightweight observation
+        // periodically in that case rather than re-evaluating its rows with a
+        // fresh Date and creating a hole at a snooze boundary.
+        let deadline = nextKnownBoundary ?? snapshot.evaluatedAt.addingTimeInterval(30)
+        let delay = max(0, deadline.timeIntervalSinceNow)
+        inboxPageTimeRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled,
+                      let self,
+                      self.workspaceObservationScope == snapshot.scope,
+                      self.inboxPageSnapshot == snapshot
+                else { return }
+                self.replaceInboxPageObservation(for: snapshot.scope)
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+        }
+    }
+
+    func loadMoreInboxPage() async {
+        guard !isLoadingMoreInboxPage,
+              let snapshot = inboxPageSnapshot,
+              snapshot.hasMore,
+              workspaceObservationScope == snapshot.scope
+        else { return }
+        isLoadingMoreInboxPage = true
+        defer { isLoadingMoreInboxPage = false }
+        do {
+            let next = try await dependencies.inboxPageObserver.loadNextPage(for: snapshot)
+            guard workspaceObservationScope == snapshot.scope,
+                  inboxPageSnapshot == snapshot
+            else { return }
+            let merged = Self.mergeInboxPages(inboxPage ?? [], next.items)
+            let updated = InboxPagePresentationSnapshot(
+                scope: snapshot.scope,
+                items: merged,
+                nextCursor: next.nextCursor,
+                hasMore: next.hasMore,
+                evaluatedAt: snapshot.evaluatedAt,
+                freshness: snapshot.freshness,
+                revision: snapshot.revision
+            )
+            inboxPageSnapshot = updated
+            inboxPage = merged
+            inboxPageHasMore = next.hasMore
+            inboxPageEvaluatedAt = snapshot.evaluatedAt
+            cachedInboxPages[snapshot.scope] = merged
+            cachedInboxPageSnapshots[snapshot.scope] = updated
+        } catch is CancellationError {
+            return
+        } catch {
+            refreshError = "Triage could not load more cached Inbox work."
+        }
+    }
+
+    private static func mergeInboxPages(_ current: [WorkItem], _ next: [WorkItem]) -> [WorkItem] {
+        var known = Set(current.map(\.id))
+        return current + next.filter { known.insert($0.id).inserted }
+    }
+
     private func invalidateWorkspaceObservation() {
         workspaceSelectionGeneration &+= 1
         workspaceObservationTask?.cancel()
         workspaceObservationTask = nil
+        workspaceObservationPredecessor?.cancel()
+        workspaceObservationPredecessor = nil
+        workspaceFullGraphObservationScope = nil
+        inboxPageObservationTask?.cancel()
+        inboxPageObservationTask = nil
+        inboxPageTimeRefreshTask?.cancel()
+        inboxPageTimeRefreshTask = nil
+        inboxPageSnapshot = nil
+        inboxPage = nil
+        inboxPageHasMore = false
+        inboxPageEvaluatedAt = nil
         workspaceObservationScope = nil
         selectedWorkspaceCoverage = nil
     }
 
     private func cancelWorkspaceObservationAndWait() async {
         workspaceSelectionGeneration &+= 1
-        let task = workspaceObservationTask
+        let tasks = [workspaceObservationTask, workspaceObservationPredecessor].compactMap { $0 }
         workspaceObservationTask = nil
+        workspaceObservationPredecessor = nil
+        workspaceFullGraphObservationScope = nil
+        inboxPageObservationTask?.cancel()
+        inboxPageObservationTask = nil
+        inboxPageTimeRefreshTask?.cancel()
+        inboxPageTimeRefreshTask = nil
+        inboxPageSnapshot = nil
+        inboxPage = nil
+        inboxPageHasMore = false
+        inboxPageEvaluatedAt = nil
         workspaceObservationScope = nil
-        task?.cancel()
-        if let task {
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
             await task.value
         }
         selectedWorkspaceCoverage = nil
@@ -476,12 +696,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         // reusing this opaque ID cannot retain a closed vault handle.
         await dependencies.workspaceObservationLifecycle.evictAccount(accountID)
         await dependencies.purgeAccountNotificationPreferences(accountID)
+        await dependencies.copilotRuntimeAuthorization.disconnect(accountID: accountID)
         try await dependencies.accountSession.removeAccount(accountID)
 
         dependencies.purgeAccountNavigationState(accountID)
         accounts.removeAll { $0.id == accountID }
         unavailableAccountIDs.remove(accountID)
-        if unavailableAccountIDs.isEmpty {
+        vaultRecoveryIssues.removeAll { $0.accountID == accountID }
+        if unavailableAccountIDs.isEmpty, vaultRecoveryIssues.isEmpty {
             restorationError = nil
         }
         workspaceRestorationError = nil
@@ -491,6 +713,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         organizationVisibilityFreshnessByAccount[accountID] = nil
         organizationAISettingsByAccount[accountID] = nil
         cachedWorkItems.removeAll(for: accountID)
+        cachedInboxPages.removeAll(for: accountID)
+        cachedInboxPageSnapshots.removeAll(for: accountID)
         cachedWorkspaceScopes[accountID] = nil
         if isRemovingSelectedAccount {
             selectedAccountID = accounts.first?.id
@@ -501,8 +725,38 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
     }
 
+    /// The Inbox page is an authoritative, complete graph for its bounded
+    /// roots. Resolve selection from it while the independent complete graph
+    /// is still loading, then prefer the latter's richer copy once available.
     var selectedWorkItem: WorkItem? {
-        workItems.first { $0.id == selectedWorkItemID }
+        selectionWorkItems.first { $0.id == selectedWorkItemID }
+    }
+
+    func setSelectedWorkItemIDs(_ ids: Set<WorkItemID>) {
+        selectedWorkItemIDs = ids.intersection(selectableWorkItemIDs)
+    }
+
+    var selectedWorkItems: [WorkItem] {
+        selectionWorkItems.filter { selectedWorkItemIDs.contains($0.id) }
+    }
+
+    var selectableWorkItemIDs: Set<WorkItemID> {
+        Set(selectionWorkItems.map(\.id))
+    }
+
+    private var selectionWorkItems: [WorkItem] {
+        Self.selectionWorkItems(inboxPage: inboxPage, fullGraph: workItems)
+    }
+
+    nonisolated static func selectionWorkItems(
+        inboxPage: [WorkItem]?,
+        fullGraph: [WorkItem]
+    ) -> [WorkItem] {
+        let fullGraphByID = Dictionary(uniqueKeysWithValues: fullGraph.map { ($0.id, $0) })
+        let page = inboxPage ?? []
+        let pageIDs = Set(page.map(\.id))
+        return page.map { fullGraphByID[$0.id] ?? $0 }
+            + fullGraph.filter { !pageIDs.contains($0.id) }
     }
 
     func connectGitHub(presentationAnchor: NSWindow) async {
@@ -528,9 +782,18 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 connectionError = "GitHub sign-in is not configured in this build."
             case .invalidBrokerURL:
                 connectionError = "The GitHub sign-in service is not configured securely."
+            case .invalidApplicationVersion:
+                connectionError = "GitHub sign-in is not configured in this build."
             }
         } catch is CancellationError {
             return
+        } catch let error as GitHubOAuthError {
+            switch error {
+            case .authorizationTimedOut:
+                connectionError = "GitHub sign-in timed out. Try again to continue."
+            default:
+                connectionError = "GitHub sign-in could not be completed. Try again."
+            }
         } catch {
             connectionError = "GitHub sign-in could not be completed. Try again."
         }
@@ -600,6 +863,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 presentationAnchor: presentationAnchor
             )
             guard canContinueCredentialMutation(for: account.id) else { return }
+            await invalidateCopilotAuthority(for: account)
+            guard canContinueCredentialMutation(for: account.id) else { return }
             let snapshot = try await dependencies.accountSession.reconnectOAuth(request, replacing: account)
             guard canContinueCredentialMutation(for: account.id) else { return }
             await install(session: snapshot, requiringActiveAccountID: account.id)
@@ -618,6 +883,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 connectionError = "GitHub sign-in is not configured in this build."
             case .invalidBrokerURL:
                 connectionError = "The GitHub sign-in service is not configured securely."
+            case .invalidApplicationVersion:
+                connectionError = "GitHub sign-in is not configured in this build."
             }
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
@@ -626,6 +893,16 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
             return
+        } catch let error as GitHubOAuthError {
+            guard canContinueCredentialMutation(for: account.id) else { return }
+            switch error {
+            case .authorizationTimedOut:
+                connectionError = "GitHub reconnect timed out. Try again to continue."
+            default:
+                connectionError = "GitHub reconnect could not be completed. Try again."
+            }
+            isCredentialMutationInProgress = false
+            await resumeSelectedOrganization()
         } catch {
             guard canContinueCredentialMutation(for: account.id) else { return }
             connectionError = "GitHub reconnect could not be completed. Try again."
@@ -658,6 +935,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await cancelForegroundRefresh()
             guard canContinueCredentialMutation(for: account.id) else { return }
             await cancelForegroundRefreshes(for: account.id)
+            guard canContinueCredentialMutation(for: account.id) else { return }
+            await invalidateCopilotAuthority(for: account)
             guard canContinueCredentialMutation(for: account.id) else { return }
             let snapshot = try await dependencies.accountSession.replacePersonalAccessToken(
                 try PersonalAccessToken(rawValue: rawValue),
@@ -705,7 +984,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func startAutomaticRefreshes() async {
-        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
+        guard automaticRefreshEnabled, !isShuttingDown, !usesInMemoryUITestFixture else { return }
         await refreshScheduler.start { [weak self] in
             await self?.refreshSelectedOrganizationAfterAccessCheck()
         }
@@ -836,7 +1115,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// Enters the durable due-refresh path after the ordinary selected-workspace
     /// activation has settled, avoiding a second foreground refresh owner.
     func launchOrganizationRefreshLifecycle() async {
-        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
+        guard automaticRefreshEnabled, !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         guard !isShuttingDown else { return }
         await dependencies.refreshLifecycle.launch(
@@ -846,7 +1125,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func applicationDidBecomeActive() async {
-        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
+        guard automaticRefreshEnabled, !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.applicationDidBecomeActive(
             synchronizationScopes: scopes,
@@ -855,7 +1134,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func handleSystemWake() async {
-        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
+        guard automaticRefreshEnabled, !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.wake(
             synchronizationScopes: scopes,
@@ -864,7 +1143,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func scheduleOpportunisticBackgroundRefresh() async {
-        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
+        guard automaticRefreshEnabled, !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
         await dependencies.refreshLifecycle.scheduleOpportunisticBackgroundRefresh(
             synchronizationScopes: scopes,
@@ -875,6 +1154,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     func shutdown() async {
         guard !isShuttingDown else { return }
         isShuttingDown = true
+        copilotRuntimeOperationTask?.cancel()
+        copilotRuntimeOperationTask = nil
+        copilotRuntimeStateObservationTask?.cancel()
+        copilotRuntimeStateObservationTask = nil
         invalidateBackgroundRefreshScheduling()
         await dependencies.refreshLifecycle.stop()
         await refreshScheduler.stop()
@@ -907,8 +1190,45 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         await refreshSelectedOrganizationAfterAccessCheck()
     }
 
+    func restoreVerifiedMigrationBackup(
+        for accountID: AccountID,
+        migrationID: String
+    ) async {
+        guard !isShuttingDown,
+              vaultRecoveryIssues.contains(where: {
+                  $0.accountID == accountID
+                      && $0.verifiedBackupMigrationIDs.contains(migrationID)
+              })
+        else {
+            return
+        }
+        restorationError = nil
+        do {
+            let result = try await dependencies.accountSession.restoreVerifiedMigrationBackup(
+                for: accountID,
+                migrationID: migrationID
+            )
+            guard !isShuttingDown else { return }
+            await install(session: result)
+            guard !isShuttingDown else { return }
+            activateSelectedOrganization()
+            if !result.vaultRecoveryIssues.isEmpty {
+                restorationError = "The encrypted local account still needs repair. Its original encrypted data has been preserved."
+            } else if !result.unavailableAccountIDs.isEmpty {
+                restorationError = "An account's encrypted local data cannot be opened. Remove its local data in Settings, then reconnect to resync."
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !isShuttingDown else { return }
+            restorationError = "Triage could not restore the verified encrypted backup. The original encrypted data has been preserved."
+        }
+    }
+
     func restoreAccounts() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, !isRestoringAccounts else { return }
+        isRestoringAccounts = true
+        defer { isRestoringAccounts = false }
         restorationError = nil
         do {
             let result = try await dependencies.accountSession.restoreAccounts()
@@ -924,7 +1244,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             guard !isShuttingDown else { return }
             activateSelectedOrganization()
             guard !isShuttingDown else { return }
-            if !result.unavailableAccountIDs.isEmpty {
+            if !result.vaultRecoveryIssues.isEmpty {
+                restorationError = "An encrypted local account needs repair. Restore a verified migration backup when available, or reconnect to GitHub to resync."
+            } else if !result.unavailableAccountIDs.isEmpty {
                 restorationError = "An account's encrypted local data cannot be opened. Remove its local data in Settings, then reconnect to resync."
             }
         } catch is CancellationError {
@@ -1236,6 +1558,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                     let configuration = try RuntimeOAuthConfiguration()
                     refreshedAccount = try await OAuthCredentialRefreshService(
                         brokerURL: configuration.brokerURL,
+                        applicationVersion: configuration.applicationVersion,
                         secretStore: secretStore,
                         vaultRegistry: vaultRegistry
                     ).refreshIfNeeded(account)
@@ -1334,6 +1657,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 let runtimeConfiguration = try RuntimeOAuthConfiguration()
                 account = try await OAuthCredentialRefreshService(
                     brokerURL: runtimeConfiguration.brokerURL,
+                    applicationVersion: runtimeConfiguration.applicationVersion,
                     secretStore: secretStore,
                     vaultRegistry: vaultRegistry
                 ).refreshIfNeeded(initialAccount)
@@ -1352,11 +1676,6 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 organizationID: organization.id
             )
             let coordinatorState = try await dependencies.workspaceCoordinator.select(scope)
-            let workItems = try await WorkItemRepository(vault: vault).fetch(
-                accountID: account.id,
-                organizationID: organization.id
-            )
-            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
             guard
                 refreshGeneration == generation,
                 selectedAccountID == account.id,
@@ -1365,11 +1684,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 return
             }
             selectedOrganizationFreshness = coordinatorState?.freshness
-            install(
-                workItems: workItems,
-                scope: scope
-            )
             replaceWorkspaceObservation(for: scope)
+            // Search indexing is independent from first Inbox presentation.
+            // The page observer above can render while it catches up.
+            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
         } catch is CancellationError {
             return
         } catch let error as OrganizationRefreshError {
@@ -1590,30 +1908,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
             try Task.checkCancellation()
             guard workspaceActivation.isCurrent(activationGeneration) else { return }
-            let workItems = try await WorkItemRepository(vault: vault).fetch(
-                accountID: account.id,
-                organizationID: organization.id
-            )
-            try Task.checkCancellation()
-            guard workspaceActivation.isCurrent(activationGeneration) else { return }
-            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
-            try Task.checkCancellation()
-            guard
-                refreshGeneration == generation,
-                selectedAccountID == account.id,
-                selectedOrganizationID == organization.id,
-                workspaceActivation.isCurrent(activationGeneration)
-            else {
-                return
-            }
             let scope = try await AccountRepository(vault: vault).synchronizationScope(
                 for: account.id,
                 organizationID: organization.id
             )
             try Task.checkCancellation()
             guard workspaceActivation.isCurrent(activationGeneration) else { return }
-            install(workItems: workItems, scope: scope)
             replaceWorkspaceObservation(for: scope)
+            try await rebuildSearchIndex(in: vault, accountID: account.id, organizationID: organization.id)
         } catch is CancellationError {
             return
         } catch {
@@ -1634,12 +1936,204 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         do {
             let scope = try await synchronizationScope(for: workItem)
             guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
-            try await dependencies.workspaceMutator.apply(action, to: workItem.id, in: scope)
+            _ = try await dependencies.workspaceMutator.applyWorkflowHistory(action, to: [workItem.id], in: scope)
             guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             workspaceAccessibility?.workflowCompleted(action)
         } catch {
             guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return }
             refreshError = "Triage could not save this local workflow change."
+        }
+    }
+
+    /// Saves an explicit local grouping choice and rebuilds only this
+    /// account/organization projection. This does not perform a GitHub write.
+    func applyGroupingMutation(
+        _ mutation: WorkItemGroupingMutation,
+        to workItem: WorkItem
+    ) async -> WorkItemGroupingMutationHistory? {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+        if usesInMemoryUITestFixture {
+            let decision = WorkItemGroupingDecision(
+                sourceNodeID: mutation.sourceNodeID,
+                destinationNodeID: mutation.destinationNodeID,
+                relation: mutation.relation,
+                strength: mutation.strength,
+                evidence: [],
+                decidedAt: .now
+            )
+            return WorkItemGroupingMutationHistory(before: [], after: [decision])
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+            return try await dependencies.workspaceMutator.applyGroupingMutation(mutation, in: scope)
+        } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return nil }
+            refreshError = (error as? WorkItemGroupingDecisionServiceError) == .staleRollbackPreserved
+                ? "Triage kept a newer local grouping decision. Review the current grouping before trying again."
+                : "Triage could not save this local grouping decision."
+            return nil
+        }
+    }
+
+    func restoreGroupingDecisions(
+        _ decisions: [WorkItemGroupingDecision],
+        expectedCurrent: [WorkItemGroupingDecision],
+        for workItem: WorkItem
+    ) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+        if usesInMemoryUITestFixture { return true }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+            try await dependencies.workspaceMutator.restoreGroupingDecisions(
+                decisions,
+                expectedCurrent: expectedCurrent,
+                in: scope
+            )
+            return true
+        } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+            refreshError = (error as? WorkItemGroupingDecisionServiceError) == .staleRollbackPreserved
+                ? "Triage kept a newer local grouping decision. Review the current grouping before trying again."
+                : "Triage could not reverse this local grouping decision because it changed again."
+            return false
+        }
+    }
+
+    /// Assigns a local action item to one member of the currently merged item
+    /// before a manual split. The encrypted mutation is validated by the
+    /// production boundary against the live group membership.
+    func assignActionItem(
+        _ actionItem: ActionItem,
+        toMemberNodeID destinationNodeID: GitHubNodeID,
+        in workItem: WorkItem
+    ) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+        if usesInMemoryUITestFixture { return true }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+            try await dependencies.workspaceMutator.assignActionItem(
+                actionItem.id,
+                expectedOwnerWorkItemID: actionItem.workItemID,
+                visibleWorkItemID: workItem.id,
+                destinationNodeID: destinationNodeID,
+                in: scope
+            )
+            return true
+        } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID) else { return false }
+            refreshError = "Triage could not assign this local action item to the selected split owner."
+            return false
+        }
+    }
+
+    /// Applies the same local-only transition to a selected set in one vault
+    /// transaction. The production mutator creates one durable undo group;
+    /// no GitHub transport is involved.
+    func applyWorkflowAction(_ action: WorkflowAction, to workItems: [WorkItem]) async {
+        _ = await applyWorkflowActionWithHistory(action, to: workItems)
+    }
+
+    /// Delivers the committed transaction to native undo registration. This
+    /// avoids racing the asynchronous workspace observer/cache after a write.
+    func applyWorkflowActionWithHistory(
+        _ action: WorkflowAction,
+        to workItems: [WorkItem]
+    ) async -> WorkflowHistoryTransaction? {
+        guard let first = workItems.first,
+              !isShuttingDown,
+              !accountsBeingRemoved.contains(first.accountID),
+              workItems.allSatisfy({ $0.accountID == first.accountID && $0.organizationID == first.organizationID })
+        else { return nil }
+        guard !usesInMemoryUITestFixture else {
+            workspaceAccessibility?.workflowCompleted(action)
+            return .init(id: UUID().uuidString.lowercased(), accountID: first.accountID, organizationID: first.organizationID, changes: [])
+        }
+        do {
+            let scope = try await synchronizationScope(for: first)
+            try Task.checkCancellation()
+            let transaction = try await dependencies.workspaceMutator.applyWorkflowHistory(
+                action,
+                to: workItems.map(\.id),
+                in: scope
+            )
+            guard !isShuttingDown, !accountsBeingRemoved.contains(first.accountID) else { return nil }
+            workspaceAccessibility?.workflowCompleted(action)
+            return transaction
+        } catch is CancellationError {
+            return nil
+        } catch {
+            guard !isShuttingDown, !accountsBeingRemoved.contains(first.accountID) else { return nil }
+            refreshError = "Triage could not save these local workflow changes."
+            return nil
+        }
+    }
+
+    /// Uses encrypted workflow history, so undo remains available after a
+    /// relaunch instead of relying solely on the window's UndoManager stack.
+    func undoLatestWorkflowAction(for workItem: WorkItem) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID), !usesInMemoryUITestFixture else {
+            return false
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            _ = try await dependencies.workspaceMutator.undoLatestWorkflow(in: scope)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            refreshError = "Triage could not reverse this local workflow change."
+            return false
+        }
+    }
+
+    func redoLatestWorkflowAction(for workItem: WorkItem) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID), !usesInMemoryUITestFixture else {
+            return false
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            _ = try await dependencies.workspaceMutator.redoLatestWorkflow(in: scope)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            refreshError = "Triage could not reapply this local workflow change."
+            return false
+        }
+    }
+
+    func undoWorkflowAction(transactionID: String, for workItem: WorkItem) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID), !usesInMemoryUITestFixture else {
+            return false
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            _ = try await dependencies.workspaceMutator.undoWorkflow(transactionID: transactionID, in: scope)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            refreshError = "Triage cannot reverse this local workflow change because newer local work exists."
+            return false
+        }
+    }
+
+    func redoWorkflowAction(transactionID: String, for workItem: WorkItem) async -> Bool {
+        guard !isShuttingDown, !accountsBeingRemoved.contains(workItem.accountID), !usesInMemoryUITestFixture else {
+            return false
+        }
+        do {
+            let scope = try await synchronizationScope(for: workItem)
+            _ = try await dependencies.workspaceMutator.redoWorkflow(transactionID: transactionID, in: scope)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            refreshError = "Triage cannot reapply this local workflow change because its undo branch is no longer current."
+            return false
         }
     }
 
@@ -1781,22 +2275,37 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               let organization = selectedOrganization,
               !accountsBeingRemoved.contains(account.id)
         else { return }
+        selectedCopilotAuthorizationState = await dependencies.copilotRuntimeAuthorization.state(for: account.id)
         do {
             let context = try await aiContext(for: account, organization: organization)
             guard !isShuttingDown,
                   selectedAccountID == account.id,
                   selectedOrganizationID == organization.id
             else { return }
-            let policy = try await context.controller.policy(
+            var policy = try await context.controller.policy(
                 for: context.scope,
                 account: account
             )
+            let models = try await context.controller.cachedModels(for: context.scope)
+            var modelSelectionNotice: String?
+            if let selectedModelID = policy.selectedModelID,
+               selectedCopilotAuthorizationState.authentication == .authenticated,
+               !models.contains(where: { $0.id == selectedModelID }) {
+                try await context.controller.selectModel(nil, for: context.scope)
+                policy = try await context.controller.policy(
+                    for: context.scope,
+                    account: account
+                )
+                modelSelectionNotice = "\(selectedModelID) is no longer available. Triage switched this organization to Auto."
+            }
             guard !isShuttingDown,
                   selectedAccountID == account.id,
                   selectedOrganizationID == organization.id
             else { return }
             organizationAISettingsByAccount[account.id, default: [:]][organization.id] = Self.aiSettingsState(
-                policy: policy
+                policy: policy,
+                availableModels: models,
+                modelSelectionNotice: modelSelectionNotice
             )
         } catch is CancellationError {
         } catch {
@@ -1827,6 +2336,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                     organizationID: organizationID,
                     isEnabled: isEnabled,
                     selectedModelID: nil,
+                    automaticActionConfidenceThreshold: organizationAISettingsByAccount[accountID]?[organizationID]?.consent.automaticActionConfidenceThreshold
+                        ?? OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
                     updatedAt: .now
                 ),
                 isEffectivelyAvailable: false,
@@ -1846,11 +2357,16 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                   !accountsBeingRemoved.contains(account.id)
             else { return }
             if isEnabled {
+                let existingConsent = try await context.controller.consent(
+                    for: account.id,
+                    organizationID: organization.id
+                )
                 try await context.controller.recordConsent(.init(
                     accountID: account.id,
                     organizationID: organization.id,
                     isEnabled: true,
                     selectedModelID: nil,
+                    automaticActionConfidenceThreshold: existingConsent.automaticActionConfidenceThreshold,
                     updatedAt: .now
                 ))
             } else {
@@ -1863,6 +2379,225 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             refreshError = isEnabled
                 ? "Triage could not save AI consent for this organization."
                 : "Triage could not disable and erase AI data for this organization."
+        }
+    }
+
+    func selectSelectedOrganizationCopilotModel(_ selectedModelID: String?) async {
+        guard !isShuttingDown,
+              !usesInMemoryUITestFixture,
+              let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization,
+              !accountsBeingRemoved.contains(account.id)
+        else { return }
+        do {
+            let context = try await aiContext(for: account, organization: organization)
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            try await context.controller.selectModel(selectedModelID, for: context.scope)
+            await refreshSelectedOrganizationAIStatus()
+        } catch is CancellationError {
+        } catch {
+            guard !isShuttingDown else { return }
+            refreshError = "Copilot model selection could not be saved. Authenticate Copilot again, then choose an available model."
+        }
+    }
+
+    func setSelectedOrganizationAutomaticActionConfidenceThreshold(_ threshold: Double) async {
+        guard !isShuttingDown,
+              !usesInMemoryUITestFixture,
+              AIConsentRepository.isValidAutomaticActionConfidenceThreshold(threshold),
+              let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization,
+              !accountsBeingRemoved.contains(account.id)
+        else { return }
+        do {
+            let context = try await aiContext(for: account, organization: organization)
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organization.id,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            try await context.controller.setAutomaticActionConfidenceThreshold(
+                threshold,
+                for: context.scope
+            )
+            await refreshSelectedOrganizationAIStatus()
+        } catch is CancellationError {
+        } catch {
+            guard !isShuttingDown else { return }
+            refreshError = "Triage could not save this organization's automatic action confidence threshold."
+        }
+    }
+
+    /// Runtime acquisition is explicit and is never started during account
+    /// restore, selection, or a background refresh.
+    func acquireCopilotRuntimeAtUserRequest() async {
+        await performCopilotRuntimeOperation(
+            failureMessage: "Copilot runtime download did not complete. Check your connection and try Download or Repair again."
+        ) { authorization in
+            try await authorization.acquireRuntimeAtUserRequest()
+        }
+    }
+
+    func startCopilotRuntimeAcquisitionAtUserRequest() {
+        guard copilotRuntimeOperationTask == nil else { return }
+        copilotRuntimeOperationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.acquireCopilotRuntimeAtUserRequest()
+            self.copilotRuntimeOperationTask = nil
+        }
+    }
+
+    func repairCopilotRuntimeAtUserRequest() async {
+        await performCopilotRuntimeOperation(
+            failureMessage: "Copilot runtime repair did not complete. Try Repair again after checking local storage."
+        ) { authorization in
+            try await authorization.repairRuntimeAtUserRequest()
+        }
+    }
+
+    func startCopilotRuntimeRepairAtUserRequest() {
+        guard copilotRuntimeOperationTask == nil else { return }
+        copilotRuntimeOperationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.repairCopilotRuntimeAtUserRequest()
+            self.copilotRuntimeOperationTask = nil
+        }
+    }
+
+    func cancelCopilotRuntimeOperation() {
+        copilotRuntimeOperationTask?.cancel()
+    }
+
+    func removeCopilotRuntimeAtUserRequest() async {
+        guard !isCopilotRuntimeOperationInProgress else { return }
+        do {
+            try await dependencies.copilotRuntimeAuthorization.removeRuntimeAtUserRequest()
+            await invalidateCopilotAuthorityForAllAccounts()
+            await refreshSelectedOrganizationAIStatus()
+        } catch {
+            refreshError = "Copilot runtime could not be removed safely. Close any Copilot action and try Remove again."
+            await refreshSelectedOrganizationAIStatus()
+        }
+    }
+
+    private func performCopilotRuntimeOperation(
+        failureMessage: String,
+        operation: @escaping @Sendable (any CopilotRuntimeAuthorizationProviding) async throws -> Void
+    ) async {
+        guard !isCopilotRuntimeOperationInProgress else { return }
+        isCopilotRuntimeOperationInProgress = true
+        let accountID = selectedAccountID
+        let authorization = dependencies.copilotRuntimeAuthorization
+        startCopilotRuntimeStateObservation(
+            authorization: authorization,
+            accountID: accountID
+        )
+        defer {
+            copilotRuntimeStateObservationTask?.cancel()
+            copilotRuntimeStateObservationTask = nil
+            isCopilotRuntimeOperationInProgress = false
+        }
+        do {
+            try await operation(authorization)
+            await invalidateCopilotAuthorityForAllAccounts()
+            await refreshSelectedOrganizationAIStatus()
+        } catch is CancellationError {
+            await refreshSelectedOrganizationAIStatus()
+        } catch where Task.isCancelled {
+            await refreshSelectedOrganizationAIStatus()
+        } catch {
+            refreshError = failureMessage
+            await refreshSelectedOrganizationAIStatus()
+        }
+    }
+
+    private func startCopilotRuntimeStateObservation(
+        authorization: any CopilotRuntimeAuthorizationProviding,
+        accountID: AccountID?
+    ) {
+        copilotRuntimeStateObservationTask?.cancel()
+        copilotRuntimeStateObservationTask = Task { [weak self] in
+            guard let states = await authorization.runtimeStateUpdates() else { return }
+            for await runtime in states {
+                guard !Task.isCancelled,
+                      let self,
+                      self.isCopilotRuntimeOperationInProgress,
+                      self.selectedAccountID == accountID
+                else { return }
+                self.selectedCopilotAuthorizationState = .init(
+                    runtime: runtime,
+                    authentication: self.selectedCopilotAuthorizationState.authentication,
+                    isEntitled: self.selectedCopilotAuthorizationState.isEntitled,
+                    hasOrganizationConsent: self.selectedCopilotAuthorizationState.hasOrganizationConsent
+                )
+            }
+        }
+    }
+
+    func authenticateSelectedCopilotAccountAtUserRequest() async {
+        guard let account = accounts.first(where: { $0.id == selectedAccountID }),
+              let organization = selectedOrganization
+        else { return }
+        let organizationID = organization.id
+        let consent = organizationAISettingsByAccount[account.id]?[organizationID]?.consent.isEnabled ?? false
+        let entitled = selectedAccountCapabilities?.status(for: .copilot) == .available
+        copilotAuthenticationError = nil
+        do {
+            try await dependencies.copilotRuntimeAuthorization.authenticate(
+                account: account,
+                organizationID: organizationID,
+                hasOrganizationConsent: consent,
+                isEntitled: entitled
+            )
+            let models = try await dependencies.copilotRuntimeAuthorization.models(
+                accountID: account.id,
+                organizationID: organizationID
+            )
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organizationID,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            let context = try await aiContext(for: account, organization: organization)
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organizationID,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            try await context.controller.replaceModels(
+                models,
+                for: context.scope,
+                expiresAt: Date.now.addingTimeInterval(AIAnalysisRepository.maximumModelCacheLifetime)
+            )
+            guard !isShuttingDown,
+                  selectedAccountID == account.id,
+                  selectedOrganizationID == organizationID,
+                  !accountsBeingRemoved.contains(account.id)
+            else { return }
+            await refreshSelectedOrganizationAIStatus()
+        } catch CopilotAuthenticationError.identityMismatch {
+            copilotAuthenticationError = "Copilot signed in to a different GitHub account. Re-authenticate the selected Triage account."
+            await refreshSelectedOrganizationAIStatus()
+        } catch CopilotAuthenticationError.copilotIdentityMismatch {
+            copilotAuthenticationError = "Copilot did not verify the selected github.com account. Re-authenticate Copilot for this Triage account."
+            await refreshSelectedOrganizationAIStatus()
+        } catch CopilotAuthenticationError.runtimeUnavailable {
+            copilotAuthenticationError = "The approved Copilot runtime is missing or failed validation. Download or Repair the runtime, then authenticate again."
+            await refreshSelectedOrganizationAIStatus()
+        } catch CopilotAuthenticationError.consentRequired {
+            copilotAuthenticationError = "Allow AI analysis for this organization before authenticating Copilot."
+        } catch CopilotAuthenticationError.entitlementRequired {
+            copilotAuthenticationError = "Copilot entitlement is not verified for this organization."
+        } catch CopilotAuthenticationError.deviceLoginUnavailable {
+            copilotAuthenticationError = "Copilot is unavailable for classic personal access tokens on this Mac. Triage will not send this token to Copilot."
+            await refreshSelectedOrganizationAIStatus()
+        } catch {
+            copilotAuthenticationError = "Copilot authentication could not be completed. Re-authenticate the selected GitHub account, then try again."
+            await refreshSelectedOrganizationAIStatus()
         }
     }
 
@@ -2099,6 +2834,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             present(workItems: [])
             return
         }
+        inboxPageSnapshot = cachedInboxPageSnapshots[scope]
+        inboxPage = cachedInboxPages[scope]
+        inboxPageHasMore = inboxPageSnapshot?.hasMore ?? false
+        inboxPageEvaluatedAt = inboxPageSnapshot?.evaluatedAt
         present(workItems: cachedWorkItems)
     }
 
@@ -2108,6 +2847,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// by a later account or organization switch.
     private func invalidateCachedWorkspaceAuthority(for accountID: AccountID) {
         cachedWorkItems.removeAll(for: accountID)
+        cachedInboxPages.removeAll(for: accountID)
+        cachedInboxPageSnapshots.removeAll(for: accountID)
         cachedWorkspaceScopes[accountID] = nil
         if workspaceObservationScope?.accountID == accountID {
             invalidateWorkspaceObservation()
@@ -2119,6 +2860,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         organizationID: OrganizationID
     ) {
         cachedWorkItems.removeAll(for: accountID, organizationID: organizationID)
+        cachedInboxPages.removeAll(for: accountID, organizationID: organizationID)
+        cachedInboxPageSnapshots.removeAll(for: accountID, organizationID: organizationID)
         cachedWorkspaceScopes[accountID]?[organizationID] = nil
         if cachedWorkspaceScopes[accountID]?.isEmpty == true {
             cachedWorkspaceScopes[accountID] = nil
@@ -2218,8 +2961,36 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         return (scope, await dependencies.organizationAIControllers.controller(for: vault))
     }
 
+    /// Replacing a GitHub credential or runtime makes every retained helper
+    /// session and cached model capability for that account stale.  Teardown
+    /// proceeds even if the vault is no longer readable; retaining a Copilot
+    /// session is never a fallback for unavailable local storage.
+    private func invalidateCopilotAuthority(for account: GitHubAccount) async {
+        await dependencies.copilotRuntimeAuthorization.disconnect(accountID: account.id)
+        await dependencies.organizationAIControllers.evict(accountID: account.id)
+        organizationAISettingsByAccount[account.id] = nil
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
+            let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+            let controller = await dependencies.organizationAIControllers.controller(for: vault)
+            try await controller.invalidateModelCaches(for: account.id)
+        } catch {
+            // The retained session is already gone.  A missing or unreadable
+            // vault cannot be used as authority for cached Copilot models.
+        }
+    }
+
+    private func invalidateCopilotAuthorityForAllAccounts() async {
+        for account in accounts where !accountsBeingRemoved.contains(account.id) {
+            await invalidateCopilotAuthority(for: account)
+        }
+    }
+
     private static func aiSettingsState(
-        policy: OrganizationAIExecutionPolicy
+        policy: OrganizationAIExecutionPolicy,
+        availableModels: [CopilotModel] = [],
+        modelSelectionNotice: String? = nil
     ) -> OrganizationAISettingsState {
         let status: String
         if !policy.consent.isEnabled {
@@ -2232,7 +3003,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         return .init(
             consent: policy.consent,
             isEffectivelyAvailable: policy.permitsAnalysis,
-            status: status
+            status: status,
+            availableModels: availableModels,
+            modelSelectionNotice: modelSelectionNotice
         )
     }
 

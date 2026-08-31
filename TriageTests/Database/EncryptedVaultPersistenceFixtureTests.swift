@@ -9,7 +9,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "encrypted-wrong-key")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000301")!
         let correctKey = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
         _ = try await registry.open(accountID: accountID, vaultKey: correctKey)
@@ -28,7 +28,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "encrypted-migration-interruption")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000302")!
         let key = try VaultKey.generate()
         let paths = try await makePreMigration033Fixture(
             root: root,
@@ -100,7 +100,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "encrypted-latest-schema")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000303")!
         let key = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
@@ -131,7 +131,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "frozen-schema-039")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000304")!
         let key = try frozenSchema039FixtureKey()
         let paths = try installFrozenSchema039Fixture(
             root: root,
@@ -299,7 +299,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let accountID = AccountID(rawValue: "encrypted-byte-tamper")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000305")!
         let key = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
         let vault = try await registry.open(accountID: accountID, vaultKey: key)
@@ -336,7 +336,11 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let account = makeAccount(id: "encrypted-corrupt-row", credentialID: "credential-valid")
+        let account = makeAccount(
+            accountID: AccountID(rawValue: "00000000-0000-4000-8000-000000000306")!,
+            login: "encrypted-corrupt-row",
+            credentialID: "credential-valid"
+        )
         let key = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
         let vault = try await registry.open(accountID: account.id, vaultKey: key)
@@ -366,7 +370,11 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let account = makeAccount(id: "encrypted-rotation", credentialID: "credential-old")
+        let account = makeAccount(
+            accountID: AccountID(rawValue: "00000000-0000-4000-8000-000000000307")!,
+            login: "encrypted-rotation",
+            credentialID: "credential-old"
+        )
         let organizationID = OrganizationID(rawValue: "encrypted-rotation-org")!
         let organization = GitHubOrganization(
             id: organizationID,
@@ -452,8 +460,8 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let firstAccountID = AccountID(rawValue: "encrypted-isolation-first")!
-        let secondAccountID = AccountID(rawValue: "encrypted-isolation-second")!
+        let firstAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000308")!
+        let secondAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000309")!
         let firstKey = try VaultKey.generate()
         let secondKey = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
@@ -484,8 +492,12 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let availableAccount = makeAccount(id: "encrypted-key-present", credentialID: "credential-present")
-        let missingAccountID = AccountID(rawValue: "encrypted-key-missing")!
+        let availableAccount = makeAccount(
+            accountID: AccountID(rawValue: "00000000-0000-4000-8000-000000000310")!,
+            login: "encrypted-key-present",
+            credentialID: "credential-present"
+        )
+        let missingAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000311")!
         let availableKey = try VaultKey.generate()
         let registry = try VaultRegistry(rootDirectory: root)
         let vault = try await registry.open(accountID: availableAccount.id, vaultKey: availableKey)
@@ -518,12 +530,16 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
 
     private let fixtureDate = Date(timeIntervalSinceReferenceDate: 1_000)
 
-    private func makeAccount(id: String, credentialID: String) -> GitHubAccount {
+    private func makeAccount(
+        accountID: AccountID,
+        login: String,
+        credentialID: String
+    ) -> GitHubAccount {
         GitHubAccount(
-            id: AccountID(rawValue: id)!,
+            id: accountID,
             githubUserID: 1,
-            nodeID: GitHubNodeID(rawValue: "U_\(id)")!,
-            login: id,
+            nodeID: GitHubNodeID(rawValue: "U_\(login)")!,
+            login: login,
             authenticationKind: .oauth,
             credentialID: CredentialID(rawValue: credentialID)!,
             credentialStatus: .active,

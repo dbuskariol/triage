@@ -2,7 +2,53 @@ import GRDB
 import XCTest
 @testable import Triage
 
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @escaping () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("Expected an error.", file: file, line: line)
+    } catch {}
+}
+
 final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
+    func testRoleMentionQualifiersRequireExactLoginAndSelectedOrganizationOwner() {
+        XCTAssertEqual(
+            OrganizationWorkItemGraphProjectionService.roleQueryQualifier(
+                named: "mentions",
+                in: "org:github is:open mentions:octocat"
+            ),
+            "octocat"
+        )
+        XCTAssertNotEqual(
+            OrganizationWorkItemGraphProjectionService.roleQueryQualifier(
+                named: "mentions",
+                in: "org:github is:open mentions:octocat-maintainer"
+            ),
+            "octocat"
+        )
+        XCTAssertNil(
+            OrganizationWorkItemGraphProjectionService.roleTeamMentionQualifier(
+                in: "org:github is:open mentions:github/triage/extra"
+            )
+        )
+        XCTAssertEqual(
+            OrganizationWorkItemGraphProjectionService.roleTeamMentionSlug(
+                in: "org:github is:open mentions:github/triage",
+                organizationLogin: "github"
+            ),
+            "triage"
+        )
+        XCTAssertNil(
+            OrganizationWorkItemGraphProjectionService.roleTeamMentionSlug(
+                in: "org:github is:open mentions:other-org/triage",
+                organizationLogin: "github"
+            )
+        )
+    }
+
     func testReplacingDecisionsRestoresEvidenceAndRemovesStaleRows() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -142,6 +188,531 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
         XCTAssertEqual(first.members.map(\.id), [fixture.firstNode.nodeID])
     }
 
+    func testManualSeparateDecisionIsPersistedLocallyAndDoesNotMergeWeakRelation() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let service = WorkItemGroupingDecisionService(vault: fixture.vault)
+        let history = try await service.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date
+        )
+
+        XCTAssertTrue(history.before.isEmpty)
+        XCTAssertEqual(history.after.map(\.strength), [.userSeparated])
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+        let splitItems = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(splitItems.count, 3)
+
+        _ = try await service.apply(
+            .confirmMerge(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        let mergedItems = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(mergedItems.count, 2)
+    }
+
+    func testManualGroupingUndoRejectsNewerDecisionAndRestoresExactPriorState() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+
+        let service = WorkItemGroupingDecisionService(vault: fixture.vault)
+        let history = try await service.apply(
+            .confirmMerge(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date
+        )
+        try await service.restore(
+            history.before,
+            expectedCurrent: history.after,
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        let restoredDecisions = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+        XCTAssertTrue(restoredDecisions.isEmpty)
+
+        do {
+            try await service.restore(
+                history.before,
+                expectedCurrent: history.after,
+                scope: fixture.scope,
+                at: fixture.date.addingTimeInterval(2)
+            )
+            XCTFail("A stale undo must not overwrite newer grouping state.")
+        } catch {
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+    }
+
+    func testAssigningSplitActionOwnershipRequiresCurrentCanonicalGroup() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let firstWorkItemID = try await fixture.workItemID(for: fixture.firstNode.nodeID)
+        let secondWorkItemID = try await fixture.workItemID(for: fixture.secondNode.nodeID)
+        try await fixture.insertAction(workItemID: secondWorkItemID)
+
+        let service = WorkItemGroupingDecisionService(vault: fixture.vault)
+        _ = try await service.apply(
+            .confirmMerge(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date
+        )
+        try await service.assignActionItem(
+            ActionItemID(rawValue: "preserved-donor-action")!,
+            expectedOwnerWorkItemID: secondWorkItemID,
+            visibleWorkItemID: firstWorkItemID,
+            destinationNodeID: fixture.firstNode.nodeID,
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        let owner = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT work_item_id FROM action_items WHERE id = 'preserved-donor-action'"
+            )
+        }
+        XCTAssertEqual(owner, firstWorkItemID.rawValue)
+    }
+
+    func testProjectionFailureCompensatesDecisionAndRetainsPriorVisibleGraph() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let service = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in throw InjectedProjectionError.failed }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await service.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+
+        let decisions = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+        XCTAssertTrue(decisions.isEmpty)
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(Set(items.map(\.primaryNodeID)), Set([
+            fixture.firstNode.nodeID, fixture.secondNode.nodeID, fixture.thirdNode.nodeID
+        ]))
+    }
+
+    func testProjectionCancellationCompensatesDecisionAndRetainsPriorVisibleGraph() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let service = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in throw CancellationError() }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await service.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+
+        let decisions = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+        XCTAssertTrue(decisions.isEmpty)
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(items.count, 3)
+    }
+
+    func testSearchRebuildFailureCompensatesCommittedProjection() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let service = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            rebuildSearch: { _ in throw InjectedProjectionError.failed }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await service.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+
+        let decisions = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+        XCTAssertTrue(decisions.isEmpty)
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(items.count, 3)
+    }
+
+    func testUndoProjectionFailureRestoresTheCurrentDecisionAndVisibleGraph() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await WorkItemGroupingDecisionRepository(vault: fixture.vault).replace(
+            [fixture.decision],
+            scope: fixture.scope
+        )
+        try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
+            .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.date)
+        let service = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in throw InjectedProjectionError.failed }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await service.restore(
+                [],
+                expectedCurrent: [fixture.decision],
+                scope: fixture.scope,
+                at: fixture.date.addingTimeInterval(1)
+            )
+        }
+
+        let restoredDecisions = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+        XCTAssertEqual(restoredDecisions, [fixture.decision])
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(items.count, 2)
+    }
+
+    func testInterleavedFailurePreservesNewerGroupingDecisionInsteadOfRollingBackOverIt() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let gate = ProjectionGate()
+        let failing = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in
+                await gate.arriveAndWait()
+                throw InjectedProjectionError.failed
+            }
+        )
+        let newer = WorkItemGroupingDecisionService(vault: fixture.vault)
+        let first = Task {
+            try await failing.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+        await gate.waitForArrival()
+        let newerHistory = try await newer.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        await gate.release()
+
+        switch await first.result {
+        case .success:
+            XCTFail("The injected projection must fail.")
+        case let .failure(error):
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+        XCTAssertEqual(newerHistory.after.map(\.strength), [.userSeparated])
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+    }
+
+    func testInterleavedCancellationPreservesNewerGroupingDecisionInsteadOfRollingBackOverIt() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let gate = ProjectionGate()
+        let cancelling = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in
+                await gate.arriveAndWait()
+                try Task.checkCancellation()
+            }
+        )
+        let newer = WorkItemGroupingDecisionService(vault: fixture.vault)
+        let first = Task {
+            try await cancelling.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+        await gate.waitForArrival()
+        _ = try await newer.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        first.cancel()
+        await gate.release()
+
+        switch await first.result {
+        case .success:
+            XCTFail("The cancelled projection must fail.")
+        case let .failure(error):
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+    }
+
+    func testInterleavedSuccessfulApplyDoesNotOverwriteNewerWindowDecision() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let gate = ProjectionGate()
+        let stale = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            beforeInitialInstallation: { _ in
+                await gate.arriveAndWait()
+            }
+        )
+        let newer = WorkItemGroupingDecisionService(vault: fixture.vault)
+
+        let first = Task {
+            try await stale.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+        await gate.waitForArrival()
+        _ = try await newer.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        await gate.release()
+
+        switch await first.result {
+        case .success:
+            XCTFail("A stale initial apply must not overwrite a newer window decision.")
+        case let .failure(error):
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+    }
+
+    func testInterleavedSuccessfulUndoDoesNotOverwriteNewerWindowDecision() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let initial = WorkItemGroupingDecisionService(vault: fixture.vault)
+        let history = try await initial.apply(
+            .confirmMerge(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date
+        )
+        let gate = ProjectionGate()
+        let staleUndo = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            beforeInitialInstallation: { _ in
+                await gate.arriveAndWait()
+            }
+        )
+        // Deliberately leave the newer write unprojected. The rejected stale
+        // undo must rebuild the graph from that current scoped state.
+        let newer = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in }
+        )
+
+        let undo = Task {
+            try await staleUndo.restore(
+                history.before,
+                expectedCurrent: history.after,
+                scope: fixture.scope,
+                at: fixture.date.addingTimeInterval(1)
+            )
+        }
+        await gate.waitForArrival()
+        _ = try await newer.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(2)
+        )
+        await gate.release()
+
+        switch await undo.result {
+        case .success:
+            XCTFail("A stale undo must not overwrite a newer window decision.")
+        case let .failure(error):
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(items.count, 3)
+    }
+
+    func testSuccessfulApplyHistoryDoesNotFenceALaterWindowDecisionAsItsOwn() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let gate = ProjectionGate()
+        let firstService = WorkItemGroupingDecisionService(
+            vault: fixture.vault,
+            project: { _, _ in
+                await gate.arriveAndWait()
+            }
+        )
+        let newerService = WorkItemGroupingDecisionService(vault: fixture.vault)
+
+        let first = Task {
+            try await firstService.apply(
+                .confirmMerge(
+                    sourceNodeID: fixture.firstNode.nodeID,
+                    destinationNodeID: fixture.secondNode.nodeID,
+                    relation: .crossReferences
+                ),
+                scope: fixture.scope,
+                at: fixture.date
+            )
+        }
+        await gate.waitForArrival()
+        _ = try await newerService.apply(
+            .keepSeparate(
+                sourceNodeID: fixture.firstNode.nodeID,
+                destinationNodeID: fixture.secondNode.nodeID,
+                relation: .crossReferences
+            ),
+            scope: fixture.scope,
+            at: fixture.date.addingTimeInterval(1)
+        )
+        await gate.release()
+        let firstHistory = try await first.value
+
+        XCTAssertEqual(firstHistory.after.map(\.strength), [.userConfirmed])
+        do {
+            try await firstService.restore(
+                firstHistory.before,
+                expectedCurrent: firstHistory.after,
+                scope: fixture.scope,
+                at: fixture.date.addingTimeInterval(2)
+            )
+            XCTFail("Undo must not treat a later window decision as this operation's state.")
+        } catch {
+            XCTAssertEqual(error as? WorkItemGroupingDecisionServiceError, .staleRollbackPreserved)
+        }
+        let persistedStrengths = try await WorkItemGroupingDecisionRepository(vault: fixture.vault)
+            .decisions(for: fixture.scope)
+            .map(\.strength)
+        XCTAssertEqual(persistedStrengths, [.userSeparated])
+    }
+
+    private enum InjectedProjectionError: Error { case failed }
+
+    private actor ProjectionGate {
+        private var arrived = false
+        private var arrivalContinuation: CheckedContinuation<Void, Never>?
+        private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+        func arriveAndWait() async {
+            arrived = true
+            arrivalContinuation?.resume()
+            arrivalContinuation = nil
+            await withCheckedContinuation { releaseContinuation = $0 }
+        }
+
+        func waitForArrival() async {
+            guard !arrived else { return }
+            await withCheckedContinuation { arrivalContinuation = $0 }
+        }
+
+        func release() {
+            releaseContinuation?.resume()
+            releaseContinuation = nil
+        }
+    }
+
     func testExplicitCurrentHydrationClosingReferenceMergesWhilePartialCoverageFailsClosed() async throws {
         let accepted = try await Fixture()
         defer { accepted.remove() }
@@ -156,6 +727,26 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             Set(try XCTUnwrap(merged.first { $0.primaryNodeID == accepted.firstNode.nodeID }).members.map(\.id)),
             Set([accepted.firstNode.nodeID, accepted.secondNode.nodeID])
         )
+        let reverse = try await accepted.vault.read { database in
+            try Row.fetchOne(database, sql: """
+                SELECT relations.subject_node_id, relations.object_node_id,
+                       relation_evidence.source_node_id, relation_evidence.raw_snapshot_id
+                FROM relations
+                JOIN relation_evidence ON relation_evidence.relation_id = relations.id
+                WHERE relations.kind = 'closedBy'
+                """).map { row in
+                    (
+                        subject: row["subject_node_id"] as String?,
+                        object: row["object_node_id"] as String?,
+                        evidenceNode: row["source_node_id"] as String?,
+                        snapshotID: row["raw_snapshot_id"] as String?
+                    )
+                }
+        }
+        XCTAssertEqual(reverse?.subject, accepted.firstNode.nodeID.rawValue)
+        XCTAssertEqual(reverse?.object, accepted.secondNode.nodeID.rawValue)
+        XCTAssertEqual(reverse?.evidenceNode, accepted.secondNode.nodeID.rawValue)
+        XCTAssertEqual(reverse?.snapshotID, "closing-source-complete")
 
         let partial = try await Fixture()
         defer { partial.remove() }
@@ -166,6 +757,79 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             accountID: partial.accountID, organizationID: partial.organizationID
         )
         XCTAssertEqual(unmerged.count, 3)
+    }
+
+    func testAuthoritativeWeakContentRelationsStayContextualInProductionProjection() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.installAuthoritativeWeakContentRelations()
+
+        try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
+            .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.date)
+
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(items.count, 3, "Only explicit closing relations may merge these items.")
+        let first = try XCTUnwrap(items.first { $0.primaryNodeID == fixture.firstNode.nodeID })
+        XCTAssertEqual(
+            Set(first.contextLinks.map { "\($0.id.rawValue)\u{0}\($0.relation.rawValue)" }),
+            Set([
+                "\(fixture.secondNode.nodeID.rawValue)\u{0}\(WorkRelationKind.duplicateOf.rawValue)",
+                "\(fixture.secondNode.nodeID.rawValue)\u{0}\(WorkRelationKind.blockedBy.rawValue)",
+                "\(fixture.thirdNode.nodeID.rawValue)\u{0}\(WorkRelationKind.crossReferences.rawValue)",
+                "\(fixture.thirdNode.nodeID.rawValue)\u{0}\(WorkRelationKind.blocks.rawValue)"
+            ])
+        )
+    }
+
+    func testHydrationResponsibilityRelationsRequireCurrentCompleteRawCoverage() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.installCurrentHydrationResponsibilityEvidence()
+
+        try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
+            .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.date)
+
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        let pullRequest = try XCTUnwrap(items.first { $0.primaryNodeID == fixture.secondNode.nodeID })
+        let materialized = Set(pullRequest.relations.map { relation in
+            "\(relation.kind.rawValue)\u{0}\(relation.objectNodeID?.rawValue ?? "")"
+        })
+        XCTAssertTrue(materialized.contains("authored\u{0}account-node"))
+        XCTAssertTrue(materialized.contains("assigned\u{0}account-node"))
+        XCTAssertTrue(materialized.contains("reviewRequestedDirectly\u{0}reviewer-node"))
+        XCTAssertTrue(materialized.contains("reviewRequestedFromTeam\u{0}review-team-node"))
+        XCTAssertTrue(materialized.contains("awaitingResponse\u{0}reviewer-node"))
+        XCTAssertTrue(pullRequest.relations.allSatisfy {
+            $0.evidence.allSatisfy { $0.sourceRevision == fixture.secondNode.sourceRevision }
+        })
+    }
+
+    func testRoleDiscoveryMentionsMaterializeOnlyForCurrentDirectAndVisibleTeamScopes() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.installCurrentRoleMentionEvidence()
+
+        try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
+            .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.date)
+
+        let items = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        let pullRequest = try XCTUnwrap(items.first { $0.primaryNodeID == fixture.secondNode.nodeID })
+        let materialized = Set(pullRequest.relations.map { relation in
+            "\(relation.kind.rawValue)\u{0}\(relation.objectNodeID?.rawValue ?? "")"
+        })
+        XCTAssertTrue(materialized.contains("mentioned\u{0}account-node"))
+        XCTAssertTrue(materialized.contains("teamMentioned\u{0}review-team-node"))
     }
 
     private final class Fixture: @unchecked Sendable {
@@ -428,12 +1092,362 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             )
         }
 
+        func installCurrentHydrationResponsibilityEvidence() async throws {
+            let streamID = SyncStreamID(rawValue: "hydration-pull-requests-\(organizationID.rawValue)")!
+            try await SyncStreamRepository(vault: vault).save(
+                SyncStream(
+                    id: streamID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: .pullRequests,
+                    highWater: nil,
+                    lastSuccessfulAt: date,
+                    lastAttemptAt: date,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+            try await CoverageRepository(vault: vault).save(
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: nil,
+                    feature: .pullRequests,
+                    streamID: streamID,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: .complete,
+                    lastSuccessfulAt: date,
+                    failureDetail: nil
+                ),
+                attemptedAt: date
+            )
+            try await ActorRepository(vault: vault).save(
+                ActorSummary(
+                    id: ActorID(rawValue: "reviewer-actor")!,
+                    nodeID: GitHubNodeID(rawValue: "reviewer-node")!,
+                    login: "reviewer",
+                    displayName: nil,
+                    avatarURL: nil
+                ),
+                observedAt: date
+            )
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO teams (id, organization_id, github_node_id, slug, name, privacy, updated_at_ms)
+                        VALUES ('review-team-node', ?, 'review-team-node', 'triage', 'Triage', NULL, ?)
+                        """,
+                    arguments: [organizationID.rawValue, Int64(date.timeIntervalSince1970 * 1_000)]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO team_memberships (account_id, team_id, membership_state, observed_at_ms, expires_at_ms)
+                        VALUES (?, 'review-team-node', 'active', ?, NULL)
+                        """,
+                    arguments: [accountID.rawValue, Int64(date.timeIntervalSince1970 * 1_000)]
+                )
+            }
+            let payload = Data("""
+                {"data":{"nodes":[{"id":"\(secondNode.nodeID.rawValue)","author":{"id":"account-node"},"assignees":{"nodes":[{"id":"account-node"}],"pageInfo":{"hasNextPage":false}},"reviewRequests":{"nodes":[{"requestedReviewer":{"id":"reviewer-node","login":"reviewer"}},{"requestedReviewer":{"id":"review-team-node","slug":"triage"}}],"pageInfo":{"hasNextPage":false}},"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}]}}
+                """.utf8)
+            try await RawAPISnapshotRepository(vault: vault).save(
+                RawAPISnapshot(
+                    id: RawAPISnapshotID(rawValue: "hydration-responsibility-source")!,
+                    accountID: accountID,
+                    githubNodeID: secondNode.nodeID,
+                    endpoint: "graphql:TriageHydrateNodes",
+                    eTag: nil,
+                    parserVersion: 2,
+                    observedAt: date,
+                    payload: payload,
+                    requestIdentity: ConditionalRequestIdentity(
+                        scope: scope,
+                        feature: .pullRequests,
+                        streamID: streamID,
+                        requestKey: "graphql:TriageHydrateNodes/node=\(secondNode.nodeID.rawValue)"
+                    )
+                )
+            )
+        }
+
+        func installCurrentRoleMentionEvidence() async throws {
+            let sourceRevision = date.ISO8601Format()
+            try await GitHubNodeRepository(vault: vault).save(
+                Self.makeNode(
+                    id: secondNode.nodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    date: date,
+                    kind: .pullRequest,
+                    sourceRevision: sourceRevision
+                )
+            )
+            let streamID = SyncStreamID(rawValue: "role-discovery-\(organizationID.rawValue)-open-direct-mentions")!
+            try await SyncStreamRepository(vault: vault).save(
+                SyncStream(
+                    id: streamID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: .roleDiscovery,
+                    highWater: nil,
+                    lastSuccessfulAt: date,
+                    lastAttemptAt: date,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+            try await CoverageRepository(vault: vault).save(
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: nil,
+                    feature: .roleDiscovery,
+                    streamID: streamID,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: .complete,
+                    lastSuccessfulAt: date,
+                    failureDetail: nil
+                ),
+                attemptedAt: date
+            )
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO teams (id, organization_id, github_node_id, slug, name, privacy, updated_at_ms)
+                        VALUES ('review-team-node', ?, 'review-team-node', 'triage', 'Triage', NULL, ?)
+                        """,
+                    arguments: [organizationID.rawValue, Int64(date.timeIntervalSince1970 * 1_000)]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO team_memberships (account_id, team_id, membership_state, observed_at_ms, expires_at_ms)
+                        VALUES (?, 'review-team-node', 'active', ?, NULL)
+                        """,
+                    arguments: [accountID.rawValue, Int64(date.timeIntervalSince1970 * 1_000)]
+                )
+            }
+            let directQuery = try GitHubIssueSearchQuery(
+                organizationLogin: "github",
+                userLogin: "octocat",
+                state: .open,
+                relationship: .mentioned
+            )
+            try await installRoleMentionPage(
+                query: directQuery,
+                streamID: streamID,
+                snapshotID: "direct-mention-role-source"
+            )
+            let teamStreamID = SyncStreamID(rawValue: "role-discovery-\(organizationID.rawValue)-open-team-mentions")!
+            try await SyncStreamRepository(vault: vault).save(
+                SyncStream(
+                    id: teamStreamID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: .roleDiscovery,
+                    highWater: nil,
+                    lastSuccessfulAt: date,
+                    lastAttemptAt: date,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+            try await CoverageRepository(vault: vault).save(
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: nil,
+                    feature: .roleDiscovery,
+                    streamID: teamStreamID,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: .complete,
+                    lastSuccessfulAt: date,
+                    failureDetail: nil
+                ),
+                attemptedAt: date
+            )
+            let teamQuery = try GitHubIssueSearchQuery(
+                organizationLogin: "github",
+                userLogin: "octocat",
+                state: .open,
+                relationship: .teamMentioned(
+                    teamNodeID: GitHubNodeID(rawValue: "review-team-node")!,
+                    teamSlug: "triage"
+                )
+            )
+            try await installRoleMentionPage(
+                query: teamQuery,
+                streamID: teamStreamID,
+                snapshotID: "team-mention-role-source"
+            )
+        }
+
+        private func installRoleMentionPage(
+            query: GitHubIssueSearchQuery,
+            streamID: SyncStreamID,
+            snapshotID: String
+        ) async throws {
+            let identity = try GitHubIssueSearchRequestIdentity(
+                query: query,
+                page: 1,
+                scope: scope,
+                streamID: streamID
+            )
+            let timestamp = date.ISO8601Format()
+            let payload = Data("""
+                {"total_count":1,"incomplete_results":false,"items":[{"id":1,"node_id":"\(secondNode.nodeID.rawValue)","number":1,"title":"Grouping node","state":"open","html_url":"https://github.com/github/triage/pull/1","created_at":"\(timestamp)","updated_at":"\(timestamp)","closed_at":null,"pull_request":{"url":"https://api.github.com/repos/github/triage/pulls/1"},"repository_url":"https://api.github.com/repos/github/triage"}]}
+                """.utf8)
+            let snapshot = RawAPISnapshot(
+                id: RawAPISnapshotID(rawValue: snapshotID)!,
+                accountID: accountID,
+                githubNodeID: nil,
+                endpoint: identity.endpoint,
+                eTag: "\"\(snapshotID)\"",
+                parserVersion: GitHubIssueSearchRequestIdentity.parserVersion,
+                observedAt: date,
+                payload: payload,
+                requestIdentity: ConditionalRequestIdentity(
+                    scope: scope,
+                    feature: .roleDiscovery,
+                    streamID: streamID,
+                    requestKey: identity.requestKey
+                )
+            )
+            try await RawAPISnapshotRepository(vault: vault).save(snapshot)
+            try await RoleSearchPageReplayRepository(vault: vault).save(
+                RoleSearchPageReplay(
+                    requestKey: identity.requestKey,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    streamID: streamID,
+                    queryValue: query.value,
+                    page: 1,
+                    endpoint: identity.endpoint,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    rawSnapshotID: snapshot.id,
+                    eTag: snapshot.eTag,
+                    lastModified: nil,
+                    parserVersion: GitHubIssueSearchRequestIdentity.parserVersion,
+                    lastValidatedAt: date
+                )
+            )
+        }
+
+        func installAuthoritativeWeakContentRelations() async throws {
+            let streamID = SyncStreamID(rawValue: "authoritative-weak-content-relations")!
+            try await SyncStreamRepository(vault: vault).save(
+                SyncStream(
+                    id: streamID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: .timelines,
+                    highWater: nil,
+                    lastSuccessfulAt: date,
+                    lastAttemptAt: date,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+            try await CoverageRepository(vault: vault).save(
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: nil,
+                    feature: .timelines,
+                    streamID: streamID,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: .complete,
+                    lastSuccessfulAt: date,
+                    failureDetail: nil
+                ),
+                attemptedAt: date
+            )
+            let snapshotID = RawAPISnapshotID(rawValue: "authoritative-weak-content-snapshot")!
+            let requestKey = "GET /repos/github/triage/issues/1/timeline?relation-fixture=1"
+            try await RawAPISnapshotRepository(vault: vault).save(
+                RawAPISnapshot(
+                    id: snapshotID,
+                    accountID: accountID,
+                    githubNodeID: firstNode.nodeID,
+                    endpoint: requestKey.dropFirst(4).description,
+                    eTag: nil,
+                    parserVersion: 1,
+                    observedAt: date,
+                    payload: Data("[]".utf8),
+                    requestIdentity: ConditionalRequestIdentity(
+                        scope: scope,
+                        feature: .timelines,
+                        streamID: streamID,
+                        requestKey: requestKey
+                    )
+                )
+            )
+            let authority = RelationReplacementAuthority(
+                source: .restTimeline,
+                locator: .query(requestKey),
+                scope: scope,
+                feature: .timelines,
+                streamID: streamID,
+                repositoryID: nil,
+                sourceRevision: firstNode.sourceRevision,
+                rawSnapshotID: snapshotID,
+                observedAt: date,
+                mode: .completeReconciliation
+            )
+            let specifications: [(WorkRelationKind, GitHubNodeID)] = [
+                (.crossReferences, thirdNode.nodeID),
+                (.duplicateOf, secondNode.nodeID),
+                (.blockedBy, secondNode.nodeID),
+                (.blocks, thirdNode.nodeID)
+            ]
+            let relations = specifications.map { kind, objectNodeID in
+                WorkRelation(
+                    kind: kind,
+                    subjectNodeID: firstNode.nodeID,
+                    objectNodeID: objectNodeID,
+                    confidence: .confirmed,
+                    evidence: [EvidenceReference(
+                        id: EvidenceID(rawValue: "weak-content-\(kind.rawValue)-\(objectNodeID.rawValue)")!,
+                        source: .restTimeline,
+                        locator: .query(requestKey),
+                        authority: .github(scope: scope, feature: .timelines, streamID: streamID),
+                        nodeID: firstNode.nodeID,
+                        sourceRevision: firstNode.sourceRevision,
+                        rawSnapshotID: snapshotID,
+                        confidence: .confirmed,
+                        confirmation: .confirmed,
+                        observedAt: date
+                    )],
+                    observedAt: date
+                )
+            }
+            try await WorkRelationRepository(vault: vault).replace(
+                relations,
+                accountID: accountID,
+                subjectNodeID: firstNode.nodeID,
+                authority: authority
+            )
+        }
+
         static func makeNode(
             id: GitHubNodeID,
             accountID: AccountID,
             organizationID: OrganizationID,
             date: Date,
-            kind: GitHubContentKind = .issue
+            kind: GitHubContentKind = .issue,
+            sourceRevision: String = "revision-1"
         ) -> NormalizedGitHubNode {
             NormalizedGitHubNode(
                 nodeID: id,
@@ -452,7 +1466,7 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
                 updatedAt: date,
                 closedAt: nil,
                 mergedAt: nil,
-                sourceRevision: "revision-1",
+                sourceRevision: sourceRevision,
                 observedAt: date,
                 accessibility: .accessible
             )

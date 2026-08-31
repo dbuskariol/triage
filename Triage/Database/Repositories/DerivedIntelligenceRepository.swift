@@ -152,6 +152,11 @@ actor DerivedIntelligenceRepository {
             try Self.validateCurrentScope(snapshot.scope, in: database)
             try Self.validateCompleteWorkItemSnapshot(snapshot, in: database)
             try Self.validateCurrentSourceRevision(snapshot, in: database)
+            try Self.validateCurrentEvidence(
+                snapshot.items.flatMap { $0.attentionReasons.flatMap(\.evidence) },
+                scope: snapshot.scope,
+                in: database
+            )
             try Self.deleteDerivedRows(for: snapshot.scope, in: database)
             try Self.insertRun(snapshot, in: database)
             for item in snapshot.items.sorted(by: { $0.workItemID.rawValue < $1.workItemID.rawValue }) {
@@ -364,7 +369,7 @@ actor DerivedIntelligenceRepository {
         }
     }
 
-    private nonisolated static func currentSourceRevision(
+    nonisolated static func currentSourceRevision(
         scope: SynchronizationScope,
         in database: Database
     ) throws -> String {
@@ -718,6 +723,8 @@ actor DerivedIntelligenceRepository {
         scope: SynchronizationScope
     ) throws {
         guard boundedIdentifier(evidence.id.rawValue),
+              evidence.confidence == .confirmed,
+              evidence.confirmation == .confirmed,
               evidence.observedAt.timeIntervalSinceReferenceDate.isFinite,
               evidence.nodeID.map({ boundedIdentifier($0.rawValue) }) ?? true,
               evidence.eventID.map({ boundedIdentifier($0.rawValue) }) ?? true,
@@ -731,18 +738,86 @@ actor DerivedIntelligenceRepository {
             where source != .localWorkflow
                 && source != .legacyUnverified
                 && (locator.kind == "endpoint" || locator.kind == "query")
-                && authorityScope == scope:
+                && authorityScope == scope
+                && !(evidence.sourceRevision?.isEmpty ?? true):
             return
         case let (.localWorkflow, .localWorkflow(locator), .localWorkflow(accountID, organizationID))
             where !locator.isEmpty && accountID == scope.accountID && organizationID == scope.organizationID:
             return
-        case (.legacyUnverified, .legacyUnverified, .legacyUnverified)
-            where evidence.confidence == .provisional && evidence.confirmation == .provisional:
-            // Current coordinator rules can still surface explicitly labeled
-            // pre-authority evidence. Preserve it for explanation, but never
-            // upgrade it into source-scoped GitHub authority.
-            return
         default:
+            throw DerivedIntelligenceRepositoryError.invalidEvidence
+        }
+    }
+
+    /// Active derived output may cite a GitHub fact only while the exact node
+    /// revision that supplied it is still normalized for this scope.  The
+    /// aggregate run fence catches source changes between adapter and write;
+    /// this per-evidence fence prevents a stale member/review/timeline fact
+    /// from piggybacking on an otherwise current aggregate.
+    private nonisolated static func validateCurrentEvidence(
+        _ evidence: [EvidenceReference],
+        scope: SynchronizationScope,
+        in database: Database
+    ) throws {
+        var expectedRevisions = [GitHubNodeID: String]()
+        for reference in evidence {
+            switch reference.authority {
+            case let .github(evidenceScope, _, _):
+                guard evidenceScope == scope,
+                      reference.confidence == .confirmed,
+                      reference.confirmation == .confirmed,
+                      let nodeID = reference.nodeID,
+                      let sourceRevision = reference.sourceRevision,
+                      !sourceRevision.isEmpty
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+                if let existing = expectedRevisions[nodeID], existing != sourceRevision {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+                expectedRevisions[nodeID] = sourceRevision
+            case let .localWorkflow(accountID, organizationID):
+                guard accountID == scope.accountID,
+                      organizationID == scope.organizationID,
+                      reference.confidence == .confirmed,
+                      reference.confirmation == .confirmed
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+            case .legacyUnverified:
+                throw DerivedIntelligenceRepositoryError.invalidEvidence
+            }
+        }
+        guard !expectedRevisions.isEmpty || evidence.allSatisfy({
+            if case .localWorkflow = $0.authority { return true }
+            return false
+        }) else {
+            throw DerivedIntelligenceRepositoryError.invalidEvidence
+        }
+
+        for batch in batches(expectedRevisions.keys.map(\.rawValue).sorted()) {
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT github_node_id, source_revision
+                    FROM github_nodes
+                    WHERE account_id = ? AND organization_id = ?
+                      AND github_node_id IN (\(placeholders(for: batch)))
+                    """,
+                arguments: StatementArguments([
+                    scope.accountID.rawValue, scope.organizationID.rawValue
+                ] + batch)
+            )
+            for row in rows {
+                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                      let currentRevision: String = row["source_revision"],
+                      expectedRevisions.removeValue(forKey: nodeID) == currentRevision
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+            }
+        }
+        guard expectedRevisions.isEmpty else {
             throw DerivedIntelligenceRepositoryError.invalidEvidence
         }
     }
@@ -1177,6 +1252,11 @@ actor DerivedIntelligenceRepository {
             }
             try validate(evidence: reference, scope: scope)
         }
+        try validateCurrentEvidence(
+            evidence,
+            scope: scope,
+            in: database
+        )
         try validatePersistedRawSnapshotReferences(
             evidence,
             batchQueryObserver: batchQueryObserver,

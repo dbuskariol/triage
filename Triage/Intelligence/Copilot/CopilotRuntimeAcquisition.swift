@@ -1,0 +1,675 @@
+import CryptoKit
+import Compression
+import Darwin
+import Foundation
+import Security
+
+/// The only Copilot CLI release that this client will acquire.  This is an
+/// acquisition boundary, not a runtime enablement switch: callers must still
+/// satisfy the independent consent, credential, and XPC gates.
+struct CopilotRuntimeRelease: Equatable, Sendable {
+    static let pinned = Self(version: "1.0.81-10")
+
+    let version: String
+    static let githubAuthority = "github.com"
+    static let signingTeam = "VEKTX9H2N7"
+    static let signingIdentifier = "copilot"
+
+    func archive(for architecture: CopilotRuntimeArchitecture) -> CopilotRuntimeArchive {
+        let name = architecture == .arm64 ? "copilot-darwin-arm64.tar.gz" : "copilot-darwin-x64.tar.gz"
+        let archiveSHA256 = architecture == .arm64
+            ? "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871"
+            : "1fb04e8e040525ae39cf53cce7f9e44b7d3fbb200bc9bfe38e2e7436d7dd3b74"
+        // These are deliberately distinct from the compressed archive pins.
+        // They were derived only after authenticating each official archive
+        // against the archive pins above and hashing its sole `copilot` file.
+        let executableSHA256 = architecture == .arm64
+            ? "2f4238eebaa42e1196e4f9473a06d03fca612fd6fed09bb9033d9c506d4a5e9a"
+            : "8da653f6c4944d6be001af17aaf6d685066c91b1f62af543bbc3ebb35b85435c"
+        return CopilotRuntimeArchive(
+            url: URL(string: "https://github.com/github/copilot-cli/releases/download/v\(version)/\(name)")!,
+            expectedArchiveSHA256: archiveSHA256,
+            expectedExecutableSHA256: executableSHA256
+        )
+    }
+}
+
+enum CopilotRuntimeArchitecture: String, CaseIterable, Equatable, Sendable {
+    case arm64
+    case x86_64
+
+    static func host() throws -> Self {
+        #if arch(arm64)
+        return .arm64
+        #elseif arch(x86_64)
+        return .x86_64
+        #else
+        throw CopilotRuntimeAcquisitionError.unsupportedArchitecture
+        #endif
+    }
+
+    var cpuType: UInt32 {
+        switch self {
+        case .arm64: return 0x0100_000c
+        case .x86_64: return 0x0100_0007
+        }
+    }
+}
+
+struct CopilotRuntimeArchive: Equatable, Sendable {
+    let url: URL
+    /// Pin for the downloaded compressed release asset.
+    let expectedArchiveSHA256: String
+    /// Pin for the regular `copilot` file extracted from that authenticated asset.
+    /// The XPC launch boundary independently enforces this before execution.
+    let expectedExecutableSHA256: String
+}
+
+enum CopilotRuntimeAcquisitionState: Equatable, Sendable {
+    case absent
+    case downloading(receivedBytes: Int64, expectedBytes: Int64?)
+    case verifying
+    case ready(URL)
+    case corrupt(String)
+}
+
+enum CopilotRuntimeAcquisitionError: Error, Equatable, Sendable {
+    case unsupportedArchitecture
+    case invalidSource
+    case redirectRejected
+    case invalidResponse
+    case archiveTooLarge
+    case checksumMismatch
+    case invalidArchive
+    case executableMissing
+    case invalidExecutableArchitecture
+    case invalidCodeSignature
+    case cancellation
+    case fileSystem
+}
+
+/// A downloading implementation must write only to `destination`, calculate
+/// the SHA-256 while bytes arrive, reject redirects, and never retain a copy.
+protocol CopilotRuntimeDownloading: Sendable {
+    func download(
+        _ archive: CopilotRuntimeArchive,
+        to destination: URL,
+        maximumBytes: Int64,
+        progress: @escaping @Sendable (Int64, Int64?) -> Void
+    ) async throws -> String
+}
+
+protocol CopilotRuntimeExtracting: Sendable {
+    /// Extracts exactly one regular `copilot` file.  Implementations must reject
+    /// traversal, links, special files, duplicate entries, and extra payloads.
+    func extractVerifiedExecutable(from archive: URL, to directory: URL) throws -> URL
+}
+
+protocol CopilotRuntimeValidating: Sendable {
+    func validate(_ executable: URL, architecture: CopilotRuntimeArchitecture) throws
+}
+
+/// Isolating file operations makes adversarial acquisition tests deterministic.
+protocol CopilotRuntimeFileManaging: Sendable {
+    func makeTemporaryDirectory() throws -> URL
+    func removeIfPresent(_ url: URL)
+    func installedExecutable(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) -> URL
+    func install(_ executable: URL, root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws -> URL
+    func removeInstalled(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws
+    func exists(_ url: URL) -> Bool
+}
+
+/// Cross-process exclusion shared by acquisition and the XPC launch boundary.
+/// Install/repair/remove take an exclusive lock.  XPC must take a shared lock
+/// from final descriptor/signature verification through `Process.run()`; it
+/// must not retain a pathname after dropping that lock.
+enum CopilotRuntimeInstallLock {
+    static let filename = ".runtime.lock"
+
+    static func withExclusiveLock<T>(root: URL, _ body: () throws -> T) throws -> T {
+        try withLock(root: root, operation: LOCK_EX, body)
+    }
+
+    static func withSharedLock<T>(root: URL, _ body: () throws -> T) throws -> T {
+        try withLock(root: root, operation: LOCK_SH, body)
+    }
+
+    private static func withLock<T>(root: URL, operation: Int32, _ body: () throws -> T) throws -> T {
+        let rootDescriptor = try CopilotRuntimePOSIX.openDirectoryTree(root, create: true)
+        defer { close(rootDescriptor) }
+        let descriptor = openat(rootDescriptor, filename, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        defer { close(descriptor) }
+        let type: Int16 = operation == LOCK_EX ? Int16(F_WRLCK) : Int16(F_RDLCK)
+        var advisoryLock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: type, l_whence: Int16(SEEK_SET))
+        guard fcntl(descriptor, F_SETLKW, &advisoryLock) != -1 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        defer {
+            var unlock = flock(l_start: 0, l_len: 0, l_pid: 0, l_type: Int16(F_UNLCK), l_whence: Int16(SEEK_SET))
+            _ = fcntl(descriptor, F_SETLK, &unlock)
+        }
+        return try body()
+    }
+}
+
+/// Actor ownership makes downloads explicitly user-triggered and single-flight.
+actor CopilotRuntimeAcquisitionService {
+    static let maximumArchiveBytes: Int64 = 150 * 1_024 * 1_024
+
+    private let release: CopilotRuntimeRelease
+    private let architecture: CopilotRuntimeArchitecture
+    private let root: URL
+    private let downloader: any CopilotRuntimeDownloading
+    private let extractor: any CopilotRuntimeExtracting
+    private let validator: any CopilotRuntimeValidating
+    private let files: any CopilotRuntimeFileManaging
+    private var currentState: CopilotRuntimeAcquisitionState = .absent
+    private var stateObservers: [UUID: AsyncStream<CopilotRuntimeAcquisitionState>.Continuation] = [:]
+
+    init(
+        applicationSupportDirectory: URL,
+        release: CopilotRuntimeRelease = .pinned,
+        architecture: CopilotRuntimeArchitecture? = nil,
+        downloader: any CopilotRuntimeDownloading = URLSessionCopilotRuntimeDownloader(),
+        extractor: any CopilotRuntimeExtracting = CopilotRuntimeTarExtractor(),
+        validator: any CopilotRuntimeValidating = CopilotRuntimeCodeValidator(),
+        files: any CopilotRuntimeFileManaging = CopilotRuntimeFileManager()
+    ) throws {
+        self.release = release
+        self.architecture = try architecture ?? .host()
+        root = applicationSupportDirectory.appending(path: "Triage/CopilotRuntime", directoryHint: .isDirectory)
+        self.downloader = downloader
+        self.extractor = extractor
+        self.validator = validator
+        self.files = files
+    }
+
+    func state() -> CopilotRuntimeAcquisitionState { currentState }
+
+    /// Emits the exact acquisition state owned by this actor. Consumers see an
+    /// immediate current value, then only state transitions from an explicit
+    /// user-requested operation; this stream never starts an acquisition.
+    func stateUpdates() -> AsyncStream<CopilotRuntimeAcquisitionState> {
+        let observerID = UUID()
+        var continuation: AsyncStream<CopilotRuntimeAcquisitionState>.Continuation!
+        let stream = AsyncStream<CopilotRuntimeAcquisitionState> { continuation = $0 }
+        stateObservers[observerID] = continuation
+        continuation.yield(currentState)
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeStateObserver(observerID) }
+        }
+        return stream
+    }
+
+    /// The only method that may contact GitHub.  Nothing calls it implicitly.
+    func acquireAtUserRequest() async throws -> URL {
+        let archive = release.archive(for: architecture)
+        guard archive.url.scheme == "https", archive.url.host == CopilotRuntimeRelease.githubAuthority else {
+            throw CopilotRuntimeAcquisitionError.invalidSource
+        }
+        let temporary = try files.makeTemporaryDirectory()
+        defer { files.removeIfPresent(temporary) }
+        let downloaded = temporary.appending(path: "runtime.tar.gz")
+        publishState(.downloading(receivedBytes: 0, expectedBytes: nil))
+        do {
+            let digest = try await downloader.download(archive, to: downloaded, maximumBytes: Self.maximumArchiveBytes) { [weak self] received, expected in
+                Task { await self?.publishDownloadProgress(received, expected: expected) }
+            }
+            try Task.checkCancellation()
+            guard digest.lowercased() == archive.expectedArchiveSHA256 else {
+                throw CopilotRuntimeAcquisitionError.checksumMismatch
+            }
+            publishState(.verifying)
+            let extraction = temporary.appending(path: "extracted", directoryHint: .isDirectory)
+            let executable = try extractor.extractVerifiedExecutable(from: downloaded, to: extraction)
+            try validator.validate(executable, architecture: architecture)
+            try Task.checkCancellation()
+            let installed = try files.install(executable, root: root, release: release, architecture: architecture)
+            // Validation after the atomic publish catches replacement between
+            // extraction and use; clients must call `runtimeForUse` again at exec.
+            try validator.validate(installed, architecture: architecture)
+            publishState(.ready(installed))
+            return installed
+        } catch is CancellationError {
+            publishState(.absent)
+            throw CopilotRuntimeAcquisitionError.cancellation
+        } catch let error as CopilotRuntimeAcquisitionError {
+            publishState(.corrupt(String(describing: error)))
+            throw error
+        } catch {
+            publishState(.corrupt("acquisition failed"))
+            throw CopilotRuntimeAcquisitionError.fileSystem
+        }
+    }
+
+    /// Revalidation is mandatory immediately before a future helper executes it.
+    func runtimeForUse() throws -> URL {
+        let executable = files.installedExecutable(root: root, release: release, architecture: architecture)
+        guard files.exists(executable) else {
+            publishState(.absent)
+            throw CopilotRuntimeAcquisitionError.executableMissing
+        }
+        do {
+            try validator.validate(executable, architecture: architecture)
+            publishState(.ready(executable))
+            return executable
+        } catch let error as CopilotRuntimeAcquisitionError {
+            publishState(.corrupt(String(describing: error)))
+            throw error
+        } catch {
+            publishState(.corrupt("runtime validation failed"))
+            throw CopilotRuntimeAcquisitionError.invalidCodeSignature
+        }
+    }
+
+    func removeAtUserRequest() throws {
+        do {
+            try CopilotRuntimeInstallLock.withExclusiveLock(root: root) {
+                let installed = files.installedExecutable(root: root, release: release, architecture: architecture)
+                if files.exists(installed) {
+                    try files.removeInstalled(root: root, release: release, architecture: architecture)
+                }
+            }
+            publishState(.absent)
+        } catch {
+            publishState(.corrupt("runtime removal failed"))
+            throw CopilotRuntimeAcquisitionError.fileSystem
+        }
+    }
+
+    func repairAtUserRequest() async throws -> URL {
+        try removeAtUserRequest()
+        return try await acquireAtUserRequest()
+    }
+
+    private func publishDownloadProgress(_ received: Int64, expected: Int64?) {
+        publishState(.downloading(receivedBytes: received, expectedBytes: expected))
+    }
+
+    private func publishState(_ state: CopilotRuntimeAcquisitionState) {
+        currentState = state
+        for continuation in stateObservers.values {
+            continuation.yield(state)
+        }
+    }
+
+    private func removeStateObserver(_ observerID: UUID) {
+        stateObservers[observerID] = nil
+    }
+}
+
+/// URLSession implementation intentionally has no cookie/cache persistence.
+/// Redirects are allowed only between GitHub's two fixed HTTPS authorities.
+final class URLSessionCopilotRuntimeDownloader: NSObject, CopilotRuntimeDownloading, @unchecked Sendable {
+    func download(_ archive: CopilotRuntimeArchive, to destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) async throws -> String {
+        guard CopilotRuntimeURLTransfer.isApprovedInitialURL(archive.url) else { throw CopilotRuntimeAcquisitionError.invalidSource }
+        let transfer = CopilotRuntimeURLTransfer(destination: destination, maximumBytes: maximumBytes, progress: progress)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration, delegate: transfer, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        return try await transfer.run(session: session, url: archive.url)
+    }
+}
+
+final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+    private let destination: URL
+    private let maximumBytes: Int64
+    private let progress: @Sendable (Int64, Int64?) -> Void
+    private var continuation: CheckedContinuation<String, Error>?
+    private var handle: FileHandle?
+    private var hasher = SHA256()
+    private var received: Int64 = 0
+    private var expected: Int64?
+    private var terminalError: Error?
+    private var task: URLSessionDataTask?
+    private var acceptedRedirect = false
+
+    init(destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) {
+        self.destination = destination; self.maximumBytes = maximumBytes; self.progress = progress
+    }
+
+    func run(session: URLSession, url: URL) async throws -> String {
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        handle = try FileHandle(forWritingTo: destination)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                let task = session.dataTask(with: request)
+                self.task = task
+                task.resume()
+            }
+        }, onCancel: { [weak self] in
+            self?.terminalError = CopilotRuntimeAcquisitionError.cancellation
+            self?.task?.cancel()
+        })
+    }
+
+    private static func isCleanHTTPSURL(_ url: URL, host: String) -> Bool {
+        guard url.scheme == "https", url.user == nil, url.password == nil,
+              url.query == nil, url.fragment == nil,
+              url.port == nil || url.port == 443,
+              let observedHost = url.host?.lowercased()
+        else { return false }
+        return observedHost == host
+    }
+
+    static func isApprovedInitialURL(_ url: URL) -> Bool {
+        isCleanHTTPSURL(url, host: CopilotRuntimeRelease.githubAuthority)
+    }
+
+    static func isApprovedRedirect(from source: URL, to destination: URL) -> Bool {
+        isApprovedInitialURL(source)
+            && isCleanHTTPSURL(destination, host: "release-assets.githubusercontent.com")
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard !acceptedRedirect,
+              let originalURL = task.originalRequest?.url,
+              let redirectedURL = newRequest.url,
+              Self.isApprovedRedirect(from: originalURL, to: redirectedURL)
+        else {
+            terminalError = CopilotRuntimeAcquisitionError.redirectRejected
+            completionHandler(nil)
+            return
+        }
+        acceptedRedirect = true
+        completionHandler(newRequest)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
+            terminalError = CopilotRuntimeAcquisitionError.invalidResponse; completionHandler(.cancel); return
+        }
+        expected = response.expectedContentLength >= 0 ? response.expectedContentLength : nil
+        if let expected, expected > maximumBytes { terminalError = CopilotRuntimeAcquisitionError.archiveTooLarge; completionHandler(.cancel); return }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard terminalError == nil else { dataTask.cancel(); return }
+        received += Int64(data.count)
+        guard received <= maximumBytes else { terminalError = CopilotRuntimeAcquisitionError.archiveTooLarge; dataTask.cancel(); return }
+        do { try handle?.write(contentsOf: data) } catch { terminalError = error; dataTask.cancel(); return }
+        hasher.update(data: data); progress(received, expected)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        try? handle?.close(); handle = nil
+        self.task = nil
+        let continuation = continuation; self.continuation = nil
+        if let terminalError { continuation?.resume(throwing: terminalError) }
+        else if let error { continuation?.resume(throwing: error) }
+        else { continuation?.resume(returning: hasher.finalize().map { String(format: "%02x", $0) }.joined()) }
+    }
+}
+
+/// Parses the gzip payload and a deliberately tiny tar profile.  The official
+/// release must contain exactly one regular file named `copilot`; accepting a
+/// general-purpose tar archive would broaden the writable surface needlessly.
+struct CopilotRuntimeTarExtractor: CopilotRuntimeExtracting {
+    func extractVerifiedExecutable(from archive: URL, to directory: URL) throws -> URL {
+        let tar = try CopilotRuntimeGzip.decode(Data(contentsOf: archive), maximumOutputBytes: 300 * 1_024 * 1_024)
+        var offset = 0; var executable: Data?; var sawTerminator = false
+        while offset + 512 <= tar.count {
+            let header = tar.subdata(in: offset..<(offset + 512))
+            if header.allSatisfy({ $0 == 0 }) {
+                try Self.requireCanonicalTerminator(in: tar, at: offset)
+                sawTerminator = true
+                break
+            }
+            let name = try string(header, 0, 100)
+            let prefix = try string(header, 345, 155)
+            let path = prefix.isEmpty ? name : "\(prefix)/\(name)"
+            let type = header[156]
+            guard type == 0 || type == 48, path == "copilot", executable == nil else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            let length = try octal(header, 124, 12)
+            let dataStart = offset + 512; let dataEnd = dataStart + length
+            guard dataEnd <= tar.count else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            executable = tar.subdata(in: dataStart..<dataEnd)
+            offset = dataStart + ((length + 511) / 512) * 512
+        }
+        guard sawTerminator else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        guard let executable, !executable.isEmpty else { throw CopilotRuntimeAcquisitionError.executableMissing }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let output = directory.appending(path: "copilot")
+        try executable.write(to: output, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: output.path)
+        return output
+    }
+
+    /// POSIX tar ends in exactly two zero records. We permit additional zero
+    /// padding only; accepting payload after the terminator would permit a
+    /// concatenated or ambiguously parsed archive.
+    static func requireCanonicalTerminator(in tar: Data, at offset: Int) throws {
+        let recordSize = 512
+        guard offset >= 0, offset + (recordSize * 2) <= tar.count else {
+            throw CopilotRuntimeAcquisitionError.invalidArchive
+        }
+        let first = tar[offset..<(offset + recordSize)]
+        let second = tar[(offset + recordSize)..<(offset + recordSize * 2)]
+        guard first.allSatisfy({ $0 == 0 }), second.allSatisfy({ $0 == 0 }),
+              tar.dropFirst(offset + recordSize * 2).allSatisfy({ $0 == 0 }) else {
+            throw CopilotRuntimeAcquisitionError.invalidArchive
+        }
+    }
+
+    private func string(_ header: Data, _ offset: Int, _ length: Int) throws -> String {
+        let bytes = header[offset..<(offset + length)].prefix { $0 != 0 }
+        guard let value = String(data: bytes, encoding: .utf8), !value.contains(".."), !value.hasPrefix("/") else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        return value
+    }
+    private func octal(_ header: Data, _ offset: Int, _ length: Int) throws -> Int {
+        let text = String(data: header[offset..<(offset + length)].prefix { $0 != 0 && $0 != 32 }, encoding: .ascii) ?? ""
+        guard let value = Int(text.trimmingCharacters(in: .whitespacesAndNewlines), radix: 8), value >= 0 else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        return value
+    }
+}
+
+private enum CopilotRuntimeGzip {
+    static func decode(_ source: Data, maximumOutputBytes: Int) throws -> Data {
+        let initialDestination = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+        let initialSource = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+        defer { initialDestination.deallocate(); initialSource.deallocate() }
+        var stream = compression_stream(dst_ptr: initialDestination, dst_size: 0, src_ptr: initialSource, src_size: 0, state: nil)
+        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        defer { compression_stream_destroy(&stream) }
+        var output = Data(); var status: compression_status = COMPRESSION_STATUS_OK
+        var remainingInput = 0
+        try source.withUnsafeBytes { input in
+            guard let base = input.bindMemory(to: UInt8.self).baseAddress else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            stream.src_ptr = base; stream.src_size = source.count
+            repeat {
+                var buffer = [UInt8](repeating: 0, count: 32 * 1_024)
+                status = try buffer.withUnsafeMutableBytes { destination in
+                    stream.dst_ptr = destination.bindMemory(to: UInt8.self).baseAddress!; stream.dst_size = destination.count
+                    let result = compression_stream_process(&stream, 0)
+                    output.append(destination.bindMemory(to: UInt8.self).baseAddress!, count: destination.count - stream.dst_size)
+                    guard output.count <= maximumOutputBytes else { throw CopilotRuntimeAcquisitionError.archiveTooLarge }
+                    return result
+                }
+            } while status == COMPRESSION_STATUS_OK
+            remainingInput = stream.src_size
+        }
+        guard status == COMPRESSION_STATUS_END, remainingInput == 0 else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        return output
+    }
+}
+
+struct CopilotRuntimeCodeValidator: CopilotRuntimeValidating {
+    private let requirementPreflight: @Sendable (String) -> Bool
+
+    init(requirementPreflight: @escaping @Sendable (String) -> Bool = { text in
+        var requirement: SecRequirement?
+        return SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess && requirement != nil
+    }) {
+        self.requirementPreflight = requirementPreflight
+    }
+
+    static var requirementText: String {
+        "identifier \"\(CopilotRuntimeRelease.signingIdentifier)\" and certificate leaf[subject.OU] = \"\(CopilotRuntimeRelease.signingTeam)\" and anchor apple generic"
+    }
+
+    func hasParsableRequirement() -> Bool { requirementPreflight(Self.requirementText) }
+
+    func validate(_ executable: URL, architecture: CopilotRuntimeArchitecture) throws {
+        let requirementText = Self.requirementText
+        guard requirementPreflight(requirementText) else { throw CopilotRuntimeAcquisitionError.invalidCodeSignature }
+        let header = try Data(contentsOf: executable, options: .mappedIfSafe).prefix(8)
+        guard header.count == 8, header.withUnsafeBytes({ $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) }) == UInt32(0xfeedfacf).littleEndian,
+              header.withUnsafeBytes({ $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }) == architecture.cpuType.littleEndian else { throw CopilotRuntimeAcquisitionError.invalidExecutableArchitecture }
+        var code: SecStaticCode?; guard SecStaticCodeCreateWithPath(executable as CFURL, [], &code) == errSecSuccess, let code else { throw CopilotRuntimeAcquisitionError.invalidCodeSignature }
+        var requirement: SecRequirement?; guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess, let requirement, SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else { throw CopilotRuntimeAcquisitionError.invalidCodeSignature }
+        var information: CFDictionary?; guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let flags = (information as? [CFString: Any])?[kSecCodeInfoFlags] as? UInt32,
+              flags & 0x10000 != 0 else { throw CopilotRuntimeAcquisitionError.invalidCodeSignature }
+    }
+}
+
+struct CopilotRuntimeFileManager: CopilotRuntimeFileManaging {
+    func makeTemporaryDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-runtime-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]); return directory
+    }
+    func removeIfPresent(_ url: URL) { try? FileManager.default.removeItem(at: url) }
+    func installedExecutable(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) -> URL { root.appending(path: release.version).appending(path: architecture.rawValue).appending(path: "copilot") }
+    func install(_ executable: URL, root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws -> URL {
+        try CopilotRuntimeInstallLock.withExclusiveLock(root: root) {
+            let rootDescriptor = try CopilotRuntimePOSIX.openDirectoryTree(root, create: true)
+            defer { close(rootDescriptor) }
+            let versionDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(release.version, beneath: rootDescriptor)
+            defer { close(versionDescriptor) }
+            let architectureDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(architecture.rawValue, beneath: versionDescriptor)
+            defer { close(architectureDescriptor) }
+
+            let source = try CopilotRuntimePOSIX.openVerifiedRegularFile(executable)
+            defer { close(source) }
+            let stageName = ".copilot-stage-\(UUID().uuidString.lowercased())"
+            let stage = openat(architectureDescriptor, stageName, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IXUSR)
+            guard stage >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            defer { _ = unlinkat(architectureDescriptor, stageName, 0); close(stage) }
+            try CopilotRuntimePOSIX.copy(source: source, destination: stage)
+            guard fchmod(stage, S_IRUSR | S_IXUSR) == 0, fsync(stage) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            try CopilotRuntimePOSIX.requirePrivateRegularFile(stage)
+            // `renameat` is an atomic publication in the already-open target
+            // directory. No path lookup can follow a swapped ancestor.
+            guard renameat(architectureDescriptor, stageName, architectureDescriptor, "copilot") == 0,
+                  fsync(architectureDescriptor) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            let installedDescriptor = try CopilotRuntimePOSIX.openRegularFile("copilot", beneath: architectureDescriptor)
+            defer { close(installedDescriptor) }
+            try CopilotRuntimePOSIX.requirePrivateRegularFile(installedDescriptor)
+            return installedExecutable(root: root, release: release, architecture: architecture)
+        }
+    }
+    func removeInstalled(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws {
+        let rootDescriptor = try CopilotRuntimePOSIX.openDirectoryTree(root, create: false)
+        defer { close(rootDescriptor) }
+        let versionDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(release.version, beneath: rootDescriptor, create: false)
+        defer { close(versionDescriptor) }
+        let architectureDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(architecture.rawValue, beneath: versionDescriptor, create: false)
+        defer { close(architectureDescriptor) }
+        let executable = try CopilotRuntimePOSIX.openRegularFile("copilot", beneath: architectureDescriptor)
+        defer { close(executable) }
+        try CopilotRuntimePOSIX.requirePrivateRegularFile(executable)
+        guard unlinkat(architectureDescriptor, "copilot", 0) == 0, fsync(architectureDescriptor) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+    }
+    func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+}
+
+private enum CopilotRuntimePOSIX {
+    private static let privateDirectoryMode: mode_t = S_IRWXU
+    private static let privateExecutableMode: mode_t = S_IRUSR | S_IXUSR
+
+    static func openDirectoryTree(_ url: URL, create: Bool) throws -> Int32 {
+        guard url.isFileURL else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        let components = url.pathComponents.filter { $0 != "/" }
+        for (index, component) in components.enumerated() {
+            do {
+                // Every component is opened with O_NOFOLLOW. Only the
+                // app-owned root itself needs the private-mode invariant;
+                // system ancestors such as /Users are not Triage-owned.
+                let child = try openOrCreateDirectory(
+                    component,
+                    beneath: descriptor,
+                    create: create,
+                    requirePrivate: index == components.count - 1
+                )
+                close(descriptor); descriptor = child
+            } catch {
+                close(descriptor); throw error
+            }
+        }
+        return descriptor
+    }
+
+    static func openOrCreateDirectory(_ name: String, beneath parent: Int32, create: Bool = true, requirePrivate: Bool = true) throws -> Int32 {
+        guard isSafeComponent(name) else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        var descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0, errno == ENOENT, create {
+            guard mkdirat(parent, name, privateDirectoryMode) == 0 || errno == EEXIST else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        if requirePrivate {
+            do { try requirePrivateDirectory(descriptor) } catch { close(descriptor); throw error }
+        }
+        return descriptor
+    }
+
+    static func openVerifiedRegularFile(_ url: URL) throws -> Int32 {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        do { try requirePrivateRegularFile(descriptor) } catch { close(descriptor); throw error }
+        return descriptor
+    }
+
+    static func openRegularFile(_ name: String, beneath parent: Int32) throws -> Int32 {
+        guard isSafeComponent(name) else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        let descriptor = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        do { try requirePrivateRegularFile(descriptor) } catch { close(descriptor); throw error }
+        return descriptor
+    }
+
+    static func copy(source: Int32, destination: Int32) throws {
+        guard lseek(source, 0, SEEK_SET) >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(source, $0.baseAddress, $0.count) }
+            if count == 0 { return }
+            guard count > 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            var written = 0
+            while written < count {
+                let result = buffer.withUnsafeBytes { write(destination, $0.baseAddress!.advanced(by: written), count - written) }
+                guard result > 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+                written += result
+            }
+        }
+    }
+
+    static func requirePrivateDirectory(_ descriptor: Int32) throws {
+        var information = stat(); guard fstat(descriptor, &information) == 0,
+              information.st_uid == geteuid(),
+              (information.st_mode & S_IFMT) == S_IFDIR,
+              (information.st_mode & 0o077) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+    }
+
+    static func requirePrivateRegularFile(_ descriptor: Int32) throws {
+        var information = stat(); guard fstat(descriptor, &information) == 0,
+              information.st_uid == geteuid(),
+              (information.st_mode & S_IFMT) == S_IFREG,
+              information.st_nlink == 1,
+              (information.st_mode & 0o077) == 0,
+              (information.st_mode & privateExecutableMode) == privateExecutableMode else { throw CopilotRuntimeAcquisitionError.fileSystem }
+    }
+
+    private static func isSafeComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && !value.contains("/")
+    }
+}

@@ -249,6 +249,50 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(freshness.lastSuccessfulSyncAt, completedAt)
     }
 
+    func testOlderFailedIntervalDoesNotOverrideLaterSuccessfulCurrentRequirement() {
+        let scope = CoordinatorFixture.defaultScope
+        let freshness = Self.intervalCoverageState(
+            for: scope,
+            olderStatus: .failed,
+            currentStatus: .complete
+        ).freshness
+
+        XCTAssertEqual(freshness.status, .fresh)
+        XCTAssertEqual(
+            freshness.lastSuccessfulSyncAt,
+            CoordinatorFixture.initialDate.addingTimeInterval(40)
+        )
+    }
+
+    func testCurrentIntervalRetainsExplicitIncompleteFreshness() {
+        let scope = CoordinatorFixture.defaultScope
+        for (coverageStatus, freshnessStatus) in [
+            (CoverageStatus.partial, FreshnessStatus.partial),
+            (.requiresSSO, .ssoRequired),
+            (.requiresApproval, .approvalRequired),
+            (.failed, .failed)
+        ] {
+            let freshness = Self.intervalCoverageState(
+                for: scope,
+                olderStatus: .complete,
+                currentStatus: coverageStatus
+            ).freshness
+
+            XCTAssertEqual(
+                freshness.status,
+                freshnessStatus,
+                "The current \(coverageStatus) interval must remain explicit."
+            )
+        }
+    }
+
+    func testNarrowerFailedRetryWithSameServerTimeOverridesEarlierCompleteCoverage() {
+        let scope = CoordinatorFixture.defaultScope
+        let freshness = Self.sameEndOverlappingCoverageState(for: scope).freshness
+
+        XCTAssertEqual(freshness.status, .failed)
+    }
+
     func testAttachedPriorityRegressionUsesContinuationReceiptRatherThanArrayIndexing() async throws {
         let fixture = CoordinatorFixture()
         let scope = fixture.scope()
@@ -1041,6 +1085,169 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
                 )
             ],
             lastSuccessfulSyncAt: timestamp
+        )
+    }
+
+    private static func intervalCoverageState(
+        for scope: SynchronizationScope,
+        olderStatus: CoverageStatus,
+        currentStatus: CoverageStatus
+    ) -> AccountOrganizationCachedState {
+        let olderStart = CoordinatorFixture.initialDate.addingTimeInterval(10)
+        let olderEnd = CoordinatorFixture.initialDate.addingTimeInterval(20)
+        let currentStart = CoordinatorFixture.initialDate.addingTimeInterval(30)
+        let currentEnd = CoordinatorFixture.initialDate.addingTimeInterval(40)
+        let roleDiscoveryStream = SyncStreamID(
+            rawValue: "role-discovery-\(scope.organizationID.rawValue)"
+        )!
+        var coverage = AccountOrganizationCoverageManifest.requiredFeatures.map { feature in
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: feature,
+                streamID: SyncStreamID(rawValue: "required-\(feature.rawValue)")!,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: currentEnd,
+                failureDetail: nil
+            )
+        }
+        coverage.removeAll { $0.feature == .roleDiscovery }
+        coverage += [
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .roleDiscovery,
+                streamID: roleDiscoveryStream,
+                intervalStart: olderStart,
+                intervalEnd: olderEnd,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: olderStatus,
+                lastSuccessfulAt: olderEnd,
+                failureDetail: "Older interval status."
+            ),
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .roleDiscovery,
+                streamID: roleDiscoveryStream,
+                intervalStart: currentStart,
+                intervalEnd: currentEnd,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: currentStatus,
+                lastSuccessfulAt: currentEnd,
+                failureDetail: "Current interval status."
+            )
+        ]
+        let requirements = AccountOrganizationCoverageManifest.requiredFeatures.map { feature in
+            if feature == .roleDiscovery {
+                CoverageRequirement(
+                    feature: feature,
+                    repositoryID: nil,
+                    streamID: roleDiscoveryStream,
+                    intervalStart: currentStart,
+                    intervalEnd: currentEnd
+                )
+            } else {
+                CoverageRequirement(
+                    feature: feature,
+                    repositoryID: nil,
+                    streamID: SyncStreamID(rawValue: "required-\(feature.rawValue)")!
+                )
+            }
+        }
+        return AccountOrganizationCachedState(
+            coverage: coverage,
+            coverageRequirements: requirements,
+            lastSuccessfulSyncAt: currentEnd
+        )
+    }
+
+    private static func sameEndOverlappingCoverageState(
+        for scope: SynchronizationScope
+    ) -> AccountOrganizationCachedState {
+        let olderStart = CoordinatorFixture.initialDate.addingTimeInterval(10)
+        let retryStart = CoordinatorFixture.initialDate.addingTimeInterval(30)
+        let sharedServerEnd = CoordinatorFixture.initialDate.addingTimeInterval(40)
+        let roleDiscoveryStream = SyncStreamID(
+            rawValue: "role-discovery-\(scope.organizationID.rawValue)"
+        )!
+        var coverage = AccountOrganizationCoverageManifest.requiredFeatures.map { feature in
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: feature,
+                streamID: SyncStreamID(rawValue: "required-\(feature.rawValue)")!,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: sharedServerEnd,
+                failureDetail: nil
+            )
+        }
+        coverage.removeAll { $0.feature == .roleDiscovery }
+        coverage += [
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .roleDiscovery,
+                streamID: roleDiscoveryStream,
+                intervalStart: olderStart,
+                intervalEnd: sharedServerEnd,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: sharedServerEnd,
+                failureDetail: nil
+            ),
+            CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .roleDiscovery,
+                streamID: roleDiscoveryStream,
+                intervalStart: retryStart,
+                intervalEnd: sharedServerEnd,
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: .failed,
+                lastSuccessfulAt: nil,
+                failureDetail: "Retry failed."
+            )
+        ]
+        let requirements = AccountOrganizationCoverageManifest.requiredFeatures.map { feature in
+            if feature == .roleDiscovery {
+                CoverageRequirement(
+                    feature: feature,
+                    repositoryID: nil,
+                    streamID: roleDiscoveryStream,
+                    intervalStart: retryStart,
+                    intervalEnd: sharedServerEnd
+                )
+            } else {
+                CoverageRequirement(
+                    feature: feature,
+                    repositoryID: nil,
+                    streamID: SyncStreamID(rawValue: "required-\(feature.rawValue)")!
+                )
+            }
+        }
+        return AccountOrganizationCachedState(
+            coverage: coverage,
+            coverageRequirements: requirements,
+            lastSuccessfulSyncAt: sharedServerEnd
         )
     }
 

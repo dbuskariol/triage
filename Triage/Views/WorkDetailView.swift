@@ -1,5 +1,14 @@
 import SwiftUI
 
+private struct WorkspaceInspectorWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
 struct WorkDetailView: View {
     @Environment(\.undoManager) private var undoManager
     @EnvironmentObject private var navigation: AppNavigationModel
@@ -7,6 +16,7 @@ struct WorkDetailView: View {
     let item: WorkItem?
     @FocusState private var accessibilityFocus: WorkDetailPresentation.AccessibilityFocusTarget?
     @StateObject private var workflowUndo = LocalWorkflowUndoCoordinator()
+    @StateObject private var groupingUndo = LocalGroupingUndoCoordinator()
 
     var body: some View {
         Group {
@@ -21,7 +31,10 @@ struct WorkDetailView: View {
                         DetailRelatedContentSection(item: item)
                         DetailReviewStateSection(item: item)
                         DetailProjectContextSection(item: item)
-                        DetailTimelineSection(item: item)
+                        DetailTimelineSection(
+                            item: item,
+                            isExpanded: $navigation.isTimelineExpanded
+                        )
                         DetailEvidenceSection(item: item)
                     }
                     .padding(28)
@@ -51,6 +64,7 @@ struct WorkDetailView: View {
             }
         }
         .focusedSceneValue(\.triageInspectorVisibility, inspectorCommandBinding)
+        .focusedSceneValue(\.triageWorkflowUndoCoordinator, workflowUndo)
         .onChange(of: navigation.isInspectorVisible) { _, isPresented in
             accessibilityFocus = WorkDetailPresentation.inspectorFocusTarget(isPresented: isPresented)
         }
@@ -69,9 +83,25 @@ struct WorkDetailView: View {
                     item: item,
                     focus: $accessibilityFocus,
                     undoCoordinator: workflowUndo,
+                    groupingUndoCoordinator: groupingUndo,
                     undoManager: undoManager
                 )
-                    .frame(minWidth: 280, idealWidth: 340)
+                    .frame(
+                        minWidth: CGFloat(WorkspaceSplitLayout.inspectorMinimumWidth),
+                        idealWidth: CGFloat(navigation.workspaceInspectorWidth),
+                        maxWidth: CGFloat(WorkspaceSplitLayout.inspectorMaximumWidth)
+                    )
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: WorkspaceInspectorWidthPreferenceKey.self,
+                                value: proxy.size.width
+                            )
+                        }
+                    }
+                    .onPreferenceChange(WorkspaceInspectorWidthPreferenceKey.self) { width in
+                        navigation.recordWorkspaceInspectorWidth(Double(width))
+                    }
             }
         }
     }
@@ -569,6 +599,7 @@ private struct DetailProjectContextSection: View {
 private struct DetailTimelineSection: View {
     @EnvironmentObject private var appModel: TriageAppModel
     let item: WorkItem
+    @Binding var isExpanded: Bool
     @State private var entries: [WorkDetailTimelineEntry] = []
     @State private var nextCursor: WorkDetailTimelineCursor?
     @State private var isLoading = false
@@ -576,7 +607,36 @@ private struct DetailTimelineSection: View {
     @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
-        DetailSection("Timeline", systemImage: "clock.arrow.circlepath") {
+        CardContainer {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                timelineContent
+            } label: {
+                Label("Timeline", systemImage: "clock.arrow.circlepath")
+                    .font(.headline)
+                    .accessibilityHeading(.h2)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Timeline")
+        .onAppear {
+            if isExpanded { loadFirstPage() }
+        }
+        .onChange(of: item.id) { _, _ in
+            if isExpanded { loadFirstPage() }
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            if expanded {
+                loadFirstPage()
+            } else {
+                loadTask?.cancel()
+                isLoading = false
+            }
+        }
+        .onDisappear { loadTask?.cancel() }
+    }
+
+    private var timelineContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
             if entries.isEmpty, didLoad {
                 Text("No normalized chronology is available in this local record.")
                     .foregroundStyle(.secondary)
@@ -609,11 +669,6 @@ private struct DetailTimelineSection: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .onAppear { loadFirstPage() }
-        .onChange(of: item.id) { _, _ in
-            loadFirstPage()
-        }
-        .onDisappear { loadTask?.cancel() }
     }
 
     private func loadFirstPage() {
@@ -681,9 +736,11 @@ private struct DetailSection<Content: View>: View {
 
 private struct WorkInspectorView: View {
     @EnvironmentObject private var appModel: TriageAppModel
+    @EnvironmentObject private var preferences: AppPreferences
     let item: WorkItem
     @FocusState.Binding var focus: WorkDetailPresentation.AccessibilityFocusTarget?
     @ObservedObject var undoCoordinator: LocalWorkflowUndoCoordinator
+    @ObservedObject var groupingUndoCoordinator: LocalGroupingUndoCoordinator
     let undoManager: UndoManager?
     @State private var followUpAt = WorkDetailPresentation.defaultFollowUpDate(from: .now)
 
@@ -722,14 +779,20 @@ private struct WorkInspectorView: View {
                 .accessibilityIdentifier("work-inspector-priority")
                 .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
                 Menu("Snooze") {
-                    Button("1 Hour") {
-                        applyLocalWorkflowAction(.snooze(until: .now.addingTimeInterval(3_600)))
+                    ForEach(InboxSnoozeSlot.allCases) { slot in
+                        Button(preferences.inboxSnoozeDurations.title(for: slot)) {
+                            applyLocalWorkflowAction(
+                                .snooze(
+                                    until: .now.addingTimeInterval(
+                                        TimeInterval(
+                                            preferences.inboxSnoozeDurations.minutes(for: slot) * 60
+                                        )
+                                    )
+                                )
+                            )
+                        }
+                        .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
                     }
-                    .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
-                    Button("Tomorrow") {
-                        applyLocalWorkflowAction(.snooze(until: .now.addingTimeInterval(86_400)))
-                    }
-                    .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
                     if item.workflow.snoozedUntil != nil {
                         Button("Clear Snooze") {
                             applyLocalWorkflowAction(.clearSnooze)
@@ -773,6 +836,60 @@ private struct WorkInspectorView: View {
                 }
             }
 
+            Section("Grouping") {
+                let candidates = WorkDetailPresentation.groupingCandidates(for: item)
+                if candidates.isEmpty {
+                    Text("No locally confirmed related item is available to review for grouping.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Menu("Review Related Item") {
+                        ForEach(candidates) { candidate in
+                            Button("Confirm Merge with \(candidate.title)") {
+                                applyGrouping(.confirmMerge(
+                                    sourceNodeID: item.primaryNodeID,
+                                    destinationNodeID: candidate.destinationNodeID,
+                                    relation: candidate.relation
+                                ))
+                            }
+                            .accessibilityHint(WorkDetailPresentation.localGroupingAccessibilityHint)
+                            Button("Keep Separate from \(candidate.title)") {
+                                applyGrouping(.keepSeparate(
+                                    sourceNodeID: item.primaryNodeID,
+                                    destinationNodeID: candidate.destinationNodeID,
+                                    relation: candidate.relation
+                                ))
+                            }
+                            .accessibilityHint(WorkDetailPresentation.localGroupingAccessibilityHint)
+                        }
+                    }
+                    .accessibilityIdentifier("work-inspector-grouping-review")
+                    .accessibilityHint(WorkDetailPresentation.localGroupingAccessibilityHint)
+                }
+
+                if item.members.count > 1, !item.actionItems.isEmpty {
+                    Text("Before separating these items, choose an owner for any action whose destination would otherwise be ambiguous.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Menu("Resolve Split Action Ownership") {
+                        ForEach(item.actionItems) { actionItem in
+                            Menu(actionItem.title) {
+                                ForEach(item.members) { member in
+                                    Button("Keep with \(member.content.title)") {
+                                        assignActionItem(actionItem, to: member.id)
+                                    }
+                                    .accessibilityHint("Assigns this local action item before a manual split. It does not modify GitHub.")
+                                }
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("work-inspector-split-ownership")
+                    .accessibilityHint("Assigns local action ownership before a manual split. It does not modify GitHub.")
+                }
+                Text("Grouping choices and split action ownership are stored in Triage’s encrypted local vault. They do not modify GitHub.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Why this is here") {
                 if item.attentionReasons.isEmpty {
                     Text("No current deterministic attention reason is attached to this item.")
@@ -804,6 +921,14 @@ private struct WorkInspectorView: View {
                         .accessibilityLabel(feedback)
                 }
             }
+            if let feedback = groupingUndoCoordinator.feedback {
+                Section("Grouping history") {
+                    Text(feedback)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(feedback)
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("Inspector")
@@ -829,6 +954,28 @@ private struct WorkInspectorView: View {
                 to: item,
                 appModel: appModel,
                 undoManager: undoManager
+            )
+        }
+    }
+
+    private func applyGrouping(_ mutation: WorkItemGroupingMutation) {
+        Task {
+            await groupingUndoCoordinator.perform(
+                mutation,
+                to: item,
+                appModel: appModel,
+                undoManager: undoManager
+            )
+        }
+    }
+
+    private func assignActionItem(_ actionItem: ActionItem, to nodeID: GitHubNodeID) {
+        Task {
+            let assigned = await appModel.assignActionItem(actionItem, toMemberNodeID: nodeID, in: item)
+            groupingUndoCoordinator.presentFeedback(
+                assigned
+                    ? "Local split action ownership updated. GitHub was not modified."
+                    : "Triage could not assign this local action item to the selected split owner. GitHub was not modified."
             )
         }
     }

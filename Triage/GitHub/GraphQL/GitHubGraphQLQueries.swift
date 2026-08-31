@@ -6,6 +6,7 @@ enum GitHubGraphQLQueries {
         "TriageHydrateNodes",
         "TriagePullRequestReviewThreads",
         "TriagePullRequestReviewThreadComments",
+        "TriagePullRequestStatusChecks",
         "TriageRepositoryDiscussions",
         "TriageDiscussionComments",
         "TriageDiscussionCommentReplies",
@@ -23,6 +24,7 @@ enum GitHubGraphQLQueries {
             hydrateNodes(),
             pullRequestReviewThreads(),
             pullRequestReviewThreadComments(),
+            pullRequestStatusChecks(),
             repositoryDiscussions(),
             discussionComments(),
             discussionCommentReplies(),
@@ -204,6 +206,44 @@ enum GitHubGraphQLQueries {
             }
             """,
             operationName: "TriagePullRequestReviewThreadComments"
+        )
+    }
+
+    /// The sole authority for a pull request's current status checks. Both
+    /// CheckRun and StatusContext implement RequirableByPullRequest, so
+    /// requiredness is evaluated by GitHub for this exact pull request rather
+    /// than inferred from a branch rule or a similarly named check.
+    static func pullRequestStatusChecks() throws -> GitHubGraphQLQuery {
+        try GitHubGraphQLQuery(
+            document: """
+            query TriagePullRequestStatusChecks($pullRequestID: ID!, $after: String) {
+              node(id: $pullRequestID) {
+                ... on PullRequest {
+                  id
+                  number
+                  mergeable
+                  statusCheckRollup {
+                    contexts(first: 50, after: $after) {
+                      nodes {
+                        __typename
+                        ... on CheckRun {
+                          id name status conclusion completedAt
+                          isRequired(pullRequestId: $pullRequestID)
+                        }
+                        ... on StatusContext {
+                          id context state updatedAt
+                          isRequired(pullRequestId: $pullRequestID)
+                        }
+                      }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                }
+              }
+              rateLimit { cost remaining resetAt }
+            }
+            """,
+            operationName: "TriagePullRequestStatusChecks"
         )
     }
 

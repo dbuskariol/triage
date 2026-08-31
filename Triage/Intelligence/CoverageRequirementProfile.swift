@@ -66,6 +66,7 @@ enum CoverageRequirementProfile {
             requirement(.pullRequests, stream: "hydration-pull-requests-\(organization)"),
             requirement(.reviews, stream: "pull-request-reviews-\(organization)"),
             requirement(.reviewThreads, stream: "pull-request-review-threads-\(organization)"),
+            requirement(.statusChecks, stream: "pull-request-status-checks-\(organization)"),
             requirement(.timelines, stream: "timelines-\(organization)"),
             requirement(
                 .discussions,

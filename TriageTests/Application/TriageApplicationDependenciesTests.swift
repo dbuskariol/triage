@@ -323,6 +323,34 @@ final class TriageApplicationDependenciesTests: XCTestCase {
         XCTAssertEqual(freshActivations, 1)
     }
 
+    func testProductionCoordinatorDrainsAllAIControllersBeforeClosingVaults() async {
+        let recorder = ShutdownAIDrainRecorder()
+        let coordinator = TriageWorkspaceCoordinator(
+            makeRuntime: { _ in throw CancellationError() },
+            closeAllVaults: { await recorder.closeVaults() },
+            organizationAIControllers: ShutdownAIControllerProviderSpy(recorder: recorder)
+        )
+
+        let shutdown = Task { await coordinator.shutdown() }
+        await recorder.waitUntilActiveAIOperationIsCancelled()
+        let vaultsAreClosedBeforeDrain = await recorder.vaultsAreClosed()
+        XCTAssertFalse(vaultsAreClosedBeforeDrain)
+
+        await recorder.finishActiveAIOperation()
+        await shutdown.value
+
+        let vaultCloseObservedDrainedAIOperation = await recorder.vaultCloseObservedDrainedAIOperation()
+        XCTAssertTrue(vaultCloseObservedDrainedAIOperation)
+
+        // Shutdown remains idempotent after the registry and vaults have
+        // already been released.
+        await coordinator.shutdown()
+        let evictAllCount = await recorder.evictAllCount()
+        let vaultCloseCount = await recorder.vaultCloseCount()
+        XCTAssertEqual(evictAllCount, 1)
+        XCTAssertEqual(vaultCloseCount, 1)
+    }
+
     func testSnapshotRejectsMixedAuthorityCoverage() throws {
         let scope = fixtureScope()
         let record = CoverageRecord(
@@ -555,6 +583,63 @@ private actor CoordinatorRuntimeSpy: AccountWorkspaceRefreshRunning {
     func refreshScopes() -> [SynchronizationScope] { refreshed }
     func activationCount() -> Int { activations }
     func cancelCount() -> Int { cancellations }
+}
+
+/// Models a registry-owned, non-cooperative analysis operation. Its all-account
+/// eviction does not complete until cancellation has drained that operation.
+private actor ShutdownAIControllerProviderSpy: OrganizationAIControllerProviding {
+    private let recorder: ShutdownAIDrainRecorder
+
+    init(recorder: ShutdownAIDrainRecorder) {
+        self.recorder = recorder
+    }
+
+    func controller(for _: AccountVault) async -> OrganizationAIController {
+        fatalError("The shutdown ordering test must not create a new controller.")
+    }
+
+    func evict(accountID _: AccountID) async {}
+
+    func evictAll() async {
+        await recorder.cancelAndDrainActiveAIOperation()
+    }
+}
+
+private actor ShutdownAIDrainRecorder {
+    private var activeAIOperationDrained = false
+    private var vaultCloseObservedAIDrain = false
+    private var evictions = 0
+    private var vaultCloses = 0
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func cancelAndDrainActiveAIOperation() async {
+        evictions += 1
+        cancellationWaiters.forEach { $0.resume() }
+        cancellationWaiters.removeAll()
+        await withCheckedContinuation { drainWaiters.append($0) }
+        activeAIOperationDrained = true
+    }
+
+    func waitUntilActiveAIOperationIsCancelled() async {
+        guard evictions == 0 else { return }
+        await withCheckedContinuation { cancellationWaiters.append($0) }
+    }
+
+    func finishActiveAIOperation() {
+        drainWaiters.forEach { $0.resume() }
+        drainWaiters.removeAll()
+    }
+
+    func closeVaults() {
+        vaultCloses += 1
+        vaultCloseObservedAIDrain = activeAIOperationDrained
+    }
+
+    func vaultsAreClosed() -> Bool { vaultCloses > 0 }
+    func vaultCloseObservedDrainedAIOperation() -> Bool { vaultCloseObservedAIDrain }
+    func evictAllCount() -> Int { evictions }
+    func vaultCloseCount() -> Int { vaultCloses }
 }
 
 private actor RotatingCoordinatorRuntimeFactory {

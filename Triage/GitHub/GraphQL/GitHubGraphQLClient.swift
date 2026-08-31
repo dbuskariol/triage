@@ -5,6 +5,7 @@ enum GitHubGraphQLError: Error, Equatable, Sendable {
     case unregisteredQuery
     case invalidQuery
     case invalidResponse
+    case invalidResponseAuthority
     case responseTooLarge
     case partialResponse
     case missingData
@@ -177,11 +178,15 @@ actor GitHubGraphQLClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(GitHubRESTTransport.apiVersion, forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue(GitHubRESTTransport.defaultUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONEncoder().encode(
             GraphQLRequest(query: query.document, operationName: query.operationName, variables: variables)
         )
         let (body, response) = try await send(request)
         try Task.checkCancellation()
+        guard GitHubAPIResponseAuthority.isValid(response.url) else {
+            throw GitHubGraphQLError.invalidResponseAuthority
+        }
         guard body.count <= Self.maximumResponseBodyBytes else {
             throw GitHubGraphQLError.responseTooLarge
         }

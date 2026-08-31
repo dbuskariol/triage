@@ -19,7 +19,16 @@ actor WorkflowActionService {
             throw AccountCredentialReaderError.missingAccessToken
         }
         let vault = try await vaultRegistry.open(accountID: workItem.accountID, vaultKey: vaultKey)
-        try await WorkflowRepository(vault: vault).save(transition.next, for: workItem.id)
+        let scope = try await AccountRepository(vault: vault).synchronizationScope(
+            for: workItem.accountID,
+            organizationID: workItem.organizationID
+        )
+        _ = try await WorkflowHistoryRepository(vault: vault).apply(
+            action,
+            to: [workItem.id],
+            in: scope,
+            at: date
+        )
         return workItem.replacing(workflow: transition.next)
     }
 }

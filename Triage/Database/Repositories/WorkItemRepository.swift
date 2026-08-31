@@ -3,7 +3,27 @@ import GRDB
 
 enum WorkItemRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
+    case inboxPageCursorScopeMismatch
     case invalidPersistedData
+}
+
+/// The immutable ordering key for a persisted Inbox page. It is scoped to the
+/// same credential/capability authority as the read so a cursor can never be
+/// replayed into a different organization view.
+struct InboxPageCursor: Codable, Equatable, Sendable {
+    let scope: SynchronizationScope
+    let isPinned: Bool
+    let priority: WorkPriority
+    let score: Int
+    let earliestOpenActionDueAt: Date?
+    let lastRelevantActivityAt: Date
+    let workItemID: WorkItemID
+}
+
+struct InboxPage: Sendable {
+    let items: [WorkItem]
+    let nextCursor: InboxPageCursor?
+    let hasMore: Bool
 }
 
 actor WorkItemRepository {
@@ -31,6 +51,9 @@ actor WorkItemRepository {
         let queryObserver = self.queryObserver
         let items: [WorkItem] = try await vault.read { database -> [WorkItem] in
             try Task.checkCancellation()
+            let currentDerivedSourceRevision = try authorityScope.map {
+                try Self.currentDerivedSourceRevision(for: $0, in: database)
+            }
             queryObserver?()
             let rows = try Row.fetchAll(
                 database,
@@ -77,77 +100,272 @@ actor WorkItemRepository {
                 """,
                 arguments: [accountID.rawValue, organizationID.rawValue]
             )
-            let workItemIDs = try rows.map { row -> String in
-                guard let workItemID: String = row["id"] else {
-                    throw WorkItemRepositoryError.invalidPersistedData
-                }
-                return workItemID
-            }
-            guard !workItemIDs.isEmpty else { return [] }
-
-            // A full work item graph is still the public repository contract,
-            // but it is now loaded in bounded set queries instead of issuing
-            // several dependent reads for every work item.
-            let reasons = try Self.attentionReasons(
-                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
-            )
-            try Task.checkCancellation()
-            let actions = try Self.actionItems(
-                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
-            )
-            try Task.checkCancellation()
-            let memberReferences = try Self.memberReferences(
-                in: database,
-                workItemIDs: workItemIDs,
-                authorityScope: authorityScope,
-                onQuery: queryObserver
-            )
-            let contextReferences = try Self.contextReferences(
-                in: database,
-                workItemIDs: workItemIDs,
-                authorityScope: authorityScope,
-                onQuery: queryObserver
-            )
-            let relatedNodeIDs = Set(memberReferences.map(\.nodeID) + contextReferences.map(\.nodeID))
-            let content = try Self.content(
-                in: database,
-                nodeIDs: relatedNodeIDs,
-                authorityScope: authorityScope,
-                onQuery: queryObserver
-            )
-            let members = try Self.members(memberReferences, contentByNodeID: content)
-            let contextLinks = try Self.contextLinks(contextReferences, contentByNodeID: content)
-            try Task.checkCancellation()
-            let relations = try Self.relations(
-                in: database,
+            return try Self.loadGraph(
+                from: rows,
                 accountID: accountID,
-                workItemIDs: workItemIDs,
+                organizationID: organizationID,
                 authorityScope: authorityScope,
-                onQuery: queryObserver
+                currentDerivedSourceRevision: currentDerivedSourceRevision,
+                freshness: FreshnessState(status: .fresh),
+                onQuery: queryObserver,
+                in: database
             )
-            try Task.checkCancellation()
-
-            return try rows.enumerated().map { index, row in
-                if index.isMultiple(of: 64) {
-                    try Task.checkCancellation()
-                }
-                guard let workItemID: String = row["id"] else {
-                    throw WorkItemRepositoryError.invalidPersistedData
-                }
-                return try Self.workItem(
-                    from: row,
-                    accountID: accountID,
-                    organizationID: organizationID,
-                    attentionReasons: reasons[workItemID] ?? [],
-                    actionItems: actions[workItemID] ?? [],
-                    members: members[workItemID] ?? [],
-                    contextLinks: contextLinks[workItemID] ?? [],
-                    relations: relations[workItemID] ?? []
-                )
-            }
         }
         try Task.checkCancellation()
         return items
+    }
+
+    /// Loads one persisted-rank Inbox page. Eligibility is evaluated in SQL
+    /// from exactly the same durable workflow, rule, and action state used by
+    /// `InboxEligibilityRule`; the selected rows are then decoded through the
+    /// normal authoritative graph loader. A caller supplies the scoped
+    /// freshness state that accompanies this cached presentation so this read
+    /// cannot silently turn partial or stale coverage into a fresh Inbox.
+    func fetchInboxPage(
+        scope: SynchronizationScope,
+        at date: Date,
+        freshness: FreshnessState,
+        limit: Int
+    ) async throws -> [WorkItem] {
+        try await fetchInboxPage(
+            scope: scope,
+            at: date,
+            freshness: freshness,
+            limit: limit,
+            after: nil
+        ).items
+    }
+
+    /// Loads one stable keyset page of Inbox work. `nextCursor` is present
+    /// exactly when `hasMore` is true; callers must carry it into `after` for
+    /// the next page rather than deriving an offset from mutable cached data.
+    func fetchInboxPage(
+        scope: SynchronizationScope,
+        at date: Date,
+        freshness: FreshnessState,
+        limit: Int,
+        after cursor: InboxPageCursor?
+    ) async throws -> InboxPage {
+        try ensureAccountScope(scope.accountID)
+        if let cursor, cursor.scope != scope {
+            throw WorkItemRepositoryError.inboxPageCursorScopeMismatch
+        }
+        guard limit > 0 else {
+            return InboxPage(items: [], nextCursor: nil, hasMore: false)
+        }
+        try Task.checkCancellation()
+
+        let queryObserver = self.queryObserver
+        // Snooze deadlines are persisted in integer milliseconds, but inbox
+        // eligibility compares their decoded `Date` values against the exact
+        // caller-supplied instant. Keep this bound as a floating-point
+        // millisecond value so a deadline at 1.001s remains snoozed at
+        // 1.0006s, matching `WorkflowState.isSnoozed(at:)`.
+        let now = date.timeIntervalSince1970 * 1_000
+        let requestedRowCount: Int
+        let didOverflowLimit: Bool
+        (requestedRowCount, didOverflowLimit) = limit.addingReportingOverflow(1)
+        let pageRowLimit = didOverflowLimit ? limit : requestedRowCount
+        let result: InboxPageLoad = try await vault.read { database in
+            try Task.checkCancellation()
+            queryObserver?()
+            let currentDerivedSourceRevision = try Self.currentDerivedSourceRevision(
+                for: scope,
+                in: database
+            )
+            let cursorPredicate = cursor == nil ? "" : Self.inboxPageCursorPredicate
+            var arguments: [DatabaseValueConvertible] = [
+                scope.accountID.rawValue,
+                scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue,
+                scope.capabilityRevision.rawValue,
+                currentDerivedSourceRevision,
+                scope.accountID.rawValue,
+                scope.organizationID.rawValue,
+                now
+            ]
+            if let cursor {
+                arguments += Self.inboxPageCursorArguments(cursor)
+            }
+            arguments.append(pageRowLimit)
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    WITH current_rule_evaluations AS (
+                        SELECT rule_evaluations.id, rule_evaluations.work_item_id, rule_evaluations.rule_id
+                        FROM rule_evaluations
+                        JOIN derived_intelligence_runs
+                          ON derived_intelligence_runs.account_id = rule_evaluations.account_id
+                         AND derived_intelligence_runs.organization_id = rule_evaluations.organization_id
+                         AND derived_intelligence_runs.credential_revision = rule_evaluations.credential_revision
+                         AND derived_intelligence_runs.capability_revision = rule_evaluations.capability_revision
+                         AND derived_intelligence_runs.source_revision = rule_evaluations.source_revision
+                        WHERE rule_evaluations.account_id = ?
+                          AND rule_evaluations.organization_id = ?
+                          AND rule_evaluations.credential_revision = ?
+                          AND rule_evaluations.capability_revision = ?
+                          AND rule_evaluations.source_revision = ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM rule_evaluation_evidence
+                              WHERE rule_evaluation_evidence.rule_evaluation_id = rule_evaluations.id
+                                AND \(Self.currentRuleEvidencePredicate)
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM rule_evaluation_evidence
+                              WHERE rule_evaluation_evidence.rule_evaluation_id = rule_evaluations.id
+                                AND NOT \(Self.currentRuleEvidencePredicate)
+                          )
+                    ), inbox_roots AS (
+                    SELECT
+                        work_items.id, work_items.primary_node_id, work_items.state,
+                        work_items.last_relevant_activity_at_ms,
+                        github_nodes.kind, github_nodes.title, github_nodes.html_url,
+                        github_nodes.repository_id,
+                        repositories.github_node_id AS repository_node_id,
+                        repositories.owner_login AS repository_owner_login,
+                        repositories.name AS repository_name,
+                        repositories.is_private AS repository_is_private,
+                        repositories.is_archived AS repository_is_archived,
+                        repositories.has_discussions AS repository_has_discussions,
+                        repositories.has_discussions_known AS repository_has_discussions_known,
+                        repositories.html_url AS repository_html_url,
+                        workflow_states.status AS workflow_status,
+                        workflow_states.pinned AS workflow_pinned,
+                        workflow_states.priority AS workflow_priority,
+                        workflow_states.snoozed_until_ms,
+                        workflow_states.follow_up_at_ms,
+                        workflow_states.local_note,
+                        workflow_states.updated_at_ms AS workflow_updated_at_ms,
+                        attention_scores.score,
+                        attention_scores.breakdown_json AS score_breakdown_json,
+                        COALESCE(workflow_states.pinned, 0) AS inbox_pinned,
+                        CASE workflow_states.priority
+                            WHEN 1 THEN 1
+                            WHEN 3 THEN 3
+                            ELSE 2
+                        END AS inbox_priority,
+                        COALESCE(attention_scores.score, 0) AS inbox_score,
+                        CASE WHEN (
+                            SELECT MIN(grouped_actions.due_at_ms)
+                            FROM action_items AS grouped_actions
+                            LEFT JOIN work_item_group_memberships
+                              ON work_item_group_memberships.constituent_work_item_id = grouped_actions.work_item_id
+                            WHERE COALESCE(
+                                      work_item_group_memberships.canonical_work_item_id,
+                                      grouped_actions.work_item_id
+                                  ) = work_items.id
+                              AND grouped_actions.state = 'open'
+                        ) IS NULL THEN 1 ELSE 0 END AS inbox_due_is_nil,
+                        (
+                            SELECT MIN(grouped_actions.due_at_ms)
+                            FROM action_items AS grouped_actions
+                            LEFT JOIN work_item_group_memberships
+                              ON work_item_group_memberships.constituent_work_item_id = grouped_actions.work_item_id
+                            WHERE COALESCE(
+                                      work_item_group_memberships.canonical_work_item_id,
+                                      grouped_actions.work_item_id
+                                  ) = work_items.id
+                              AND grouped_actions.state = 'open'
+                        ) AS inbox_due_at_ms
+                    FROM work_items
+                    JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                        AND github_nodes.account_id = work_items.account_id
+                        AND github_nodes.organization_id = work_items.organization_id
+                    LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
+                    LEFT JOIN workflow_states ON workflow_states.work_item_id = work_items.id
+                    LEFT JOIN attention_scores ON attention_scores.work_item_id = work_items.id
+                    LEFT JOIN work_item_group_memberships
+                      ON work_item_group_memberships.constituent_work_item_id = work_items.id
+                     AND work_item_group_memberships.account_id = work_items.account_id
+                     AND work_item_group_memberships.organization_id = work_items.organization_id
+                    WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                      AND (
+                          work_item_group_memberships.constituent_work_item_id IS NULL
+                          OR work_item_group_memberships.canonical_work_item_id = work_items.id
+                      )
+                      AND work_items.state != 'inaccessible'
+                      AND COALESCE(workflow_states.snoozed_until_ms > ?, 0) = 0
+                      AND COALESCE(workflow_states.status, 'active') != 'archived'
+                      AND (
+                          (
+                              COALESCE(workflow_states.status, 'active') = 'waiting'
+                              AND EXISTS (
+                                  SELECT 1 FROM current_rule_evaluations
+                                  WHERE current_rule_evaluations.work_item_id = work_items.id
+                                    AND current_rule_evaluations.rule_id IN ('awaitedActorResponded', 'followUpDue')
+                              )
+                          )
+                          OR (
+                              COALESCE(workflow_states.status, 'active') != 'waiting'
+                              AND (
+                                  work_items.state != 'resolved'
+                                  OR EXISTS (
+                                      SELECT 1 FROM action_items
+                                      LEFT JOIN work_item_group_memberships
+                                        ON work_item_group_memberships.constituent_work_item_id = action_items.work_item_id
+                                      WHERE COALESCE(
+                                                work_item_group_memberships.canonical_work_item_id,
+                                                action_items.work_item_id
+                                            ) = work_items.id
+                                        AND action_items.state = 'open'
+                                  )
+                              )
+                              AND (
+                                  COALESCE(workflow_states.pinned, 0) = 1
+                                  OR EXISTS (
+                                      SELECT 1 FROM current_rule_evaluations
+                                      WHERE current_rule_evaluations.work_item_id = work_items.id
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1 FROM action_items
+                                      LEFT JOIN work_item_group_memberships
+                                        ON work_item_group_memberships.constituent_work_item_id = action_items.work_item_id
+                                      WHERE COALESCE(
+                                                work_item_group_memberships.canonical_work_item_id,
+                                                action_items.work_item_id
+                                            ) = work_items.id
+                                        AND action_items.state = 'open'
+                                  )
+                              )
+                          )
+                      )
+                    )
+                    SELECT *
+                    FROM inbox_roots
+                    \(cursorPredicate)
+                    ORDER BY
+                        inbox_pinned DESC,
+                        inbox_priority DESC,
+                        inbox_score DESC,
+                        inbox_due_is_nil ASC,
+                        inbox_due_at_ms ASC,
+                        last_relevant_activity_at_ms DESC,
+                        id ASC
+                    LIMIT ?
+                    """,
+                arguments: StatementArguments(arguments)
+            )
+            let hasMore = !didOverflowLimit && rows.count > limit
+            let selectedRows = hasMore ? Array(rows.prefix(limit)) : rows
+            let items = try Self.loadGraph(
+                from: selectedRows,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                authorityScope: scope,
+                currentDerivedSourceRevision: currentDerivedSourceRevision,
+                freshness: freshness,
+                onQuery: queryObserver,
+                in: database
+            )
+            return InboxPageLoad(items: items, hasMore: hasMore)
+        }
+        try Task.checkCancellation()
+        let nextCursor = result.hasMore
+            ? try result.items.last.map { try Self.inboxPageCursor(for: $0, scope: scope) }
+            : nil
+        return InboxPage(items: result.items, nextCursor: nextCursor, hasMore: result.hasMore)
     }
 
     func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
@@ -194,26 +412,73 @@ actor WorkItemRepository {
         for node: NormalizedGitHubNode,
         in database: Database
     ) throws -> WorkItemID {
-        if let existingID: String = try String.fetchOne(
+        if let existing = try Row.fetchOne(
                 database,
                 sql: """
-                    SELECT id FROM work_items
+                    SELECT id, organization_id FROM work_items
                     WHERE account_id = ? AND primary_node_id = ?
                     """,
                 arguments: [node.accountID.rawValue, node.nodeID.rawValue]
-            ) {
+            ),
+            let existingID: String = existing["id"],
+            let existingOrganizationID: String = existing["organization_id"]
+        {
+                let wasTransferred = existingOrganizationID != node.organizationID.rawValue
                 try database.execute(
                     sql: """
                         UPDATE work_items
-                        SET state = ?, last_relevant_activity_at_ms = ?, updated_at_ms = ?
+                        SET organization_id = ?, state = ?, last_relevant_activity_at_ms = ?, updated_at_ms = ?
                         WHERE id = ?
                         """,
                     arguments: [
+                        node.organizationID.rawValue,
                         node.state == .open || node.state == .draft ? WorkItemState.active.rawValue : WorkItemState.resolved.rawValue,
                         Self.milliseconds(node.updatedAt),
                         Self.milliseconds(node.observedAt),
                         existingID
                     ]
+                )
+                if wasTransferred {
+                    // A transferred primary node keeps its durable Work Item
+                    // and local workflow history, but every derived graph edge
+                    // belonged to its former organization. Retain only the
+                    // primary membership until the destination projection
+                    // rebuilds the graph under its new authority.
+                    try database.execute(
+                        sql: "DELETE FROM work_item_members WHERE work_item_id = ? AND github_node_id != ?",
+                        arguments: [existingID, node.nodeID.rawValue]
+                    )
+                    try database.execute(
+                        sql: "DELETE FROM work_item_context_links WHERE work_item_id = ?",
+                        arguments: [existingID]
+                    )
+                    try database.execute(
+                        sql: """
+                            DELETE FROM work_item_group_memberships
+                            WHERE constituent_work_item_id = ? OR canonical_work_item_id = ?
+                            """,
+                        arguments: [existingID, existingID]
+                    )
+                    try database.execute(
+                        sql: """
+                            UPDATE github_nodes
+                            SET organization_id = ?
+                            WHERE github_node_id = ? AND account_id = ?
+                            """,
+                        arguments: [
+                            node.organizationID.rawValue,
+                            node.nodeID.rawValue,
+                            node.accountID.rawValue
+                        ]
+                    )
+                }
+                try database.execute(
+                    sql: """
+                        INSERT INTO work_item_members (work_item_id, github_node_id, role)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(work_item_id, github_node_id) DO UPDATE SET role = excluded.role
+                        """,
+                    arguments: [existingID, node.nodeID.rawValue, WorkItemMemberRole.primary.rawValue]
                 )
                 guard let workItemID = WorkItemID(rawValue: existingID) else {
                     throw WorkItemRepositoryError.invalidPersistedData
@@ -256,6 +521,94 @@ actor WorkItemRepository {
         }
     }
 
+    /// Decodes a complete graph for already bounded root rows. Keeping this
+    /// loader shared means the Inbox page has the same child collections and
+    /// exact evidence-authority filtering as the established full fetch.
+    private nonisolated static func loadGraph(
+        from rows: [Row],
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        authorityScope: SynchronizationScope?,
+        currentDerivedSourceRevision: String?,
+        freshness: FreshnessState,
+        onQuery: (@Sendable () -> Void)?,
+        in database: Database
+    ) throws -> [WorkItem] {
+        let workItemIDs = try rows.map { row -> String in
+            guard let workItemID: String = row["id"] else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return workItemID
+        }
+        guard !workItemIDs.isEmpty else { return [] }
+
+        // A full work item graph is still the public repository contract, but
+        // all dependent reads are bounded by the selected root rows.
+        let reasons = try attentionReasons(
+            in: database,
+            workItemIDs: workItemIDs,
+            authorityScope: authorityScope,
+            currentDerivedSourceRevision: currentDerivedSourceRevision,
+            onQuery: onQuery
+        )
+        try Task.checkCancellation()
+        let actions = try actionItems(
+            in: database, workItemIDs: workItemIDs, onQuery: onQuery
+        )
+        try Task.checkCancellation()
+        let memberReferences = try memberReferences(
+            in: database,
+            workItemIDs: workItemIDs,
+            authorityScope: authorityScope,
+            onQuery: onQuery
+        )
+        let contextReferences = try contextReferences(
+            in: database,
+            workItemIDs: workItemIDs,
+            authorityScope: authorityScope,
+            onQuery: onQuery
+        )
+        let relatedNodeIDs = Set(memberReferences.map(\.nodeID) + contextReferences.map(\.nodeID))
+        let content = try content(
+            in: database,
+            nodeIDs: relatedNodeIDs,
+            authorityScope: authorityScope,
+            onQuery: onQuery
+        )
+        let members = try members(memberReferences, contentByNodeID: content)
+        let contextLinks = try contextLinks(contextReferences, contentByNodeID: content)
+        try Task.checkCancellation()
+        let relations = try relations(
+            in: database,
+            accountID: accountID,
+            organizationID: organizationID,
+            workItemIDs: workItemIDs,
+            authorityScope: authorityScope,
+            onQuery: onQuery
+        )
+        try Task.checkCancellation()
+
+        return try rows.enumerated().map { index, row in
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            guard let workItemID: String = row["id"] else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            return try workItem(
+                from: row,
+                accountID: accountID,
+                organizationID: organizationID,
+                attentionReasons: reasons[workItemID] ?? [],
+                actionItems: actions[workItemID] ?? [],
+                members: members[workItemID] ?? [],
+                contextLinks: contextLinks[workItemID] ?? [],
+                relations: relations[workItemID] ?? [],
+                freshness: freshness
+            )
+        }
+    }
+
     private nonisolated static func workItem(
         from row: Row,
         accountID: AccountID,
@@ -264,7 +617,8 @@ actor WorkItemRepository {
         actionItems: [ActionItem],
         members: [WorkItemMember],
         contextLinks: [WorkItemContextLink],
-        relations: [WorkRelation]
+        relations: [WorkRelation],
+        freshness: FreshnessState
     ) throws -> WorkItem {
         guard let id = WorkItemID(rawValue: row["id"]),
               let nodeID = GitHubNodeID(rawValue: row["primary_node_id"]),
@@ -300,7 +654,7 @@ actor WorkItemRepository {
             attentionReasons: attentionReasons,
             actionItems: actionItems,
             workflow: workflow,
-            freshness: FreshnessState(status: .fresh),
+            freshness: freshness,
             lastRelevantActivityAt: activity,
             score: try attentionScore(from: row)
         )
@@ -352,6 +706,98 @@ actor WorkItemRepository {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 
+    private struct InboxPageLoad: Sendable {
+        let items: [WorkItem]
+        let hasMore: Bool
+    }
+
+    // This is the lexicographic continuation predicate for the exact persisted
+    // rank below. It intentionally uses the normalized SQL priority, since a
+    // corrupt stored priority decodes as `.normal` in `workflow(from:)`.
+    private static let inboxPageCursorPredicate = """
+        WHERE
+            inbox_pinned < ?
+            OR (inbox_pinned = ? AND inbox_priority < ?)
+            OR (inbox_pinned = ? AND inbox_priority = ? AND inbox_score < ?)
+            OR (
+                inbox_pinned = ?
+                AND inbox_priority = ?
+                AND inbox_score = ?
+                AND (
+                    inbox_due_is_nil > ?
+                    OR (
+                        inbox_due_is_nil = ?
+                        AND (
+                            (
+                                inbox_due_is_nil = 0
+                                AND (
+                                    inbox_due_at_ms > ?
+                                    OR (
+                                        inbox_due_at_ms = ?
+                                        AND (
+                                            last_relevant_activity_at_ms < ?
+                                            OR (
+                                                last_relevant_activity_at_ms = ?
+                                                AND id > ?
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                            OR (
+                                inbox_due_is_nil = 1
+                                AND (
+                                    last_relevant_activity_at_ms < ?
+                                    OR (
+                                        last_relevant_activity_at_ms = ?
+                                        AND id > ?
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        """
+
+    private nonisolated static func inboxPageCursorArguments(
+        _ cursor: InboxPageCursor
+    ) -> [DatabaseValueConvertible] {
+        let pinned = cursor.isPinned ? 1 : 0
+        let priority = cursor.priority.rawValue
+        let score = cursor.score
+        let dueBucket = cursor.earliestOpenActionDueAt == nil ? 1 : 0
+        // This value is ignored for a nil due date, because that branch only
+        // evaluates the activity/id suffix. Keeping it non-optional avoids a
+        // SQLite NULL comparison from changing the keyset predicate.
+        let dueAt = cursor.earliestOpenActionDueAt.map(milliseconds) ?? 0
+        let activity = milliseconds(cursor.lastRelevantActivityAt)
+        let id = cursor.workItemID.rawValue
+        return [
+            pinned,
+            pinned, priority,
+            pinned, priority, score,
+            pinned, priority, score, dueBucket,
+            dueBucket, dueAt, dueAt, activity, activity, id,
+            activity, activity, id
+        ]
+    }
+
+    private nonisolated static func inboxPageCursor(
+        for item: WorkItem,
+        scope: SynchronizationScope
+    ) -> InboxPageCursor {
+        InboxPageCursor(
+            scope: scope,
+            isPinned: item.workflow.isPinned,
+            priority: item.workflow.priority,
+            score: item.score.value,
+            earliestOpenActionDueAt: item.openActionItems.compactMap(\.dueAt).min(),
+            lastRelevantActivityAt: item.lastRelevantActivityAt,
+            workItemID: item.id
+        )
+    }
+
     private static let maximumBatchSize = 500
 
     private struct MemberReference {
@@ -389,22 +835,73 @@ actor WorkItemRepository {
     private nonisolated static func attentionReasons(
         in database: Database,
         workItemIDs: [String],
+        authorityScope: SynchronizationScope?,
+        currentDerivedSourceRevision: String?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [String: [AttentionReason]] {
         var rows: [Row] = []
         for batch in batches(workItemIDs) {
             try Task.checkCancellation()
             onQuery?()
-            rows += try Row.fetchAll(
-                database,
-                sql: """
-                    SELECT work_item_id, id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
-                    FROM attention_reasons
-                    WHERE work_item_id IN (\(placeholders(for: batch)))
-                    ORDER BY work_item_id, strength DESC, id
-                    """,
-                arguments: StatementArguments(batch)
-            )
+            if let authorityScope {
+                guard let currentDerivedSourceRevision else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                rows += try Row.fetchAll(
+                    database,
+                    sql: """
+                        SELECT rule_evaluations.work_item_id, rule_evaluations.id,
+                               rule_evaluations.rule_id, rule_evaluations.rule_version,
+                               rule_evaluations.category, rule_evaluations.strength,
+                               rule_evaluations.title, rule_evaluations.explanation,
+                               rule_evaluations.evaluated_at_ms
+                        FROM rule_evaluations
+                        JOIN derived_intelligence_runs
+                          ON derived_intelligence_runs.account_id = rule_evaluations.account_id
+                         AND derived_intelligence_runs.organization_id = rule_evaluations.organization_id
+                         AND derived_intelligence_runs.credential_revision = rule_evaluations.credential_revision
+                         AND derived_intelligence_runs.capability_revision = rule_evaluations.capability_revision
+                         AND derived_intelligence_runs.source_revision = rule_evaluations.source_revision
+                        WHERE rule_evaluations.work_item_id IN (\(placeholders(for: batch)))
+                          AND rule_evaluations.account_id = ?
+                          AND rule_evaluations.organization_id = ?
+                          AND rule_evaluations.credential_revision = ?
+                          AND rule_evaluations.capability_revision = ?
+                          AND rule_evaluations.source_revision = ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM rule_evaluation_evidence
+                              WHERE rule_evaluation_evidence.rule_evaluation_id = rule_evaluations.id
+                                AND \(Self.currentRuleEvidencePredicate)
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM rule_evaluation_evidence
+                              WHERE rule_evaluation_evidence.rule_evaluation_id = rule_evaluations.id
+                                AND NOT \(Self.currentRuleEvidencePredicate)
+                          )
+                        ORDER BY rule_evaluations.work_item_id, rule_evaluations.strength DESC, rule_evaluations.id
+                        """,
+                    arguments: StatementArguments(batch + [
+                        authorityScope.accountID.rawValue,
+                        authorityScope.organizationID.rawValue,
+                        authorityScope.credentialRevision.rawValue,
+                        authorityScope.capabilityRevision.rawValue,
+                        currentDerivedSourceRevision
+                    ])
+                )
+            } else {
+                rows += try Row.fetchAll(
+                    database,
+                    sql: """
+                        SELECT work_item_id, id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
+                        FROM attention_reasons
+                        WHERE work_item_id IN (\(placeholders(for: batch)))
+                        ORDER BY work_item_id, strength DESC, id
+                        """,
+                    arguments: StatementArguments(batch)
+                )
+            }
         }
         let evidence = try attentionEvidence(
             in: database,
@@ -414,6 +911,7 @@ actor WorkItemRepository {
                 }
                 return id
             },
+            authorityScope: authorityScope,
             onQuery: onQuery
         )
         var result: [String: [AttentionReason]] = [:]
@@ -446,6 +944,7 @@ actor WorkItemRepository {
     private nonisolated static func attentionEvidence(
         in database: Database,
         reasonIDs: [String],
+        authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [String: [EvidenceReference]] {
         guard !reasonIDs.isEmpty else { return [:] }
@@ -453,40 +952,101 @@ actor WorkItemRepository {
         for batch in batches(reasonIDs) {
             try Task.checkCancellation()
             onQuery?()
-            let rows = try Row.fetchAll(
-                database,
-                sql: """
-                    SELECT attention_reason_id, evidence_id, source, source_node_id, source_event_id,
-                           source_revision, observed_at_ms, excerpt
-                    FROM attention_reason_evidence
-                    WHERE attention_reason_id IN (\(placeholders(for: batch)))
-                    ORDER BY attention_reason_id, evidence_id
-                    """,
-                arguments: StatementArguments(batch)
-            )
-            for row in rows {
-                guard let reasonID: String = row["attention_reason_id"],
-                      let id = EvidenceID(rawValue: row["evidence_id"]),
-                      let source = EvidenceSource(rawValue: row["source"]),
-                      let observedAt = date(milliseconds: row["observed_at_ms"])
-                else {
-                    throw WorkItemRepositoryError.invalidPersistedData
-                }
-                result[reasonID, default: []].append(
-                    EvidenceReference(
-                        id: id,
-                        source: source,
-                        locator: .legacyUnverified,
-                        authority: .legacyUnverified,
-                        nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
-                        eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
-                        sourceRevision: row["source_revision"],
-                        confidence: .provisional,
-                        confirmation: .provisional,
-                        observedAt: observedAt,
-                        excerpt: row["excerpt"]
-                    )
+            if let authorityScope {
+                let rows = try Row.fetchAll(
+                    database,
+                    sql: """
+                        SELECT rule_evaluation_evidence.rule_evaluation_id AS attention_reason_id,
+                               rule_evaluation_evidence.evidence_id,
+                               rule_evaluation_evidence.source,
+                               rule_evaluation_evidence.source_locator_kind,
+                               rule_evaluation_evidence.source_locator,
+                               rule_evaluation_evidence.authority_kind,
+                               rule_evaluation_evidence.authority_account_id,
+                               rule_evaluation_evidence.authority_organization_id,
+                               rule_evaluation_evidence.authority_feature,
+                               rule_evaluation_evidence.authority_stream_id,
+                               rule_evaluation_evidence.authority_credential_revision,
+                               rule_evaluation_evidence.authority_capability_revision,
+                               rule_evaluation_evidence.source_node_id,
+                               rule_evaluation_evidence.source_event_id,
+                               rule_evaluation_evidence.source_revision,
+                               rule_evaluation_evidence.raw_snapshot_id,
+                               rule_evaluation_evidence.confidence,
+                               rule_evaluation_evidence.confirmation,
+                               rule_evaluation_evidence.observed_at_ms,
+                               rule_evaluation_evidence.excerpt
+                        FROM rule_evaluation_evidence
+                        JOIN rule_evaluations
+                          ON rule_evaluations.id = rule_evaluation_evidence.rule_evaluation_id
+                        JOIN derived_intelligence_runs
+                          ON derived_intelligence_runs.account_id = rule_evaluations.account_id
+                         AND derived_intelligence_runs.organization_id = rule_evaluations.organization_id
+                         AND derived_intelligence_runs.credential_revision = rule_evaluations.credential_revision
+                         AND derived_intelligence_runs.capability_revision = rule_evaluations.capability_revision
+                         AND derived_intelligence_runs.source_revision = rule_evaluations.source_revision
+                        WHERE rule_evaluation_evidence.rule_evaluation_id IN (\(placeholders(for: batch)))
+                          AND rule_evaluations.account_id = ?
+                          AND rule_evaluations.organization_id = ?
+                          AND rule_evaluations.credential_revision = ?
+                          AND rule_evaluations.capability_revision = ?
+                          AND \(Self.currentRuleEvidencePredicate)
+                        ORDER BY rule_evaluation_evidence.rule_evaluation_id,
+                                 rule_evaluation_evidence.evidence_id
+                        """,
+                    arguments: StatementArguments(batch + [
+                        authorityScope.accountID.rawValue,
+                        authorityScope.organizationID.rawValue,
+                        authorityScope.credentialRevision.rawValue,
+                        authorityScope.capabilityRevision.rawValue
+                    ])
                 )
+                for row in rows {
+                    guard let reasonID: String = row["attention_reason_id"] else {
+                        throw WorkItemRepositoryError.invalidPersistedData
+                    }
+                    let evidence = try evidenceReference(from: row)
+                    guard isAuthorizedForPresentation(evidence, scope: authorityScope) else {
+                        continue
+                    }
+                    result[reasonID, default: []].append(evidence)
+                }
+            } else {
+                let rows = try Row.fetchAll(
+                    database,
+                    sql: """
+                        SELECT attention_reason_id, evidence_id, source, source_node_id, source_event_id,
+                               source_revision, observed_at_ms, excerpt
+                        FROM attention_reason_evidence
+                        WHERE attention_reason_id IN (\(placeholders(for: batch)))
+                        ORDER BY attention_reason_id, evidence_id
+                        """,
+                    arguments: StatementArguments(batch)
+                )
+                for row in rows {
+                    guard let reasonID: String = row["attention_reason_id"],
+                          let id = EvidenceID(rawValue: row["evidence_id"]),
+                          let source = EvidenceSource(rawValue: row["source"]),
+                          let observedAt = date(milliseconds: row["observed_at_ms"])
+                    else {
+                        throw WorkItemRepositoryError.invalidPersistedData
+                    }
+                    result[reasonID, default: []].append(
+                        EvidenceReference(
+                            id: id,
+                            source: source,
+                            locator: .legacyUnverified,
+                            authority: .legacyUnverified,
+                            nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                            eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
+                            sourceRevision: row["source_revision"],
+                            confidence: .provisional,
+                            confirmation: .provisional,
+                            observedAt: observedAt,
+                            excerpt: row["excerpt"]
+                        )
+                    )
+                }
             }
         }
         return result
@@ -739,6 +1299,7 @@ actor WorkItemRepository {
     private nonisolated static func relations(
         in database: Database,
         accountID: AccountID,
+        organizationID: OrganizationID,
         workItemIDs: [String],
         authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
@@ -756,12 +1317,18 @@ actor WorkItemRepository {
                     FROM relations
                     JOIN work_item_members
                       ON work_item_members.github_node_id = relations.subject_node_id
+                    JOIN github_nodes
+                      ON github_nodes.github_node_id = relations.subject_node_id
+                     AND github_nodes.account_id = ?
+                     AND github_nodes.organization_id = ?
                     WHERE relations.account_id = ?
                       AND work_item_members.work_item_id IN (\(placeholders(for: batch)))
                     ORDER BY work_item_members.work_item_id, relations.subject_node_id,
                              relations.kind, relations.object_node_id, relations.id
                     """,
-                arguments: StatementArguments([accountID.rawValue] + batch)
+                arguments: StatementArguments([
+                    accountID.rawValue, organizationID.rawValue, accountID.rawValue
+                ] + batch)
             )
             for row in rows {
                 guard let workItemID: String = row["work_item_id"],
@@ -796,10 +1363,47 @@ actor WorkItemRepository {
             authorityScope: authorityScope,
             onQuery: onQuery
         )
+        let evidenceNodeIDs = Set(evidence.values.flatMap { $0.compactMap(\.nodeID) })
+        let evidenceNodeRevisions: [GitHubNodeID: String]
+        if evidenceNodeIDs.isEmpty {
+            evidenceNodeRevisions = [:]
+        } else {
+            onQuery?()
+            let identifiers = evidenceNodeIDs.map(\.rawValue).sorted()
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT github_node_id, source_revision
+                    FROM github_nodes
+                    WHERE account_id = ? AND organization_id = ?
+                      AND github_node_id IN (\(placeholders(for: identifiers)))
+                    """,
+                arguments: StatementArguments([accountID.rawValue, organizationID.rawValue] + identifiers)
+            )
+            evidenceNodeRevisions = Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                      let sourceRevision: String = row["source_revision"],
+                      !sourceRevision.isEmpty
+                else { return nil }
+                return (nodeID, sourceRevision)
+            })
+        }
         var result: [String: [WorkRelation]] = [:]
         for (index, reference) in references.enumerated() {
             if index.isMultiple(of: 64) { try Task.checkCancellation() }
-            let relationEvidence = evidence[reference.relationID] ?? []
+            let relationEvidence = (evidence[reference.relationID] ?? []).filter { evidence in
+                switch evidence.authority {
+                case .github:
+                    guard let evidenceNodeID = evidence.nodeID,
+                          let sourceRevision = evidence.sourceRevision
+                    else { return false }
+                    return evidenceNodeRevisions[evidenceNodeID] == sourceRevision
+                case .localWorkflow:
+                    return true
+                case .legacyUnverified:
+                    return authorityScope == nil
+                }
+            }
             // Account-only relation rows are not sufficient authority. When
             // presentation has an active scope, a relation must carry at
             // least one exact current-scope GitHub or local-workflow proof.
@@ -1017,6 +1621,49 @@ actor WorkItemRepository {
             accountID == scope.accountID && organizationID == scope.organizationID
         case .legacyUnverified:
             false
+        }
+    }
+
+    /// Active-scope rule publication is stricter than historical rendering:
+    /// every proof must be confirmed and a GitHub proof must name a currently
+    /// normalized node with the same source revision.  Historical callers do
+    /// not use this predicate and retain migration readability.
+    private static let currentRuleEvidencePredicate = """
+        (
+            (
+                rule_evaluation_evidence.authority_kind = 'github'
+                AND rule_evaluation_evidence.authority_account_id = rule_evaluations.account_id
+                AND rule_evaluation_evidence.authority_organization_id = rule_evaluations.organization_id
+                AND rule_evaluation_evidence.authority_credential_revision = rule_evaluations.credential_revision
+                AND rule_evaluation_evidence.authority_capability_revision = rule_evaluations.capability_revision
+                AND rule_evaluation_evidence.confidence = 'confirmed'
+                AND rule_evaluation_evidence.confirmation = 'confirmed'
+                AND EXISTS (
+                    SELECT 1
+                    FROM github_nodes AS evidence_nodes
+                    WHERE evidence_nodes.github_node_id = rule_evaluation_evidence.source_node_id
+                      AND evidence_nodes.account_id = rule_evaluations.account_id
+                      AND evidence_nodes.organization_id = rule_evaluations.organization_id
+                      AND evidence_nodes.source_revision = rule_evaluation_evidence.source_revision
+                )
+            ) OR (
+                rule_evaluation_evidence.authority_kind = 'localWorkflow'
+                AND rule_evaluation_evidence.authority_account_id = rule_evaluations.account_id
+                AND rule_evaluation_evidence.authority_organization_id = rule_evaluations.organization_id
+                AND rule_evaluation_evidence.confidence = 'confirmed'
+                AND rule_evaluation_evidence.confirmation = 'confirmed'
+            )
+        )
+        """
+
+    private nonisolated static func currentDerivedSourceRevision(
+        for scope: SynchronizationScope,
+        in database: Database
+    ) throws -> String {
+        do {
+            return try DerivedIntelligenceRepository.currentSourceRevision(scope: scope, in: database)
+        } catch {
+            throw WorkItemRepositoryError.invalidPersistedData
         }
     }
 

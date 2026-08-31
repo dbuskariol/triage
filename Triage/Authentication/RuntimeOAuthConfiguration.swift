@@ -12,20 +12,36 @@ struct RuntimeOAuthConfiguration: Sendable {
     let applicationVersion: String
 
     init(bundle: Bundle = .main) throws {
-        guard let clientID = bundle.object(forInfoDictionaryKey: "TRIAGE_GITHUB_OAUTH_CLIENT_ID") as? String,
+        try self.init(
+            clientID: bundle.object(forInfoDictionaryKey: "TRIAGE_GITHUB_OAUTH_CLIENT_ID") as? String,
+            brokerURLString: bundle.object(forInfoDictionaryKey: "TRIAGE_AUTH_BROKER_URL") as? String,
+            applicationVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        )
+    }
+
+    /// This initializer keeps all runtime prerequisites testable without
+    /// substituting a process bundle. Production continues to source them
+    /// exclusively from the signed application bundle above.
+    init(
+        clientID: String?,
+        brokerURLString: String?,
+        applicationVersion: String?
+    ) throws {
+        guard let clientID,
               !clientID.isEmpty,
               !clientID.hasPrefix("$(")
         else {
             throw RuntimeOAuthConfigurationError.missingClientID
         }
-        guard let brokerURLString = bundle.object(forInfoDictionaryKey: "TRIAGE_AUTH_BROKER_URL") as? String,
-              let brokerURL = URL(string: brokerURLString),
-              brokerURL.scheme == "https",
-              brokerURL.host != nil
-        else {
+        guard let brokerURLString, let brokerURL = URL(string: brokerURLString) else {
             throw RuntimeOAuthConfigurationError.invalidBrokerURL
         }
-        guard let applicationVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+        do {
+            try AuthBrokerClient.validate(baseURL: brokerURL)
+        } catch {
+            throw RuntimeOAuthConfigurationError.invalidBrokerURL
+        }
+        guard let applicationVersion,
               AuthBrokerProtocol.isValidApplicationVersion(applicationVersion)
         else {
             throw RuntimeOAuthConfigurationError.invalidApplicationVersion

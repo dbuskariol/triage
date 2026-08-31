@@ -19,6 +19,28 @@ final class WorkItemGrouperTests: XCTestCase {
         XCTAssertEqual(result.contextualRelations.map(\.kind), [.crossReferences])
     }
 
+    func testAuthoritativeDuplicateAndDependencyRelationsRemainContextual() {
+        let issue = node("issue")
+        let duplicate = node("duplicate")
+        let blocker = node("blocker")
+        let blocked = node("blocked")
+        let result = WorkItemGrouper().group(
+            nodeIDs: [issue, duplicate, blocker, blocked],
+            relations: [
+                relation(.duplicateOf, issue, duplicate),
+                relation(.blockedBy, issue, blocker),
+                relation(.blocks, issue, blocked)
+            ],
+            decisions: []
+        )
+
+        XCTAssertEqual(result.memberGroups, [[blocked], [blocker], [duplicate], [issue]])
+        XCTAssertEqual(
+            Set(result.contextualRelations.map(\.kind)),
+            Set([.duplicateOf, .blockedBy, .blocks])
+        )
+    }
+
     func testUserConfirmedDecisionMergesNodes() {
         let first = node("first")
         let second = node("second")

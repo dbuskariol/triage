@@ -19,6 +19,7 @@ struct ConversationFollowUpRule: Sendable {
     func evaluate(
         relations: [WorkRelation],
         timeline: [TimelineEventSummary],
+        timelineEvidence: [GitHubEventID: EvidenceReference] = [:],
         context: ConversationRuleContext
     ) -> RuleEvaluation {
         var reasons: [AttentionReason] = []
@@ -68,26 +69,14 @@ struct ConversationFollowUpRule: Sendable {
                 && $0.occurredAt > (context.latestQualifyingProgressAt ?? .distantPast)
                 && [.commented, .reviewed, .reviewThreadUnresolved].contains($0.kind)
         }
-        if participates, !newActivity.isEmpty {
+        let newActivityEvidence = newActivity.compactMap { timelineEvidence[$0.id] }
+        if participates, !newActivityEvidence.isEmpty {
             reasons.append(reason(
                 id: .newActivityOnParticipatedWork,
                 strength: 500,
                 title: "New activity on work you joined",
                 explanation: "Someone else added relevant conversation activity after your latest qualifying progress update.",
-                evidence: newActivity.map {
-                    EvidenceReference(
-                        id: EvidenceID(rawValue: "timeline-\($0.id.rawValue)")!,
-                        source: .restTimeline,
-                        locator: .legacyUnverified,
-                        authority: .legacyUnverified,
-                        nodeID: $0.subjectNodeID,
-                        eventID: $0.id,
-                        confidence: .provisional,
-                        confirmation: .provisional,
-                        observedAt: $0.occurredAt,
-                        excerpt: $0.body
-                    )
-                },
+                evidence: newActivityEvidence,
                 context: context
             ))
         }

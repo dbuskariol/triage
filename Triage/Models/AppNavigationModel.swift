@@ -89,6 +89,30 @@ enum WorkspaceListFilter: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+/// Bounds for native workspace split sizing. These are deliberately limited to
+/// useful desktop sizes so corrupt preferences cannot collapse a column or make
+/// the main window impractical to use.
+enum WorkspaceSplitLayout {
+    static let sidebarMinimumWidth = 200.0
+    static let sidebarDefaultWidth = 218.0
+    static let sidebarMaximumWidth = 260.0
+
+    static let contentMinimumWidth = 320.0
+    static let contentDefaultWidth = 390.0
+    static let contentMaximumWidth = 520.0
+
+    static let inspectorMinimumWidth = 280.0
+    static let inspectorDefaultWidth = 340.0
+    static let inspectorMaximumWidth = 520.0
+}
+
+/// The primary `Window` uses this stable, non-sensitive identifier. SwiftUI
+/// associates it with the system-managed frame restoration record rather than
+/// storing display geometry in application preferences.
+enum WorkspaceWindowRestoration {
+    static let mainWindowFrameIdentifier = "main"
+}
+
 private struct WorkspaceSelectionScope: Codable, Hashable {
     let accountID: AccountID
     let organizationID: OrganizationID
@@ -142,6 +166,10 @@ final class AppNavigationModel: ObservableObject {
         static let listFilter = "workspace.list-filter"
         static let inspectorVisible = "workspace.inspector-visible"
         static let sidebarVisible = "workspace.sidebar-visible"
+        static let sidebarWidth = "workspace.sidebar-width"
+        static let contentWidth = "workspace.content-width"
+        static let inspectorWidth = "workspace.inspector-width"
+        static let timelineExpanded = "workspace.timeline-expanded"
         static let selectedWorkItems = "workspace.selected-work-items"
     }
 
@@ -166,6 +194,17 @@ final class AppNavigationModel: ObservableObject {
     @Published var isSidebarVisible: Bool {
         didSet { defaults.set(isSidebarVisible, forKey: PreferenceKey.sidebarVisible) }
     }
+    /// Native column widths captured from the main window only. They contain
+    /// no account, organization, or work-item identifiers.
+    @Published private(set) var workspaceSidebarWidth: Double
+    @Published private(set) var workspaceContentWidth: Double
+    @Published private(set) var workspaceInspectorWidth: Double
+    /// A practical, non-sensitive timeline disclosure preference for the main
+    /// workspace window. Item-specific expansion would retain stale private
+    /// work identifiers, so it is intentionally global to this window.
+    @Published var isTimelineExpanded: Bool {
+        didSet { defaults.set(isTimelineExpanded, forKey: PreferenceKey.timelineExpanded) }
+    }
 
     private let defaults: UserDefaults
     private var selectedWorkItems: [WorkspaceSelectionScope: WorkItemID]
@@ -185,7 +224,62 @@ final class AppNavigationModel: ObservableObject {
             .flatMap(WorkspaceListFilter.init(rawValue:)) ?? .all
         isInspectorVisible = defaults.object(forKey: PreferenceKey.inspectorVisible) as? Bool ?? false
         isSidebarVisible = defaults.object(forKey: PreferenceKey.sidebarVisible) as? Bool ?? true
+        workspaceSidebarWidth = Self.restoredWidth(
+            from: defaults,
+            key: PreferenceKey.sidebarWidth,
+            defaultValue: WorkspaceSplitLayout.sidebarDefaultWidth,
+            minimum: WorkspaceSplitLayout.sidebarMinimumWidth,
+            maximum: WorkspaceSplitLayout.sidebarMaximumWidth
+        )
+        workspaceContentWidth = Self.restoredWidth(
+            from: defaults,
+            key: PreferenceKey.contentWidth,
+            defaultValue: WorkspaceSplitLayout.contentDefaultWidth,
+            minimum: WorkspaceSplitLayout.contentMinimumWidth,
+            maximum: WorkspaceSplitLayout.contentMaximumWidth
+        )
+        workspaceInspectorWidth = Self.restoredWidth(
+            from: defaults,
+            key: PreferenceKey.inspectorWidth,
+            defaultValue: WorkspaceSplitLayout.inspectorDefaultWidth,
+            minimum: WorkspaceSplitLayout.inspectorMinimumWidth,
+            maximum: WorkspaceSplitLayout.inspectorMaximumWidth
+        )
+        isTimelineExpanded = defaults.object(forKey: PreferenceKey.timelineExpanded) as? Bool ?? true
         selectedWorkItems = Self.decodeSelectedWorkItems(from: defaults)
+    }
+
+    func recordWorkspaceSidebarWidth(_ width: Double) {
+        guard let width = Self.validatedWidth(
+            width,
+            minimum: WorkspaceSplitLayout.sidebarMinimumWidth,
+            maximum: WorkspaceSplitLayout.sidebarMaximumWidth
+        ), width != workspaceSidebarWidth
+        else { return }
+        workspaceSidebarWidth = width
+        defaults.set(width, forKey: PreferenceKey.sidebarWidth)
+    }
+
+    func recordWorkspaceContentWidth(_ width: Double) {
+        guard let width = Self.validatedWidth(
+            width,
+            minimum: WorkspaceSplitLayout.contentMinimumWidth,
+            maximum: WorkspaceSplitLayout.contentMaximumWidth
+        ), width != workspaceContentWidth
+        else { return }
+        workspaceContentWidth = width
+        defaults.set(width, forKey: PreferenceKey.contentWidth)
+    }
+
+    func recordWorkspaceInspectorWidth(_ width: Double) {
+        guard let width = Self.validatedWidth(
+            width,
+            minimum: WorkspaceSplitLayout.inspectorMinimumWidth,
+            maximum: WorkspaceSplitLayout.inspectorMaximumWidth
+        ), width != workspaceInspectorWidth
+        else { return }
+        workspaceInspectorWidth = width
+        defaults.set(width, forKey: PreferenceKey.inspectorWidth)
     }
 
     func openSettings(_ category: SettingsCategory = .general) {
@@ -428,5 +522,30 @@ final class AppNavigationModel: ObservableObject {
         if didRemovePersistedSelection {
             persistSelectedWorkItems()
         }
+    }
+
+    private static func restoredWidth(
+        from defaults: UserDefaults,
+        key: String,
+        defaultValue: Double,
+        minimum: Double,
+        maximum: Double
+    ) -> Double {
+        guard let number = defaults.object(forKey: key) as? NSNumber,
+              let width = validatedWidth(number.doubleValue, minimum: minimum, maximum: maximum)
+        else {
+            defaults.removeObject(forKey: key)
+            return defaultValue
+        }
+        return width
+    }
+
+    private static func validatedWidth(
+        _ width: Double,
+        minimum: Double,
+        maximum: Double
+    ) -> Double? {
+        guard width.isFinite, width >= minimum, width <= maximum else { return nil }
+        return width
     }
 }

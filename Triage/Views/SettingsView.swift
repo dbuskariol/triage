@@ -23,6 +23,13 @@ enum AccountRemovalPresentation {
     }
 }
 
+private struct VerifiedMigrationBackupRestoreRequest: Identifiable {
+    let accountID: AccountID
+    let migrationID: String
+
+    var id: String { "\(accountID.rawValue)-\(migrationID)" }
+}
+
 enum NotificationAuthorizationAction: Equatable {
     case requestAuthorization
     case openSystemSettings
@@ -73,6 +80,7 @@ struct SettingsView: View {
     @State private var accountReplacingToken: GitHubAccount?
     @State private var accountPendingRemoval: GitHubAccount?
     @State private var unavailableAccountPendingRemoval: AccountID?
+    @State private var verifiedBackupPendingRestore: VerifiedMigrationBackupRestoreRequest?
     @State private var accountRemovalError: String?
     @State private var notificationSettingsOpenError: String?
     @State private var selectedNotificationConsentScope: NotificationScope?
@@ -169,6 +177,25 @@ struct SettingsView: View {
             .keyboardShortcut(.cancelAction)
         } message: {
             Text(AccountRemovalPresentation.unavailableVaultRecoveryMessage)
+        }
+        .confirmationDialog(
+            "Restore verified encrypted backup?",
+            isPresented: Binding(
+                get: { verifiedBackupPendingRestore != nil },
+                set: { if !$0 { verifiedBackupPendingRestore = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Restore Verified Backup") {
+                restorePendingVerifiedBackup()
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {
+                verifiedBackupPendingRestore = nil
+            }
+            .keyboardShortcut(.cancelAction)
+        } message: {
+            Text("Triage will preserve the current encrypted database and restore this verified migration backup. GitHub will not be changed.")
         }
         .alert(
             "Triage could not remove this account",
@@ -269,7 +296,9 @@ struct SettingsView: View {
 
     private var accountsSettings: some View {
         SettingsCard(title: "Connected Accounts") {
-            if appModel.accounts.isEmpty, appModel.unavailableAccountIDs.isEmpty {
+            if appModel.accounts.isEmpty,
+               appModel.unavailableAccountIDs.isEmpty,
+               appModel.vaultRecoveryIssues.isEmpty {
                 Text("No GitHub accounts are connected.")
                     .foregroundStyle(.secondary)
             }
@@ -312,6 +341,41 @@ struct SettingsView: View {
                         .accessibilityHint(
                             "Removes this unavailable account's encrypted local data from this Mac. GitHub content is not changed."
                         )
+                    }
+                }
+            }
+            if !appModel.vaultRecoveryIssues.isEmpty {
+                if !appModel.accounts.isEmpty || !appModel.unavailableAccountIDs.isEmpty {
+                    SettingsDivider()
+                }
+                ForEach(
+                    appModel.vaultRecoveryIssues.sorted { $0.accountID.rawValue < $1.accountID.rawValue },
+                    id: \.accountID
+                ) { issue in
+                    SettingsValueRow(
+                        title: "Encrypted local account needs repair",
+                        detail: vaultRecoveryDetail(for: issue),
+                        systemImage: "externaldrive.badge.exclamationmark"
+                    ) {
+                        HStack(spacing: 10) {
+                            if !issue.verifiedBackupMigrationIDs.isEmpty {
+                                Menu("Restore Verified Backup…") {
+                                    ForEach(issue.verifiedBackupMigrationIDs, id: \.self) { migrationID in
+                                        Button(migrationID) {
+                                            verifiedBackupPendingRestore = .init(
+                                                accountID: issue.accountID,
+                                                migrationID: migrationID
+                                            )
+                                        }
+                                    }
+                                }
+                                .accessibilityHint("Preserves the current encrypted database, then restores a verified migration backup.")
+                            }
+                            Button("Reconnect to GitHub…") {
+                                reconnectToResync()
+                            }
+                            .accessibilityHint("Connects GitHub to resynchronize in a new local encrypted account. The affected encrypted data is not removed.")
+                        }
                     }
                 }
             }
@@ -421,14 +485,81 @@ struct SettingsView: View {
 
     private var inboxSettings: some View {
         VStack(alignment: .leading, spacing: 16) {
+            SettingsCard(title: "Inbox") {
+                SettingsValueRow(
+                    title: "Default sort",
+                    detail: "Sets the order of an unfiltered local Inbox. Search results keep their own selected order.",
+                    systemImage: "arrow.up.arrow.down"
+                ) {
+                    Picker("Default Inbox sort", selection: $preferences.inboxDefaultSort) {
+                        ForEach(InboxDefaultSort.allCases) { sort in
+                            Text(sort.title).tag(sort)
+                        }
+                    }
+                    .accessibilityHint("Changes the default order of local Inbox work.")
+                }
+            }
             SettingsCard(title: "Attention") {
                 SettingsValueRow(
                     title: "Stale progress",
-                    detail: "Owned work becomes stale after three business days without qualifying progress.",
+                    detail: "Owned work becomes stale after the selected number of working days without qualifying progress.",
                     systemImage: "clock.badge.exclamationmark"
                 ) {
-                    Text("3 days")
-                        .foregroundStyle(.secondary)
+                    Stepper(
+                        value: Binding(
+                            get: { preferences.businessDayPolicy.staleAfterBusinessDays },
+                            set: { preferences.setStaleAfterBusinessDays($0) }
+                        ),
+                        in: BusinessDayPolicyPreferences.minimumStaleAfterBusinessDays...BusinessDayPolicyPreferences.maximumStaleAfterBusinessDays
+                    ) {
+                        Text("\(preferences.businessDayPolicy.staleAfterBusinessDays) business days")
+                    }
+                    .accessibilityLabel("Stale progress threshold")
+                    .accessibilityHint("Sets how many configured working days pass before owned work is marked stale.")
+                }
+                SettingsDivider()
+                Text("Working days")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Only these weekdays count toward the stale-progress threshold. Public holidays are not inferred.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ForEach(WorkingWeekday.allCases, id: \.self) { weekday in
+                    Toggle(weekday.title, isOn: Binding(
+                        get: { preferences.businessDayPolicy.workingDays.contains(weekday) },
+                        set: { preferences.setWorkingDay(weekday, enabled: $0) }
+                    ))
+                    .disabled(
+                        preferences.businessDayPolicy.workingDays.count == 1
+                            && preferences.businessDayPolicy.workingDays.contains(weekday)
+                    )
+                    .accessibilityHint(
+                        preferences.businessDayPolicy.workingDays.count == 1
+                            && preferences.businessDayPolicy.workingDays.contains(weekday)
+                            ? "At least one working day is required."
+                            : "Includes \(weekday.title) when calculating stale progress."
+                    )
+                }
+            }
+            SettingsCard(title: "Quick Snooze") {
+                Text("These three durations appear in local workflow Snooze menus. They never change GitHub.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ForEach(InboxSnoozeSlot.allCases) { slot in
+                    let durations = preferences.inboxSnoozeDurations
+                    Stepper(
+                        value: Binding(
+                            get: { preferences.inboxSnoozeDurations.minutes(for: slot) },
+                            set: { preferences.setInboxSnoozeDuration($0, for: slot) }
+                        ),
+                        in: snoozeDurationRange(for: slot, durations: durations),
+                        step: 5
+                    ) {
+                        Text("\(slot.title): \(durations.minutes(for: slot)) minutes")
+                    }
+                    .accessibilityLabel(slot.title)
+                    .accessibilityValue("\(durations.minutes(for: slot)) minutes")
+                    .accessibilityHint("Sets a local quick-snooze duration. Each duration remains distinct and ordered.")
                 }
             }
             Label(
@@ -465,7 +596,17 @@ struct SettingsView: View {
                         set: { notificationSettings.setReason(reason, enabled: $0) }
                     ))
                 }
+                if notificationSettings.isDeliverySettingsMutationPending {
+                    ProgressView("Applying notification privacy settings…")
+                        .controlSize(.small)
+                }
+                if let error = notificationSettings.deliverySettingsMutationError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
+            .disabled(notificationSettings.isDeliverySettingsMutationPending)
 
             SettingsCard(title: "Selected Organization") {
                 if let accountID = appModel.selectedAccountID,
@@ -659,6 +800,18 @@ struct SettingsView: View {
 
     private var aiSettings: some View {
         SettingsCard(title: "Copilot") {
+            let copilotState = appModel.selectedCopilotAuthorizationState
+            SettingsValueRow(
+                title: "Approved runtime",
+                detail: copilotRuntimeDetail(copilotState.runtime),
+                systemImage: copilotRuntimeImage(copilotState.runtime)
+            ) {
+                copilotRuntimeControl(
+                    for: copilotState.runtime,
+                    isOperationInProgress: appModel.isCopilotRuntimeOperationInProgress
+                )
+            }
+            SettingsDivider()
             if let organization = appModel.selectedOrganization {
                 let organizationName = NotificationSettingsPresentation.organizationScopeName(
                     displayName: organization.displayName,
@@ -680,12 +833,64 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 SettingsDivider()
                 SettingsValueRow(
+                    title: "Automatic action confidence",
+                    detail: "Triage never creates an automatic action below 92% confidence. Raise this organization-specific threshold for a stricter Inbox.",
+                    systemImage: "checkmark.seal"
+                ) {
+                    Stepper(
+                        value: Binding(
+                            get: {
+                                state?.consent.automaticActionConfidenceThreshold
+                                    ?? OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold
+                            },
+                            set: { threshold in
+                                Task {
+                                    await appModel.setSelectedOrganizationAutomaticActionConfidenceThreshold(threshold)
+                                }
+                            }
+                        ),
+                        in: OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold...OrganizationAIConsent.maximumAutomaticActionConfidenceThreshold,
+                        step: 0.01
+                    ) {
+                        Text(state?.automaticActionConfidenceTitle ?? Self.automaticActionConfidenceTitle(
+                            OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold
+                        ))
+                    }
+                    .disabled(!(state?.consent.isEnabled ?? false))
+                    .accessibilityLabel("Automatic action confidence threshold")
+                    .accessibilityValue(state?.automaticActionConfidenceTitle ?? Self.automaticActionConfidenceTitle(
+                        OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold
+                    ))
+                    .accessibilityHint("Raises the minimum confidence required before Copilot can create an automatic Inbox action for this organization. It cannot be set below 92 percent.")
+                }
+                SettingsDivider()
+                SettingsValueRow(
                     title: "Selected model",
-                    detail: "The current selection is persisted for this organization only.",
+                    detail: state?.modelSelectionNotice
+                        ?? "The current selection is persisted for this organization only.",
                     systemImage: "cpu"
                 ) {
-                    Text(state?.selectedModelTitle ?? "Auto")
-                        .foregroundStyle(.secondary)
+                    Menu {
+                        Button("Auto") {
+                            Task { await appModel.selectSelectedOrganizationCopilotModel(nil) }
+                        }
+                        if !(state?.availableModels.isEmpty ?? true) {
+                            Divider()
+                        }
+                        ForEach(state?.availableModels ?? []) { model in
+                            Button(model.displayName) {
+                                Task { await appModel.selectSelectedOrganizationCopilotModel(model.id) }
+                            }
+                        }
+                    } label: {
+                        Text(state?.selectedModelTitle ?? "Auto")
+                    }
+                    .disabled(!(state?.consent.isEnabled ?? false))
+                    .accessibilityLabel("Copilot model")
+                    .accessibilityValue(state?.selectedModelTitle ?? "Auto")
+                    .accessibilityHint(
+                        "Choose Auto or an authenticated model available for this organization."
+                    )
                 }
                 SettingsDivider()
                 SettingsValueRow(
@@ -695,6 +900,31 @@ struct SettingsView: View {
                 ) {
                     Text(state?.isEffectivelyAvailable == true ? "Available" : "Blocked")
                         .foregroundStyle(state?.isEffectivelyAvailable == true ? Color.secondary : Color.orange)
+                }
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Copilot account",
+                    detail: copilotAuthenticationDetail(copilotState.authentication),
+                    systemImage: "person.badge.key"
+                ) {
+                    if appModel.accounts.first(where: { $0.id == appModel.selectedAccountID })?.authenticationKind == .classicPersonalAccessToken {
+                        Text("Unavailable")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Copilot is unavailable for classic personal access tokens")
+                    } else {
+                        Button("Authenticate Copilot") {
+                            Task { await appModel.authenticateSelectedCopilotAccountAtUserRequest() }
+                        }
+                        .keyboardShortcut("a", modifiers: [.command, .option])
+                        .disabled(!copilotState.hasOrganizationConsent || !copilotState.isEntitled)
+                        .accessibilityHint("Verifies that Copilot is signed in as the selected Triage GitHub account.")
+                    }
+                }
+                if let error = appModel.copilotAuthenticationError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Copilot authentication error: \(error)")
                 }
             } else {
                 Text("Select an available organization before configuring AI analysis.")
@@ -717,30 +947,149 @@ struct SettingsView: View {
         }
     }
 
-    private var generalSettings: some View {
-        SettingsCard(title: "App") {
-            SettingsToggleRow(
-                title: "Show Triage in the menu bar",
-                detail: "Keep Triage available without leaving the main window open.",
-                systemImage: "menubar.rectangle",
-                isOn: $preferences.showMenuBarExtra
-            )
-            SettingsDivider()
-            SettingsToggleRow(
-                title: "Launch at login",
-                detail: "Make Triage available as soon as you sign in.",
-                systemImage: "power",
-                isOn: Binding(
-                    get: { preferences.launchAtLoginEnabled },
-                    set: { preferences.setLaunchAtLogin($0) }
-                )
-            )
-            if let error = preferences.launchAtLoginError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .padding(.leading, 42)
+    @ViewBuilder
+    private func copilotRuntimeControl(
+        for status: CopilotRuntimeStatus,
+        isOperationInProgress: Bool
+    ) -> some View {
+        switch status {
+        case .missing, .unsupported:
+            Button("Download") {
+                appModel.startCopilotRuntimeAcquisitionAtUserRequest()
             }
+            .keyboardShortcut("d", modifiers: [.command, .option])
+            .disabled(ifUnsupportedRuntime(status) || isOperationInProgress)
+            .accessibilityHint("Downloads the pinned Copilot runtime only after this explicit request.")
+        case .downloading, .verifying:
+            Button("Cancel") { appModel.cancelCopilotRuntimeOperation() }
+                .accessibilityLabel("Cancel Copilot runtime download")
+                .accessibilityHint("Cancels the Copilot runtime download and removes its temporary files.")
+        case .ready:
+            Button("Remove", role: .destructive) {
+                appModel.cancelCopilotRuntimeOperation()
+                Task { await appModel.removeCopilotRuntimeAtUserRequest() }
+            }
+            .disabled(isOperationInProgress)
+            .accessibilityHint("Removes the approved Copilot runtime from this Mac.")
+        case .corrupt:
+            Button("Repair") {
+                appModel.startCopilotRuntimeRepairAtUserRequest()
+            }
+            .disabled(isOperationInProgress)
+            .accessibilityHint("Removes and re-downloads the verified Copilot runtime.")
+        }
+    }
+
+    private func ifUnsupportedRuntime(_ status: CopilotRuntimeStatus) -> Bool {
+        if case .unsupported = status { return true }
+        return false
+    }
+
+    private func copilotRuntimeDetail(_ status: CopilotRuntimeStatus) -> String {
+        switch status {
+        case .missing: return "Not installed. Triage never searches PATH or a user Copilot installation."
+        case let .downloading(received, expected):
+            if let expected { return "Downloading \(received) of \(expected) bytes from the pinned release." }
+            return "Downloading \(received) bytes from the pinned release."
+        case .verifying: return "Verifying the pinned runtime checksum, signature, and architecture."
+        case .ready: return "Installed and revalidated before every use."
+        case let .corrupt(message): return "The installed runtime failed validation (\(message)). Repair it before use."
+        case let .unsupported(message): return message
+        }
+    }
+
+    private func copilotRuntimeImage(_ status: CopilotRuntimeStatus) -> String {
+        switch status {
+        case .ready: "checkmark.shield"
+        case .downloading, .verifying: "arrow.down.circle"
+        case .corrupt, .unsupported: "exclamationmark.triangle"
+        case .missing: "arrow.down.circle"
+        }
+    }
+
+    private func copilotAuthenticationDetail(_ status: CopilotAuthenticationStatus) -> String {
+        switch status {
+        case .signedOut: "Not authenticated for this Triage account."
+        case .deviceLoginRequired: "Copilot device login is unavailable in this build."
+        case .verifyingIdentity: "Verifying the authenticated GitHub numeric user ID."
+        case .authenticated: "Authenticated identity exactly matches the selected Triage account."
+        case let .identityMismatch(expected, actual): "Blocked: Copilot user \(actual) does not match selected GitHub user \(expected)."
+        case let .blocked(message), let .failed(message): message
+        }
+    }
+
+    private static func automaticActionConfidenceTitle(_ threshold: Double) -> String {
+        "\(Int((threshold * 100).rounded()))% minimum"
+    }
+
+    private var generalSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsCard(title: "App") {
+                SettingsToggleRow(
+                    title: "Show Triage in the menu bar",
+                    detail: "Keep Triage available without leaving the main window open.",
+                    systemImage: "menubar.rectangle",
+                    isOn: $preferences.showMenuBarExtra
+                )
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Launch at login",
+                    detail: "Make Triage available as soon as you sign in.",
+                    systemImage: "power",
+                    isOn: Binding(
+                        get: { preferences.launchAtLoginEnabled },
+                        set: { preferences.setLaunchAtLogin($0) }
+                    )
+                )
+                if let error = preferences.launchAtLoginError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.leading, 42)
+                }
+            }
+            SettingsCard(title: "Appearance") {
+                SettingsValueRow(
+                    title: "List density",
+                    detail: "Uses native macOS list sizing in the sidebar and work list.",
+                    systemImage: "list.bullet"
+                ) {
+                    Picker("List density", selection: $preferences.appearanceDensity) {
+                        ForEach(InterfaceAppearanceDensity.allCases) { density in
+                            Text(density.title).tag(density)
+                        }
+                    }
+                    .accessibilityHint("Changes native sidebar and work-list row density.")
+                }
+            }
+            SettingsCard(title: "Refresh") {
+                SettingsValueRow(
+                    title: "Refresh behavior",
+                    detail: "Automatic refresh checks when Triage launches, becomes active, wakes, and schedules local background work. Manual only leaves Refresh available in the toolbar and menu. Changes apply at the next launch.",
+                    systemImage: "arrow.triangle.2.circlepath"
+                ) {
+                    Picker("Refresh behavior", selection: $preferences.refreshBehavior) {
+                        ForEach(RefreshBehavior.allCases) { behavior in
+                            Text(behavior.title).tag(behavior)
+                        }
+                    }
+                    .accessibilityHint("Controls automatic refreshes. Manual Refresh remains available.")
+                }
+            }
+        }
+    }
+
+    private func snoozeDurationRange(
+        for slot: InboxSnoozeSlot,
+        durations: InboxSnoozeDurations
+    ) -> ClosedRange<Int> {
+        switch slot {
+        case .first:
+            InboxSnoozeDurations.minimumMinutes...(durations.secondMinutes - 1)
+        case .second:
+            (durations.firstMinutes + 1)...(durations.thirdMinutes - 1)
+        case .third:
+            (durations.secondMinutes + 1)...InboxSnoozeDurations.maximumMinutes
         }
     }
 
@@ -874,6 +1223,42 @@ struct SettingsView: View {
                 )
             }
         }
+    }
+
+    private func restorePendingVerifiedBackup() {
+        guard let request = verifiedBackupPendingRestore else { return }
+        verifiedBackupPendingRestore = nil
+        Task {
+            await appModel.restoreVerifiedMigrationBackup(
+                for: request.accountID,
+                migrationID: request.migrationID
+            )
+        }
+    }
+
+    private func reconnectToResync() {
+        guard let window = NSApp.keyWindow else {
+            appModel.recordConnectionWindowError()
+            return
+        }
+        Task {
+            await appModel.connectGitHub(presentationAnchor: window)
+        }
+    }
+
+    private func vaultRecoveryDetail(for issue: AccountVaultRecoveryIssue) -> String {
+        let repair = switch issue.kind {
+        case .databaseCorruption:
+            "The encrypted database needs repair."
+        case .migrationFailure:
+            "An encrypted database migration needs repair."
+        case .sqlCipherUnavailable:
+            "Encrypted database support is unavailable for this local account."
+        }
+        if issue.verifiedBackupMigrationIDs.isEmpty {
+            return "\(repair) No verified migration backup is available. The original encrypted data has not been removed. Reconnect to GitHub to resync."
+        }
+        return "\(repair) A verified migration backup is available. The original encrypted data has not been removed."
     }
 
     private func credentialStatusTitle(_ status: CredentialStatus) -> String {

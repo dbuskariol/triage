@@ -97,9 +97,16 @@ struct ProgressAttentionRule: Sendable {
       return action.evidence
     }
 
-    let linkedIssueEvidence = linkedPullRequestEvidence.isEmpty
-      ? []
-      : linkedPullRequestEvidence + (input.sourceIssueEvidence.map { [$0] } ?? [])
+    // This conclusion compares the linked pull request against the current
+    // issue state. A pull-request proof alone cannot establish that the issue
+    // has not changed, so omit the rule unless both source records carry
+    // authority-backed evidence.
+    let linkedIssueEvidence: [EvidenceReference]
+    if !linkedPullRequestEvidence.isEmpty, let sourceIssueEvidence = input.sourceIssueEvidence {
+      linkedIssueEvidence = linkedPullRequestEvidence + [sourceIssueEvidence]
+    } else {
+      linkedIssueEvidence = []
+    }
     let definitions: [(ProgressAttentionRuleID, Int, String, String, [EvidenceReference])] = [
       (
         .overdueDueActions,

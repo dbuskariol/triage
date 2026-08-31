@@ -14,6 +14,12 @@ struct WorkspaceSplitViewVisibilityState {
         visibility == .all
     }
 
+    /// Keep the toolbar context in sync with the system's current adaptive
+    /// split-view layout rather than the separately persisted intent.
+    var shouldShowPrincipalOrganizationTitle: Bool {
+        !isSidebarPresented
+    }
+
     init(isSidebarVisible: Bool = true) {
         visibility = isSidebarVisible ? .all : .doubleColumn
     }
@@ -31,6 +37,24 @@ struct WorkspaceSplitViewVisibilityState {
     }
 }
 
+private struct WorkspaceSidebarWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
+private struct WorkspaceContentWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
 struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openSettings) private var openSettings
@@ -39,6 +63,7 @@ struct RootView: View {
     @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
     @State private var isRetryingUnavailableWorkspace = false
+    @State private var accountRecoveryBeingRetried: LocalAccountRecoveryPresentation?
     // Keep the complete system visibility value local to this window. The
     // persisted preference records only a deliberate sidebar toggle; it must
     // not overwrite `.detailOnly` when macOS temporarily collapses columns.
@@ -120,15 +145,45 @@ struct RootView: View {
                     onSelectOrganization: { appModel.selectOrganization($0) },
                     selection: $navigation.section
                 )
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
+                    .navigationSplitViewColumnWidth(
+                        min: CGFloat(WorkspaceSplitLayout.sidebarMinimumWidth),
+                        ideal: CGFloat(navigation.workspaceSidebarWidth),
+                        max: CGFloat(WorkspaceSplitLayout.sidebarMaximumWidth)
+                    )
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: WorkspaceSidebarWidthPreferenceKey.self,
+                                value: proxy.size.width
+                            )
+                        }
+                    }
             } content: {
                 workspaceQueue
-                    .navigationSplitViewColumnWidth(min: 320, ideal: 390, max: 520)
+                    .navigationSplitViewColumnWidth(
+                        min: CGFloat(WorkspaceSplitLayout.contentMinimumWidth),
+                        ideal: CGFloat(navigation.workspaceContentWidth),
+                        max: CGFloat(WorkspaceSplitLayout.contentMaximumWidth)
+                    )
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: WorkspaceContentWidthPreferenceKey.self,
+                                value: proxy.size.width
+                            )
+                        }
+                    }
             } detail: {
                 WorkDetailView(item: appModel.selectedWorkItem)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
+            .onPreferenceChange(WorkspaceSidebarWidthPreferenceKey.self) { width in
+                navigation.recordWorkspaceSidebarWidth(Double(width))
+            }
+            .onPreferenceChange(WorkspaceContentWidthPreferenceKey.self) { width in
+                navigation.recordWorkspaceContentWidth(Double(width))
+            }
             .focusedSceneValue(\.triageSidebarVisibility, sidebarVisibilityBinding)
             .toolbar {
                 ToolbarItem(placement: .navigation) {
@@ -163,7 +218,8 @@ struct RootView: View {
                     .help("Next work item")
                     .accessibilityHint("Moves to the next work item in this organization.")
                 }
-                if !navigation.isSidebarVisible, let organization = appModel.selectedOrganization {
+                if splitViewVisibility.shouldShowPrincipalOrganizationTitle,
+                   let organization = appModel.selectedOrganization {
                     ToolbarItem(placement: .principal) {
                         Text(organization.displayName ?? organization.login)
                             .lineLimit(1)
@@ -183,13 +239,14 @@ struct RootView: View {
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                if let localAccountRecovery {
+                if let localAccountRecovery = localAccountRecovery ?? accountRecoveryBeingRetried {
                     LocalAccountRecoveryNotice(
                         recovery: localAccountRecovery,
+                        isRetrying: appModel.isRestoringAccounts,
                         onOpenAccountSettings: openAccountSettings,
-                        onRetry: {
+                        onRetry: { recovery in
                             Task {
-                                await appModel.restoreAccounts()
+                                await retryLocalAccountRestoration(recovery)
                             }
                         }
                     )
@@ -347,12 +404,13 @@ struct RootView: View {
             organizationAccess: appModel.selectedOrganizationAccess,
             isConnecting: appModel.isConnecting,
             isSynchronizing: appModel.isRefreshing,
+            isRestoringAccounts: appModel.isRestoringAccounts,
             connectionError: appModel.connectionError,
             refreshError: appModel.refreshError,
             aiAccess: .unavailable(
                 "Copilot analysis has not been enabled for this organization."
             ),
-            localAccountRecovery: localAccountRecovery,
+            localAccountRecovery: localAccountRecovery ?? accountRecoveryBeingRetried,
             hasSSOAuthorizationURL: {
                 guard let ssoAuthorizationHeader = appModel.ssoAuthorizationHeader else {
                     return false
@@ -369,9 +427,27 @@ struct RootView: View {
     /// filesystem error text can reach a visible recovery surface.
     private var localAccountRecovery: LocalAccountRecoveryPresentation? {
         guard appModel.restorationError != nil else { return nil }
+        if !appModel.vaultRecoveryIssues.isEmpty {
+            return .encryptedVaultNeedsRepair
+        }
         return appModel.unavailableAccountIDs.isEmpty
             ? .encryptedLocalDataUnavailable
             : .unavailableVaultKey
+    }
+
+    private func retryLocalAccountRestoration(
+        _ recovery: LocalAccountRecoveryPresentation
+    ) async {
+        guard !appModel.isRestoringAccounts else { return }
+        accountRecoveryBeingRetried = recovery
+        workspaceAccessibility.accountRestorationRetryStarted()
+        await appModel.restoreAccounts()
+        if appModel.restorationError == nil {
+            workspaceAccessibility.accountRestorationRetrySucceeded()
+        } else {
+            workspaceAccessibility.accountRestorationRetryFailed()
+        }
+        accountRecoveryBeingRetried = nil
     }
 
     private func openAccountSettings() {
@@ -417,7 +493,8 @@ struct RootView: View {
                 openAccountSettings()
             },
             retryLocalAccountRestoration: {
-                await appModel.restoreAccounts()
+                guard let recovery = localAccountRecovery ?? accountRecoveryBeingRetried else { return }
+                await retryLocalAccountRestoration(recovery)
             }
         )
     }
@@ -425,8 +502,9 @@ struct RootView: View {
 
 private struct LocalAccountRecoveryNotice: View {
     let recovery: LocalAccountRecoveryPresentation
+    let isRetrying: Bool
     let onOpenAccountSettings: () -> Void
-    let onRetry: () -> Void
+    let onRetry: (LocalAccountRecoveryPresentation) -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -441,7 +519,13 @@ private struct LocalAccountRecoveryNotice: View {
             if recovery.canOpenAccountSettings {
                 Button("Open Account Settings…", action: onOpenAccountSettings)
             }
-            Button("Try Again", action: onRetry)
+            if isRetrying {
+                ProgressView("Retrying encrypted local account data…")
+                    .controlSize(.small)
+                    .accessibilityLabel("Retrying encrypted local account data")
+            } else {
+                Button("Try Again") { onRetry(recovery) }
+            }
         }
         .controlSize(.small)
         .padding(.horizontal, 16)
@@ -449,6 +533,11 @@ private struct LocalAccountRecoveryNotice: View {
         .background(.bar)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(recovery.accessibilityLabel)
+        .accessibilityHint(
+            isRetrying
+                ? "Encrypted local account restoration is in progress."
+                : "Try restoring encrypted local account data again."
+        )
     }
 }
 

@@ -21,19 +21,30 @@ struct DerivedAIPolicy: Equatable, Sendable {
     /// The exact persisted selection authorized for this derived run. `nil`
     /// means Auto and remains distinct from any explicit runtime model.
     let selectedModelID: String?
+    /// The exact authenticated model resolved for this run. Unlike the user
+    /// preference above, Auto never reaches execution as an ambient choice.
+    /// A missing value keeps cache lookup and execution fail-closed.
+    let effectiveModelID: String?
+    /// The encrypted organization policy used to decide which validated
+    /// Copilot claims may become automatic local actions.
+    let automaticActionConfidenceThreshold: Double
 
     init(
         isOrganizationConsentActive: Bool,
         isAuthenticationValid: Bool,
         isEntitled: Bool,
         hasAvailableBudget: Bool,
-        selectedModelID: String? = nil
+        selectedModelID: String? = nil,
+        effectiveModelID: String? = nil,
+        automaticActionConfidenceThreshold: Double = OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold
     ) {
         self.isOrganizationConsentActive = isOrganizationConsentActive
         self.isAuthenticationValid = isAuthenticationValid
         self.isEntitled = isEntitled
         self.hasAvailableBudget = hasAvailableBudget
         self.selectedModelID = selectedModelID
+        self.effectiveModelID = effectiveModelID
+        self.automaticActionConfidenceThreshold = automaticActionConfidenceThreshold
     }
 
     var permitsCandidates: Bool {
@@ -43,26 +54,45 @@ struct DerivedAIPolicy: Equatable, Sendable {
 
 struct DerivedIntelligenceItemInput: Sendable {
     let workItem: WorkItem
+    /// Exact current-source proof for the primary node. This remains separate
+    /// from display state so rules cannot manufacture legacy provenance.
+    let primaryEvidence: EvidenceReference?
     let timeline: [TimelineEventSummary]
+    /// Evidence is keyed by immutable event ID. An event without an exact
+    /// current proof is cached history only and cannot drive a rule.
+    let timelineEvidence: [GitHubEventID: EvidenceReference]
     let pullRequestReviews: [PullRequestReviewFeedback]
     let pullRequestReviewThreads: [PullRequestReviewThread]
+    let pullRequestStatusChecks: [PullRequestStatusCheck]
+    let pullRequestMergeableState: String?
+    let pullRequestStatusCheckMarkerEvidence: EvidenceReference?
     let searchDocument: SearchDocument
     let hasChangedAIFingerprint: Bool
     let hasValidCachedAIAnalysis: Bool
 
     init(
         workItem: WorkItem,
+        primaryEvidence: EvidenceReference? = nil,
         timeline: [TimelineEventSummary] = [],
+        timelineEvidence: [GitHubEventID: EvidenceReference] = [:],
         pullRequestReviews: [PullRequestReviewFeedback] = [],
         pullRequestReviewThreads: [PullRequestReviewThread] = [],
+        pullRequestStatusChecks: [PullRequestStatusCheck] = [],
+        pullRequestMergeableState: String? = nil,
+        pullRequestStatusCheckMarkerEvidence: EvidenceReference? = nil,
         searchDocument: SearchDocument,
         hasChangedAIFingerprint: Bool = true,
         hasValidCachedAIAnalysis: Bool = false
     ) {
         self.workItem = workItem
+        self.primaryEvidence = primaryEvidence
         self.timeline = timeline
+        self.timelineEvidence = timelineEvidence
         self.pullRequestReviews = pullRequestReviews
         self.pullRequestReviewThreads = pullRequestReviewThreads
+        self.pullRequestStatusChecks = pullRequestStatusChecks
+        self.pullRequestMergeableState = pullRequestMergeableState
+        self.pullRequestStatusCheckMarkerEvidence = pullRequestStatusCheckMarkerEvidence
         self.searchDocument = searchDocument
         self.hasChangedAIFingerprint = hasChangedAIFingerprint
         self.hasValidCachedAIAnalysis = hasValidCachedAIAnalysis
@@ -270,13 +300,28 @@ struct DerivedIntelligenceCoordinator: Sendable {
         input: DerivedIntelligenceInput
     ) throws -> DerivedIntelligenceItemResult {
         let workItem = itemInput.workItem
-        let confirmedRelations = trustedRelations(workItem.relations, scope: input.scope)
+        let primaryEvidence = itemInput.primaryEvidence.flatMap {
+            isCurrentEvidence($0, scope: input.scope) ? $0 : nil
+        }
+        let confirmedRelations = trustedRelations(
+            workItem.relations,
+            workItem: workItem,
+            primaryEvidence: primaryEvidence,
+            scope: input.scope
+        )
+        let timelineEvidence = trustedTimelineEvidence(
+            itemInput.timelineEvidence,
+            scope: input.scope,
+            sourceRevision: primaryEvidence?.sourceRevision
+        )
+        let trustedTimeline = itemInput.timeline.filter { timelineEvidence[$0.id] != nil }
         let isOwned = confirmedRelations.contains {
             $0.objectNodeID == input.currentUserNodeID
                 && [.authored, .assigned, .projectWrapsContent].contains($0.kind)
         }
         let latestProgress = latestProgress(
-            timeline: itemInput.timeline,
+            timeline: trustedTimeline,
+            evidenceByEventID: timelineEvidence,
             currentUserNodeID: input.currentUserNodeID
         )
         let waitingEvidence = EvidenceReference(
@@ -303,7 +348,8 @@ struct DerivedIntelligenceCoordinator: Sendable {
             ),
             ConversationFollowUpRule().evaluate(
                 relations: confirmedRelations,
-                timeline: itemInput.timeline,
+                timeline: trustedTimeline,
+                timelineEvidence: timelineEvidence,
                 context: ConversationRuleContext(
                     currentUserNodeID: input.currentUserNodeID,
                     visibleTeamNodeIDs: input.visibleTeamNodeIDs,
@@ -311,24 +357,20 @@ struct DerivedIntelligenceCoordinator: Sendable {
                     evaluatedAt: input.evaluatedAt
                 )
             ),
-            pullRequestReasons(for: itemInput, currentUserNodeID: input.currentUserNodeID, evaluatedAt: input.evaluatedAt),
+            pullRequestReasons(
+                for: itemInput,
+                confirmedRelations: confirmedRelations,
+                currentUserNodeID: input.currentUserNodeID,
+                evaluatedAt: input.evaluatedAt,
+                scope: input.scope,
+                timeline: trustedTimeline
+            ),
             ProgressAttentionRule().evaluate(
                 input: ProgressRuleInput(
                     isOwnedByCurrentUser: isOwned,
                     latestQualifyingProgress: latestProgress,
                     sourceIssueLastUpdatedAt: workItem.sourceKind == .issue ? workItem.lastRelevantActivityAt : nil,
-                    sourceIssueEvidence: workItem.sourceKind == .issue
-                        ? EvidenceReference(
-                            id: EvidenceID(rawValue: "work-item-\(workItem.primaryNodeID.rawValue)")!,
-                            source: .graphQL,
-                            locator: .legacyUnverified,
-                            authority: .legacyUnverified,
-                            nodeID: workItem.primaryNodeID,
-                            confidence: .provisional,
-                            confirmation: .provisional,
-                            observedAt: workItem.lastRelevantActivityAt
-                        )
-                        : nil,
+                    sourceIssueEvidence: workItem.sourceKind == .issue ? primaryEvidence : nil,
                     linkedPullRequests: linkedPullRequests(from: confirmedRelations),
                     dueActions: workItem.openActionItems.map {
                         DueActionEvidence(
@@ -366,12 +408,15 @@ struct DerivedIntelligenceCoordinator: Sendable {
                         evidence: waitingEvidence
                     ),
                     awaitedActorNodeID: awaitedActor(from: confirmedRelations),
-                    responses: itemInput.timeline.compactMap {
-                        guard let actorNodeID = $0.actor?.nodeID else { return nil }
+                    responses: trustedTimeline.compactMap {
+                        guard let actorNodeID = $0.actor?.nodeID,
+                              let evidence = timelineEvidence[$0.id],
+                              Self.isResponseBearingTimelineEvent($0.kind)
+                        else { return nil }
                         return AwaitedActorResponseEvidence(
                             actorNodeID: actorNodeID,
                             occurredAt: $0.occurredAt,
-                            evidence: timelineEvidence(for: $0)
+                            evidence: evidence
                         )
                     }
                 ),
@@ -440,30 +485,75 @@ struct DerivedIntelligenceCoordinator: Sendable {
 
     private func pullRequestReasons(
         for item: DerivedIntelligenceItemInput,
+        confirmedRelations: [WorkRelation],
         currentUserNodeID: GitHubNodeID,
-        evaluatedAt: Date
+        evaluatedAt: Date,
+        scope: SynchronizationScope,
+        timeline: [TimelineEventSummary]
     ) -> RuleEvaluation {
         guard item.workItem.sourceKind == .pullRequest else {
             return RuleEvaluation(reasons: [])
         }
-        let authored = item.workItem.members.contains {
-            $0.role == .primary && $0.content.author?.nodeID == currentUserNodeID
-        } || item.workItem.relations.contains {
+        // Current node fields describe content, but a personal authored-work
+        // predicate requires an independently materialized, exact-scope
+        // relation. This avoids treating stale hydration as present authority.
+        let authored = confirmedRelations.contains {
             $0.kind == .authored && $0.objectNodeID == currentUserNodeID && $0.confidence == .confirmed
         }
-        let latestResponseOrCommit = item.timeline
+        let latestResponseOrCommit = timeline
             .filter {
                 $0.actor?.nodeID == currentUserNodeID
                     && [.commented, .reviewed, .committed].contains($0.kind)
             }
             .map(\.occurredAt)
             .max()
+        let currentPrimaryRevision: String? = item.primaryEvidence.flatMap { evidence -> String? in
+            isCurrentEvidence(evidence, scope: scope) ? evidence.sourceRevision : nil
+        }
+        let statusMarker: EvidenceReference? = item.pullRequestStatusCheckMarkerEvidence.flatMap { evidence -> EvidenceReference? in
+            guard isCurrentEvidence(evidence, scope: scope),
+                  evidence.nodeID == item.workItem.primaryNodeID,
+                  evidence.sourceRevision == currentPrimaryRevision
+            else { return nil }
+            return evidence
+        }
+        let currentStatusChecks: [PullRequestStatusCheck]
+        if let statusMarker {
+            currentStatusChecks = item.pullRequestStatusChecks.filter {
+                isCurrentEvidence($0.evidence, scope: scope)
+                    && $0.evidence.nodeID == item.workItem.primaryNodeID
+                    && $0.evidence.sourceRevision == statusMarker.sourceRevision
+            }
+        } else {
+            currentStatusChecks = []
+        }
         return PullRequestAttentionRule().evaluate(
             input: PullRequestRuleInput(
                 isAuthoredByCurrentUser: authored,
                 latestCurrentUserResponseOrCommitAt: latestResponseOrCommit,
-                reviews: item.pullRequestReviews,
-                reviewThreads: item.pullRequestReviewThreads
+                reviews: item.pullRequestReviews.filter {
+                    isCurrentEvidence($0.evidence, scope: scope)
+                },
+                reviewThreads: item.pullRequestReviewThreads.filter {
+                    isCurrentEvidence($0.evidence, scope: scope)
+                },
+                mergeableState: statusMarker == nil ? nil : item.pullRequestMergeableState,
+                statusChecks: currentStatusChecks,
+                openUserOwnedActionEvidence: item.workItem.openActionItems.map {
+                    EvidenceReference(
+                        id: EvidenceID(rawValue: "action-\($0.id.rawValue)")!,
+                        source: .localWorkflow,
+                        locator: .localWorkflow("action-state"),
+                        authority: .localWorkflow(
+                            accountID: scope.accountID,
+                            organizationID: scope.organizationID
+                        ),
+                        nodeID: item.workItem.primaryNodeID,
+                        confidence: .confirmed,
+                        confirmation: .confirmed,
+                        observedAt: $0.updatedAt
+                    )
+                }
             ),
             context: PullRequestRuleContext(currentUserNodeID: currentUserNodeID, evaluatedAt: evaluatedAt)
         )
@@ -471,6 +561,7 @@ struct DerivedIntelligenceCoordinator: Sendable {
 
     private func latestProgress(
         timeline: [TimelineEventSummary],
+        evidenceByEventID: [GitHubEventID: EvidenceReference],
         currentUserNodeID: GitHubNodeID
     ) -> QualifyingProgressEvidence? {
         timeline
@@ -478,10 +569,14 @@ struct DerivedIntelligenceCoordinator: Sendable {
                 $0.actor?.nodeID == currentUserNodeID
                     && [.commented, .reviewed, .committed].contains($0.kind)
             }
-            .max {
-                ($0.occurredAt, $0.id.rawValue) < ($1.occurredAt, $1.id.rawValue)
+            .compactMap { event in
+                evidenceByEventID[event.id].map {
+                    QualifyingProgressEvidence(occurredAt: event.occurredAt, evidence: $0)
+                }
             }
-            .map { QualifyingProgressEvidence(occurredAt: $0.occurredAt, evidence: timelineEvidence(for: $0)) }
+            .max {
+                ($0.occurredAt, $0.evidence.id.rawValue) < ($1.occurredAt, $1.evidence.id.rawValue)
+            }
     }
 
     private func linkedPullRequests(from relations: [WorkRelation]) -> [LinkedPullRequestProgressEvidence] {
@@ -498,23 +593,38 @@ struct DerivedIntelligenceCoordinator: Sendable {
     /// explainability, but it must never drive current deterministic reasons.
     private func trustedRelations(
         _ relations: [WorkRelation],
+        workItem: WorkItem,
+        primaryEvidence: EvidenceReference?,
         scope: SynchronizationScope
     ) -> [WorkRelation] {
-        relations.compactMap { relation in
+        var currentRevisions = Dictionary(
+            uniqueKeysWithValues: workItem.members.map {
+                ($0.id, $0.content.updatedAt.ISO8601Format())
+            }
+        )
+        if let primaryRevision = primaryEvidence?.sourceRevision, !primaryRevision.isEmpty {
+            currentRevisions[workItem.primaryNodeID] = primaryRevision
+        }
+        return relations.compactMap { relation in
             guard relation.confidence == .confirmed else { return nil }
             let evidence = relation.evidence.filter { evidence in
                 guard evidence.confidence == .confirmed,
-                      evidence.confirmation == .confirmed
+                      evidence.confirmation == .confirmed,
+                      isCurrentEvidence(evidence, scope: scope)
                 else { return false }
-                switch evidence.authority {
-                case let .github(evidenceScope, _, _):
-                    return evidenceScope == scope
-                case let .localWorkflow(accountID, organizationID):
-                    return accountID == scope.accountID
-                        && organizationID == scope.organizationID
-                case .legacyUnverified:
-                    return false
+                // Direct responsibility/conversation/waiting facts describe a
+                // specific work-item member. They are valid only while the
+                // same member revision that supplied the fact remains current.
+                // This prevents a removed assignee/request/mention from
+                // surviving a later normalized node update.
+                if Self.requiresCurrentSubjectRevision(relation.kind),
+                   case .github = evidence.authority {
+                    guard evidence.nodeID == relation.subjectNodeID,
+                          let sourceRevision = evidence.sourceRevision,
+                          currentRevisions[relation.subjectNodeID] == sourceRevision
+                    else { return false }
                 }
+                return true
             }
             guard !evidence.isEmpty else { return nil }
             return WorkRelation(
@@ -528,6 +638,26 @@ struct DerivedIntelligenceCoordinator: Sendable {
         }
     }
 
+    private static func requiresCurrentSubjectRevision(_ kind: WorkRelationKind) -> Bool {
+        switch kind {
+        case .authored, .assigned, .mentioned, .teamMentioned, .commented,
+                .reviewRequestedDirectly, .reviewRequestedFromTeam, .reviewed,
+                .changesRequested, .awaitingResponse:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isResponseBearingTimelineEvent(_ kind: TimelineEventKind) -> Bool {
+        switch kind {
+        case .commented, .reviewed, .reviewThreadUnresolved, .reviewThreadResolved:
+            true
+        default:
+            false
+        }
+    }
+
     private func awaitedActor(from relations: [WorkRelation]) -> GitHubNodeID? {
         relations
             .filter { $0.kind == .awaitingResponse }
@@ -536,19 +666,41 @@ struct DerivedIntelligenceCoordinator: Sendable {
             .first
     }
 
-    private func timelineEvidence(for event: TimelineEventSummary) -> EvidenceReference {
-        EvidenceReference(
-            id: EvidenceID(rawValue: "timeline-\(event.id.rawValue)")!,
-            source: .restTimeline,
-            locator: .legacyUnverified,
-            authority: .legacyUnverified,
-            nodeID: event.subjectNodeID,
-            eventID: event.id,
-            confidence: .provisional,
-            confirmation: .provisional,
-            observedAt: event.occurredAt,
-            excerpt: event.body
-        )
+    private func trustedTimelineEvidence(
+        _ evidence: [GitHubEventID: EvidenceReference],
+        scope: SynchronizationScope,
+        sourceRevision: String?
+    ) -> [GitHubEventID: EvidenceReference] {
+        guard let sourceRevision, !sourceRevision.isEmpty else { return [:] }
+        return evidence.reduce(into: [:]) { result, entry in
+            guard entry.key == entry.value.eventID,
+                  entry.value.sourceRevision == sourceRevision,
+                  isCurrentEvidence(entry.value, scope: scope)
+            else { return }
+            result[entry.key] = entry.value
+        }
+    }
+
+    private func isCurrentEvidence(
+        _ evidence: EvidenceReference,
+        scope: SynchronizationScope
+    ) -> Bool {
+        switch (evidence.source, evidence.locator, evidence.authority) {
+        case let (source, locator, .github(evidenceScope, _, _))
+            where source != .localWorkflow
+                && source != .legacyUnverified
+                && evidenceScope == scope
+                && !(evidence.sourceRevision?.isEmpty ?? true):
+            if case .endpoint = locator { return true }
+            if case .query = locator { return true }
+            return false
+        case let (.localWorkflow, .localWorkflow(locator), .localWorkflow(accountID, organizationID)):
+            return !locator.isEmpty
+                && accountID == scope.accountID
+                && organizationID == scope.organizationID
+        default:
+            return false
+        }
     }
 
     private func bounded(_ document: SearchDocument) -> SearchDocument {

@@ -32,6 +32,11 @@ enum LocalAccountRecoveryPresentation: Equatable {
     /// A stored account identity remains only as opaque local recovery state
     /// because its encryption key is unavailable.
     case unavailableVaultKey
+    /// Triage opened the account's Keychain entry, but the encrypted vault
+    /// needs repair. This is deliberately distinct from a missing key: the
+    /// original encrypted data remains in place until the person explicitly
+    /// chooses a verified-backup restore or a separate resync path.
+    case encryptedVaultNeedsRepair
     /// Account restoration failed before Triage could determine which local
     /// account data, if any, needs recovery.
     case encryptedLocalDataUnavailable
@@ -40,6 +45,8 @@ enum LocalAccountRecoveryPresentation: Equatable {
         switch self {
         case .unavailableVaultKey:
             "Recover encrypted local account data"
+        case .encryptedVaultNeedsRepair:
+            "Repair encrypted local account data"
         case .encryptedLocalDataUnavailable:
             "Encrypted local account data is unavailable"
         }
@@ -49,22 +56,30 @@ enum LocalAccountRecoveryPresentation: Equatable {
         switch self {
         case .unavailableVaultKey:
             "Triage cannot open encrypted local data for one or more saved accounts. In Account Settings, remove each unavailable account’s local data. This removes data stored on this Mac only; it does not change GitHub. Then reconnect to GitHub to resync."
+        case .encryptedVaultNeedsRepair:
+            "Triage detected a problem with encrypted local data for one or more saved accounts. The original encrypted data has not been removed or replaced. In Account Settings, restore a verified migration backup when available, or reconnect to GitHub to resync."
         case .encryptedLocalDataUnavailable:
             "Triage could not restore encrypted local account data. Try again after local storage is available. No local data will be changed automatically."
         }
     }
 
-    /// Only the keyless recovery path has an opaque account identity that the
-    /// Settings view can remove. A generic restoration failure must remain a
-    /// retry-only state; offering account removal there would be misleading
-    /// and could imply a destructive recovery path that does not exist.
+    /// The explicit local-repair states have a Settings destination. Generic
+    /// restoration failures remain retry-only because no account-specific
+    /// recovery authority has been established.
     var canOpenAccountSettings: Bool {
-        self == .unavailableVaultKey
+        switch self {
+        case .unavailableVaultKey, .encryptedVaultNeedsRepair:
+            true
+        case .encryptedLocalDataUnavailable:
+            false
+        }
     }
 
     var systemImage: String {
         switch self {
         case .unavailableVaultKey:
+            "externaldrive.badge.exclamationmark"
+        case .encryptedVaultNeedsRepair:
             "externaldrive.badge.exclamationmark"
         case .encryptedLocalDataUnavailable:
             "lock.trianglebadge.exclamationmark"
@@ -151,6 +166,9 @@ struct OnboardingPresentationState: Equatable {
     let organizationAccess: OrganizationAccess?
     let isConnecting: Bool
     let isSynchronizing: Bool
+    /// Shared application state, not view-local retry bookkeeping. It keeps
+    /// recovery controls consistent with the workspace recovery notice.
+    let isRestoringAccounts: Bool
     let connectionError: String?
     let refreshError: String?
     let aiAccess: OnboardingAIAccess
@@ -169,6 +187,7 @@ struct OnboardingPresentationState: Equatable {
         organizationAccess: OrganizationAccess?,
         isConnecting: Bool,
         isSynchronizing: Bool,
+        isRestoringAccounts: Bool = false,
         connectionError: String?,
         refreshError: String?,
         aiAccess: OnboardingAIAccess,
@@ -181,6 +200,7 @@ struct OnboardingPresentationState: Equatable {
         self.organizationAccess = organizationAccess
         self.isConnecting = isConnecting
         self.isSynchronizing = isSynchronizing
+        self.isRestoringAccounts = isRestoringAccounts
         self.connectionError = connectionError
         self.refreshError = refreshError
         self.aiAccess = aiAccess
@@ -285,7 +305,6 @@ struct OnboardingFlowView: View {
     let onComplete: () -> Void
     @State private var completedSteps = Set<OnboardingStep>()
     @State private var isPresentingPersonalAccessToken = false
-    @State private var isRetryingLocalAccountRestoration = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -379,16 +398,14 @@ struct OnboardingFlowView: View {
                 .accessibilityHint("Opens the local account recovery controls.")
             }
 
-            if isRetryingLocalAccountRestoration {
-                ProgressView("Checking encrypted local account data…")
+            if state.isRestoringAccounts {
+                ProgressView("Retrying encrypted local account data…")
                     .controlSize(.small)
-                    .accessibilityLabel("Checking encrypted local account data")
+                    .accessibilityLabel("Retrying encrypted local account data")
             } else {
                 Button("Try Again") {
-                    isRetryingLocalAccountRestoration = true
                     Task {
                         await actions.retryLocalAccountRestoration()
-                        isRetryingLocalAccountRestoration = false
                     }
                 }
                 .accessibilityHint("Checks whether local account data can now be restored.")

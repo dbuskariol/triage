@@ -3057,6 +3057,130 @@ enum TriageDatabaseMigrator {
                     credential_revision, capability_revision, source_revision
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "055-workflow-history-durable-undo-v1",
+            checksum: "a72e9b9d18f7bc9424a497a4320f9d1a381425d7f4c1f1652cd007454c313147"
+        ) { database in
+            // The original workflow history was per-row audit data only.
+            // Durable undo groups reversible local transitions by an opaque
+            // transaction ID and scopes them to the encrypted account vault.
+            try database.execute(sql: "ALTER TABLE workflow_history ADD COLUMN transaction_id TEXT")
+            try database.execute(sql: "ALTER TABLE workflow_history ADD COLUMN account_id TEXT")
+            try database.execute(sql: "ALTER TABLE workflow_history ADD COLUMN organization_id TEXT")
+            try database.execute(sql: "ALTER TABLE workflow_history ADD COLUMN is_undone INTEGER NOT NULL DEFAULT 0")
+            try database.execute(sql: """
+                UPDATE workflow_history
+                SET account_id = (
+                        SELECT account_id FROM work_items
+                        WHERE work_items.id = workflow_history.work_item_id
+                    ),
+                    organization_id = (
+                        SELECT organization_id FROM work_items
+                        WHERE work_items.id = workflow_history.work_item_id
+                    )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workflow_history_durable_undo_scope
+                ON workflow_history (account_id, organization_id, is_undone, created_at_ms DESC, transaction_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "056-pull-request-status-check-authority-v1",
+            checksum: "51aecb18f9132ff0d3d1f17d14c9d33df0d77b6241d0c3666877ee0a1f14d3be"
+        ) { database in
+            // Status check names are not globally authoritative. Bind every
+            // normalized row to one current pull-request revision and source
+            // scope so an older all-green rollup cannot survive a new commit.
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN organization_id TEXT NOT NULL DEFAULT ''")
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN credential_revision TEXT NOT NULL DEFAULT ''")
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN capability_revision TEXT NOT NULL DEFAULT ''")
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''")
+            try database.execute(sql: "ALTER TABLE status_checks ADD COLUMN observed_at_ms INTEGER NOT NULL DEFAULT 0")
+            try database.execute(sql: """
+                CREATE INDEX status_checks_current_pull_request_scope
+                ON status_checks (
+                    github_node_id, account_id, organization_id,
+                    credential_revision, capability_revision, source_revision
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE status_check_rollup_markers (
+                    github_node_id TEXT PRIMARY KEY NOT NULL REFERENCES pull_requests(github_node_id) ON DELETE CASCADE,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64 AND source_revision NOT GLOB '*[^0-9a-f]*'),
+                    mergeable_state TEXT NOT NULL CHECK (mergeable_state IN ('MERGEABLE', 'CONFLICTING', 'UNKNOWN')),
+                    observed_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "057-copilot-candidate-budget-v1",
+            checksum: "1b91d9eacb16b18cbebe278e2aefae89fdc0a01eaee99d8bb31342a0bb378412"
+        ) { database in
+            // This is an encrypted-vault counter, not telemetry. It contains
+            // only local opaque request/fingerprint keys and timing required
+            // to enforce the candidate limits.
+            try database.execute(sql: """
+                CREATE TABLE ai_candidate_budget_attempts (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    utc_day TEXT NOT NULL CHECK (length(utc_day) = 10),
+                    candidate_id TEXT NOT NULL CHECK (length(candidate_id) BETWEEN 1 AND 512),
+                    source_fingerprint TEXT NOT NULL CHECK (
+                        length(source_fingerprint) = 64
+                        AND source_fingerprint NOT GLOB '*[^0-9a-f]*'
+                    ),
+                    priority INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('leased', 'completed', 'cancelled')),
+                    lease_id TEXT NOT NULL CHECK (length(lease_id) = 36),
+                    started_at_ms INTEGER NOT NULL,
+                    finished_at_ms INTEGER,
+                    PRIMARY KEY (account_id, organization_id, utc_day, candidate_id, source_fingerprint),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (
+                        (state = 'leased' AND finished_at_ms IS NULL)
+                        OR (state IN ('completed', 'cancelled') AND finished_at_ms IS NOT NULL)
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX ai_candidate_budget_scope_started
+                ON ai_candidate_budget_attempts (
+                    account_id, organization_id, utc_day, started_at_ms DESC
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX ai_candidate_budget_scope_active
+                ON ai_candidate_budget_attempts (
+                    account_id, organization_id, state, started_at_ms DESC
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "058-ai-action-confidence-threshold-v1",
+            checksum: "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
+        ) { database in
+            // Existing consent rows retain the product safety minimum.  The
+            // encrypted row remains the sole authority for an organization's
+            // user-raised automatic-action threshold.
+            try database.execute(sql: """
+                ALTER TABLE ai_consents
+                ADD COLUMN automatic_action_confidence_threshold REAL NOT NULL
+                DEFAULT 0.92
+                CHECK (
+                    automatic_action_confidence_threshold >= 0.92
+                    AND automatic_action_confidence_threshold <= 1.0
+                )
+                """)
         }
     ]
 }

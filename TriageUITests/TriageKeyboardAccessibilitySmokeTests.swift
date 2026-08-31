@@ -30,6 +30,14 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         let sidebar = element(named: "Triage sidebar")
         XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
 
+        // Cmd-Control-S is the standard View-menu sidebar toggle. Exercise it
+        // before other focused commands so an accidental duplicate shortcut
+        // cannot route to a workflow action instead.
+        app.typeKey("s", modifierFlags: [.command, .control])
+        XCTAssertFalse(sidebar.waitForExistence(timeout: 2))
+        app.typeKey("s", modifierFlags: [.command, .control])
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 2))
+
         let search = searchField()
         XCTAssertTrue(search.waitForExistence(timeout: 5))
 

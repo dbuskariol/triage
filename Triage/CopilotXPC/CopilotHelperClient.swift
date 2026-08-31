@@ -2,17 +2,28 @@ import Foundation
 
 actor CopilotHelperClient: TriageCopilotHelping {
   private struct ActiveOperation: Sendable {
+    /// This is deliberately distinct from the protocol request ID. A caller
+    /// may retry with the same request ID, but a cancellation callback belongs
+    /// to one particular local exchange and must never terminate its retry.
+    let exchangeID: UUID
     let requestID: UUID
+    let accountID: AccountID
     let organizationID: OrganizationID
     let operation: CopilotOperation
+    var isTerminating = false
   }
 
   private let transport: any CopilotFrameTransport
+  private let exchangeIDGenerator: @Sendable () -> UUID
   private var activeOperation: ActiveOperation?
   private var isShutDown = false
 
-  init(transport: any CopilotFrameTransport) {
+  init(
+    transport: any CopilotFrameTransport,
+    exchangeIDGenerator: @escaping @Sendable () -> UUID = { UUID() }
+  ) {
     self.transport = transport
+    self.exchangeIDGenerator = exchangeIDGenerator
   }
 
   func health(_ request: CopilotHealthRequest) async throws -> CopilotHealthResponse {
@@ -22,6 +33,10 @@ actor CopilotHelperClient: TriageCopilotHelping {
       timeout: nil
     )
     return response
+  }
+
+  func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse {
+    try await exchange(request, expectedStatus: .authentication, timeout: 60)
   }
 
   func models(_ request: CopilotModelsRequest) async throws -> CopilotModelsResponse {
@@ -50,6 +65,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse {
     guard let activeOperation,
       activeOperation.requestID == request.targetRequestID,
+      activeOperation.accountID == request.header.accountID,
       activeOperation.organizationID == request.header.organizationID,
       activeOperation.operation == .analyze
     else {
@@ -57,11 +73,11 @@ actor CopilotHelperClient: TriageCopilotHelping {
     }
     // A pipe has one response reader. Termination safely interrupts it; the
     // XPC service will own protocol-level cancellation dispatch.
-    isShutDown = true
-    await transport.terminate()
+    await terminateActiveOperation(matching: activeOperation.exchangeID)
     return CopilotCancelResponse(
       header: CopilotResponseHeader(
         requestID: request.header.requestID,
+        accountID: request.header.accountID,
         organizationID: request.header.organizationID,
         status: .cancelled
       ),
@@ -92,45 +108,72 @@ actor CopilotHelperClient: TriageCopilotHelping {
     guard activeOperation == nil else { throw CopilotXPCError.operationInProgress }
     try validate(request.header)
 
-    activeOperation = ActiveOperation(
+    let operation = ActiveOperation(
+      exchangeID: exchangeIDGenerator(),
       requestID: request.header.requestID,
+      accountID: request.header.accountID,
       organizationID: request.header.organizationID,
       operation: request.header.operation
     )
+    activeOperation = operation
     defer {
-      activeOperation = nil
+      // A queued cancellation callback is allowed to run after this exchange
+      // completes. It must not clear state for a later exchange.
+      if activeOperation?.exchangeID == operation.exchangeID {
+        activeOperation = nil
+      }
     }
 
-    let payload = try CopilotJSONCodec.encode(request)
+    var payload = try CopilotJSONCodec.encode(request)
+    // Authenticate requests contain a Keychain credential. This client owns
+    // this JSON buffer and wipes it after the sole framed exchange returns or
+    // is cancelled; transports independently wipe their frame copies.
+    defer { payload.resetBytes(in: 0..<payload.count) }
     guard payload.count <= CopilotIPC.maximumRequestBytes else {
       throw CopilotFrameError.payloadTooLarge
     }
     // The cancellation handler is a sending closure. Capture only the
-    // concrete Sendable header and actor reference, never the generic request
-    // or the current actor-isolated region.
-    let requestHeader = request.header
+    // concrete Sendable exchange identity and actor reference, never the
+    // generic request or the current actor-isolated region.
+    let exchangeID = operation.exchangeID
     let client = self
 
     do {
-      return try await withTaskCancellationHandler {
+      let response: Response = try await withTaskCancellationHandler {
         try await readResponse(
           payload: payload,
           request: request.header,
           expectedStatus: expectedStatus,
-          timeout: timeout
+          timeout: timeout,
+          exchangeID: exchangeID
         )
       } onCancel: {
-        Task { [client, requestHeader] in
-          await client.cancelRunningProcess(for: requestHeader)
+        Task { [client, exchangeID] in
+          await client.cancelRunningProcess(matching: exchangeID)
         }
       }
-    } catch is CancellationError {
-      // The cancellation handler schedules termination without blocking its
-      // caller. Before reporting cancellation, synchronously fence the exact
-      // still-active request so a fast cooperative read failure cannot race
-      // ahead and leave the helper transport alive. The request identity
-      // check keeps a delayed cancellation from terminating newer work.
-      await cancelRunningProcess(for: requestHeader)
+      // Cancellation handlers are allowed to run asynchronously. Do not
+      // return a successful response after caller cancellation; the catch
+      // below synchronously reaps this exact helper before returning.
+      try Task.checkCancellation()
+      return response
+    } catch {
+      guard error is CancellationError || error as? CopilotXPCError == .operationCancelled else {
+        // Invalidating the NSXPC connection is the transport-level fence for
+        // an explicit cancel. That invalidation is reported by the concrete
+        // XPC client as helper-unavailable, even though this exact exchange
+        // was deliberately terminated. Do not widen this normalization to
+        // unrelated helper failures.
+        if activeOperation?.exchangeID == exchangeID,
+           activeOperation?.isTerminating == true {
+          throw CopilotXPCError.operationCancelled
+        }
+        throw error
+      }
+      // Both task cancellation and XPC's normalized cancellation error must
+      // synchronously fence the active helper. Keeping a per-exchange token
+      // prevents an old queued onCancel from terminating a newer retry.
+      await cancelRunningProcess(matching: exchangeID)
       throw CopilotXPCError.operationCancelled
     }
   }
@@ -139,7 +182,8 @@ actor CopilotHelperClient: TriageCopilotHelping {
     payload: Data,
     request: CopilotRequestHeader,
     expectedStatus: CopilotResponseStatus,
-    timeout: TimeInterval?
+    timeout: TimeInterval?,
+    exchangeID: UUID
   ) async throws -> Response {
     if let timeout {
       return try await withThrowingTaskGroup(of: Response.self) { group in
@@ -163,7 +207,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
         } catch {
           group.cancelAll()
           if error as? CopilotXPCError == .operationTimedOut {
-            await self.cancelRunningProcess(for: request)
+            await self.cancelRunningProcess(matching: exchangeID)
           }
           throw error
         }
@@ -188,6 +232,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
     try CopilotWireSchema.validate(responseData, expectedStatus: expectedStatus)
     let wireResponse = try CopilotJSONCodec.decode(CopilotWireResponse.self, from: responseData)
     if let failure = wireResponse.failure {
+      try validate(failureResponse: wireResponse, for: request)
       throw CopilotXPCError.helperFailure(failure)
     }
     let response = try CopilotJSONCodec.decode(Response.self, from: responseData)
@@ -199,21 +244,30 @@ actor CopilotHelperClient: TriageCopilotHelping {
     guard header.protocolVersion == CopilotIPC.version else {
       throw CopilotXPCError.invalidProtocolVersion
     }
+    guard Self.isCanonicalOpaqueAccountID(header.accountID) else {
+      throw CopilotXPCError.invalidAccountID
+    }
   }
 
-  /// Terminates only the operation whose cancellation or deadline triggered
-  /// this request. The XPC transport cannot be reopened after termination, so
-  /// a current-operation cancellation is terminal; a delayed stale handler is
-  /// a no-op and cannot shut down a newer operation.
-  func cancelRunningProcess(for request: CopilotRequestHeader) async {
-    guard activeOperation?.requestID == request.requestID,
-      activeOperation?.organizationID == request.organizationID,
-      activeOperation?.operation == request.operation
-    else {
-      return
-    }
+  /// Terminates only the local exchange whose cancellation or deadline
+  /// triggered this request. The XPC transport cannot be reopened after
+  /// termination, so a current-operation cancellation is terminal; a delayed
+  /// stale handler is a no-op and cannot shut down a newer retry.
+  private func terminateActiveOperation(matching exchangeID: UUID) async {
+    guard var activeOperation,
+      activeOperation.exchangeID == exchangeID,
+      !activeOperation.isTerminating
+    else { return }
+    activeOperation.isTerminating = true
+    self.activeOperation = activeOperation
     isShutDown = true
     await transport.terminate()
+  }
+
+  /// The test-visible cancellation entry point intentionally accepts the
+  /// local exchange token, rather than a reusable protocol request ID.
+  func cancelRunningProcess(matching exchangeID: UUID) async {
+    await terminateActiveOperation(matching: exchangeID)
   }
 
   private func validate<Response: CopilotResponseContaining>(
@@ -227,11 +281,33 @@ actor CopilotHelperClient: TriageCopilotHelping {
     }
     guard header.status == expectedStatus,
       header.requestID == request.requestID,
+      header.accountID == request.accountID,
       header.organizationID == request.organizationID,
       header.failure == nil
     else {
       throw CopilotXPCError.responseMismatch
     }
+  }
+
+  /// Helper failures are still untrusted frames. They must echo the exact
+  /// exchange before callers can observe their code or message; otherwise a
+  /// stale or cross-account failure could be attributed to current work.
+  private func validate(failureResponse: CopilotWireResponse, for request: CopilotRequestHeader) throws {
+    guard failureResponse.protocolVersion == CopilotIPC.version else {
+      throw CopilotXPCError.invalidProtocolVersion
+    }
+    guard failureResponse.status == .failure,
+      failureResponse.requestID == request.requestID,
+      failureResponse.accountID == request.accountID,
+      failureResponse.organizationID == request.organizationID
+    else {
+      throw CopilotXPCError.responseMismatch
+    }
+  }
+
+  private static func isCanonicalOpaqueAccountID(_ accountID: AccountID) -> Bool {
+    guard let value = UUID(uuidString: accountID.rawValue) else { return false }
+    return value.uuidString.lowercased() == accountID.rawValue
   }
 }
 
@@ -240,6 +316,7 @@ private protocol CopilotRequestContaining {
 }
 
 extension CopilotHealthRequest: CopilotRequestContaining {}
+extension CopilotAuthenticateRequest: CopilotRequestContaining {}
 extension CopilotModelsRequest: CopilotRequestContaining {}
 extension CopilotAnalyzeRequest: CopilotRequestContaining {}
 extension CopilotCancelRequest: CopilotRequestContaining {}
@@ -250,6 +327,7 @@ private protocol CopilotResponseContaining {
 }
 
 extension CopilotHealthResponse: CopilotResponseContaining {}
+extension CopilotAuthenticationResponse: CopilotResponseContaining {}
 extension CopilotModelsResponse: CopilotResponseContaining {}
 extension CopilotAnalysisResponse: CopilotResponseContaining {}
 extension CopilotCancelResponse: CopilotResponseContaining {}
@@ -283,14 +361,28 @@ private enum CopilotWireSchema {
     let commonFields: Set<String> = [
       "protocol_version",
       "request_id",
+      "account_id",
       "organization_id",
       "status",
       "failure",
     ]
+    guard let statusValue = object["status"] as? String,
+      let actualStatus = CopilotResponseStatus(rawValue: statusValue)
+    else {
+      throw CopilotXPCError.invalidResponse
+    }
     let operationFields: Set<String>
-    switch expectedStatus {
+    switch actualStatus {
+    case .failure:
+      // A failure envelope carries only its bound header and failure detail.
+      // Do not permit a stale success payload to piggyback on an error frame.
+      operationFields = []
+    default:
+      switch expectedStatus {
     case .health:
       operationFields = ["health"]
+    case .authentication:
+      operationFields = ["authentication"]
     case .models:
       operationFields = ["models"]
     case .analysis:
@@ -310,9 +402,44 @@ private enum CopilotWireSchema {
       operationFields = []
     case .failure:
       operationFields = []
+      }
     }
     guard Set(object.keys).isSubset(of: commonFields.union(operationFields)) else {
       throw CopilotXPCError.invalidResponse
+    }
+    if actualStatus == .analysis, expectedStatus == .analysis {
+      try validateAnalysis(object)
+    }
+  }
+
+  private static func validateAnalysis(_ object: [String: Any]) throws {
+    guard let actions = object["action_items"] as? [[String: Any]],
+      actions.count <= 128
+    else { throw CopilotXPCError.invalidResponse }
+    let permittedActionFields: Set<String> = [
+      "id", "text", "confidence", "evidence_ids", "deadline", "claims",
+    ]
+    let permittedClaimFields: Set<String> = [
+      "evidence_id", "actor_role", "timestamp", "quoted_span", "deterministic_reason_id",
+    ]
+    for action in actions {
+      guard Set(action.keys).isSubset(of: permittedActionFields),
+        action["id"] is String,
+        action["text"] is String,
+        action["confidence"] is NSNumber,
+        action["evidence_ids"] is [String],
+        let claims = action["claims"] as? [[String: Any]],
+        claims.count <= 128
+      else { throw CopilotXPCError.invalidResponse }
+      for claim in claims {
+        guard Set(claim.keys).isSubset(of: permittedClaimFields),
+          claim["evidence_id"] is String,
+          claim["actor_role"] is String,
+          claim["timestamp"] is String,
+          claim["quoted_span"] is String,
+          claim["deterministic_reason_id"] is String
+        else { throw CopilotXPCError.invalidResponse }
+      }
     }
   }
 }

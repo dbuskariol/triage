@@ -19,6 +19,11 @@ struct AccountSessionSnapshot: Equatable, Sendable {
     /// separate from usable accounts so the UI can offer local crypto-erasure
     /// without manufacturing GitHub profile data from a missing vault.
     let unavailableAccountIDs: Set<AccountID>
+    /// Account-local encrypted vault failures with an intact Keychain key.
+    /// These remain distinct from unavailable keys so presentation never
+    /// offers destructive keyless-vault removal for corruption or migration
+    /// repair.
+    let vaultRecoveryIssues: [AccountVaultRecoveryIssue]
     /// Non-secret remediation notice produced after a successful credential
     /// replacement whose retired Keychain entry could not be erased.
     let credentialActionNotice: String?
@@ -29,6 +34,7 @@ struct AccountSessionSnapshot: Equatable, Sendable {
         organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]],
         accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot],
         unavailableAccountIDs: Set<AccountID> = [],
+        vaultRecoveryIssues: [AccountVaultRecoveryIssue] = [],
         credentialActionNotice: String? = nil
     ) throws {
         let accountIDs = Set(accounts.map(\.id))
@@ -38,7 +44,10 @@ struct AccountSessionSnapshot: Equatable, Sendable {
         guard Set(organizationsByAccount.keys).isSubset(of: accountIDs),
               Set(organizationAccessesByAccount.keys).isSubset(of: accountIDs),
               Set(accountCapabilitiesByAccount.keys).isSubset(of: accountIDs),
-              unavailableAccountIDs.isDisjoint(with: accountIDs)
+              unavailableAccountIDs.isDisjoint(with: accountIDs),
+              Set(vaultRecoveryIssues.map(\.accountID)).isDisjoint(with: accountIDs),
+              unavailableAccountIDs.isDisjoint(with: Set(vaultRecoveryIssues.map(\.accountID))),
+              Set(vaultRecoveryIssues.map(\.accountID)).count == vaultRecoveryIssues.count
         else {
             throw AccountSessionSnapshotError.unknownAccountReference
         }
@@ -64,6 +73,7 @@ struct AccountSessionSnapshot: Equatable, Sendable {
         self.organizationAccessesByAccount = organizationAccessesByAccount
         self.accountCapabilitiesByAccount = accountCapabilitiesByAccount
         self.unavailableAccountIDs = unavailableAccountIDs
+        self.vaultRecoveryIssues = vaultRecoveryIssues
         self.credentialActionNotice = credentialActionNotice
     }
 }
@@ -88,6 +98,10 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
 
     let scope: SynchronizationScope
     let workItems: [WorkItem]
+    /// The persisted-rank first Inbox page. The complete local graph remains
+    /// available for section counts, search, and local workflow updates; this
+    /// page is the bounded read consumed by the unfiltered Inbox list.
+    let inboxPage: [WorkItem]?
     let durableState: AccountOrganizationDurableState
     let coverageRequirements: [CoverageRequirement]
     let coverageRecords: [CoverageRecord]
@@ -102,6 +116,7 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
     init(
         scope: SynchronizationScope,
         workItems: [WorkItem],
+        inboxPage: [WorkItem]? = nil,
         durableState: AccountOrganizationDurableState,
         coverageRequirements: [CoverageRequirement],
         coverageRecords: [CoverageRecord],
@@ -113,6 +128,11 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
         guard workItems.allSatisfy({
             $0.accountID == scope.accountID && $0.organizationID == scope.organizationID
         }) else {
+            throw WorkspacePresentationSnapshotError.workItemScopeMismatch
+        }
+        guard inboxPage?.allSatisfy({
+            $0.accountID == scope.accountID && $0.organizationID == scope.organizationID
+        }) ?? true else {
             throw WorkspacePresentationSnapshotError.workItemScopeMismatch
         }
         guard coverageRecords.allSatisfy({
@@ -139,6 +159,7 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
         }
         self.scope = scope
         self.workItems = workItems
+        self.inboxPage = inboxPage
         self.durableState = durableState
         self.coverageRequirements = coverageRequirements
         self.coverageRecords = coverageRecords

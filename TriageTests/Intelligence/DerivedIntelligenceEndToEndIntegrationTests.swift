@@ -4,6 +4,27 @@ import XCTest
 @testable import Triage
 
 final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
+    func testAuthoritativeHydrationRoleAndTimelineSourcesDriveProductionAttentionRules() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.seedAuthoritativeRuleSources()
+
+        try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
+            .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.now)
+
+        let snapshot = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: fixture.aiPolicy,
+            evaluatedAt: fixture.now
+        )
+        let output = try DerivedIntelligenceCoordinator().recompute(snapshot.input)
+        let result = try XCTUnwrap(output.items.first)
+        let ruleIDs = Set(result.attentionReasons.map(\.ruleID))
+        XCTAssertTrue(ruleIDs.contains(AttentionRuleID.assignedToCurrentUser.rawValue))
+        XCTAssertTrue(ruleIDs.contains(ConversationAttentionRuleID.directMentionAfterProgress.rawValue))
+        XCTAssertTrue(ruleIDs.contains(WaitingAttentionRuleID.awaitedActorResponded.rawValue))
+    }
+
     func testRevisionQualifiedNormalizedSourcesRemainProvisionalThroughPersistenceAndWorkspaceProjection() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -210,12 +231,13 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
 
     private final class Fixture: @unchecked Sendable {
         let directory: URL
-        let accountID = AccountID(rawValue: "derived-e2e-account")!
+        let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000201")!
         let organizationID = OrganizationID(rawValue: "derived-e2e-org")!
         let accountNodeID = GitHubNodeID(rawValue: "derived-e2e-user")!
         let pullRequestNodeID = GitHubNodeID(rawValue: "derived-e2e-pr")!
         let reviewNodeID = GitHubNodeID(rawValue: "derived-e2e-review")!
         let reviewThreadNodeID = GitHubNodeID(rawValue: "derived-e2e-review-thread")!
+        let reviewerNodeID = GitHubNodeID(rawValue: "derived-e2e-reviewer")!
         let projectNodeID = GitHubNodeID(rawValue: "derived-e2e-project")!
         let projectItemNodeID = GitHubNodeID(rawValue: "derived-e2e-project-item")!
         let timelineEventID = GitHubEventID(rawValue: "derived-e2e-event")!
@@ -338,6 +360,182 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             try await insertReviewThread()
             try await insertTimeline()
             try await insertProjectEvidence()
+        }
+
+        func seedAuthoritativeRuleSources() async throws {
+            let primaryRevision = now.ISO8601Format()
+            try await GitHubNodeRepository(vault: vault).save(
+                Self.node(
+                    id: pullRequestNodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    now: now,
+                    kind: .pullRequest,
+                    title: "Derived end-to-end pull request",
+                    sourceRevision: primaryRevision,
+                    body: "Normalized pull request body"
+                )
+            )
+            let hydrationStreamID = SyncStreamID(rawValue: "hydration-pull-requests-\(organizationID.rawValue)")!
+            try await saveCoverage(.pullRequests, stream: hydrationStreamID.rawValue)
+            try await ActorRepository(vault: vault).save(
+                ActorSummary(
+                    id: ActorID(rawValue: reviewerNodeID.rawValue)!,
+                    nodeID: reviewerNodeID,
+                    login: "reviewer",
+                    displayName: nil,
+                    avatarURL: nil
+                ),
+                observedAt: now
+            )
+            let hydrationPayload = Data("""
+                {"data":{"nodes":[{"id":"\(pullRequestNodeID.rawValue)","author":{"id":"\(accountNodeID.rawValue)"},"assignees":{"nodes":[{"id":"\(accountNodeID.rawValue)"}],"pageInfo":{"hasNextPage":false}},"reviewRequests":{"nodes":[{"requestedReviewer":{"id":"\(reviewerNodeID.rawValue)","login":"reviewer"}}],"pageInfo":{"hasNextPage":false}}}]}}
+                """.utf8)
+            try await RawAPISnapshotRepository(vault: vault).save(
+                RawAPISnapshot(
+                    id: RawAPISnapshotID(rawValue: "derived-e2e-hydration-rules")!,
+                    accountID: accountID,
+                    githubNodeID: pullRequestNodeID,
+                    endpoint: "graphql:TriageHydrateNodes",
+                    eTag: nil,
+                    parserVersion: 2,
+                    observedAt: now,
+                    payload: hydrationPayload,
+                    requestIdentity: ConditionalRequestIdentity(
+                        scope: scope,
+                        feature: .pullRequests,
+                        streamID: hydrationStreamID,
+                        requestKey: "graphql:TriageHydrateNodes/node=\(pullRequestNodeID.rawValue)"
+                    )
+                )
+            )
+
+            let mentionStreamID = SyncStreamID(rawValue: "role-discovery-\(organizationID.rawValue)-open-direct-mentions")!
+            try await SyncStreamRepository(vault: vault).save(
+                SyncStream(
+                    id: mentionStreamID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: .roleDiscovery,
+                    highWater: nil,
+                    lastSuccessfulAt: now,
+                    lastAttemptAt: now,
+                    status: .complete,
+                    failureDetail: nil
+                )
+            )
+            try await saveCoverage(.roleDiscovery, stream: mentionStreamID.rawValue)
+            let mentionQuery = try GitHubIssueSearchQuery(
+                organizationLogin: "acme",
+                userLogin: "octocat",
+                state: .open,
+                relationship: .mentioned
+            )
+            let mentionIdentity = try GitHubIssueSearchRequestIdentity(
+                query: mentionQuery,
+                page: 1,
+                scope: scope,
+                streamID: mentionStreamID
+            )
+            let timestamp = primaryRevision
+            let mentionSnapshot = RawAPISnapshot(
+                id: RawAPISnapshotID(rawValue: "derived-e2e-direct-mention")!,
+                accountID: accountID,
+                githubNodeID: nil,
+                endpoint: mentionIdentity.endpoint,
+                eTag: "\"derived-e2e-direct-mention\"",
+                parserVersion: GitHubIssueSearchRequestIdentity.parserVersion,
+                observedAt: now,
+                payload: Data("""
+                    {"total_count":1,"incomplete_results":false,"items":[{"id":1,"node_id":"\(pullRequestNodeID.rawValue)","number":1,"title":"Derived end-to-end pull request","state":"open","html_url":"https://github.com/acme/repo/pull/1","created_at":"\(timestamp)","updated_at":"\(timestamp)","closed_at":null,"pull_request":{"url":"https://api.github.com/repos/acme/repo/pulls/1"},"repository_url":"https://api.github.com/repos/acme/repo"}]}
+                    """.utf8),
+                requestIdentity: ConditionalRequestIdentity(
+                    scope: scope,
+                    feature: .roleDiscovery,
+                    streamID: mentionStreamID,
+                    requestKey: mentionIdentity.requestKey
+                )
+            )
+            try await RawAPISnapshotRepository(vault: vault).save(mentionSnapshot)
+            try await RoleSearchPageReplayRepository(vault: vault).save(
+                RoleSearchPageReplay(
+                    requestKey: mentionIdentity.requestKey,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    streamID: mentionStreamID,
+                    queryValue: mentionQuery.value,
+                    page: 1,
+                    endpoint: mentionIdentity.endpoint,
+                    credentialRevision: credentialRevision,
+                    capabilityRevision: capabilityRevision,
+                    rawSnapshotID: mentionSnapshot.id,
+                    eTag: mentionSnapshot.eTag,
+                    lastModified: nil,
+                    parserVersion: GitHubIssueSearchRequestIdentity.parserVersion,
+                    lastValidatedAt: now
+                )
+            )
+
+            try await saveCoverage(.timelines, stream: "timelines-\(organizationID.rawValue)")
+            try await saveCoverage(.timelines, stream: "timeline:\(pullRequestNodeID.rawValue)")
+            try await TimelineRepository(vault: vault).save(
+                TimelineEventSummary(
+                    id: GitHubEventID(rawValue: "derived-e2e-reviewer-response")!,
+                    subjectNodeID: pullRequestNodeID,
+                    kind: .commented,
+                    actor: ActorSummary(
+                        id: ActorID(rawValue: reviewerNodeID.rawValue)!,
+                        nodeID: reviewerNodeID,
+                        login: "reviewer",
+                        displayName: nil,
+                        avatarURL: nil
+                    ),
+                    occurredAt: now,
+                    url: nil,
+                    body: "Authoritative reviewer response"
+                ),
+                sourceRevision: primaryRevision
+            )
+            let timelineSnapshotID = RawAPISnapshotID(rawValue: "derived-e2e-timeline-rules")!
+            try await RawAPISnapshotRepository(vault: vault).save(
+                RawAPISnapshot(
+                    id: timelineSnapshotID,
+                    accountID: accountID,
+                    githubNodeID: pullRequestNodeID,
+                    endpoint: "/repos/acme/repo/issues/1/timeline?page=1",
+                    eTag: "timeline-rules-etag",
+                    parserVersion: 1,
+                    observedAt: now,
+                    payload: Data("[]".utf8),
+                    requestIdentity: ConditionalRequestIdentity(
+                        scope: scope,
+                        feature: .timelines,
+                        streamID: SyncStreamID(rawValue: "timeline:\(pullRequestNodeID.rawValue)")!,
+                        requestKey: "GET /repos/acme/repo/issues/1/timeline?page=1"
+                    )
+                )
+            )
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO timeline_current_pages (
+                            account_id, organization_id, github_node_id, feature, stream_id,
+                            credential_revision, capability_revision, source_revision, page_index,
+                            raw_snapshot_id, request_key, observed_at_ms, is_terminal
+                        ) VALUES (?, ?, ?, 'timelines', ?, ?, ?, ?, 1, ?, ?, ?, 1)
+                        """,
+                    arguments: [
+                        accountID.rawValue, organizationID.rawValue, pullRequestNodeID.rawValue,
+                        "timeline:\(pullRequestNodeID.rawValue)", credentialRevision.rawValue,
+                        capabilityRevision.rawValue, primaryRevision, timelineSnapshotID.rawValue,
+                        "GET /repos/acme/repo/issues/1/timeline?page=1", milliseconds(now)
+                    ]
+                )
+            }
+            try await WorkflowRepository(vault: vault).save(
+                WorkflowState(status: .waiting, updatedAt: now.addingTimeInterval(-1)),
+                for: workItemID
+            )
         }
 
         func rotateCredentialRevision() async throws {

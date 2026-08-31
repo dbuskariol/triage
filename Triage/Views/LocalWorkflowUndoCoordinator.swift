@@ -55,6 +55,14 @@ enum LocalWorkflowUndoPolicy {
         }
     }
 
+    /// A batch is worth recording when at least one member changes.
+    static func hasReversibleChange(
+        for action: WorkflowAction,
+        in states: some Sequence<WorkflowState>
+    ) -> Bool {
+        states.contains { inverse(for: action, previous: $0) != nil }
+    }
+
     static func actionName(for action: WorkflowAction) -> String {
         switch action {
         case .archive: return "Archive in Triage"
@@ -89,34 +97,77 @@ final class LocalWorkflowUndoCoordinator: NSObject, ObservableObject {
         appModel: TriageAppModel,
         undoManager: UndoManager?
     ) async {
-        guard let inverse = LocalWorkflowUndoPolicy.inverse(for: action, previous: item.workflow) else {
+        await perform(action, to: [item], appModel: appModel, undoManager: undoManager)
+    }
+
+    func perform(
+        _ action: WorkflowAction,
+        to items: [WorkItem],
+        appModel: TriageAppModel,
+        undoManager: UndoManager?
+    ) async {
+        guard LocalWorkflowUndoPolicy.hasReversibleChange(
+            for: action,
+            in: items.lazy.map(\.workflow)
+        ) else {
             feedback = "This local workflow action has no reversible change. GitHub was not modified."
             return
         }
+        let changedItems = items.filter {
+            LocalWorkflowUndoPolicy.inverse(for: action, previous: $0.workflow) != nil
+        }
+        guard let item = changedItems.first else { return }
 
-        let expectedAfterAction = WorkflowTransitionEngine.apply(action, to: item.workflow, at: .now).next
-        await appModel.applyWorkflowAction(action, to: item)
-        guard let updated = currentWorkItem(id: item.id, in: appModel),
-              LocalWorkflowUndoPolicy.hasSamePersistentState(updated.workflow, expectedAfterAction)
-        else {
+        // Keep only effective transitions in the durable transaction. The
+        // remaining batch is still committed and undone atomically, while an
+        // already-matching selected item does not receive a synthetic update.
+        guard let transaction = await appModel.applyWorkflowActionWithHistory(action, to: changedItems) else {
             feedback = "Triage could not save this local workflow change. GitHub was not modified."
             return
         }
 
         if let undoManager {
-            registerHistoryStep(
-                expectedCurrent: updated.workflow,
-                applying: inverse,
-                expectedAfterApplying: item.workflow,
-                nextAction: action,
+            registerDurableHistoryStep(
                 item: item,
                 appModel: appModel,
                 undoManager: undoManager,
-                actionName: LocalWorkflowUndoPolicy.actionName(for: action)
+                actionName: LocalWorkflowUndoPolicy.actionName(for: action),
+                isRedo: false,
+                transactionID: transaction.id
             )
             feedback = "Local workflow updated. Choose Edit > Undo to reverse it in Triage; GitHub is unchanged."
         } else {
             feedback = "Local workflow updated. Undo is unavailable in this window; GitHub is unchanged."
+        }
+    }
+
+    private func registerDurableHistoryStep(
+        item: WorkItem,
+        appModel: TriageAppModel,
+        undoManager: UndoManager,
+        actionName: String,
+        isRedo: Bool,
+        transactionID: String
+    ) {
+        LocalWorkflowUndoPolicy.registerNativeUndo(named: actionName, with: undoManager) {
+            undoManager.registerUndo(withTarget: self) { coordinator in
+                coordinator.registerDurableHistoryStep(
+                    item: item,
+                    appModel: appModel,
+                    undoManager: undoManager,
+                    actionName: actionName,
+                    isRedo: !isRedo,
+                    transactionID: transactionID
+                )
+                Task { @MainActor in
+                    let didChange = isRedo
+                        ? await appModel.redoWorkflowAction(transactionID: transactionID, for: item)
+                        : await appModel.undoWorkflowAction(transactionID: transactionID, for: item)
+                    coordinator.feedback = didChange
+                        ? "Local workflow reversal completed in Triage. GitHub was not modified."
+                        : "Triage could not reverse this local workflow change. GitHub was not modified."
+                }
+            }
         }
     }
 

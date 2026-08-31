@@ -8,16 +8,21 @@ import XCTest
 final class TriagePerformanceLaunchTests: XCTestCase {
     func testOptInLaunchBudget() throws {
         guard ProcessInfo.processInfo.environment["TRIAGE_PERFORMANCE_UI_BENCHMARK"] == "1" else { return }
+        guard let reportSession = ProcessInfo.processInfo.environment[
+            "TRIAGE_PERFORMANCE_BENCHMARK_SESSION"
+        ], !reportSession.isEmpty else {
+            throw LaunchMeasurementError.missingBenchmarkSession
+        }
 
         var samples = [Double]()
-        let benchmarkSession = UUID().uuidString.lowercased()
         for warmup in 0..<LaunchMeasurement.warmupSampleCount {
-            _ = try launchSample(session: "performance-\(benchmarkSession)-warmup-\(warmup)")
+            _ = try launchSample(session: "performance-\(reportSession)-warmup-\(warmup)")
         }
         for sample in 0..<LaunchMeasurement.measuredSampleCount {
-            samples.append(try launchSample(session: "performance-\(benchmarkSession)-\(sample)"))
+            samples.append(try launchSample(session: "performance-\(reportSession)-\(sample)"))
         }
         let result = try LaunchMeasurement(
+            benchmarkSession: reportSession,
             samplesMilliseconds: samples,
             budgetMilliseconds: 1_000,
             p95BudgetMilliseconds: 1_200
@@ -56,6 +61,7 @@ private struct LaunchMeasurement: Codable {
     static let measuredSampleCount = 11
 
     let schemaVersion: Int
+    let benchmarkSession: String
     let warmupSampleCount: Int
     let samplesMilliseconds: [Double]
     let medianMilliseconds: Double
@@ -64,11 +70,13 @@ private struct LaunchMeasurement: Codable {
     let p95BudgetMilliseconds: Double
 
     init(
+        benchmarkSession: String,
         samplesMilliseconds: [Double],
         budgetMilliseconds: Double,
         p95BudgetMilliseconds: Double
     ) throws {
-        guard samplesMilliseconds.count == Self.measuredSampleCount,
+        guard !benchmarkSession.isEmpty,
+              samplesMilliseconds.count == Self.measuredSampleCount,
               samplesMilliseconds.allSatisfy(\.isFinite),
               samplesMilliseconds.allSatisfy({ $0 >= 0 })
         else {
@@ -76,6 +84,7 @@ private struct LaunchMeasurement: Codable {
         }
         let sorted = samplesMilliseconds.sorted()
         schemaVersion = Self.currentSchemaVersion
+        self.benchmarkSession = benchmarkSession
         warmupSampleCount = Self.warmupSampleCount
         self.samplesMilliseconds = samplesMilliseconds
         medianMilliseconds = Self.percentile(sorted, fraction: 0.5)
@@ -91,5 +100,6 @@ private struct LaunchMeasurement: Codable {
 }
 
 private enum LaunchMeasurementError: Error {
+    case missingBenchmarkSession
     case invalidSamples
 }
