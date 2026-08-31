@@ -20,6 +20,7 @@ struct WorkspaceSidebar: View {
                     Label {
                         HStack {
                             Text(item.section.title)
+                                .lineLimit(1)
                             Spacer(minLength: 8)
                             Text(item.count.formatted())
                                 .font(.caption.monospacedDigit())
@@ -31,10 +32,11 @@ struct WorkspaceSidebar: View {
                     }
                     .tag(item.section)
                     .accessibilityLabel("\(item.section.title), \(item.count) items")
+                    .accessibilityHint("Shows \(item.section.title.lowercased()) work in the selected organization")
                 }
             }
 
-            Section {
+            Section("Synchronization") {
                 SynchronizationStatusLabel(
                     status: presentation.synchronizationStatus,
                     detail: presentation.synchronizationDetail
@@ -68,6 +70,7 @@ struct WorkspaceSidebar: View {
                 }
             }
             .disabled(accounts.count < 2)
+            .accessibilityHint(accounts.count < 2 ? "Only one GitHub account is connected." : "Changes the organization work queue.")
         }
     }
 
@@ -93,6 +96,7 @@ struct WorkspaceSidebar: View {
                         .tag(Optional(organization.id))
                 }
             }
+            .accessibilityHint("Changes the organization work queue.")
         }
     }
 }
@@ -119,19 +123,20 @@ struct SynchronizationStatusLabel: View {
         }
         .help(detail ?? status.title)
         .accessibilityLabel(detail.map { "\(status.title). \($0)" } ?? status.title)
+        .accessibilityHint("Synchronization and coverage status for the selected organization.")
     }
 
     private var tint: Color {
         switch status {
         case .upToDate:
             .green
-        case .refreshing:
+        case .refreshing, .initialSynchronization:
             .accentColor
         case .partial, .ssoRequired, .approvalRequired:
             .orange
         case .offline, .signInRequired:
             .red
-        case .unavailable:
+        case .noAccount, .noOrganization, .unavailable:
             .secondary
         }
     }

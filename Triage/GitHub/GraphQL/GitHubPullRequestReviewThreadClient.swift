@@ -9,6 +9,24 @@ enum GitHubPullRequestReviewThreadClientError: Error, Equatable, Sendable {
     case missingRequestedPullRequest
     case missingRequestedThread
     case duplicateThread
+    case partialResponse
+    case missingData
+    case undecodableResponse
+    case normalizationFailed
+    case requestFailed
+    case transportFailure
+}
+
+/// A failed review-thread traversal always carries every raw page obtained
+/// before the terminal condition. This lets the synchronizer retain evidence
+/// before moving its fair-scheduling cursor; it never makes a partial result
+/// authoritative normalized state.
+struct GitHubPullRequestReviewThreadTraversalFailure: Error, Equatable, Sendable {
+    let reason: GitHubPullRequestReviewThreadClientError
+    let rawPages: [GitHubPullRequestReviewThreadRawPage]
+    let terminalRequestKey: String
+    let remoteFailure: GitHubFailure?
+    let ssoHeader: GitHubSSOHeader?
 }
 
 enum GitHubPullRequestReviewThreadNormalizationError: Error, Equatable, Sendable {
@@ -40,7 +58,17 @@ struct PullRequestReviewThreadRecord: Equatable, Sendable {
 
 struct GitHubPullRequestReviewThreadRawPage: Equatable, Sendable {
     let endpoint: String
+    /// Canonical operation and variables for this exact GraphQL request. This
+    /// is deliberately separate from the diagnostic storage endpoint: cursors
+    /// are authority, not page display metadata.
+    let requestKey: String
     let payload: Data
+
+    init(endpoint: String, requestKey: String? = nil, payload: Data) {
+        self.endpoint = endpoint
+        self.requestKey = requestKey ?? endpoint
+        self.payload = payload
+    }
 }
 
 struct GitHubPullRequestReviewThreadMetrics: Equatable, Sendable {
@@ -81,30 +109,104 @@ actor GitHubPullRequestReviewThreadClient {
 
         while true {
             try Task.checkCancellation()
+            let endpoint = "graphql:TriagePullRequestReviewThreads/page=\(threadPages + 1)"
+            let requestKey = Self.threadRequestKey(
+                pullRequestNodeID: pullRequestNodeID,
+                after: after
+            )
             guard threadPages < Self.maximumPages else {
-                throw GitHubPullRequestReviewThreadClientError.paginationLimitExceeded
+                let terminal = Self.syntheticTerminalPage(
+                    endpoint: endpoint,
+                    requestKey: requestKey,
+                    reason: .paginationLimitExceeded
+                )
+                throw Self.failure(
+                    .paginationLimitExceeded,
+                    rawPages: rawPages + [terminal],
+                    terminalRequestKey: terminal.requestKey
+                )
             }
-            let response = try await client.execute(
-                threadsQuery,
-                variables: CursorVariables(pullRequestID: pullRequestNodeID.rawValue, after: after),
-                as: GitHubPullRequestReviewThreadPayload.self
-            )
+            let decodingResult: GitHubGraphQLDecodingResult<GitHubPullRequestReviewThreadPayload>
+            do {
+                decodingResult = try await client.executePreservingUndecodableResponse(
+                    threadsQuery,
+                    variables: CursorVariables(pullRequestID: pullRequestNodeID.rawValue, after: after),
+                    as: GitHubPullRequestReviewThreadPayload.self
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let GitHubGraphQLError.requestFailed(failure) {
+                let terminal = Self.syntheticTerminalPage(
+                    endpoint: endpoint,
+                    requestKey: requestKey,
+                    reason: .requestFailed
+                )
+                throw Self.failure(
+                    .requestFailed,
+                    rawPages: rawPages + [terminal],
+                    terminalRequestKey: terminal.requestKey,
+                    remoteFailure: failure,
+                    ssoHeader: failure.ssoHeader
+                )
+            } catch {
+                let terminal = Self.syntheticTerminalPage(
+                    endpoint: endpoint,
+                    requestKey: requestKey,
+                    reason: .transportFailure
+                )
+                throw Self.failure(
+                    .transportFailure,
+                    rawPages: rawPages + [terminal],
+                    terminalRequestKey: terminal.requestKey
+                )
+            }
             try Task.checkCancellation()
+            let response: GitHubGraphQLResponse<GitHubPullRequestReviewThreadPayload>
+            switch decodingResult {
+            case let .response(value):
+                response = value
+            case let .undecodable(value):
+                let rawPage = GitHubPullRequestReviewThreadRawPage(
+                    endpoint: endpoint, requestKey: requestKey, payload: value.payload
+                )
+                throw Self.failure(
+                    .undecodableResponse,
+                    rawPages: rawPages + [rawPage],
+                    terminalRequestKey: requestKey,
+                    ssoHeader: value.metadata.ssoHeader
+                )
+            }
             let rawPage = GitHubPullRequestReviewThreadRawPage(
-                endpoint: "graphql:TriagePullRequestReviewThreads/page=\(threadPages + 1)",
-                payload: response.payload
+                endpoint: endpoint, requestKey: requestKey, payload: response.payload
             )
-            let payload = try Self.complete(response)
-            try budget.consume(
-                cost: try Self.validatedCost(payload.rateLimit.cost),
-                responseBytes: rawPage.payload.count
-            )
+            if let ssoHeader = response.metadata.ssoHeader {
+                throw Self.failure(
+                    .requestFailed,
+                    rawPages: rawPages + [rawPage],
+                    terminalRequestKey: requestKey,
+                    ssoHeader: ssoHeader
+                )
+            }
+            guard response.errors.isEmpty else {
+                throw Self.failure(.partialResponse, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+            }
+            guard let payload = response.data else {
+                throw Self.failure(.missingData, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+            }
+            do {
+                try budget.consume(
+                    cost: try Self.validatedCost(payload.rateLimit.cost),
+                    responseBytes: rawPage.payload.count
+                )
+            } catch let reason as GitHubPullRequestReviewThreadClientError {
+                throw Self.failure(reason, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+            }
             rawPages.append(rawPage)
             guard let pullRequest = payload.node, pullRequest.id == pullRequestNodeID.rawValue else {
-                throw GitHubPullRequestReviewThreadClientError.missingRequestedPullRequest
+                throw Self.failure(.missingRequestedPullRequest, rawPages: rawPages, terminalRequestKey: requestKey)
             }
             guard !pullRequest.reviewThreads.nodes.contains(where: { $0 == nil }) else {
-                throw GitHubPullRequestReviewThreadNormalizationError.missingThreadID
+                throw Self.failure(.incompleteConnection, rawPages: rawPages, terminalRequestKey: requestKey)
             }
             threads.append(contentsOf: pullRequest.reviewThreads.nodes.compactMap { $0 })
             threadPages += 1
@@ -112,13 +214,22 @@ actor GitHubPullRequestReviewThreadClient {
             guard let cursor = pullRequest.reviewThreads.pageInfo.endCursor,
                   visitedCursors.insert(cursor).inserted
             else {
-                throw GitHubPullRequestReviewThreadClientError.paginationLoop
+                throw Self.failure(.paginationLoop, rawPages: rawPages, terminalRequestKey: requestKey)
             }
             after = cursor
         }
 
         try Task.checkCancellation()
-        let threadIDs = try Self.validThreadIDs(in: threads)
+        let threadIDs: [GitHubNodeID]
+        do {
+            threadIDs = try Self.validThreadIDs(in: threads)
+        } catch {
+            throw Self.failure(
+                .normalizationFailed,
+                rawPages: rawPages,
+                terminalRequestKey: rawPages.last?.requestKey ?? Self.threadRequestKey(pullRequestNodeID: pullRequestNodeID, after: nil)
+            )
+        }
         for index in threads.indices {
             try Task.checkCancellation()
             var thread = threads[index]
@@ -128,32 +239,98 @@ actor GitHubPullRequestReviewThreadClient {
             var visitedCommentCursors = Set<String>()
             while true {
                 try Task.checkCancellation()
+                let endpoint = "graphql:TriagePullRequestReviewThreadComments/thread=\(threadIDs[index].rawValue)/page=\(commentPages + 1)"
+                let requestKey = Self.commentRequestKey(threadNodeID: threadIDs[index], after: commentCursor)
                 guard commentPages < Self.maximumPages else {
-                    throw GitHubPullRequestReviewThreadClientError.paginationLimitExceeded
+                    let terminal = Self.syntheticTerminalPage(
+                        endpoint: endpoint,
+                        requestKey: requestKey,
+                        reason: .paginationLimitExceeded
+                    )
+                    throw Self.failure(
+                        .paginationLimitExceeded,
+                        rawPages: rawPages + [terminal],
+                        terminalRequestKey: terminal.requestKey
+                    )
                 }
-                let response = try await client.execute(
-                    commentsQuery,
-                    variables: ThreadCursorVariables(
-                        threadID: threadIDs[index].rawValue,
-                        after: commentCursor
-                    ),
-                    as: GitHubPullRequestReviewThreadCommentPagePayload.self
-                )
+                let decodingResult: GitHubGraphQLDecodingResult<GitHubPullRequestReviewThreadCommentPagePayload>
+                do {
+                    decodingResult = try await client.executePreservingUndecodableResponse(
+                        commentsQuery,
+                        variables: ThreadCursorVariables(
+                            threadID: threadIDs[index].rawValue,
+                            after: commentCursor
+                        ),
+                        as: GitHubPullRequestReviewThreadCommentPagePayload.self
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let GitHubGraphQLError.requestFailed(failure) {
+                    let terminal = Self.syntheticTerminalPage(
+                        endpoint: endpoint,
+                        requestKey: requestKey,
+                        reason: .requestFailed
+                    )
+                    throw Self.failure(
+                        .requestFailed,
+                        rawPages: rawPages + [terminal],
+                        terminalRequestKey: terminal.requestKey,
+                        remoteFailure: failure,
+                        ssoHeader: failure.ssoHeader
+                    )
+                } catch {
+                    let terminal = Self.syntheticTerminalPage(
+                        endpoint: endpoint,
+                        requestKey: requestKey,
+                        reason: .transportFailure
+                    )
+                    throw Self.failure(
+                        .transportFailure,
+                        rawPages: rawPages + [terminal],
+                        terminalRequestKey: terminal.requestKey
+                    )
+                }
                 try Task.checkCancellation()
+                let response: GitHubGraphQLResponse<GitHubPullRequestReviewThreadCommentPagePayload>
+                switch decodingResult {
+                case let .response(value):
+                    response = value
+                case let .undecodable(value):
+                    let rawPage = GitHubPullRequestReviewThreadRawPage(
+                        endpoint: endpoint, requestKey: requestKey, payload: value.payload
+                    )
+                    throw Self.failure(
+                        .undecodableResponse,
+                        rawPages: rawPages + [rawPage],
+                        terminalRequestKey: requestKey,
+                        ssoHeader: value.metadata.ssoHeader
+                    )
+                }
                 let rawPage = GitHubPullRequestReviewThreadRawPage(
-                    endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadIDs[index].rawValue)/page=\(commentPages + 1)",
-                    payload: response.payload
+                    endpoint: endpoint, requestKey: requestKey, payload: response.payload
                 )
-                let payload = try Self.complete(response)
-                try budget.consume(
-                    cost: try Self.validatedCost(payload.rateLimit.cost),
-                    responseBytes: rawPage.payload.count
-                )
+                if let ssoHeader = response.metadata.ssoHeader {
+                    throw Self.failure(.requestFailed, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey, ssoHeader: ssoHeader)
+                }
+                guard response.errors.isEmpty else {
+                    throw Self.failure(.partialResponse, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+                }
+                guard let payload = response.data else {
+                    throw Self.failure(.missingData, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+                }
+                do {
+                    try budget.consume(
+                        cost: try Self.validatedCost(payload.rateLimit.cost),
+                        responseBytes: rawPage.payload.count
+                    )
+                } catch let reason as GitHubPullRequestReviewThreadClientError {
+                    throw Self.failure(reason, rawPages: rawPages + [rawPage], terminalRequestKey: requestKey)
+                }
                 rawPages.append(rawPage)
                 guard let returnedThread = payload.node,
                       returnedThread.id == threadIDs[index].rawValue
                 else {
-                    throw GitHubPullRequestReviewThreadClientError.missingRequestedThread
+                    throw Self.failure(.missingRequestedThread, rawPages: rawPages, terminalRequestKey: requestKey)
                 }
                 comments.append(contentsOf: returnedThread.comments.nodes)
                 commentPages += 1
@@ -161,7 +338,7 @@ actor GitHubPullRequestReviewThreadClient {
                 guard let nextCursor = returnedThread.comments.pageInfo.endCursor,
                       visitedCommentCursors.insert(nextCursor).inserted
                 else {
-                    throw GitHubPullRequestReviewThreadClientError.paginationLoop
+                    throw Self.failure(.paginationLoop, rawPages: rawPages, terminalRequestKey: requestKey)
                 }
                 commentCursor = nextCursor
             }
@@ -173,7 +350,16 @@ actor GitHubPullRequestReviewThreadClient {
         }
 
         try Task.checkCancellation()
-        let records = try GitHubPullRequestReviewThreadNormalizer.normalize(threads, observedAt: observedAt)
+        let records: [PullRequestReviewThreadRecord]
+        do {
+            records = try GitHubPullRequestReviewThreadNormalizer.normalize(threads, observedAt: observedAt)
+        } catch {
+            throw Self.failure(
+                .normalizationFailed,
+                rawPages: rawPages,
+                terminalRequestKey: rawPages.last?.requestKey ?? Self.threadRequestKey(pullRequestNodeID: pullRequestNodeID, after: nil)
+            )
+        }
         try Task.checkCancellation()
         return GitHubPullRequestReviewThreadInventory(
             records: records,
@@ -184,14 +370,6 @@ actor GitHubPullRequestReviewThreadClient {
                 queryCost: budget.queryCost
             )
         )
-    }
-
-    private nonisolated static func complete<Value>(
-        _ response: GitHubGraphQLResponse<Value>
-    ) throws -> Value {
-        guard response.errors.isEmpty else { throw GitHubGraphQLError.partialResponse }
-        guard let data = response.data else { throw GitHubGraphQLError.missingData }
-        return data
     }
 
     private nonisolated static func validatedCost(_ cost: Int) throws -> Int {
@@ -242,6 +420,54 @@ actor GitHubPullRequestReviewThreadClient {
     private struct ThreadCursorVariables: Encodable, Sendable {
         let threadID: String
         let after: String?
+    }
+
+    private nonisolated static func failure(
+        _ reason: GitHubPullRequestReviewThreadClientError,
+        rawPages: [GitHubPullRequestReviewThreadRawPage],
+        terminalRequestKey: String,
+        remoteFailure: GitHubFailure? = nil,
+        ssoHeader: GitHubSSOHeader? = nil
+    ) -> GitHubPullRequestReviewThreadTraversalFailure {
+        .init(
+            reason: reason,
+            rawPages: rawPages,
+            terminalRequestKey: terminalRequestKey,
+            remoteFailure: remoteFailure,
+            ssoHeader: ssoHeader
+        )
+    }
+
+    private nonisolated static func threadRequestKey(
+        pullRequestNodeID: GitHubNodeID,
+        after: String?
+    ) -> String {
+        "graphql:TriagePullRequestReviewThreads/pull-request=\(pullRequestNodeID.rawValue)/after=\(cursorComponent(after))"
+    }
+
+    private nonisolated static func commentRequestKey(
+        threadNodeID: GitHubNodeID,
+        after: String?
+    ) -> String {
+        "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/after=\(cursorComponent(after))"
+    }
+
+    private nonisolated static func cursorComponent(_ cursor: String?) -> String {
+        guard let cursor else { return "none" }
+        return Data(cursor.utf8).base64EncodedString()
+    }
+
+    private nonisolated static func syntheticTerminalPage(
+        endpoint: String,
+        requestKey: String,
+        reason: GitHubPullRequestReviewThreadClientError
+    ) -> GitHubPullRequestReviewThreadRawPage {
+        let payload = Data("{\"triageFailureEnvelopeVersion\":1,\"reason\":\"\(String(describing: reason))\"}".utf8)
+        return .init(
+            endpoint: "\(endpoint)/terminal",
+            requestKey: "\(requestKey)/terminal",
+            payload: payload
+        )
     }
 }
 

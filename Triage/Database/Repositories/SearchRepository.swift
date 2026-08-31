@@ -29,6 +29,23 @@ struct SearchResult: Sendable, Equatable {
 }
 
 actor SearchRepository {
+    /// Search is an acceleration structure, not an unbounded second copy of
+    /// the account vault. Keep its persisted document size aligned with the
+    /// derived-intelligence contract.
+    nonisolated static let maximumDocumentBytes = 128 * 1_024
+    nonisolated static let maximumMatchQueryBytes = 4 * 1_024
+
+    private nonisolated static let maximumSearchTerms = 12
+    private nonisolated static let maximumSearchTermBytes = 256
+    private nonisolated static let maximumTitleBytes = 8 * 1_024
+    private nonisolated static let maximumBodyBytes = 64 * 1_024
+    private nonisolated static let maximumRepositoryBytes = 4 * 1_024
+    private nonisolated static let maximumLabelsBytes = 8 * 1_024
+    private nonisolated static let maximumPeopleBytes = 8 * 1_024
+    private nonisolated static let maximumProjectValuesBytes = 16 * 1_024
+    private nonisolated static let maximumActionTextBytes = 12 * 1_024
+    private nonisolated static let maximumLocalNoteBytes = 8 * 1_024
+
     private let vault: AccountVault
 
     init(vault: AccountVault) {
@@ -48,6 +65,7 @@ actor SearchRepository {
         }
         let indexedAt = Self.milliseconds(Date.now)
         try await vault.write { database in
+            try Task.checkCancellation()
             try database.execute(
                 sql: """
                     DELETE FROM search_documents
@@ -67,16 +85,18 @@ actor SearchRepository {
             )
 
             for document in documents {
+                try Task.checkCancellation()
+                let boundedDocument = Self.bounded(document)
                 try database.execute(
                     sql: """
                         INSERT INTO search_documents (
                             title, body, repository, labels, people, project_values, action_text, local_note
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
+                    """,
                     arguments: [
-                        document.title, document.body, document.repository,
-                        document.labels, document.people, document.projectValues,
-                        document.actionText, document.localNote
+                        boundedDocument.title, boundedDocument.body, boundedDocument.repository,
+                        boundedDocument.labels, boundedDocument.people, boundedDocument.projectValues,
+                        boundedDocument.actionText, boundedDocument.localNote
                     ]
                 )
                 let documentID = database.lastInsertedRowID
@@ -98,77 +118,117 @@ actor SearchRepository {
 
     func rebuild(accountID: AccountID, organizationID: OrganizationID) async throws {
         try ensureAccountScope(accountID)
-        let documents = try await vault.read { database in
+        try Task.checkCancellation()
+        let documents: [SearchDocument] = try await vault.read { database -> [SearchDocument] in
             let rows = try Row.fetchAll(
                 database,
                 sql: """
                     SELECT
                         work_items.id AS work_item_id,
                         work_items.primary_node_id,
-                        github_nodes.title,
-                        COALESCE(github_nodes.body_markdown, '') || ' ' || COALESCE((
-                            SELECT group_concat(comments.body_markdown, ' ')
-                            FROM comments
-                            WHERE comments.parent_node_id = work_items.primary_node_id
-                        ), '') || ' ' || COALESCE((
-                            SELECT group_concat(reviews.body_markdown, ' ')
-                            FROM reviews
-                            WHERE reviews.pull_request_node_id = work_items.primary_node_id
-                        ), '') AS body,
-                        COALESCE(repositories.owner_login || '/' || repositories.name, '') AS repository,
-                        COALESCE((
-                            SELECT group_concat(label_names.value, ' ')
+                        COALESCE(substr(github_nodes.title, 1, 8192), '') AS title,
+                        COALESCE(substr(github_nodes.body_markdown, 1, 80000), '') || ' ' || COALESCE((
+                            SELECT group_concat(body_markdown, ' ')
                             FROM (
-                                SELECT label_names_json
-                                FROM issues
-                                WHERE issues.github_node_id = work_items.primary_node_id
-                                UNION ALL
-                                SELECT label_names_json
-                                FROM pull_requests
-                                WHERE pull_requests.github_node_id = work_items.primary_node_id
-                            ) AS content_labels
-                            JOIN json_each(CAST(content_labels.label_names_json AS TEXT)) AS label_names
+                                SELECT substr(comments.body_markdown, 1, 4096) AS body_markdown
+                                FROM comments
+                                WHERE comments.parent_node_id = work_items.primary_node_id
+                                ORDER BY comments.updated_at_ms DESC, comments.github_node_id
+                                LIMIT 32
+                            )
+                        ), '') || ' ' || COALESCE((
+                            SELECT group_concat(body_markdown, ' ')
+                            FROM (
+                                SELECT substr(reviews.body_markdown, 1, 4096) AS body_markdown
+                                FROM reviews
+                                WHERE reviews.pull_request_node_id = work_items.primary_node_id
+                                ORDER BY reviews.updated_at_ms DESC, reviews.github_node_id
+                                LIMIT 32
+                            )
+                        ), '') AS body,
+                        substr(COALESCE(repositories.owner_login || '/' || repositories.name, ''), 1, 4096) AS repository,
+                        COALESCE((
+                            SELECT group_concat(value, ' ')
+                            FROM (
+                                SELECT substr(label_names.value, 1, 256) AS value
+                                FROM (
+                                    SELECT label_names_json
+                                    FROM issues
+                                    WHERE issues.github_node_id = work_items.primary_node_id
+                                    UNION ALL
+                                    SELECT label_names_json
+                                    FROM pull_requests
+                                    WHERE pull_requests.github_node_id = work_items.primary_node_id
+                                ) AS content_labels
+                                JOIN json_each(CAST(content_labels.label_names_json AS TEXT)) AS label_names
+                                ORDER BY value
+                                LIMIT 32
+                            )
                         ), '') AS labels,
                         COALESCE((
                             SELECT group_concat(login, ' ')
                             FROM (
-                                SELECT actors.login
+                                SELECT substr(actors.login, 1, 256) AS login
                                 FROM github_nodes AS authored_node
                                 JOIN actors ON actors.id = authored_node.author_id
                                 WHERE authored_node.github_node_id = work_items.primary_node_id
-                                UNION
-                                SELECT actors.login
+                                UNION ALL
+                                SELECT substr(actors.login, 1, 256) AS login
                                 FROM comments
                                 JOIN actors ON actors.id = comments.author_id
-                                WHERE comments.parent_node_id = work_items.primary_node_id
-                                UNION
-                                SELECT actors.login
+                                WHERE comments.github_node_id IN (
+                                    SELECT comment_candidates.github_node_id
+                                    FROM comments AS comment_candidates
+                                    WHERE comment_candidates.parent_node_id = work_items.primary_node_id
+                                    ORDER BY comment_candidates.updated_at_ms DESC,
+                                             comment_candidates.github_node_id
+                                    LIMIT 32
+                                )
+                                UNION ALL
+                                SELECT substr(actors.login, 1, 256) AS login
                                 FROM reviews
                                 JOIN actors ON actors.id = reviews.author_id
-                                WHERE reviews.pull_request_node_id = work_items.primary_node_id
+                                WHERE reviews.github_node_id IN (
+                                    SELECT review_candidates.github_node_id
+                                    FROM reviews AS review_candidates
+                                    WHERE review_candidates.pull_request_node_id = work_items.primary_node_id
+                                    ORDER BY review_candidates.updated_at_ms DESC,
+                                             review_candidates.github_node_id
+                                    LIMIT 32
+                                )
                             )
                         ), '') AS people,
                         COALESCE((
                             SELECT group_concat(
-                                COALESCE(project_field_values.field_name, '') || ' ' ||
-                                COALESCE(project_field_values.display_value, '') || ' ' ||
-                                COALESCE(CAST(project_field_values.date_value_ms AS TEXT), ''),
+                                field_name || ' ' || display_value || ' ' || date_value,
                                 ' '
                             )
-                            FROM project_items
-                            JOIN project_field_values
-                                ON project_field_values.project_item_node_id = project_items.github_node_id
-                            WHERE project_items.content_node_id = work_items.primary_node_id
+                            FROM (
+                                SELECT
+                                    substr(project_field_values.field_name, 1, 512) AS field_name,
+                                    substr(COALESCE(project_field_values.display_value, ''), 1, 2048) AS display_value,
+                                    substr(COALESCE(CAST(project_field_values.date_value_ms AS TEXT), ''), 1, 64) AS date_value
+                                FROM project_items
+                                JOIN project_field_values
+                                    ON project_field_values.project_item_node_id = project_items.github_node_id
+                                WHERE project_items.content_node_id = work_items.primary_node_id
+                                ORDER BY project_items.updated_at_ms DESC,
+                                         project_items.github_node_id,
+                                         project_field_values.field_name
+                                LIMIT 32
+                            )
                         ), '') AS project_values,
                         COALESCE((
-                            SELECT group_concat(
-                                action_items.title || ' ' || COALESCE(action_items.detail, ''),
-                                ' '
+                            SELECT group_concat(action_text, ' ')
+                            FROM (
+                                SELECT substr(action_items.title || ' ' || COALESCE(action_items.detail, ''), 1, 4096) AS action_text
+                                FROM action_items
+                                WHERE action_items.work_item_id = work_items.id
+                                ORDER BY action_items.updated_at_ms DESC, action_items.id
+                                LIMIT 32
                             )
-                            FROM action_items
-                            WHERE action_items.work_item_id = work_items.id
                         ), '') AS action_text,
-                        COALESCE(workflow_states.local_note, '') AS local_note
+                        COALESCE(substr(workflow_states.local_note, 1, 16000), '') AS local_note
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
                     LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
@@ -178,7 +238,8 @@ actor SearchRepository {
                     """,
                 arguments: [accountID.rawValue, organizationID.rawValue]
             )
-            return rows.compactMap { row -> SearchDocument? in
+            return try rows.compactMap { row -> SearchDocument? in
+                try Task.checkCancellation()
                 guard let workItemID = WorkItemID(rawValue: row["work_item_id"]),
                       let nodeID = GitHubNodeID(rawValue: row["primary_node_id"])
                 else {
@@ -200,7 +261,9 @@ actor SearchRepository {
                 )
             }
         }
+        try Task.checkCancellation()
         try await replace(documents, accountID: accountID, organizationID: organizationID)
+        try Task.checkCancellation()
     }
 
     func search(
@@ -211,7 +274,8 @@ actor SearchRepository {
     ) async throws -> [SearchResult] {
         try ensureAccountScope(accountID)
         guard let matchQuery = Self.matchQuery(for: query) else { return [] }
-        return try await vault.read { database in
+        try Task.checkCancellation()
+        let results: [SearchResult] = try await vault.read { database -> [SearchResult] in
             try Row.fetchAll(
                 database,
                 sql: """
@@ -226,7 +290,8 @@ actor SearchRepository {
                     """,
                 arguments: [matchQuery, accountID.rawValue, organizationID.rawValue, min(max(limit, 1), 100)]
             ).map { row in
-                SearchResult(
+                try Task.checkCancellation()
+                return SearchResult(
                     documentID: row["id"],
                     workItemID: (row["work_item_id"] as String?).flatMap(WorkItemID.init(rawValue:)),
                     nodeID: (row["github_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
@@ -234,6 +299,8 @@ actor SearchRepository {
                 )
             }
         }
+        try Task.checkCancellation()
+        return results
     }
 
     private func ensureAccountScope(_ accountID: AccountID) throws {
@@ -246,14 +313,79 @@ actor SearchRepository {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 
-    private nonisolated static func matchQuery(for query: String) -> String? {
+    private nonisolated static func bounded(_ document: SearchDocument) -> SearchDocument {
+        var remainingBytes = maximumDocumentBytes
+
+        func field(_ value: String, maximumBytes: Int) -> String {
+            let result = boundedUTF8(value, maximumBytes: min(maximumBytes, remainingBytes))
+            remainingBytes -= result.utf8.count
+            return result
+        }
+
+        return SearchDocument(
+            accountID: document.accountID,
+            organizationID: document.organizationID,
+            workItemID: document.workItemID,
+            nodeID: document.nodeID,
+            title: field(document.title, maximumBytes: maximumTitleBytes),
+            body: field(document.body, maximumBytes: maximumBodyBytes),
+            repository: field(document.repository, maximumBytes: maximumRepositoryBytes),
+            labels: field(document.labels, maximumBytes: maximumLabelsBytes),
+            people: field(document.people, maximumBytes: maximumPeopleBytes),
+            projectValues: field(document.projectValues, maximumBytes: maximumProjectValuesBytes),
+            actionText: field(document.actionText, maximumBytes: maximumActionTextBytes),
+            localNote: field(document.localNote, maximumBytes: maximumLocalNoteBytes)
+        )
+    }
+
+    /// Truncates on Unicode-scalar boundaries so persisted FTS text is always
+    /// valid UTF-8. The marker makes a bounded document distinguishable from a
+    /// complete source field without retaining additional private content.
+    private nonisolated static func boundedUTF8(_ value: String, maximumBytes: Int) -> String {
+        guard value.utf8.count > maximumBytes else { return value }
+        guard maximumBytes > 0 else { return "" }
+
+        let marker = "…"
+        guard maximumBytes > marker.utf8.count else {
+            return String(bytes: marker.utf8.prefix(maximumBytes), encoding: .utf8) ?? ""
+        }
+
+        let contentBudget = maximumBytes - marker.utf8.count
+        var scalars = String.UnicodeScalarView()
+        var byteCount = 0
+        for scalar in value.unicodeScalars {
+            let scalarBytes = scalar.utf8.count
+            guard byteCount + scalarBytes <= contentBudget else { break }
+            scalars.append(scalar)
+            byteCount += scalarBytes
+        }
+        return String(scalars) + marker
+    }
+
+    nonisolated static func matchQuery(for query: String) -> String? {
         let terms = query
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .prefix(12)
-            .map(String.init)
+            .split(
+                maxSplits: maximumSearchTerms,
+                omittingEmptySubsequences: true,
+                whereSeparator: { !$0.isLetter && !$0.isNumber }
+            )
+            .prefix(maximumSearchTerms)
+            .map(boundedSearchTerm)
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return nil }
         return terms.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"*" }
             .joined(separator: " AND ")
+    }
+
+    private nonisolated static func boundedSearchTerm(_ term: Substring) -> String {
+        var scalars = String.UnicodeScalarView()
+        var byteCount = 0
+        for scalar in term.unicodeScalars {
+            let scalarBytes = scalar.utf8.count
+            guard byteCount + scalarBytes <= maximumSearchTermBytes else { break }
+            scalars.append(scalar)
+            byteCount += scalarBytes
+        }
+        return String(scalars)
     }
 }

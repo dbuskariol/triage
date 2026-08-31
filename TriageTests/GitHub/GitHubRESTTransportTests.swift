@@ -2,6 +2,17 @@ import XCTest
 @testable import Triage
 
 final class GitHubRESTTransportTests: XCTestCase {
+    func testProductionSessionConfigurationDisablesPersistenceAndConnectivityWaiting() {
+        let configuration = TriageHTTPSessionFactory.makeConfiguration()
+
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertFalse(configuration.httpShouldSetCookies)
+        XCTAssertNil(configuration.urlCredentialStorage)
+        XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+
     func testTransportBuildsAReadOnlyAuthenticatedGitHubRequest() async throws {
         let session = RecordingSession()
         let transport = try GitHubRESTTransport(session: session)

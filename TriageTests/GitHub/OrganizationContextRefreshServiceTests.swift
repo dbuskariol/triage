@@ -58,8 +58,8 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         )
         XCTAssertEqual(records.status(feature: .discussions, stream: "discussions-acme-R_disabled"), .unavailable)
         XCTAssertEqual(records.status(feature: .discussions, stream: "discussions-acme-R_unknown"), .unknown)
-        XCTAssertEqual(records.status(feature: .discussionComments, stream: "discussion-comments-acme"), .unavailable)
-        XCTAssertEqual(records.status(feature: .discussionReplies, stream: "discussion-replies-acme"), .unavailable)
+        XCTAssertEqual(records.status(feature: .discussionComments, stream: "discussion-comments-acme"), .unknown)
+        XCTAssertEqual(records.status(feature: .discussionReplies, stream: "discussion-replies-acme"), .unknown)
         XCTAssertEqual(
             records.filter { $0.feature == .discussionComments && $0.repositoryID != nil }.count,
             repositories.count
@@ -146,6 +146,97 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         XCTAssertNotEqual(secondCalls.last?.highWater, priorHighWater)
     }
 
+    func testDiscussionCommentLeavesUseIndependentStreamsAndAggregateOnlyAfterAllCandidates() async throws {
+        let fixture = try await OrganizationContextFixture()
+        defer { fixture.remove() }
+        let repository = try await fixture.persistRepositories([
+            fixture.repository(id: 1, nodeID: "R_a", name: "a")
+        ])[0]
+        try await fixture.persistDiscussion(nodeID: "D_a", repositoryID: repository.id)
+        try await fixture.persistDiscussion(nodeID: "D_b", repositoryID: repository.id)
+        let commentHighWater = fixture.observedAt.addingTimeInterval(-3_600)
+        let replyHighWater = fixture.observedAt.addingTimeInterval(-1_800)
+        try await fixture.coverageRepository.save(
+            fixture.coverage(
+                scope: fixture.scope,
+                repositoryID: repository.id,
+                feature: .discussionComments,
+                streamID: SyncStreamID(rawValue: "discussion-comments-acme-R_a-D_a")!,
+                observedAt: commentHighWater
+            ),
+            attemptedAt: commentHighWater
+        )
+        try await fixture.coverageRepository.save(
+            fixture.coverage(
+                scope: fixture.scope,
+                repositoryID: repository.id,
+                feature: .discussionReplies,
+                streamID: SyncStreamID(rawValue: "discussion-replies-acme-R_a-D_a")!,
+                observedAt: replyHighWater
+            ),
+            attemptedAt: replyHighWater
+        )
+        let recorder = OrganizationContextRecorder()
+        let service = fixture.service(
+            recorder: recorder,
+            discussionComments: { scope, _, repository, discussionNodeID, commentStreamID, replyStreamID, previousCommentHighWater, previousReplyHighWater, observedAt in
+                await recorder.recordDiscussionComment(
+                    discussionNodeID,
+                    commentStreamID: commentStreamID,
+                    replyStreamID: replyStreamID,
+                    commentHighWater: previousCommentHighWater,
+                    replyHighWater: previousReplyHighWater
+                )
+                return .init(
+                    comments: [],
+                    replies: [],
+                    commentCoverage: fixture.coverage(
+                        scope: scope,
+                        repositoryID: repository.id,
+                        feature: .discussionComments,
+                        streamID: commentStreamID,
+                        observedAt: observedAt
+                    ),
+                    replyCoverage: fixture.coverage(
+                        scope: scope,
+                        repositoryID: repository.id,
+                        feature: .discussionReplies,
+                        streamID: replyStreamID,
+                        observedAt: observedAt
+                    )
+                )
+            }
+        )
+
+        _ = try await service.refresh(
+            scope: fixture.scope,
+            organization: fixture.organization,
+            repositories: [repository],
+            observedAt: fixture.observedAt
+        )
+
+        let calls = await recorder.discussionComments()
+        XCTAssertEqual(calls.map(\.discussionNodeID.rawValue), ["D_b", "D_a"])
+        XCTAssertEqual(calls[0].commentStreamID.rawValue, "discussion-comments-acme-R_a-D_b")
+        XCTAssertEqual(calls[0].replyStreamID.rawValue, "discussion-replies-acme-R_a-D_b")
+        XCTAssertNil(calls[0].commentHighWater)
+        XCTAssertNil(calls[0].replyHighWater)
+        XCTAssertEqual(calls[1].commentHighWater, commentHighWater)
+        XCTAssertEqual(calls[1].replyHighWater, replyHighWater)
+        let records = try await fixture.coverageRepository.records(
+            for: fixture.account.id,
+            organizationID: fixture.organization.id
+        )
+        XCTAssertEqual(
+            records.status(feature: .discussionComments, stream: "discussion-comments-acme-R_a"),
+            .complete
+        )
+        XCTAssertEqual(
+            records.status(feature: .discussionReplies, stream: "discussion-replies-acme-R_a"),
+            .complete
+        )
+    }
+
     func testDiscussionSourceFailureContinuesSiblingsAndAggregatesRecovery() async throws {
         let fixture = try await OrganizationContextFixture()
         defer { fixture.remove() }
@@ -172,7 +263,7 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
                     observedAt: observedAt
                 )
             },
-            projectInventory: { scope, _, streamID, _, observedAt in
+            projectInventory: { scope, _, streamID, _, _, observedAt in
                 await recorder.recordEvent("project-inventory")
                 throw GitHubGraphQLError.requestFailed(
                     GitHubFailure(kind: .rateLimited, statusCode: 429, retryAfter: 120)
@@ -233,7 +324,7 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         let service = fixture.service(
             recorder: recorder,
             policy: .init(maximumDiscussionRepositories: 1, maximumProjects: 2),
-            projectInventory: { scope, _, streamID, _, observedAt in
+            projectInventory: { scope, _, streamID, _, _, observedAt in
                 await recorder.recordEvent("project-inventory")
                 return ProjectV2SynchronizationResult(
                     projects: projects,
@@ -247,7 +338,7 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
                     itemCoverages: [:]
                 )
             },
-            projectItems: { project, scope, _, streamID, highWater, observedAt in
+            projectItems: { project, scope, _, streamID, highWater, _, observedAt in
                 await recorder.recordProject(project.nodeID, streamID: streamID, highWater: highWater)
                 await recorder.recordEvent("project-item-\(project.nodeID.rawValue)")
                 if project.nodeID.rawValue == "P_a" {
@@ -308,7 +399,7 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         let project = fixture.project("P_a", number: 1)
         let service = fixture.service(
             recorder: recorder,
-            projectInventory: { scope, _, streamID, highWater, observedAt in
+            projectInventory: { scope, _, streamID, highWater, _, observedAt in
                 await recorder.recordInventory(highWater: highWater)
                 return ProjectV2SynchronizationResult(
                     projects: [project],
@@ -338,13 +429,75 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         XCTAssertEqual(projectCalls.map(\.highWater), [itemHighWater])
     }
 
+    func testProjectCallbacksReceiveFullAndIncrementalReconciliationIntent() async throws {
+        let fixture = try await OrganizationContextFixture()
+        defer { fixture.remove() }
+        let recorder = OrganizationContextRecorder()
+        let project = fixture.project("P_intent", number: 1)
+        let service = fixture.service(
+            recorder: recorder,
+            projectInventory: { scope, _, streamID, highWater, reconciliationIntent, observedAt in
+                await recorder.recordInventory(
+                    highWater: highWater,
+                    reconciliationIntent: reconciliationIntent
+                )
+                return ProjectV2SynchronizationResult(
+                    projects: [project],
+                    projectCoverage: fixture.coverage(
+                        scope: scope,
+                        repositoryID: nil,
+                        feature: .projects,
+                        streamID: streamID,
+                        observedAt: observedAt
+                    ),
+                    itemCoverages: [:]
+                )
+            },
+            projectItems: { project, scope, _, streamID, highWater, reconciliationIntent, observedAt in
+                await recorder.recordProject(
+                    project.nodeID,
+                    streamID: streamID,
+                    highWater: highWater,
+                    reconciliationIntent: reconciliationIntent
+                )
+                return fixture.coverage(
+                    scope: scope,
+                    repositoryID: nil,
+                    feature: .projectItems,
+                    streamID: streamID,
+                    observedAt: observedAt
+                )
+            }
+        )
+
+        _ = try await service.refresh(
+            scope: fixture.scope,
+            organization: fixture.organization,
+            repositories: [],
+            reconciliationIntent: .fullReconciliation,
+            observedAt: fixture.observedAt
+        )
+        _ = try await service.refresh(
+            scope: fixture.scope,
+            organization: fixture.organization,
+            repositories: [],
+            reconciliationIntent: .incremental,
+            observedAt: fixture.observedAt.addingTimeInterval(60)
+        )
+
+        let inventoryIntents = await recorder.inventoryIntents()
+        let projectIntents = await recorder.projectIntents()
+        XCTAssertEqual(inventoryIntents, [.fullReconciliation, .incremental])
+        XCTAssertEqual(projectIntents, [.fullReconciliation, .incremental])
+    }
+
     func testProjectInventoryFailureCreatesExplicitItemCoverageAndStartsNoItems() async throws {
         let fixture = try await OrganizationContextFixture()
         defer { fixture.remove() }
         let recorder = OrganizationContextRecorder()
         let service = fixture.service(
             recorder: recorder,
-            projectInventory: { _, _, _, _, _ in
+            projectInventory: { _, _, _, _, _, _ in
                 await recorder.recordEvent("project-inventory")
                 throw GitHubGraphQLError.requestFailed(GitHubFailure(kind: .unauthorized, statusCode: 401))
             }
@@ -426,7 +579,7 @@ final class OrganizationContextRefreshServiceTests: XCTestCase {
         let gate = OrganizationContextResponseGate()
         let service = fixture.service(
             recorder: recorder,
-            projectInventory: { scope, _, streamID, _, observedAt in
+            projectInventory: { scope, _, streamID, _, _, observedAt in
                 await gate.enterAndWait()
                 return ProjectV2SynchronizationResult(
                     projects: [],
@@ -620,9 +773,20 @@ private actor OrganizationContextRecorder {
         let highWater: Date?
     }
 
+    struct DiscussionCommentCall: Sendable {
+        let discussionNodeID: GitHubNodeID
+        let commentStreamID: SyncStreamID
+        let replyStreamID: SyncStreamID
+        let commentHighWater: Date?
+        let replyHighWater: Date?
+    }
+
     private var discussionCalls = [DiscussionCall]()
     private var projectCalls = [ProjectCall]()
     private var inventoryCalls = [Date?]()
+    private var inventoryIntentValues = [SynchronizationReconciliationIntent]()
+    private var projectIntentValues = [SynchronizationReconciliationIntent]()
+    private var discussionCommentCalls = [DiscussionCommentCall]()
     private var eventValues = [String]()
 
     func recordDiscussion(_ repositoryID: RepositoryID, streamID: SyncStreamID, highWater: Date?) {
@@ -633,8 +797,42 @@ private actor OrganizationContextRecorder {
         projectCalls.append(.init(projectID: projectID, streamID: streamID, highWater: highWater))
     }
 
+    func recordDiscussionComment(
+        _ discussionNodeID: GitHubNodeID,
+        commentStreamID: SyncStreamID,
+        replyStreamID: SyncStreamID,
+        commentHighWater: Date?,
+        replyHighWater: Date?
+    ) {
+        discussionCommentCalls.append(.init(
+            discussionNodeID: discussionNodeID,
+            commentStreamID: commentStreamID,
+            replyStreamID: replyStreamID,
+            commentHighWater: commentHighWater,
+            replyHighWater: replyHighWater
+        ))
+    }
+
+    func recordProject(
+        _ projectID: GitHubNodeID,
+        streamID: SyncStreamID,
+        highWater: Date?,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) {
+        recordProject(projectID, streamID: streamID, highWater: highWater)
+        projectIntentValues.append(reconciliationIntent)
+    }
+
     func recordInventory(highWater: Date?) {
         inventoryCalls.append(highWater)
+    }
+
+    func recordInventory(
+        highWater: Date?,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) {
+        recordInventory(highWater: highWater)
+        inventoryIntentValues.append(reconciliationIntent)
     }
 
     func recordEvent(_ event: String) {
@@ -644,6 +842,9 @@ private actor OrganizationContextRecorder {
     func discussions() -> [DiscussionCall] { discussionCalls }
     func projectItems() -> [ProjectCall] { projectCalls }
     func inventories() -> [Date?] { inventoryCalls }
+    func inventoryIntents() -> [SynchronizationReconciliationIntent] { inventoryIntentValues }
+    func projectIntents() -> [SynchronizationReconciliationIntent] { projectIntentValues }
+    func discussionComments() -> [DiscussionCommentCall] { discussionCommentCalls }
     func events() -> [String] { eventValues }
 }
 
@@ -787,7 +988,8 @@ private final class OrganizationContextFixture: @unchecked Sendable {
         ),
         discussion: OrganizationContextRefreshService.DiscussionRefresh? = nil,
         projectInventory: OrganizationContextRefreshService.ProjectInventoryRefresh? = nil,
-        projectItems: OrganizationContextRefreshService.ProjectItemsRefresh? = nil
+        projectItems: OrganizationContextRefreshService.ProjectItemsRefresh? = nil,
+        discussionComments: OrganizationContextRefreshService.DiscussionCommentsRefresh? = nil
     ) -> OrganizationContextRefreshService {
         OrganizationContextRefreshService(
             vault: vault,
@@ -802,7 +1004,7 @@ private final class OrganizationContextFixture: @unchecked Sendable {
                     observedAt: observedAt
                 )
             },
-            refreshProjectInventory: projectInventory ?? { scope, _, streamID, _, observedAt in
+            refreshProjectInventory: projectInventory ?? { scope, _, streamID, _, _, observedAt in
                 await recorder.recordEvent("project-inventory")
                 return ProjectV2SynchronizationResult(
                     projects: [],
@@ -816,7 +1018,7 @@ private final class OrganizationContextFixture: @unchecked Sendable {
                     itemCoverages: [:]
                 )
             },
-            refreshProjectItems: projectItems ?? { project, scope, _, streamID, highWater, observedAt in
+            refreshProjectItems: projectItems ?? { project, scope, _, streamID, highWater, _, observedAt in
                 await recorder.recordProject(project.nodeID, streamID: streamID, highWater: highWater)
                 return self.coverage(
                     scope: scope,
@@ -824,6 +1026,33 @@ private final class OrganizationContextFixture: @unchecked Sendable {
                     feature: .projectItems,
                     streamID: streamID,
                     observedAt: observedAt
+                )
+            },
+            refreshDiscussionComments: discussionComments ?? { scope, _, repository, discussionNodeID, commentStreamID, replyStreamID, _, _, observedAt in
+                await recorder.recordDiscussionComment(
+                    discussionNodeID,
+                    commentStreamID: commentStreamID,
+                    replyStreamID: replyStreamID,
+                    commentHighWater: nil,
+                    replyHighWater: nil
+                )
+                return .init(
+                    comments: [],
+                    replies: [],
+                    commentCoverage: self.coverage(
+                        scope: scope,
+                        repositoryID: repository.id,
+                        feature: .discussionComments,
+                        streamID: commentStreamID,
+                        observedAt: observedAt
+                    ),
+                    replyCoverage: self.coverage(
+                        scope: scope,
+                        repositoryID: repository.id,
+                        feature: .discussionReplies,
+                        streamID: replyStreamID,
+                        observedAt: observedAt
+                    )
                 )
             }
         )
@@ -869,6 +1098,45 @@ private final class OrganizationContextFixture: @unchecked Sendable {
             updatedAt: observedAt,
             state: .active
         )
+    }
+
+    func persistDiscussion(nodeID: String, repositoryID: RepositoryID) async throws {
+        let discussionNodeID = GitHubNodeID(rawValue: nodeID)!
+        try await vault.write { database in
+            try GitHubNodeRepository.save(
+                .init(
+                    nodeID: discussionNodeID,
+                    accountID: account.id,
+                    organizationID: organization.id,
+                    repositoryID: repositoryID,
+                    kind: .discussion,
+                    numericID: nil,
+                    number: 1,
+                    title: "Discussion \(nodeID)",
+                    state: .open,
+                    url: URL(string: "https://github.com/acme/a/discussions/1")!,
+                    bodyMarkdown: nil,
+                    authorID: nil,
+                    createdAt: observedAt,
+                    updatedAt: observedAt,
+                    closedAt: nil,
+                    mergedAt: nil,
+                    sourceRevision: observedAt.ISO8601Format(),
+                    observedAt: observedAt,
+                    accessibility: .accessible
+                ),
+                in: database
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO discussions (
+                        github_node_id, category_name, answer_comment_node_id,
+                        comments_count, updated_at_ms
+                    ) VALUES (?, NULL, NULL, 0, ?)
+                    """,
+                arguments: [discussionNodeID.rawValue, Int64((observedAt.timeIntervalSince1970 * 1_000).rounded())]
+            )
+        }
     }
 
     func coverage(

@@ -549,7 +549,7 @@ actor GitHubNodeHydrationService {
         })
     }
 
-    private nonisolated static func status(
+    nonisolated static func status(
         for error: GitHubGraphQLError,
         githubOrganizationID: UInt64?,
         observedAt: Date
@@ -560,6 +560,10 @@ actor GitHubNodeHydrationService {
             case .partialResponse: .partialGraphQL([.unknown])
             case .missingData: .missingData
             case .invalidResponse: .invalidResponse
+            // A document that is not in the committed query inventory is a
+            // local integrity boundary failure. Do not retry it with another
+            // document or infer current fields from any fallback source.
+            case .unregisteredQuery: .unavailableOrPermission
             case .mutationRejected, .invalidQuery, .requestFailed: .failed
             }
         }

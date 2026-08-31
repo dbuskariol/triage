@@ -136,6 +136,77 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationStatus, .approvalRequired)
     }
 
+    func testNoAccountIsExplicitEvenWhenStalePresentationDataExists() {
+        let state = WorkspacePresentationState(
+            workItems: [makeWorkItem(id: "cached", freshness: .fresh)],
+            selectedAccountID: nil,
+            selectedOrganizationID: organizationID,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: false,
+            refreshError: nil,
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .noAccount)
+        XCTAssertEqual(state.synchronizationDetail, "Connect a GitHub account to view work.")
+    }
+
+    func testNoOrganizationIsExplicitBeforeQueueState() {
+        let state = WorkspacePresentationState(
+            workItems: [],
+            selectedAccountID: accountID,
+            selectedOrganizationID: nil,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: false,
+            refreshError: nil,
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .noOrganization)
+        XCTAssertEqual(
+            state.synchronizationDetail,
+            "Choose an organization to view its local work queue."
+        )
+        XCTAssertEqual(state.count(for: .allWork), 0)
+    }
+
+    func testEmptyOrganizationWithoutCoverageIsReadyForInitialSynchronization() {
+        let state = makeState(workItems: [])
+
+        XCTAssertEqual(state.synchronizationStatus, .initialSynchronization)
+        XCTAssertEqual(
+            state.synchronizationDetail,
+            "Synchronize this organization to create its local work queue."
+        )
+    }
+
+    func testRefreshFailureDoesNotMasqueradeAsInitialSynchronization() {
+        let state = WorkspacePresentationState(
+            workItems: [],
+            selectedAccountID: accountID,
+            selectedOrganizationID: organizationID,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: false,
+            refreshError: "GitHub did not complete the first synchronization.",
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(state.synchronizationDetail, "GitHub did not complete the first synchronization.")
+    }
+
+    func testAuthoritativeFreshEmptyCoverageRemainsAnEmptyQueue() {
+        let state = makeState(
+            workItems: [],
+            workspaceFreshness: FreshnessState(status: .fresh)
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .upToDate)
+    }
+
     private func makeState(
         workItems: [WorkItem],
         access: OrganizationAccess? = nil,

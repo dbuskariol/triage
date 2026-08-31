@@ -148,6 +148,20 @@ actor OrganizationWorkRefreshService {
             case let .failure(failure, _):
                 throw requiredRepositoryInventoryFailure(failure)
             }
+            try await validateCurrentScope(synchronizationScope, vault: vault)
+            let notificationCapability = try await AccountRepository(vault: vault)
+                .accountCapabilities(for: account.id)?
+                .status(for: .notifications) ?? .unknown
+            try await validateCurrentScope(synchronizationScope, vault: vault)
+            try await refreshNotifications(
+                restClient: restClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
+                capabilityStatus: notificationCapability,
+                attemptedAt: attemptedAt
+            )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
             if case let .failure(.ssoRequired(header), _) = inventoryResult.teams {
                 deferredSSORequirement = header
             }
@@ -268,14 +282,16 @@ actor OrganizationWorkRefreshService {
                 }
             )
             try await validateCurrentScope(synchronizationScope, vault: vault)
-            let contextOutcome = try await OrganizationContextRefreshService(
+            let contextService = try OrganizationContextRefreshService(
                 vault: vault,
                 graphQLClient: graphqlClient,
                 selectionPolicy: .policy(for: reconciliationIntent)
-            ).refresh(
+            )
+            let contextOutcome = try await contextService.refresh(
                 scope: synchronizationScope,
                 organization: organization,
                 repositories: inventory,
+                reconciliationIntent: reconciliationIntent,
                 observedAt: serverObservedAt
             )
             try await validateCurrentScope(synchronizationScope, vault: vault)
@@ -420,6 +436,18 @@ actor OrganizationWorkRefreshService {
             throw error
         }
         try await validateCurrentScope(synchronizationScope, vault: vault)
+        let derivedOutcome = try await OrganizationRefreshCompletionCoordinator(vault: vault)
+            .finalizeAfterNormalizedCommit(
+                for: synchronizationScope,
+                evaluatedAt: attemptedAt
+            )
+        try await validateCurrentScope(synchronizationScope, vault: vault)
+        switch derivedOutcome {
+        case .published, .partial:
+            break
+        case let .failed(failure):
+            throw OrganizationRefreshCompletionCoordinatorError.derivedProjectionFailed(failure)
+        }
         if let deferredSSORequirement {
             throw OrganizationRefreshError.ssoRequirement(deferredSSORequirement)
         }
@@ -778,6 +806,62 @@ actor OrganizationWorkRefreshService {
         }
     }
 
+    private nonisolated static func coverageStatus(
+        for failure: ReviewCandidateFailureClassification
+    ) -> CoverageStatus {
+        switch failure {
+        case .ssoRequired:
+            .requiresSSO
+        case .approvalRequired:
+            .requiresApproval
+        case .unavailableOrPermission:
+            .unavailable
+        case .rateLimited:
+            .partial
+        case .authenticationRequired, .transportFailure, .serverFailure, .malformedResponse, .normalizationFailure:
+            .failed
+        }
+    }
+
+    private nonisolated static func reviewFailureSeverity(
+        _ failure: ReviewCandidateFailureClassification
+    ) -> Int {
+        switch coverageStatus(for: failure) {
+        case .complete: 0
+        case .unavailable: 1
+        case .unknown: 2
+        case .partial: 3
+        case .failed: 4
+        case .requiresApproval: 5
+        case .requiresSSO: 6
+        }
+    }
+
+    private nonisolated static func reviewFailureDetail(
+        for failure: ReviewCandidateFailureClassification
+    ) -> String {
+        switch failure {
+        case .authenticationRequired:
+            "Reconnect the selected account to refresh pull request reviews."
+        case .ssoRequired:
+            "GitHub organization SSO authorization is required for pull request reviews."
+        case .approvalRequired:
+            "GitHub organization approval is required for pull request reviews."
+        case .rateLimited:
+            "GitHub rate limiting left pull request review coverage incomplete."
+        case .unavailableOrPermission:
+            "Some pull request reviews are unavailable to the selected account."
+        case .transportFailure:
+            "A transport failure left pull request review coverage incomplete."
+        case .serverFailure:
+            "GitHub did not complete pull request review coverage."
+        case .malformedResponse:
+            "GitHub returned malformed pull request review data."
+        case .normalizationFailure:
+            "GitHub pull request review data could not be normalized."
+        }
+    }
+
     private func refreshTimelines(
         restClient: GitHubRESTClient,
         vault: AccountVault,
@@ -889,6 +973,77 @@ actor OrganizationWorkRefreshService {
         }
     }
 
+    /// Notifications are account-scoped, read-only discovery evidence. The
+    /// selected organization only receives a filtered local view after the
+    /// repository inventory has established its current scope.
+    private func refreshNotifications(
+        restClient: GitHubRESTClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        capabilityStatus: CapabilityStatus,
+        attemptedAt: Date
+    ) async throws {
+        let streamID = SyncStreamID(rawValue: "notifications-\(organization.id.rawValue)")!
+        guard capabilityStatus == .available else {
+            let status: CoverageStatus = switch capabilityStatus {
+            case .available:
+                .complete
+            case .unavailable, .notApplicable:
+                .unavailable
+            case .unknown:
+                .unknown
+            case .requiresSSO:
+                .requiresSSO
+            case .requiresApproval:
+                .requiresApproval
+            }
+            let detail: String = switch capabilityStatus {
+            case .unavailable, .notApplicable:
+                "GitHub notifications are unavailable to the selected account."
+            case .unknown:
+                "GitHub notification capability has not been established for the selected account."
+            case .requiresSSO:
+                "GitHub SSO authorization is required before notifications can refresh."
+            case .requiresApproval:
+                "GitHub organization approval is required before notifications can refresh."
+            case .available:
+                ""
+            }
+            try await saveCoverage(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: status,
+                    lastSuccessfulAt: nil,
+                    failureDetail: detail,
+                    feature: .notifications
+                ),
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
+            )
+            return
+        }
+        try await validateCurrentScope(scope, vault: vault)
+        let previousHighWater = try await SyncStreamRepository(vault: vault)
+            .stream(withID: streamID, accountID: scope.accountID)?
+            .highWater
+        try await validateCurrentScope(scope, vault: vault)
+        _ = try await GitHubNotificationSynchronizationService(
+            client: GitHubNotificationClient(client: restClient),
+            repository: GitHubNotificationSourceRepository(vault: vault)
+        ).refresh(
+            scope: scope,
+            organizationLogin: organization.login,
+            streamID: streamID,
+            previousHighWater: previousHighWater,
+            observedAt: attemptedAt
+        )
+        try await validateCurrentScope(scope, vault: vault)
+    }
+
     private func refreshPullRequestReviews(
         restClient: GitHubRESTClient,
         vault: AccountVault,
@@ -915,7 +1070,8 @@ actor OrganizationWorkRefreshService {
             try await validateCurrentScope(scope, vault: vault)
             let result = try await PullRequestReviewRefreshService(
                 client: GitHubPullRequestClient(client: restClient),
-                candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
+                candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
+                failureEnvelopeRepository: ReviewCandidateFailureEnvelopeRepository(vault: vault)
             ).refresh(
                 scope: scope,
                 githubOrganizationID: organization.githubOrganizationID,
@@ -923,12 +1079,23 @@ actor OrganizationWorkRefreshService {
             )
             try await validateCurrentScope(scope, vault: vault)
             let scopedSSOHeader = result.ssoHeader?.scoped(to: organization.githubOrganizationID)
-            let status: CoverageStatus = scopedSSOHeader == nil
-                && !result.hasRemainingCandidates
-                && !result.hasBlockedKnownCandidates
-                ? .complete
-                : (result.hasBlockedKnownCandidates ? .unavailable : .partial)
-            let failureDetail: String? = if scopedSSOHeader != nil {
+            let classifiedFailure = result.failureClassifications.max { lhs, rhs in
+                Self.reviewFailureSeverity(lhs) < Self.reviewFailureSeverity(rhs)
+            }
+            let status: CoverageStatus = if let classifiedFailure {
+                Self.coverageStatus(for: classifiedFailure)
+            } else if scopedSSOHeader != nil {
+                .requiresSSO
+            } else if result.hasBlockedKnownCandidates {
+                .unavailable
+            } else if result.hasRemainingCandidates {
+                .partial
+            } else {
+                .complete
+            }
+            let failureDetail: String? = if let classifiedFailure {
+                Self.reviewFailureDetail(for: classifiedFailure)
+            } else if scopedSSOHeader != nil {
                 "GitHub returned partial pull request review results due to SSO."
             } else if result.hasBlockedKnownCandidates {
                 "Some known pull requests are no longer accessible to the selected account. Restore repository access or refresh the repository inventory."
@@ -1022,7 +1189,8 @@ actor OrganizationWorkRefreshService {
                 fetcher: GitHubPullRequestReviewThreadClient(client: graphqlClient),
                 candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
                 threadRepository: PullRequestReviewThreadRepository(vault: vault),
-                currentUserNodeID: currentUserNodeID
+                currentUserNodeID: currentUserNodeID,
+                failureEnvelopeRepository: ReviewCandidateFailureEnvelopeRepository(vault: vault)
             ).refresh(
                 scope: scope,
                 githubOrganizationID: organization.githubOrganizationID,

@@ -75,7 +75,13 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
         } verify: { error in
-            XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .paginationLoop)
+            let failure = error as? GitHubPullRequestReviewThreadTraversalFailure
+            XCTAssertEqual(failure?.reason, .paginationLoop)
+            XCTAssertEqual(failure?.rawPages.count, 2)
+            XCTAssertEqual(failure?.rawPages.map(\.requestKey), [
+                "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=cmVwZWF0"
+            ])
         }
     }
 
@@ -105,7 +111,9 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
         } verify: { error in
-            XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .queryCostExceeded)
+            let failure = error as? GitHubPullRequestReviewThreadTraversalFailure
+            XCTAssertEqual(failure?.reason, .queryCostExceeded)
+            XCTAssertEqual(failure?.rawPages.count, 2)
         }
     }
 
@@ -135,7 +143,9 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
         } verify: { error in
-            XCTAssertEqual(error as? GitHubPullRequestReviewThreadClientError, .responseByteBudgetExceeded)
+            let failure = error as? GitHubPullRequestReviewThreadTraversalFailure
+            XCTAssertEqual(failure?.reason, .responseByteBudgetExceeded)
+            XCTAssertEqual(failure?.rawPages.count, 2)
         }
     }
 

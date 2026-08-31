@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+/// Keeps menu-bar labels compact without discarding the full source title from
+/// the main work surface or its accessibility label.
+enum TriageMenuLabel {
+    static func abbreviated(_ title: String, limit: Int = 30) -> String {
+        precondition(limit >= 0, "A menu title limit cannot be negative.")
+        guard limit > 0 else { return "" }
+
+        let normalized = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard normalized.count > limit else { return normalized }
+        guard limit > 1 else { return "…" }
+        return String(normalized.prefix(limit - 1)) + "…"
+    }
+}
+
 struct MenuBarView: View {
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -17,9 +31,11 @@ struct MenuBarView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Triage")
                         .font(.headline)
-                    Text(summary)
+                    Text(selectionSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(summary)
                 }
                 Spacer()
             }
@@ -40,6 +56,7 @@ struct MenuBarView: View {
                         }
                     }
                 }
+                .accessibilityHint("Opens the chosen local Triage work view.")
 
                 ForEach(topItems) { item in
                     Button {
@@ -47,9 +64,10 @@ struct MenuBarView: View {
                         appModel.selectedWorkItemID = item.id
                         openMainWindow()
                     } label: {
-                        Text(item.title)
-                            .lineLimit(1)
+                        Text(TriageMenuLabel.abbreviated(item.title))
                     }
+                    .accessibilityLabel(item.title)
+                    .accessibilityHint("Opens this item in Triage. It does not change GitHub.")
                 }
                 if !topItems.isEmpty {
                     Divider()
@@ -67,13 +85,13 @@ struct MenuBarView: View {
                 navigation.section = .inbox
                 openMainWindow()
             }
-            .keyboardShortcut("o")
+            .accessibilityHint("Opens the local Triage Inbox window.")
 
             Button("Settings…") {
+                navigation.openSettings(.general)
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
             }
-            .keyboardShortcut(",")
 
             Button("Refresh GitHub Work") {
                 Task {
@@ -81,6 +99,7 @@ struct MenuBarView: View {
                 }
             }
             .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
+            .accessibilityHint("Refreshes read-only GitHub data for the selected organization.")
 
             Button("Check for Updates…") {
                 softwareUpdates.checkForUpdates()
@@ -117,9 +136,16 @@ struct MenuBarView: View {
             return "No account connected"
         }
         let highPriority = inboxItems.filter { $0.workflow.priority == .high }.count
+        let account = appModel.accounts.first(where: { $0.id == appModel.selectedAccountID })
+        let accountName = account?.displayName ?? account?.login
         let organization = appModel.selectedOrganization?.displayName ?? appModel.selectedOrganization?.login
         let counts = "\(highPriority) priority · \(inboxItems.count) inbox"
-        return organization.map { "\($0) · \(counts)" } ?? counts
+        let selection = [accountName, organization].compactMap { $0 }.joined(separator: " · ")
+        return selection.isEmpty ? counts : "\(selection) · \(counts)"
+    }
+
+    private var selectionSummary: String {
+        TriageMenuLabel.abbreviated(summary)
     }
 
     private var presentation: WorkspacePresentationState {

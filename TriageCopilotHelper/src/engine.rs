@@ -184,7 +184,13 @@ fn runtime_unavailable() -> Failure {
 
 #[cfg(test)]
 mod tests {
-    use super::{CancellationState, ZeroToolPolicy};
+    use super::{CancellationState, CopilotEngine, UnavailableCopilotEngine, ZeroToolPolicy};
+    use crate::{
+        protocol::FailureCode,
+        schema::{CandidateInput, EvidenceInput, EvidenceKind, TriggerReason, WorkItemState},
+    };
+    use chrono::Utc;
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     #[test]
@@ -210,5 +216,50 @@ mod tests {
         assert_eq!(sdk_config.enable_config_discovery, Some(false));
         assert_eq!(sdk_config.enable_mcp_apps, Some(false));
         assert_eq!(sdk_config.enable_skills, Some(false));
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_never_claims_models_or_analysis_are_available() {
+        let engine = UnavailableCopilotEngine;
+
+        let health = engine.health().await.expect("unavailable health is still explicit");
+        assert!(!health.copilot_available);
+        assert_eq!(health.tool_policy, "deny_all");
+
+        let models = engine.models().await.expect_err("models require a bundled runtime");
+        assert!(matches!(models.code, FailureCode::RuntimeUnavailable));
+        assert_eq!(models.message, "Copilot runtime is not bundled in this build");
+
+        let analysis = engine
+            .analyze(
+                Uuid::new_v4(),
+                CandidateInput {
+                    candidate_id: Uuid::new_v4(),
+                    content_is_untrusted: true,
+                    work_item_title: "Fixture work item".to_owned(),
+                    state: WorkItemState::Open,
+                    trigger_reasons: vec![TriggerReason {
+                        id: "fixture".to_owned(),
+                        title: "Fixture trigger".to_owned(),
+                    }],
+                    body: None,
+                    conversation: Vec::new(),
+                    labels: Vec::new(),
+                    project_fields: BTreeMap::new(),
+                    evidence: vec![EvidenceInput {
+                        id: Uuid::new_v4(),
+                        kind: EvidenceKind::Issue,
+                        observed_at: Utc::now(),
+                        quote: "Fixture evidence".to_owned(),
+                        explicit_deadline: None,
+                    }],
+                },
+                None,
+                CancellationState::default(),
+            )
+            .await
+            .expect_err("analysis requires a bundled runtime");
+        assert!(matches!(analysis.code, FailureCode::RuntimeUnavailable));
+        assert_eq!(analysis.message, "Copilot runtime is not bundled in this build");
     }
 }

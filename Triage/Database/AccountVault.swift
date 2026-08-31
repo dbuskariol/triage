@@ -6,6 +6,7 @@ enum VaultError: Error, Equatable, Sendable {
     case sqlCipherUnavailable
     case missingApplicationSupportDirectory
     case accountBeingRemoved
+    case unsafeAccountIDPath
     case unsupportedDestructiveMigration(String)
     case invalidMigrationBackup
 }
@@ -70,6 +71,16 @@ actor AccountVault {
         _ operation: @Sendable (Database) throws -> Value
     ) throws -> Value {
         try databasePool.read(operation)
+    }
+
+    /// Creates a value-only workspace observation bridge while retaining sole
+    /// ownership of this vault's database pool. Consumers can cancel their
+    /// subscriptions, but never receive a database handle.
+    func workspaceObservationBridge() -> WorkspaceDatabaseObservationBridge {
+        WorkspaceDatabaseObservationService.bridge(
+            in: databasePool,
+            accountID: accountID
+        )
     }
 
     func write<Value: Sendable>(
@@ -298,10 +309,14 @@ actor VaultRegistry {
     }
 
     func remove(accountID: AccountID) async throws {
+        guard Self.isOpaqueAccountID(accountID) else {
+            throw VaultError.unsafeAccountIDPath
+        }
+        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
+        try Self.assertRemovalPathIsSafe(paths.directory, beneath: rootDirectory)
         beginRemoval(accountID: accountID)
         defer { cancelRemoval(accountID: accountID) }
         try await close(accountID: accountID)
-        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
         if FileManager.default.fileExists(atPath: paths.directory.path) {
             try FileManager.default.removeItem(at: paths.directory)
         }
@@ -313,5 +328,47 @@ actor VaultRegistry {
 
     func cancelRemoval(accountID: AccountID) {
         accountsBeingRemoved.remove(accountID)
+    }
+
+    /// Lifecycle state only; no database handle is exposed while an account is
+    /// being cryptographically erased.
+    func isOpen(accountID: AccountID) -> Bool {
+        openVaults[accountID] != nil
+    }
+
+    func isBeingRemoved(accountID: AccountID) -> Bool {
+        accountsBeingRemoved.contains(accountID)
+    }
+
+    private static func isOpaqueAccountID(_ accountID: AccountID) -> Bool {
+        guard let value = UUID(uuidString: accountID.rawValue) else { return false }
+        return value.uuidString.lowercased() == accountID.rawValue
+    }
+
+    private static func assertRemovalPathIsSafe(_ path: URL, beneath root: URL) throws {
+        let standardizedRoot = root.standardizedFileURL
+        let standardizedPath = path.standardizedFileURL
+        let rootPath = standardizedRoot.path
+        let pathPath = standardizedPath.path
+        guard pathPath.hasPrefix(rootPath + "/") else {
+            throw VaultError.unsafeAccountIDPath
+        }
+
+        var current = standardizedRoot
+        guard !isSymbolicLink(current) else {
+            throw VaultError.unsafeAccountIDPath
+        }
+        let relativePath = String(pathPath.dropFirst(rootPath.count + 1))
+        for component in relativePath.split(separator: "/") {
+            current.appendPathComponent(String(component), isDirectory: true)
+            guard !isSymbolicLink(current) else {
+                throw VaultError.unsafeAccountIDPath
+            }
+        }
+    }
+
+    private static func isSymbolicLink(_ url: URL) -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType)
+            == .typeSymbolicLink
     }
 }

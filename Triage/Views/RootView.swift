@@ -26,15 +26,24 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, appModel.ssoAuthorizationHeader != nil else { return }
             Task {
-                await appModel.recheckSelectedOrganizationAccess()
+                switch phase {
+                case .active:
+                    await appModel.applicationDidBecomeActive()
+                    if appModel.ssoAuthorizationHeader != nil {
+                        await appModel.recheckSelectedOrganizationAccess()
+                    }
+                case .background:
+                    await appModel.scheduleOpportunisticBackgroundRefresh()
+                default:
+                    break
+                }
             }
         }
     }
 
     private var workspace: some View {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: sidebarVisibility) {
                 WorkspaceSidebar(
                     accounts: appModel.accounts,
                     organizations: appModel.organizations,
@@ -45,7 +54,7 @@ struct RootView: View {
                 )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 218, max: 260)
             } content: {
-                WorkListView()
+                workspaceQueue
                     .navigationSplitViewColumnWidth(min: 320, ideal: 390, max: 520)
             } detail: {
                 WorkDetailView(item: appModel.selectedWorkItem)
@@ -53,7 +62,19 @@ struct RootView: View {
             }
             .navigationSplitViewStyle(.balanced)
             .toolbar {
-                ToolbarItem {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        navigation.isSidebarVisible.toggle()
+                    } label: {
+                        Label(
+                            navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar",
+                            systemImage: "sidebar.left"
+                        )
+                    }
+                    .help(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
+                    .accessibilityLabel(navigation.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar")
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task {
                             await appModel.refreshSelectedOrganizationAfterAccessCheck()
@@ -65,6 +86,41 @@ struct RootView: View {
                     .help("Refresh GitHub Work")
                 }
             }
+    }
+
+    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { navigation.isSidebarVisible ? .all : .doubleColumn },
+            set: { navigation.isSidebarVisible = $0 == .all }
+        )
+    }
+
+    @ViewBuilder
+    private var workspaceQueue: some View {
+        switch presentation.synchronizationStatus {
+        case .noOrganization:
+            WorkspaceQueueUnavailableView(
+                title: "Choose an organization",
+                systemImage: "building.2",
+                description: "Select an organization in the sidebar to view its local work queue."
+            )
+        case .initialSynchronization:
+            WorkspaceQueueUnavailableView(
+                title: "Synchronize your work",
+                systemImage: "arrow.triangle.2.circlepath",
+                description: "Triage has not created a local work queue for this organization yet.",
+                actionTitle: "Synchronize Now",
+                action: refreshSelectedOrganization
+            )
+        default:
+            WorkListView()
+        }
+    }
+
+    private func refreshSelectedOrganization() {
+        Task {
+            await appModel.refreshSelectedOrganizationAfterAccessCheck()
+        }
     }
 
     private var presentation: WorkspacePresentationState {
@@ -131,6 +187,30 @@ struct RootView: View {
             },
             recordAIConsent: { _ in }
         )
+    }
+}
+
+private struct WorkspaceQueueUnavailableView: View {
+    let title: String
+    let systemImage: String
+    let description: String
+    var actionTitle: String?
+    var action: (() -> Void)?
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(description)
+        } actions: {
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityHint("Creates or updates the local work queue for this organization.")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
     }
 }
 

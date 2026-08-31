@@ -29,9 +29,37 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A7C73551B76290FE46E08A93"
+               BuildableName = "TriageCopilotXPCTests.xctest"
+               BlueprintName = "TriageCopilotXPCTests"
+               ReferencedContainer = "container:Triage.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "B6FA0A368BF7D8AD4BC57863"
                BuildableName = "TriageTests.xctest"
                BlueprintName = "TriageTests"
+               ReferencedContainer = "container:Triage.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "995EFACD1AD5B13417BD4E09"
+               BuildableName = "TriageUITests.xctest"
+               BlueprintName = "TriageUITests"
                ReferencedContainer = "container:Triage.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -61,6 +89,28 @@
                BlueprintIdentifier = "B6FA0A368BF7D8AD4BC57863"
                BuildableName = "TriageTests.xctest"
                BlueprintName = "TriageTests"
+               ReferencedContainer = "container:Triage.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "995EFACD1AD5B13417BD4E09"
+               BuildableName = "TriageUITests.xctest"
+               BlueprintName = "TriageUITests"
+               ReferencedContainer = "container:Triage.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A7C73551B76290FE46E08A93"
+               BuildableName = "TriageCopilotXPCTests.xctest"
+               BlueprintName = "TriageCopilotXPCTests"
                ReferencedContainer = "container:Triage.xcodeproj">
             </BuildableReference>
          </TestableReference>

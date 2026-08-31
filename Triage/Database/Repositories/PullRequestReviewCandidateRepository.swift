@@ -16,6 +16,24 @@ struct PullRequestReviewCandidate: Sendable {
     let repositoryID: RepositoryID
     let repository: GitHubRepositoryPath
     let number: Int
+    /// Immutable source version captured at candidate selection. A complete
+    /// traversal receipt rechecks this before it authorizes destructive
+    /// normalization.
+    let sourceRevision: String
+
+    init(
+        nodeID: GitHubNodeID,
+        repositoryID: RepositoryID,
+        repository: GitHubRepositoryPath,
+        number: Int,
+        sourceRevision: String = ""
+    ) {
+        self.nodeID = nodeID
+        self.repositoryID = repositoryID
+        self.repository = repository
+        self.number = number
+        self.sourceRevision = sourceRevision
+    }
 }
 
 struct PullRequestReviewCandidateInventory: Sendable {
@@ -51,7 +69,8 @@ actor PullRequestReviewCandidateRepository {
                 database,
                 sql: """
                     SELECT github_nodes.github_node_id, repositories.id AS repository_id,
-                           repositories.owner_login, repositories.name, github_nodes.number
+                           repositories.owner_login, repositories.name, github_nodes.number,
+                           github_nodes.source_revision
                     FROM pull_requests
                     JOIN github_nodes
                       ON github_nodes.github_node_id = pull_requests.github_node_id
@@ -249,7 +268,9 @@ actor PullRequestReviewCandidateRepository {
     private nonisolated static func candidate(_ row: Row) throws -> PullRequestReviewCandidate {
         guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
               let repositoryID = RepositoryID(rawValue: row["repository_id"]),
-              let number: Int = row["number"]
+              let number: Int = row["number"],
+              let sourceRevision: String = row["source_revision"],
+              !sourceRevision.isEmpty
         else {
             throw PullRequestReviewCandidateRepositoryError.invalidPersistedCandidate
         }
@@ -260,7 +281,8 @@ actor PullRequestReviewCandidateRepository {
                 owner: row["owner_login"],
                 repository: row["name"]
             ),
-            number: number
+            number: number,
+            sourceRevision: sourceRevision
         )
     }
 
@@ -272,7 +294,8 @@ actor PullRequestReviewCandidateRepository {
             database,
             sql: """
                 SELECT github_nodes.github_node_id, repositories.id AS repository_id,
-                       repositories.owner_login, repositories.name, github_nodes.number
+                       repositories.owner_login, repositories.name, github_nodes.number,
+                       github_nodes.source_revision
                 FROM pull_requests
                 JOIN github_nodes
                   ON github_nodes.github_node_id = pull_requests.github_node_id

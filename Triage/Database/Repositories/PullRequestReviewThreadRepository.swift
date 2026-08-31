@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -7,6 +8,8 @@ enum PullRequestReviewThreadRepositoryError: Error, Equatable, Sendable {
     case duplicateThreadNodeID
     case duplicateCommentNodeID
     case invalidRecord
+    case invalidRawAuthority
+    case invalidTraversalReceipt
 }
 
 actor PullRequestReviewThreadRepository {
@@ -47,6 +50,9 @@ actor PullRequestReviewThreadRepository {
         currentUserNodeID: GitHubNodeID,
         records: [PullRequestReviewThreadRecord],
         rawPages: [GitHubPullRequestReviewThreadRawPage] = [],
+        scope: SynchronizationScope? = nil,
+        streamID: SyncStreamID? = nil,
+        completeTraversalReceipt: ReviewCandidateCompleteTraversalReceiptToken? = nil,
         observedAt: Date,
         in database: Database
     ) throws {
@@ -59,7 +65,52 @@ actor PullRequestReviewThreadRepository {
             in: database
         )
 
-        for page in rawPages {
+        guard (scope == nil) == (streamID == nil) else {
+            throw PullRequestReviewThreadRepositoryError.invalidRawAuthority
+        }
+        if let completeTraversalReceipt {
+            guard completeTraversalReceipt.feature == .reviewThreads,
+                  completeTraversalReceipt.candidateNodeID == pullRequestNodeID,
+                  completeTraversalReceipt.repositoryID == repositoryID,
+                  completeTraversalReceipt.scope.accountID == accountID,
+                  completeTraversalReceipt.scope.organizationID == organizationID,
+                  completeTraversalReceipt.scope == scope,
+                  completeTraversalReceipt.streamID == streamID
+            else {
+                throw PullRequestReviewThreadRepositoryError.invalidTraversalReceipt
+            }
+            try ReviewCandidateCompleteTraversalReceiptRepository.validate(
+                completeTraversalReceipt,
+                in: database
+            )
+            let receiptDigest = try Data.fetchOne(
+                database,
+                sql: """
+                    SELECT normalized_digest
+                    FROM review_candidate_complete_traversal_receipts
+                    WHERE id = ?
+                    """,
+                arguments: [completeTraversalReceipt.id.uuidString.lowercased()]
+            )
+            guard receiptDigest == normalizedDigest(for: records) else {
+                throw PullRequestReviewThreadRepositoryError.invalidTraversalReceipt
+            }
+        }
+        // Complete receipts own the source snapshots. Saving the flat page
+        // list again would create unlinked duplicate evidence and, worse,
+        // make it easy to confuse an incomplete flat list for pruning proof.
+        for page in completeTraversalReceipt == nil ? rawPages : [] {
+            let requestIdentity = try scope.map { scope -> ConditionalRequestIdentity in
+                guard let streamID else {
+                    throw PullRequestReviewThreadRepositoryError.invalidRawAuthority
+                }
+                return ConditionalRequestIdentity(
+                    scope: scope,
+                    feature: .reviewThreads,
+                    streamID: streamID,
+                    requestKey: page.requestKey
+                )
+            }
             try RawAPISnapshotRepository.save(
                 RawAPISnapshot(
                     id: .make(),
@@ -69,7 +120,8 @@ actor PullRequestReviewThreadRepository {
                     eTag: nil,
                     parserVersion: 1,
                     observedAt: observedAt,
-                    payload: page.payload
+                    payload: page.payload,
+                    requestIdentity: requestIdentity
                 ),
                 in: database
             )
@@ -148,11 +200,13 @@ actor PullRequestReviewThreadRepository {
             }
         }
 
-        try pruneStaleNodes(
-            pullRequestNodeID: pullRequestNodeID,
-            records: records,
-            in: database
-        )
+        if completeTraversalReceipt != nil {
+            try pruneStaleNodes(
+                pullRequestNodeID: pullRequestNodeID,
+                records: records,
+                in: database
+            )
+        }
         for record in records {
             let latestAuthor = record.comments.max { lhs, rhs in
                 lhs.createdAt == rhs.createdAt
@@ -320,6 +374,36 @@ actor PullRequestReviewThreadRepository {
 
     private static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    /// This is also the exact digest persisted in a complete traversal
+    /// receipt. Keep it record-based (rather than raw-page-based) so a
+    /// receipt can authorize only the normalized replacement it witnessed.
+    nonisolated static func normalizedDigest(
+        for records: [PullRequestReviewThreadRecord]
+    ) -> Data {
+        var hasher = SHA256()
+        func append(_ value: String) {
+            let data = Data(value.utf8)
+            hasher.update(data: Data("\(data.count):".utf8))
+            hasher.update(data: data)
+        }
+        append("review-thread-normalization-v1")
+        for record in records.sorted(by: { $0.nodeID.rawValue < $1.nodeID.rawValue }) {
+            append(record.nodeID.rawValue)
+            append(record.isResolved ? "1" : "0")
+            append(record.isOutdated ? "1" : "0")
+            append(String(record.updatedAt.timeIntervalSinceReferenceDate))
+            for comment in record.comments.sorted(by: { $0.nodeID.rawValue < $1.nodeID.rawValue }) {
+                append(comment.nodeID.rawValue)
+                append(comment.author?.id.rawValue ?? "")
+                append(comment.body)
+                append(String(comment.createdAt.timeIntervalSinceReferenceDate))
+                append(String(comment.updatedAt.timeIntervalSinceReferenceDate))
+                append(comment.url.absoluteString)
+            }
+        }
+        return Data(hasher.finalize())
     }
 }
 

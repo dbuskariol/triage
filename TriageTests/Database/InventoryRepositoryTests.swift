@@ -10,7 +10,7 @@ final class InventoryRepositoryTests: XCTestCase {
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
         let original = fixture.repository(id: 1, nodeID: "R_1", name: "old-name")
 
-        try await repository.replace(
+        _ = try await repository.replace(
             [original],
             accountID: fixture.account.id,
             organization: fixture.organization,
@@ -105,7 +105,7 @@ final class InventoryRepositoryTests: XCTestCase {
             lastModified: nil,
             ssoHeader: nil
         )
-        try await repository.replace(
+        _ = try await repository.replace(
             teams: [team],
             memberships: [
                 TeamMembershipObservation(
@@ -147,12 +147,159 @@ final class InventoryRepositoryTests: XCTestCase {
         )
     }
 
+    func testTeamInventoryOmissionRetainsHiddenTeamTopologyAndMembership() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = TeamInventoryRepository(vault: fixture.vault)
+        let hidden = GitHubTeamDTO(
+            id: 1,
+            nodeID: "T_hidden",
+            name: "Hidden",
+            slug: "hidden",
+            privacy: "secret"
+        )
+        let visible = GitHubTeamDTO(
+            id: 2,
+            nodeID: "T_visible",
+            name: "Visible",
+            slug: "visible",
+            privacy: "closed"
+        )
+        _ = try await repository.replace(
+            teams: [hidden, visible],
+            memberships: [
+                TeamMembershipObservation(
+                    teamID: TeamID(rawValue: hidden.nodeID)!,
+                    membership: .member(fixture.membership(state: "active", role: "member"))
+                ),
+                TeamMembershipObservation(
+                    teamID: TeamID(rawValue: visible.nodeID)!,
+                    membership: .authoritativeNonMembership(fixture.membership(state: "none", role: nil))
+                )
+            ],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+
+        let renamedVisible = GitHubTeamDTO(
+            id: 2,
+            nodeID: "T_visible",
+            name: "Visible renamed",
+            slug: "visible",
+            privacy: "closed"
+        )
+        let summaries = try await repository.replace(
+            teams: [renamedVisible],
+            memberships: [
+                TeamMembershipObservation(
+                    teamID: TeamID(rawValue: renamedVisible.nodeID)!,
+                    membership: .member(fixture.membership(state: "active", role: "maintainer"))
+                )
+            ],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(summaries.map(\.id.rawValue), [renamedVisible.nodeID])
+        XCTAssertEqual(summaries.first?.name, "Visible renamed")
+        let persisted = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT teams.id, teams.name, teams.privacy, team_memberships.membership_state
+                    FROM teams
+                    LEFT JOIN team_memberships
+                      ON team_memberships.team_id = teams.id
+                     AND team_memberships.account_id = ?
+                    WHERE teams.organization_id = ?
+                    ORDER BY teams.id
+                    """,
+                arguments: [fixture.account.id.rawValue, fixture.organization.id.rawValue]
+            ).map { row in
+                (
+                    row["id"] as String,
+                    row["name"] as String,
+                    row["privacy"] as String?,
+                    row["membership_state"] as String?
+                )
+            }
+        }
+        XCTAssertEqual(persisted.map(\.0), [hidden.nodeID, renamedVisible.nodeID])
+        XCTAssertEqual(persisted.map(\.1), ["Hidden", "Visible renamed"])
+        XCTAssertEqual(persisted.map(\.2), ["secret", "closed"])
+        XCTAssertEqual(persisted.map(\.3), ["active", "active"])
+    }
+
+    func testReturnedTeamInventoryReconcilesEachReturnedTeamAndMembership() async throws {
+        let fixture = try await InventoryFixture()
+        defer { fixture.remove() }
+        let repository = TeamInventoryRepository(vault: fixture.vault)
+        let first = GitHubTeamDTO(id: 1, nodeID: "T_1", name: "One", slug: "one", privacy: "closed")
+        let second = GitHubTeamDTO(id: 2, nodeID: "T_2", name: "Two", slug: "two", privacy: "secret")
+        _ = try await repository.replace(
+            teams: [first, second],
+            memberships: [
+                .init(teamID: TeamID(rawValue: first.nodeID)!, membership: .authoritativeNonMembership(fixture.membership(state: "none", role: nil))),
+                .init(teamID: TeamID(rawValue: second.nodeID)!, membership: .member(fixture.membership(state: "active", role: "member")))
+            ],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date
+        )
+
+        let updatedFirst = GitHubTeamDTO(id: 1, nodeID: "T_1", name: "One updated", slug: "one-updated", privacy: "secret")
+        let updatedSecond = GitHubTeamDTO(id: 2, nodeID: "T_2", name: "Two updated", slug: "two-updated", privacy: "closed")
+        let summaries = try await repository.replace(
+            teams: [updatedFirst, updatedSecond],
+            memberships: [
+                .init(teamID: TeamID(rawValue: updatedFirst.nodeID)!, membership: .member(fixture.membership(state: "pending", role: "member"))),
+                .init(teamID: TeamID(rawValue: updatedSecond.nodeID)!, membership: .authoritativeNonMembership(fixture.membership(state: "none", role: nil)))
+            ],
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            observedAt: fixture.date.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(summaries.map(\.slug), ["one-updated", "two-updated"])
+        XCTAssertEqual(summaries.map(\.membershipState), ["pending", "none"])
+        let persisted = try await fixture.vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT teams.id, teams.name, teams.slug, teams.privacy, team_memberships.membership_state
+                    FROM teams
+                    JOIN team_memberships
+                      ON team_memberships.team_id = teams.id
+                     AND team_memberships.account_id = ?
+                    WHERE teams.organization_id = ?
+                    ORDER BY teams.id
+                    """,
+                arguments: [fixture.account.id.rawValue, fixture.organization.id.rawValue]
+            ).map { row in
+                (
+                    row["id"] as String,
+                    row["name"] as String,
+                    row["slug"] as String,
+                    row["privacy"] as String?,
+                    row["membership_state"] as String
+                )
+            }
+        }
+        XCTAssertEqual(persisted.map(\.0), [updatedFirst.nodeID, updatedSecond.nodeID])
+        XCTAssertEqual(persisted.map(\.1), ["One updated", "Two updated"])
+        XCTAssertEqual(persisted.map(\.2), ["one-updated", "two-updated"])
+        XCTAssertEqual(persisted.map(\.3), ["secret", "closed"])
+        XCTAssertEqual(persisted.map(\.4), ["pending", "none"])
+    }
+
     func testInvalidRepositoryPageDoesNotDeletePriorAuthoritativeInventory() async throws {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
         let original = fixture.repository(id: 1, nodeID: "R_1", name: "retained")
-        try await repository.replace(
+        _ = try await repository.replace(
             [original],
             accountID: fixture.account.id,
             organization: fixture.organization,
@@ -193,7 +340,7 @@ final class InventoryRepositoryTests: XCTestCase {
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
         let existing = fixture.repository(id: 1, nodeID: "R_1", name: "retained")
-        try await repository.replace(
+        _ = try await repository.replace(
             [existing],
             accountID: fixture.account.id,
             organization: fixture.organization,
@@ -210,7 +357,7 @@ final class InventoryRepositoryTests: XCTestCase {
         let fixture = try await InventoryFixture()
         defer { fixture.remove() }
         let repository = RepositoryInventoryRepository(vault: fixture.vault)
-        try await repository.replace(
+        _ = try await repository.replace(
             [fixture.repository(id: 1, nodeID: "R_1", name: "revoked")],
             accountID: fixture.account.id,
             organization: fixture.organization,
@@ -803,6 +950,16 @@ private final class InventoryFixture: @unchecked Sendable {
             htmlURL: URL(string: "https://github.com/\(owner)/\(name)")!,
             updatedAt: date,
             owner: .init(login: owner)
+        )
+    }
+
+    func membership(state: String, role: String?) -> GitHubResponse<GitHubTeamMembershipDTO> {
+        GitHubResponse(
+            value: GitHubTeamMembershipDTO(state: state, role: role),
+            payload: Data("{\"state\":\"\(state)\"}".utf8),
+            etag: nil,
+            lastModified: nil,
+            ssoHeader: nil
         )
     }
 

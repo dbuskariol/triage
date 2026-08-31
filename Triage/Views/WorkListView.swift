@@ -1,74 +1,69 @@
 import SwiftUI
 
 struct WorkListView: View {
-    private enum SearchScope: String, CaseIterable, Identifiable {
-        case currentView
-        case organization
-
-        var id: Self { self }
-
-        var title: String {
-            switch self {
-            case .currentView: "Current View"
-            case .organization: "Selected Organization"
-            }
-        }
-    }
-
-    private enum SearchSort: String, CaseIterable, Identifiable {
-        case relevance
-        case attention
-        case recent
-
-        var id: Self { self }
-
-        var title: String {
-            switch self {
-            case .relevance: "Relevance"
-            case .attention: "Attention"
-            case .recent: "Recent Activity"
-            }
-        }
-    }
-
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
     @State private var searchText = ""
-    @State private var searchScope = SearchScope.currentView
-    @State private var searchSort = SearchSort.relevance
     @State private var searchResults: [SearchResult] = []
     @State private var isSearching = false
     @State private var searchError: String?
+    @FocusState private var searchFocus: Bool
 
     var body: some View {
         List(selection: $appModel.selectedWorkItemID) {
             ForEach(filteredWorkItems) { item in
-                WorkItemRow(item: item, highlightedQuery: searchText)
+                WorkItemRow(
+                    item: item,
+                    highlightedQuery: searchText,
+                    onWorkflowOperation: applyContextMenuOperation
+                )
                     .tag(item.id)
             }
         }
         .navigationTitle(navigation.section.title)
         .searchable(text: $searchText, prompt: "Search work")
-        .searchScopes($searchScope) {
-            ForEach(SearchScope.allCases) { scope in
+        .focused($searchFocus)
+        .focusedSceneValue(
+            \.triageSearchFocus,
+            Binding(
+                get: { searchFocus },
+                set: { searchFocus = $0 }
+            )
+        )
+        .searchScopes(searchScope) {
+            ForEach(WorkspaceSearchScope.allCases) { scope in
                 Text(scope.title).tag(scope)
             }
         }
         .toolbar {
             ToolbarItem(placement: .secondaryAction) {
-                Menu("Search Options") {
-                    Picker("Sort Results", selection: $searchSort) {
-                        ForEach(SearchSort.allCases) { sort in
+                Menu("List Options") {
+                    Picker("Filter", selection: listFilter) {
+                        ForEach(WorkspaceListFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+
+                    Divider()
+
+                    Picker("Sort Results", selection: searchSort) {
+                        ForEach(WorkspaceSearchSort.allCases) { sort in
                             Text(sort.title).tag(sort)
                         }
                     }
                     .disabled(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .disabled(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityHint("Filters and sorts only the local Triage work queue.")
             }
         }
-        .task(id: searchRequestID) {
-            await updateSearchResults()
+        .task(id: searchRequest) { [request = searchRequest] in
+            await updateSearchResults(for: request)
+        }
+        .task(id: selectionRestorationRequest) {
+            restoreSelectedWorkItem()
+        }
+        .onChange(of: appModel.selectedWorkItemID) { _, workItemID in
+            persistSelectedWorkItem(workItemID)
         }
         .onKeyPress(.escape) {
             guard !searchText.isEmpty else { return .ignored }
@@ -136,13 +131,15 @@ struct WorkListView: View {
             case .allWork:
                 true
             }
-        }
+        }.filter(matchesListFilter)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             return AttentionRanker().sort(currentViewItems, at: now)
         }
 
-        let allowedItems = searchScope == .currentView ? currentViewItems : appModel.workItems
+        let allowedItems = navigation.searchScope == .currentView
+            ? currentViewItems
+            : appModel.workItems.filter(matchesListFilter)
         let itemsByID = Dictionary(uniqueKeysWithValues: allowedItems.map { ($0.id, $0) })
         let resultRanks = Dictionary(
             uniqueKeysWithValues: searchResults.compactMap { result in
@@ -150,7 +147,7 @@ struct WorkListView: View {
             }
         )
         let matching = itemsByID.values.filter { resultRanks[$0.id] != nil }
-        switch searchSort {
+        switch navigation.searchSort {
         case .relevance:
             return matching.sorted {
                 let lhsRank = resultRanks[$0.id] ?? .greatestFiniteMagnitude
@@ -179,16 +176,87 @@ struct WorkListView: View {
             : "No synchronized work matches this view."
     }
 
-    private var searchRequestID: String {
-        [
-            appModel.selectedAccountID?.rawValue ?? "",
-            appModel.selectedOrganizationID?.rawValue ?? "",
-            searchText
-        ].joined(separator: "\u{1F}")
+    private var searchRequest: WorkListSearchRequest {
+        WorkListSearchRequest(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            query: searchText
+        )
     }
 
-    private func updateSearchResults() async {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var searchScope: Binding<WorkspaceSearchScope> {
+        Binding(
+            get: { navigation.searchScope },
+            set: { navigation.searchScope = $0 }
+        )
+    }
+
+    private var searchSort: Binding<WorkspaceSearchSort> {
+        Binding(
+            get: { navigation.searchSort },
+            set: { navigation.searchSort = $0 }
+        )
+    }
+
+    private var listFilter: Binding<WorkspaceListFilter> {
+        Binding(
+            get: { navigation.listFilter },
+            set: { navigation.listFilter = $0 }
+        )
+    }
+
+    private var selectionRestorationRequest: WorkListSelectionRestorationRequest {
+        WorkListSelectionRestorationRequest(
+            accountID: appModel.selectedAccountID,
+            organizationID: appModel.selectedOrganizationID,
+            validWorkItemIDs: Set(appModel.workItems.map(\.id))
+        )
+    }
+
+    private func matchesListFilter(_ item: WorkItem) -> Bool {
+        switch navigation.listFilter {
+        case .all:
+            true
+        case .pinned:
+            item.workflow.isPinned
+        case .highPriority:
+            item.workflow.priority == .high
+        case .openActionItems:
+            !item.openActionItems.isEmpty
+        }
+    }
+
+    private func restoreSelectedWorkItem() {
+        guard let accountID = appModel.selectedAccountID,
+              let organizationID = appModel.selectedOrganizationID
+        else {
+            appModel.selectedWorkItemID = nil
+            return
+        }
+
+        appModel.selectedWorkItemID = navigation.validatedSelectedWorkItem(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: selectionRestorationRequest.validWorkItemIDs
+        )
+    }
+
+    private func persistSelectedWorkItem(_ workItemID: WorkItemID?) {
+        guard let accountID = appModel.selectedAccountID,
+              let organizationID = appModel.selectedOrganizationID
+        else {
+            return
+        }
+
+        navigation.setSelectedWorkItem(
+            workItemID,
+            accountID: accountID,
+            organizationID: organizationID
+        )
+    }
+
+    private func updateSearchResults(for request: WorkListSearchRequest) async {
+        let query = request.query
         guard !query.isEmpty else {
             searchResults = []
             searchError = nil
@@ -201,20 +269,57 @@ struct WorkListView: View {
         do {
             try await Task.sleep(for: .milliseconds(100))
             try Task.checkCancellation()
-            searchResults = try await appModel.searchCachedWork(query)
+            let results = try await appModel.searchCachedWork(query)
+            guard WorkListPresentation.shouldApplySearchResult(
+                for: request,
+                currentRequest: searchRequest,
+                isCancelled: Task.isCancelled
+            ) else {
+                return
+            }
+            searchResults = results
         } catch is CancellationError {
             return
         } catch {
+            guard WorkListPresentation.shouldApplySearchResult(
+                for: request,
+                currentRequest: searchRequest,
+                isCancelled: Task.isCancelled
+            ) else {
+                return
+            }
             searchResults = []
             searchError = "Triage could not search its encrypted cache."
         }
+        guard WorkListPresentation.shouldApplySearchResult(
+            for: request,
+            currentRequest: searchRequest,
+            isCancelled: Task.isCancelled
+        ) else {
+            return
+        }
         isSearching = false
+    }
+
+    private func applyContextMenuOperation(
+        _ operation: WorkItemContextMenuOperation,
+        to item: WorkItem
+    ) {
+        // The contextual row, rather than an older list selection, is the
+        // action target. The List keeps that explicit selection after the
+        // local workflow update whenever the row remains visible.
+        appModel.selectedWorkItemID = item.id
+        let action = operation.workflowAction(now: Date())
+        Task {
+            await appModel.applyWorkflowAction(action, to: item)
+        }
     }
 }
 
 private struct WorkItemRow: View {
     let item: WorkItem
     let highlightedQuery: String
+    let onWorkflowOperation: (WorkItemContextMenuOperation, WorkItem) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -248,6 +353,12 @@ private struct WorkItemRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
+        .contextMenu {
+            WorkItemContextMenu(
+                item: item,
+                onOperation: onWorkflowOperation
+            )
+        }
     }
 
     private var symbol: String {
@@ -291,8 +402,91 @@ private struct WorkItemRow: View {
     }
 
     private var accessibilityLabel: String {
-        let repository = item.repository.map { " in \($0.fullName)" } ?? ""
-        let reason = item.attentionReasons.max(by: { $0.strength < $1.strength }).map { ", \($0.title)" } ?? ""
-        return "\(item.sourceKind.rawValue), \(item.title)\(repository)\(reason)"
+        WorkListPresentation.accessibilityLabel(for: item, at: Date())
+    }
+}
+
+private struct WorkItemContextMenu: View {
+    let item: WorkItem
+    let onOperation: (WorkItemContextMenuOperation, WorkItem) -> Void
+
+    private var policy: WorkItemContextMenuPolicy {
+        WorkItemContextMenuPolicy(item: item)
+    }
+
+    var body: some View {
+        if let archiveOperation = policy.archiveOperation {
+            Button(archiveOperation == .archive ? "Archive in Triage" : "Restore in Triage") {
+                apply(archiveOperation)
+            }
+            .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+        }
+
+        Button(item.workflow.isPinned ? "Unpin in Triage" : "Pin in Triage") {
+            apply(policy.pinOperation)
+        }
+        .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+
+        Menu("Set Priority") {
+            ForEach(policy.priorityOperations.indices, id: \.self) { index in
+                let operation = policy.priorityOperations[index]
+                Button(priorityTitle(for: operation)) {
+                    apply(operation)
+                }
+                .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+            }
+        }
+        .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+
+        if !policy.snoozeOperations.isEmpty || policy.clearSnoozeOperation != nil {
+            Menu("Snooze") {
+                ForEach(policy.snoozeOperations.indices, id: \.self) { index in
+                    let operation = policy.snoozeOperations[index]
+                    Button(snoozeTitle(for: operation)) {
+                        apply(operation)
+                    }
+                    .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+                }
+                if let clearSnoozeOperation = policy.clearSnoozeOperation {
+                    if !policy.snoozeOperations.isEmpty {
+                        Divider()
+                    }
+                    Button("End Snooze") {
+                        apply(clearSnoozeOperation)
+                    }
+                    .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+                }
+            }
+            .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+        }
+
+        if let waitingOperation = policy.waitingOperation {
+            Button(waitingOperation == .markWaiting ? "Mark Waiting" : "Stop Waiting") {
+                apply(waitingOperation)
+            }
+            .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
+        }
+    }
+
+    private func apply(_ operation: WorkItemContextMenuOperation) {
+        onOperation(operation, item)
+    }
+
+    private func priorityTitle(for operation: WorkItemContextMenuOperation) -> String {
+        guard case let .setPriority(priority) = operation else { return "Priority" }
+        return switch priority {
+        case .low: "Low"
+        case .normal: "Normal"
+        case .high: "High"
+        }
+    }
+
+    private func snoozeTitle(for operation: WorkItemContextMenuOperation) -> String {
+        switch operation {
+        case .snooze(.oneHour): "Snooze for One Hour"
+        case .snooze(.tomorrow): "Snooze Until Tomorrow"
+        case .snooze(.nextWeek): "Snooze Until Next Week"
+        default: "Snooze"
+        }
     }
 }

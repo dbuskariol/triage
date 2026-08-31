@@ -1,6 +1,78 @@
 import Foundation
 
 enum GitHubGraphQLQueries {
+    private static let productionOperationNames = [
+        "TriageViewer",
+        "TriageHydrateNodes",
+        "TriagePullRequestReviewThreads",
+        "TriagePullRequestReviewThreadComments",
+        "TriageRepositoryDiscussions",
+        "TriageDiscussionComments",
+        "TriageDiscussionCommentReplies",
+        "TriageOrganizationProjectsV2",
+        "TriageProjectV2Items",
+        "TriageProjectV2ItemFieldValues"
+    ]
+
+    /// Every operation permitted to cross the GraphQL transport boundary.
+    /// Keep this inventory exhaustive: callers cannot send dynamically-built
+    /// documents, even when they are read-only.
+    static func registeredQueries() throws -> [GitHubGraphQLQuery] {
+        let queries = try [
+            viewer(),
+            hydrateNodes(),
+            pullRequestReviewThreads(),
+            pullRequestReviewThreadComments(),
+            repositoryDiscussions(),
+            discussionComments(),
+            discussionCommentReplies(),
+            organizationProjectsV2(),
+            projectV2Items(),
+            projectV2ItemFieldValues()
+        ]
+        try validateProductionRegistry(queries)
+        return queries
+    }
+
+    /// Fail-closed integrity check for the committed GraphQL inventory. The
+    /// client runs this before constructing a request, so an accidental query
+    /// edit cannot silently reach GitHub.
+    static func validateProductionRegistry(_ queries: [GitHubGraphQLQuery]) throws {
+        guard queries.map(\.operationName) == productionOperationNames else {
+            throw GitHubGraphQLError.invalidQuery
+        }
+        for query in queries {
+            guard query.document.range(
+                of: #"\b(mutation|subscription)\b"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) == nil,
+            let declaredOperationName = operationName(in: query.document),
+            declaredOperationName == query.operationName,
+            query.document.range(
+                of: #"\brateLimit\s*\{\s*cost\s+remaining\s+resetAt\s*\}"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+            else {
+                throw GitHubGraphQLError.invalidQuery
+            }
+        }
+    }
+
+    private static func operationName(in document: String) -> String? {
+        let expression = try? NSRegularExpression(
+            pattern: #"^query\s+([_A-Za-z][_0-9A-Za-z]*)"#
+        )
+        guard let match = expression?.firstMatch(
+            in: document,
+            range: NSRange(document.startIndex..., in: document)
+        ),
+        let range = Range(match.range(at: 1), in: document)
+        else {
+            return nil
+        }
+        return String(document[range])
+    }
+
     static func viewer() throws -> GitHubGraphQLQuery {
         try GitHubGraphQLQuery(
         document: """
@@ -139,6 +211,46 @@ enum GitHubGraphQLQueries {
             }
             """,
             operationName: "TriageRepositoryDiscussions"
+        )
+    }
+
+    static func discussionComments() throws -> GitHubGraphQLQuery {
+        try GitHubGraphQLQuery(
+            document: """
+            query TriageDiscussionComments($discussionID: ID!, $after: String) {
+              node(id: $discussionID) {
+                ... on Discussion {
+                  id
+                  comments(first: 50, after: $after) {
+                    nodes { id body createdAt updatedAt url author { id login avatarUrl } replies { totalCount } }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }
+              rateLimit { cost remaining resetAt }
+            }
+            """,
+            operationName: "TriageDiscussionComments"
+        )
+    }
+
+    static func discussionCommentReplies() throws -> GitHubGraphQLQuery {
+        try GitHubGraphQLQuery(
+            document: """
+            query TriageDiscussionCommentReplies($commentID: ID!, $after: String) {
+              node(id: $commentID) {
+                ... on DiscussionComment {
+                  id
+                  replies(first: 50, after: $after) {
+                    nodes { id body createdAt updatedAt url author { id login avatarUrl } }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }
+              rateLimit { cost remaining resetAt }
+            }
+            """,
+            operationName: "TriageDiscussionCommentReplies"
         )
     }
 

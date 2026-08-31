@@ -8,9 +8,13 @@ enum WorkItemRepositoryError: Error, Equatable, Sendable {
 
 actor WorkItemRepository {
     private let vault: AccountVault
+    private let queryObserver: (@Sendable () -> Void)?
 
-    init(vault: AccountVault) {
+    /// `queryObserver` is an internal test seam for guarding the bounded
+    /// graph-load query budget. Production callers use the default `nil`.
+    init(vault: AccountVault, queryObserver: (@Sendable () -> Void)? = nil) {
         self.vault = vault
+        self.queryObserver = queryObserver
     }
 
     func fetch(
@@ -18,8 +22,12 @@ actor WorkItemRepository {
         organizationID: OrganizationID
     ) async throws -> [WorkItem] {
         try ensureAccountScope(accountID)
-        return try await vault.read { database in
-            return try Row.fetchAll(
+        try Task.checkCancellation()
+        let queryObserver = self.queryObserver
+        let items: [WorkItem] = try await vault.read { database -> [WorkItem] in
+            try Task.checkCancellation()
+            queryObserver?()
+            let rows = try Row.fetchAll(
                 database,
                 sql: """
                     SELECT
@@ -51,33 +59,68 @@ actor WorkItemRepository {
                     LEFT JOIN attention_scores ON attention_scores.work_item_id = work_items.id
                     WHERE work_items.account_id = ? AND work_items.organization_id = ?
                     ORDER BY work_items.last_relevant_activity_at_ms DESC, work_items.id
-                    """,
+                """,
                 arguments: [accountID.rawValue, organizationID.rawValue]
-            ).map { row in
-                let reasons = try Self.attentionReasons(
-                    in: database,
-                    workItemID: row["id"]
-                )
-                let actions = try Self.actionItems(in: database, workItemID: row["id"])
-                let members = try Self.members(in: database, workItemID: row["id"])
-                let contextLinks = try Self.contextLinks(in: database, workItemID: row["id"])
-                let relations = try Self.relations(
-                    in: database,
-                    accountID: accountID,
-                    workItemID: row["id"]
-                )
+            )
+            let workItemIDs = try rows.map { row -> String in
+                guard let workItemID: String = row["id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return workItemID
+            }
+            guard !workItemIDs.isEmpty else { return [] }
+
+            // A full work item graph is still the public repository contract,
+            // but it is now loaded in bounded set queries instead of issuing
+            // several dependent reads for every work item.
+            let reasons = try Self.attentionReasons(
+                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+            )
+            try Task.checkCancellation()
+            let actions = try Self.actionItems(
+                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+            )
+            try Task.checkCancellation()
+            let memberReferences = try Self.memberReferences(
+                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+            )
+            let contextReferences = try Self.contextReferences(
+                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+            )
+            let relatedNodeIDs = Set(memberReferences.map(\.nodeID) + contextReferences.map(\.nodeID))
+            let content = try Self.content(in: database, nodeIDs: relatedNodeIDs, onQuery: queryObserver)
+            let members = try Self.members(memberReferences, contentByNodeID: content)
+            let contextLinks = try Self.contextLinks(contextReferences, contentByNodeID: content)
+            try Task.checkCancellation()
+            let relations = try Self.relations(
+                in: database,
+                accountID: accountID,
+                workItemIDs: workItemIDs,
+                onQuery: queryObserver
+            )
+            try Task.checkCancellation()
+
+            return try rows.enumerated().map { index, row in
+                if index.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
+                guard let workItemID: String = row["id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
                 return try Self.workItem(
                     from: row,
                     accountID: accountID,
                     organizationID: organizationID,
-                    attentionReasons: reasons,
-                    actionItems: actions,
-                    members: members,
-                    contextLinks: contextLinks,
-                    relations: relations
+                    attentionReasons: reasons[workItemID] ?? [],
+                    actionItems: actions[workItemID] ?? [],
+                    members: members[workItemID] ?? [],
+                    contextLinks: contextLinks[workItemID] ?? [],
+                    relations: relations[workItemID] ?? []
                 )
             }
-    }
+        }
+        try Task.checkCancellation()
+        return items
     }
 
     func ensureWorkItem(for node: NormalizedGitHubNode) async throws -> WorkItemID {
@@ -95,19 +138,23 @@ actor WorkItemRepository {
         guard !nodeIDs.isEmpty else {
             return []
         }
-        return try await vault.read { database in
-            try String.fetchAll(
-                database,
-                sql: """
-                    SELECT id
-                    FROM work_items
-                    WHERE account_id = ? AND primary_node_id IN (\(nodeIDs.map { _ in "?" }.joined(separator: ",")))
-                    ORDER BY id
-                    """,
-                arguments: StatementArguments(
-                    [accountID.rawValue] + nodeIDs.map(\.rawValue).sorted()
+        let nodeIDValues = nodeIDs.map(\.rawValue).sorted()
+        return try await vault.read { database -> [WorkItemID] in
+            var rawWorkItemIDs: [String] = []
+            for batch in Self.batches(nodeIDValues) {
+                try Task.checkCancellation()
+                rawWorkItemIDs += try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT id
+                        FROM work_items
+                        WHERE account_id = ? AND primary_node_id IN (\(Self.placeholders(for: batch)))
+                        ORDER BY id
+                        """,
+                    arguments: StatementArguments([accountID.rawValue] + batch)
                 )
-            ).map { rawValue in
+            }
+            return try rawWorkItemIDs.sorted().map { rawValue in
                 guard let workItemID = WorkItemID(rawValue: rawValue) else {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
@@ -278,109 +325,193 @@ actor WorkItemRepository {
         Int64((date.timeIntervalSince1970 * 1_000).rounded())
     }
 
+    private static let maximumBatchSize = 500
+
+    private struct MemberReference {
+        let workItemID: String
+        let nodeID: GitHubNodeID
+        let role: WorkItemMemberRole
+    }
+
+    private struct ContextReference {
+        let workItemID: String
+        let nodeID: GitHubNodeID
+        let relation: WorkRelationKind
+    }
+
+    private struct RelationReference {
+        let workItemID: String
+        let relationID: String
+        let subjectNodeID: GitHubNodeID
+        let kind: WorkRelationKind
+        let objectNodeID: GitHubNodeID?
+        let confidence: RelationConfidence
+        let observedAt: Date
+    }
+
+    private nonisolated static func batches(_ values: [String]) -> [[String]] {
+        stride(from: 0, to: values.count, by: maximumBatchSize).map { start in
+            Array(values[start..<min(start + maximumBatchSize, values.count)])
+        }
+    }
+
+    private nonisolated static func placeholders(for values: [String]) -> String {
+        values.map { _ in "?" }.joined(separator: ",")
+    }
+
     private nonisolated static func attentionReasons(
         in database: Database,
-        workItemID: String
-    ) throws -> [AttentionReason] {
-        try Row.fetchAll(
-            database,
-            sql: """
-                SELECT id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
-                FROM attention_reasons
-                WHERE work_item_id = ?
-                ORDER BY strength DESC, id
-                """,
-            arguments: [workItemID]
-        ).map { row in
-            guard let category = AttentionCategory(rawValue: row["category"]),
+        workItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [AttentionReason]] {
+        var rows: [Row] = []
+        for batch in batches(workItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            rows += try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_id, id, rule_id, rule_version, category, strength, title, explanation, evaluated_at_ms
+                    FROM attention_reasons
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY work_item_id, strength DESC, id
+                    """,
+                arguments: StatementArguments(batch)
+            )
+        }
+        let evidence = try attentionEvidence(
+            in: database,
+            reasonIDs: try rows.map { row in
+                guard let id: String = row["id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return id
+            },
+            onQuery: onQuery
+        )
+        var result: [String: [AttentionReason]] = [:]
+        for (index, row) in rows.enumerated() {
+            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            guard let workItemID: String = row["work_item_id"],
+                  let reasonID: String = row["id"],
+                  let category = AttentionCategory(rawValue: row["category"]),
                   let evaluatedAt = date(milliseconds: row["evaluated_at_ms"])
             else {
                 throw WorkItemRepositoryError.invalidPersistedData
             }
-            let reasonID: String = row["id"]
-            return AttentionReason(
-                id: reasonID,
-                category: category,
-                ruleID: row["rule_id"],
-                ruleVersion: row["rule_version"],
-                strength: row["strength"],
-                title: row["title"],
-                explanation: row["explanation"],
-                evidence: try evidence(in: database, reasonID: reasonID),
-                evaluatedAt: evaluatedAt
+            result[workItemID, default: []].append(
+                AttentionReason(
+                    id: reasonID,
+                    category: category,
+                    ruleID: row["rule_id"],
+                    ruleVersion: row["rule_version"],
+                    strength: row["strength"],
+                    title: row["title"],
+                    explanation: row["explanation"],
+                    evidence: evidence[reasonID] ?? [],
+                    evaluatedAt: evaluatedAt
+                )
             )
         }
+        return result
     }
 
-    private nonisolated static func evidence(
+    private nonisolated static func attentionEvidence(
         in database: Database,
-        reasonID: String
-    ) throws -> [EvidenceReference] {
-        try Row.fetchAll(
-            database,
-            sql: """
-                SELECT evidence_id, source, source_node_id, source_event_id, source_revision, observed_at_ms, excerpt
-                FROM attention_reason_evidence
-                WHERE attention_reason_id = ?
-                ORDER BY evidence_id
-                """,
-            arguments: [reasonID]
-        ).compactMap { row in
-            guard let id = EvidenceID(rawValue: row["evidence_id"]),
-                  let source = EvidenceSource(rawValue: row["source"]),
-                  let observedAt = date(milliseconds: row["observed_at_ms"])
-            else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            return EvidenceReference(
-                id: id,
-                source: source,
-                locator: .legacyUnverified,
-                authority: .legacyUnverified,
-                nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
-                eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
-                sourceRevision: row["source_revision"],
-                confidence: .provisional,
-                confirmation: .provisional,
-                observedAt: observedAt,
-                excerpt: row["excerpt"]
-            )
-        }
-    }
-
-    private nonisolated static func actionItems(
-            in database: Database,
-            workItemID: String
-        ) throws -> [ActionItem] {
-            guard let typedWorkItemID = WorkItemID(rawValue: workItemID) else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            return try Row.fetchAll(
+        reasonIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [EvidenceReference]] {
+        guard !reasonIDs.isEmpty else { return [:] }
+        var result: [String: [EvidenceReference]] = [:]
+        for batch in batches(reasonIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, title, detail, origin, state, priority, due_at_ms, source_fingerprint,
-                           created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
-                    FROM action_items
-                    WHERE work_item_id = ?
-                    ORDER BY state, due_at_ms, id
+                    SELECT attention_reason_id, evidence_id, source, source_node_id, source_event_id,
+                           source_revision, observed_at_ms, excerpt
+                    FROM attention_reason_evidence
+                    WHERE attention_reason_id IN (\(placeholders(for: batch)))
+                    ORDER BY attention_reason_id, evidence_id
                     """,
-                arguments: [workItemID]
-            ).map { row in
-                guard let id = ActionItemID(rawValue: row["id"]),
-                      let origin = ActionItemOrigin(rawValue: row["origin"]),
-                      let state = ActionItemState(rawValue: row["state"]),
-                      let priority = WorkPriority(rawValue: row["priority"]),
-                      let createdAt = date(milliseconds: row["created_at_ms"]),
-                      let updatedAt = date(milliseconds: row["updated_at_ms"])
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let reasonID: String = row["attention_reason_id"],
+                      let id = EvidenceID(rawValue: row["evidence_id"]),
+                      let source = EvidenceSource(rawValue: row["source"]),
+                      let observedAt = date(milliseconds: row["observed_at_ms"])
                 else {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
-                let evidenceIDs = try String.fetchAll(
-                    database,
-                    sql: "SELECT evidence_id FROM action_item_evidence WHERE action_item_id = ? ORDER BY evidence_id",
-                    arguments: [id.rawValue]
-                ).compactMap(EvidenceID.init(rawValue:))
-                return ActionItem(
+                result[reasonID, default: []].append(
+                    EvidenceReference(
+                        id: id,
+                        source: source,
+                        locator: .legacyUnverified,
+                        authority: .legacyUnverified,
+                        nodeID: (row["source_node_id"] as String?).flatMap(GitHubNodeID.init(rawValue:)),
+                        eventID: (row["source_event_id"] as String?).flatMap(GitHubEventID.init(rawValue:)),
+                        sourceRevision: row["source_revision"],
+                        confidence: .provisional,
+                        confirmation: .provisional,
+                        observedAt: observedAt,
+                        excerpt: row["excerpt"]
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func actionItems(
+        in database: Database,
+        workItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [ActionItem]] {
+        var rows: [Row] = []
+        for batch in batches(workItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            rows += try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_id, id, title, detail, origin, state, priority, due_at_ms, source_fingerprint,
+                           created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
+                    FROM action_items
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY work_item_id, state, due_at_ms, id
+                    """,
+                arguments: StatementArguments(batch)
+            )
+        }
+        let evidence = try actionEvidence(
+            in: database,
+            actionItemIDs: try rows.map { row in
+                guard let id: String = row["id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                return id
+            },
+            onQuery: onQuery
+        )
+        var result: [String: [ActionItem]] = [:]
+        for (index, row) in rows.enumerated() {
+            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            guard let workItemID: String = row["work_item_id"],
+                  let typedWorkItemID = WorkItemID(rawValue: workItemID),
+                  let id = ActionItemID(rawValue: row["id"]),
+                  let origin = ActionItemOrigin(rawValue: row["origin"]),
+                  let state = ActionItemState(rawValue: row["state"]),
+                  let priority = WorkPriority(rawValue: row["priority"]),
+                  let createdAt = date(milliseconds: row["created_at_ms"]),
+                  let updatedAt = date(milliseconds: row["updated_at_ms"])
+            else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            result[workItemID, default: []].append(
+                ActionItem(
                     id: id,
                     workItemID: typedWorkItemID,
                     title: row["title"],
@@ -389,174 +520,293 @@ actor WorkItemRepository {
                     state: state,
                     priority: priority,
                     dueAt: date(milliseconds: row["due_at_ms"]),
-                    evidenceIDs: evidenceIDs,
+                    evidenceIDs: evidence[id.rawValue] ?? [],
                     sourceFingerprint: row["source_fingerprint"],
                     createdAt: createdAt,
                     updatedAt: updatedAt,
                     completedAt: date(milliseconds: row["completed_at_ms"]),
                     dismissedAt: date(milliseconds: row["dismissed_at_ms"])
                 )
+            )
         }
+        return result
     }
 
-        private nonisolated static func members(
-            in database: Database,
-            workItemID: String
-        ) throws -> [WorkItemMember] {
-            try Row.fetchAll(
+    private nonisolated static func actionEvidence(
+        in database: Database,
+        actionItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [EvidenceID]] {
+        guard !actionItemIDs.isEmpty else { return [:] }
+        var result: [String: [EvidenceID]] = [:]
+        for batch in batches(actionItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT work_item_members.github_node_id, work_item_members.role
-                    FROM work_item_members
-                    WHERE work_item_members.work_item_id = ?
-                    ORDER BY work_item_members.role, work_item_members.github_node_id
+                    SELECT action_item_id, evidence_id
+                    FROM action_item_evidence
+                    WHERE action_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY action_item_id, evidence_id
                     """,
-                arguments: [workItemID]
-            ).map { row in
-                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let actionItemID: String = row["action_item_id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                if let evidenceID = EvidenceID(rawValue: row["evidence_id"]) {
+                    result[actionItemID, default: []].append(evidenceID)
+                }
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func memberReferences(
+        in database: Database,
+        workItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [MemberReference] {
+        var result: [MemberReference] = []
+        for batch in batches(workItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_id, github_node_id, role
+                    FROM work_item_members
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY work_item_id, role, github_node_id
+                    """,
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let workItemID: String = row["work_item_id"],
+                      let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
                       let role = WorkItemMemberRole(rawValue: row["role"])
                 else {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
-                return WorkItemMember(
-                    id: nodeID,
-                    role: role,
-                    content: try content(in: database, nodeID: nodeID),
-                    evidence: []
-                )
+                result.append(MemberReference(workItemID: workItemID, nodeID: nodeID, role: role))
             }
         }
+        return result
+    }
 
-        private nonisolated static func contextLinks(
-            in database: Database,
-            workItemID: String
-        ) throws -> [WorkItemContextLink] {
-            try Row.fetchAll(
+    private nonisolated static func contextReferences(
+        in database: Database,
+        workItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [ContextReference] {
+        var result: [ContextReference] = []
+        for batch in batches(workItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT github_node_id, relation
+                    SELECT work_item_id, github_node_id, relation
                     FROM work_item_context_links
-                    WHERE work_item_id = ?
-                    ORDER BY relation, github_node_id
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY work_item_id, relation, github_node_id
                     """,
-                arguments: [workItemID]
-            ).map { row in
-                guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let workItemID: String = row["work_item_id"],
+                      let nodeID = GitHubNodeID(rawValue: row["github_node_id"]),
                       let relation = WorkRelationKind(rawValue: row["relation"])
                 else {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
-                return WorkItemContextLink(
-                    id: nodeID,
-                    relation: relation,
-                    content: try content(in: database, nodeID: nodeID),
-                    evidence: []
-                )
+                result.append(ContextReference(workItemID: workItemID, nodeID: nodeID, relation: relation))
             }
         }
+        return result
+    }
+
+    private nonisolated static func members(
+        _ references: [MemberReference],
+        contentByNodeID: [GitHubNodeID: GitHubContentSummary]
+    ) throws -> [String: [WorkItemMember]] {
+        var result: [String: [WorkItemMember]] = [:]
+        for (index, reference) in references.enumerated() {
+            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            guard let content = contentByNodeID[reference.nodeID] else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            result[reference.workItemID, default: []].append(
+                WorkItemMember(id: reference.nodeID, role: reference.role, content: content, evidence: [])
+            )
+        }
+        return result
+    }
+
+    private nonisolated static func contextLinks(
+        _ references: [ContextReference],
+        contentByNodeID: [GitHubNodeID: GitHubContentSummary]
+    ) throws -> [String: [WorkItemContextLink]] {
+        var result: [String: [WorkItemContextLink]] = [:]
+        for (index, reference) in references.enumerated() {
+            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            guard let content = contentByNodeID[reference.nodeID] else {
+                throw WorkItemRepositoryError.invalidPersistedData
+            }
+            result[reference.workItemID, default: []].append(
+                WorkItemContextLink(id: reference.nodeID, relation: reference.relation, content: content, evidence: [])
+            )
+        }
+        return result
+    }
 
     private nonisolated static func relations(
         in database: Database,
         accountID: AccountID,
-        workItemID: String
-    ) throws -> [WorkRelation] {
-        try Row.fetchAll(
-            database,
-            sql: """
-                SELECT relations.id, relations.subject_node_id, relations.object_node_id,
-                       relations.kind, relations.confidence, relations.observed_at_ms
-                FROM relations
-                JOIN work_item_members
-                    ON work_item_members.github_node_id = relations.subject_node_id
-                WHERE relations.account_id = ? AND work_item_members.work_item_id = ?
-                ORDER BY relations.subject_node_id, relations.kind, relations.object_node_id, relations.id
-                """,
-            arguments: [accountID.rawValue, workItemID]
-        ).map { row in
-            guard let subjectNodeID = GitHubNodeID(rawValue: row["subject_node_id"]),
-                  let kind = WorkRelationKind(rawValue: row["kind"]),
-                  let confidence = RelationConfidence(rawValue: row["confidence"]),
-                  let observedAt = date(milliseconds: row["observed_at_ms"])
-            else {
-                throw WorkItemRepositoryError.invalidPersistedData
+        workItemIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [WorkRelation]] {
+        var references: [RelationReference] = []
+        for batch in batches(workItemIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_members.work_item_id, relations.id, relations.subject_node_id,
+                           relations.object_node_id, relations.kind, relations.confidence,
+                           relations.observed_at_ms
+                    FROM relations
+                    JOIN work_item_members
+                      ON work_item_members.github_node_id = relations.subject_node_id
+                    WHERE relations.account_id = ?
+                      AND work_item_members.work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY work_item_members.work_item_id, relations.subject_node_id,
+                             relations.kind, relations.object_node_id, relations.id
+                    """,
+                arguments: StatementArguments([accountID.rawValue] + batch)
+            )
+            for row in rows {
+                guard let workItemID: String = row["work_item_id"],
+                      let relationID: String = row["id"],
+                      let subjectNodeID = GitHubNodeID(rawValue: row["subject_node_id"]),
+                      let kind = WorkRelationKind(rawValue: row["kind"]),
+                      let confidence = RelationConfidence(rawValue: row["confidence"]),
+                      let observedAt = date(milliseconds: row["observed_at_ms"])
+                else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                let objectNodeValue: String? = row["object_node_id"]
+                guard objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)) != nil || objectNodeValue == nil else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                references.append(
+                    RelationReference(
+                        workItemID: workItemID,
+                        relationID: relationID,
+                        subjectNodeID: subjectNodeID,
+                        kind: kind,
+                        objectNodeID: objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)),
+                        confidence: confidence,
+                        observedAt: observedAt
+                    )
+                )
             }
-            let objectNodeValue: String? = row["object_node_id"]
-            guard objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)) != nil
-                    || objectNodeValue == nil else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            let relationID: String = row["id"]
-            return WorkRelation(
-                kind: kind,
-                subjectNodeID: subjectNodeID,
-                objectNodeID: objectNodeValue.flatMap(GitHubNodeID.init(rawValue:)),
-                confidence: confidence,
-                evidence: try relationEvidence(in: database, relationID: relationID),
-                observedAt: observedAt
+        }
+        let evidence = try relationEvidence(
+            in: database,
+            relationIDs: references.map(\.relationID),
+            onQuery: onQuery
+        )
+        var result: [String: [WorkRelation]] = [:]
+        for (index, reference) in references.enumerated() {
+            if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            result[reference.workItemID, default: []].append(
+                WorkRelation(
+                    kind: reference.kind,
+                    subjectNodeID: reference.subjectNodeID,
+                    objectNodeID: reference.objectNodeID,
+                    confidence: reference.confidence,
+                    evidence: evidence[reference.relationID] ?? [],
+                    observedAt: reference.observedAt
+                )
             )
         }
+        return result
     }
 
     private nonisolated static func relationEvidence(
         in database: Database,
-        relationID: String
-    ) throws -> [EvidenceReference] {
-        try Row.fetchAll(
-            database,
-            sql: """
-                SELECT evidence_id, source, source_node_id, source_event_id,
-                       source_revision, source_locator_kind, source_locator,
-                       authority_kind, authority_account_id, authority_organization_id,
-                       authority_feature, authority_stream_id,
-                       authority_credential_revision, authority_capability_revision,
-                       raw_snapshot_id, confidence, confirmation, observed_at_ms, excerpt
-                FROM relation_evidence
-                WHERE relation_id = ?
-                ORDER BY observed_at_ms, source, source_locator_kind, source_locator, evidence_id
-                """,
-            arguments: [relationID]
-        ).map { row in
-            let values: RelationEvidenceValues
-            do {
-                values = try RelationEvidenceValues(row: row)
-            } catch {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            guard let id = EvidenceID(rawValue: values.id),
-                  let source = EvidenceSource(rawValue: values.source),
-                  let locator = EvidenceLocator(kind: values.locatorKind, value: values.locatorValue),
-                  let confidence = RelationConfidence(rawValue: values.confidence),
-                  let confirmation = EvidenceConfirmation(rawValue: values.confirmation),
-                  let observedAt = date(milliseconds: values.observedAtMilliseconds),
-                  let authority = evidenceAuthority(kind: values.authorityKind, values: values),
-                  isValidRelationEvidence(source: source, locator: locator, authority: authority)
-            else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            guard values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)) != nil
-                    || values.sourceNodeID == nil,
-                  values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)) != nil
-                    || values.sourceEventID == nil,
-                  values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)) != nil
-                    || values.rawSnapshotID == nil
-            else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
-            return EvidenceReference(
-                id: id,
-                source: source,
-                locator: locator,
-                authority: authority,
-                nodeID: values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)),
-                eventID: values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)),
-                sourceRevision: values.sourceRevision,
-                rawSnapshotID: values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)),
-                confidence: confidence,
-                confirmation: confirmation,
-                observedAt: observedAt,
-                excerpt: values.excerpt
+        relationIDs: [String],
+        onQuery: (@Sendable () -> Void)?
+    ) throws -> [String: [EvidenceReference]] {
+        guard !relationIDs.isEmpty else { return [:] }
+        var result: [String: [EvidenceReference]] = [:]
+        for batch in batches(relationIDs) {
+            try Task.checkCancellation()
+            onQuery?()
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT relation_id, evidence_id, source, source_node_id, source_event_id,
+                           source_revision, source_locator_kind, source_locator,
+                           authority_kind, authority_account_id, authority_organization_id,
+                           authority_feature, authority_stream_id,
+                           authority_credential_revision, authority_capability_revision,
+                           raw_snapshot_id, confidence, confirmation, observed_at_ms, excerpt
+                    FROM relation_evidence
+                    WHERE relation_id IN (\(placeholders(for: batch)))
+                    ORDER BY relation_id, observed_at_ms, source, source_locator_kind, source_locator, evidence_id
+                    """,
+                arguments: StatementArguments(batch)
             )
+            for row in rows {
+                guard let relationID: String = row["relation_id"] else {
+                    throw WorkItemRepositoryError.invalidPersistedData
+                }
+                result[relationID, default: []].append(try evidenceReference(from: row))
+            }
         }
+        return result
+    }
+
+    private nonisolated static func evidenceReference(from row: Row) throws -> EvidenceReference {
+        let values: RelationEvidenceValues
+        do {
+            values = try RelationEvidenceValues(row: row)
+        } catch {
+            throw WorkItemRepositoryError.invalidPersistedData
+        }
+        guard let id = EvidenceID(rawValue: values.id),
+              let source = EvidenceSource(rawValue: values.source),
+              let locator = EvidenceLocator(kind: values.locatorKind, value: values.locatorValue),
+              let confidence = RelationConfidence(rawValue: values.confidence),
+              let confirmation = EvidenceConfirmation(rawValue: values.confirmation),
+              let observedAt = date(milliseconds: values.observedAtMilliseconds),
+              let authority = evidenceAuthority(kind: values.authorityKind, values: values),
+              isValidRelationEvidence(source: source, locator: locator, authority: authority),
+              values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)) != nil || values.sourceNodeID == nil,
+              values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)) != nil || values.sourceEventID == nil,
+              values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)) != nil || values.rawSnapshotID == nil
+        else {
+            throw WorkItemRepositoryError.invalidPersistedData
+        }
+        return EvidenceReference(
+            id: id,
+            source: source,
+            locator: locator,
+            authority: authority,
+            nodeID: values.sourceNodeID.flatMap(GitHubNodeID.init(rawValue:)),
+            eventID: values.sourceEventID.flatMap(GitHubEventID.init(rawValue:)),
+            sourceRevision: values.sourceRevision,
+            rawSnapshotID: values.rawSnapshotID.flatMap(RawAPISnapshotID.init(rawValue:)),
+            confidence: confidence,
+            confirmation: confirmation,
+            observedAt: observedAt,
+            excerpt: values.excerpt
+        )
     }
 
     private struct RelationEvidenceValues {
@@ -671,37 +921,55 @@ actor WorkItemRepository {
 
         private nonisolated static func content(
             in database: Database,
+            nodeIDs: Set<GitHubNodeID>,
+            onQuery: (@Sendable () -> Void)?
+        ) throws -> [GitHubNodeID: GitHubContentSummary] {
+            guard !nodeIDs.isEmpty else { return [:] }
+            var result: [GitHubNodeID: GitHubContentSummary] = [:]
+            for batch in batches(nodeIDs.map(\.rawValue).sorted()) {
+                try Task.checkCancellation()
+                onQuery?()
+                let rows = try Row.fetchAll(
+                    database,
+                    sql: """
+                        SELECT
+                            github_nodes.github_node_id, github_nodes.kind, github_nodes.number,
+                            github_nodes.title, github_nodes.state, github_nodes.html_url,
+                            github_nodes.created_at_ms, github_nodes.updated_at_ms,
+                            github_nodes.closed_at_ms, github_nodes.merged_at_ms,
+                            github_nodes.repository_id,
+                            repositories.github_node_id AS repository_node_id,
+                            repositories.owner_login AS repository_owner_login,
+                            repositories.name AS repository_name,
+                            repositories.is_private AS repository_is_private,
+                            repositories.is_archived AS repository_is_archived,
+                            repositories.has_discussions AS repository_has_discussions,
+                            repositories.has_discussions_known AS repository_has_discussions_known,
+                            repositories.html_url AS repository_html_url,
+                            actors.id AS actor_id, actors.github_node_id AS actor_node_id,
+                            actors.login AS actor_login, actors.display_name AS actor_display_name,
+                            actors.avatar_url AS actor_avatar_url
+                        FROM github_nodes
+                        LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
+                        LEFT JOIN actors ON actors.id = github_nodes.author_id
+                        WHERE github_nodes.github_node_id IN (\(placeholders(for: batch)))
+                        """,
+                    arguments: StatementArguments(batch)
+                )
+                for row in rows {
+                    guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]) else {
+                        throw WorkItemRepositoryError.invalidPersistedData
+                    }
+                    result[nodeID] = try content(from: row, nodeID: nodeID)
+                }
+            }
+            return result
+        }
+
+        private nonisolated static func content(
+            from row: Row,
             nodeID: GitHubNodeID
         ) throws -> GitHubContentSummary {
-            guard let row = try Row.fetchOne(
-                database,
-                sql: """
-                    SELECT
-                        github_nodes.github_node_id, github_nodes.kind, github_nodes.number,
-                        github_nodes.title, github_nodes.state, github_nodes.html_url,
-                        github_nodes.created_at_ms, github_nodes.updated_at_ms,
-                        github_nodes.closed_at_ms, github_nodes.merged_at_ms,
-                        github_nodes.repository_id,
-                        repositories.github_node_id AS repository_node_id,
-                        repositories.owner_login AS repository_owner_login,
-                        repositories.name AS repository_name,
-                        repositories.is_private AS repository_is_private,
-                        repositories.is_archived AS repository_is_archived,
-                        repositories.has_discussions AS repository_has_discussions,
-                        repositories.has_discussions_known AS repository_has_discussions_known,
-                        repositories.html_url AS repository_html_url,
-                        actors.id AS actor_id, actors.github_node_id AS actor_node_id,
-                        actors.login AS actor_login, actors.display_name AS actor_display_name,
-                        actors.avatar_url AS actor_avatar_url
-                    FROM github_nodes
-                    LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
-                    LEFT JOIN actors ON actors.id = github_nodes.author_id
-                    WHERE github_nodes.github_node_id = ?
-                    """,
-                arguments: [nodeID.rawValue]
-            ) else {
-                throw WorkItemRepositoryError.invalidPersistedData
-            }
             guard let kind = GitHubContentKind(rawValue: row["kind"]),
                   let state = GitHubItemState(rawValue: row["state"]),
                   let url = URL(string: row["html_url"]),

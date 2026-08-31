@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "039-timeline-current-page-membership")
+        XCTAssertEqual(migrations.last?.id, "044-workspace-query-performance-indexes-v1")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "498de3f54c04aa6d9c271a9f18a235859ae1fdbbe1d806b566038ed6115f64b7"
+            "8b9e0ec0885167e950ef210c8d3a8697559ca1e1c897c41069830417afb90188"
         )
         let timelineMembershipSchema = try await vault.read { database in
             (
@@ -90,6 +90,44 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertTrue(timelineMembershipSchema.1)
         XCTAssertEqual(timelineMembershipSchema.2, 0)
         XCTAssertEqual(timelineMembershipSchema.3, 0)
+        let reviewFailureSchema = try await vault.read { database in
+            (
+                try database.tableExists("review_candidate_failure_envelopes"),
+                try database.tableExists("review_candidate_failure_pages"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_envelopes"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_pages")
+            )
+        }
+        XCTAssertTrue(reviewFailureSchema.0)
+        XCTAssertTrue(reviewFailureSchema.1)
+        XCTAssertEqual(reviewFailureSchema.2, 0)
+        XCTAssertEqual(reviewFailureSchema.3, 0)
+        let notificationSchema = try await vault.read { database in
+            (
+                try database.tableExists("notification_threads"),
+                try database.tableExists("notification_current_pages"),
+                try database.tableExists("notification_replay_receipts"),
+                try database.tableExists("notification_failure_envelopes"),
+                try database.tableExists("notification_failure_pages")
+            )
+        }
+        XCTAssertTrue(notificationSchema.0)
+        XCTAssertTrue(notificationSchema.1)
+        XCTAssertTrue(notificationSchema.2)
+        XCTAssertTrue(notificationSchema.3)
+        XCTAssertTrue(notificationSchema.4)
+        let derivedIntelligenceSchema = try await vault.read { database in
+            (
+                try database.tableExists("derived_intelligence_runs"),
+                try database.tableExists("rule_evaluations"),
+                try database.tableExists("rule_evaluation_evidence"),
+                try database.tableExists("ai_action_candidates")
+            )
+        }
+        XCTAssertTrue(derivedIntelligenceSchema.0)
+        XCTAssertTrue(derivedIntelligenceSchema.1)
+        XCTAssertTrue(derivedIntelligenceSchema.2)
+        XCTAssertTrue(derivedIntelligenceSchema.3)
         try await registry.closeAll()
     }
 
@@ -1175,6 +1213,56 @@ final class AccountVaultTests: XCTestCase {
 
         let paths = VaultPaths(rootDirectory: directory, accountID: accountID)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.directory.path))
+    }
+
+    func testRemovalRejectsNonOpaqueAccountIDBeforeConstructingAPath() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let unsafeAccountID = AccountID(rawValue: "../outside")!
+
+        do {
+            try await registry.remove(accountID: unsafeAccountID)
+            XCTFail("Expected unsafe account path rejection.")
+        } catch let error as VaultError {
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: directory.deletingLastPathComponent().appendingPathComponent("outside").path
+            )
+        )
+    }
+
+    func testRemovalRefusesSymlinkedVaultRootWithoutDeletingItsTarget() async throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let externalVault = external.appendingPathComponent(accountID.rawValue, isDirectory: true)
+        try FileManager.default.createDirectory(at: externalVault, withIntermediateDirectories: true)
+        let marker = externalVault.appendingPathComponent("must-not-delete")
+        try Data("outside".utf8).write(to: marker)
+        try FileManager.default.createSymbolicLink(
+            at: directory.appendingPathComponent("Vaults", isDirectory: true),
+            withDestinationURL: external
+        )
+        let registry = try VaultRegistry(rootDirectory: directory)
+
+        do {
+            try await registry.remove(accountID: accountID)
+            XCTFail("Expected a symlinked vault root to be refused.")
+        } catch let error as VaultError {
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+        }
+
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "outside")
     }
 
     private func makePre033LegacyRoleReplayVault(

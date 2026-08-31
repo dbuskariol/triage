@@ -11,11 +11,17 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         try await repository.replace(
             reviews: [review(nodeID: "MDM6UmV2aWV3MQ==", state: "APPROVED")],
             pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(
+                reviews: [review(nodeID: "MDM6UmV2aWV3MQ==", state: "APPROVED")]
+            ),
             observedAt: fixture.date
         )
         try await repository.replace(
             reviews: [review(nodeID: "MDM6UmV2aWV3Mg==", state: "CHANGES_REQUESTED")],
             pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(
+                reviews: [review(nodeID: "MDM6UmV2aWV3Mg==", state: "CHANGES_REQUESTED")]
+            ),
             observedAt: fixture.date
         )
 
@@ -44,6 +50,7 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         try await repository.replace(
             reviews: [review],
             pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(reviews: [review]),
             observedAt: fixture.date
         )
         let secondPullRequest = fixture.pullRequest(
@@ -73,6 +80,10 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
             try await repository.replace(
                 reviews: [review],
                 pullRequestNodeID: secondPullRequest.nodeID,
+                replacementProof: try await fixture.reviewProof(
+                    reviews: [review],
+                    for: secondPullRequest
+                ),
                 observedAt: fixture.date.addingTimeInterval(1)
             )
         } verify: { error in
@@ -111,6 +122,7 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         try await repository.replace(
             valid,
             pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(requestedReviewers: valid),
             observedAt: fixture.date
         )
 
@@ -121,6 +133,11 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
                     teams: []
                 ),
                 pullRequestNodeID: fixture.pullRequest.nodeID,
+                replacementProof: try await fixture.reviewProof(
+                    requestedReviewers: GitHubRequestedReviewersDTO(
+                        users: [.init(nodeID: "", login: "invalid", slug: nil)], teams: []
+                    )
+                ),
                 observedAt: fixture.date
             )
         } verify: { error in
@@ -181,7 +198,92 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
         XCTAssertEqual(persistedTitle, fixture.pullRequest.title)
     }
 
-    func testReviewThreadReplacementPrunesStaleNodesAndComputesResponseRequirement() async throws {
+    func testCrossPullRequestReceiptCannotAuthorizeReviewDeletion() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = PullRequestReviewRepository(vault: fixture.vault)
+        try await repository.replace(
+            reviews: [review(nodeID: "R_retained", state: "APPROVED")],
+            pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(
+                reviews: [review(nodeID: "R_retained", state: "APPROVED")]
+            ),
+            observedAt: fixture.date
+        )
+        let otherPullRequest = fixture.pullRequest(
+            nodeID: GitHubNodeID(rawValue: "PR_receipt_other")!,
+            number: 2,
+            title: "Receipt other"
+        )
+        try await GitHubNodeDetailsRepository(vault: fixture.vault).save(
+            HydratedGitHubNode(
+                node: otherPullRequest,
+                details: .pullRequest(
+                    isDraft: false, mergeableState: nil, headRef: "other", baseRef: "main",
+                    reviewDecision: nil, assigneeNodeIDs: [], labelNodeIDs: [], labelNames: []
+                )
+            ),
+            accountID: fixture.accountID,
+            observedAt: fixture.date
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                reviews: [],
+                pullRequestNodeID: fixture.pullRequest.nodeID,
+                replacementProof: try await fixture.reviewProof(
+                    reviews: [],
+                    for: otherPullRequest
+                ),
+                observedAt: fixture.date.addingTimeInterval(1)
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? PullRequestReviewRepositoryError, .invalidTraversalReceipt)
+        }
+        let retained = try await fixture.vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: "SELECT github_node_id FROM reviews WHERE pull_request_node_id = ?",
+                arguments: [fixture.pullRequest.nodeID.rawValue]
+            )
+        }
+        XCTAssertEqual(retained, ["R_retained"])
+    }
+
+    func testDigestMismatchedReplacementCannotDeleteExistingReviews() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = PullRequestReviewRepository(vault: fixture.vault)
+        let retainedReview = review(nodeID: "R_digest_retained", state: "APPROVED")
+        try await repository.replace(
+            reviews: [retainedReview],
+            pullRequestNodeID: fixture.pullRequest.nodeID,
+            replacementProof: try await fixture.reviewProof(reviews: [retainedReview]),
+            observedAt: fixture.date
+        )
+        let validEmptyProof = try await fixture.reviewProof(reviews: [])
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replace(
+                reviews: [self.review(nodeID: "R_digest_replacement", state: "CHANGES_REQUESTED")],
+                pullRequestNodeID: fixture.pullRequest.nodeID,
+                replacementProof: validEmptyProof,
+                observedAt: fixture.date.addingTimeInterval(1)
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? PullRequestReviewRepositoryError, .invalidTraversalReceipt)
+        }
+        let retained = try await fixture.vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: "SELECT github_node_id FROM reviews WHERE pull_request_node_id = ?",
+                arguments: [fixture.pullRequest.nodeID.rawValue]
+            )
+        }
+        XCTAssertEqual(retained, [retainedReview.nodeID])
+    }
+
+    func testReviewThreadReplacementWithoutCompleteReceiptRetainsStaleNodesAndComputesResponseRequirement() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
         let repository = PullRequestReviewThreadRepository(vault: fixture.vault)
@@ -264,10 +366,10 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
                 try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")
             )
         }
-        XCTAssertEqual(persisted.0, 0)
-        XCTAssertEqual(persisted.1, 0)
-        XCTAssertEqual(persisted.2, 0)
-        XCTAssertEqual(persisted.3, 0)
+        XCTAssertEqual(persisted.0, 1)
+        XCTAssertEqual(persisted.1, 1)
+        XCTAssertEqual(persisted.2, 2)
+        XCTAssertEqual(persisted.3, 1)
         XCTAssertEqual(persisted.4, 1)
     }
 
@@ -320,12 +422,36 @@ final class PullRequestReviewReconciliationTests: XCTestCase {
                 try String.fetchAll(
                     database,
                     sql: "SELECT requested_reviewer_node_id FROM review_requests"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_segments"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_pages"
+                ),
+                try Int.fetchOne(
+                    database,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM review_candidate_complete_traversal_pages
+                        WHERE is_terminal = 1
+                        """
                 )
             )
         }
         XCTAssertEqual(persisted.0, 2)
         XCTAssertEqual(persisted.1, ["R_1"])
         XCTAssertEqual(persisted.2, ["U_1"])
+        XCTAssertEqual(persisted.3, 1)
+        XCTAssertEqual(persisted.4, 2)
+        XCTAssertEqual(persisted.5, 2)
+        XCTAssertEqual(persisted.6, 2)
     }
 
     private func review(nodeID: String, state: String) -> GitHubPullRequestReviewDTO {
@@ -532,10 +658,95 @@ private final class Fixture: @unchecked Sendable {
             accessibility: .accessible
         )
     }
+
+    func reviewReceipt(
+        for pullRequest: NormalizedGitHubNode? = nil,
+        reviews: [GitHubPullRequestReviewDTO] = [],
+        requestedReviewers: GitHubRequestedReviewersDTO = .init(users: [], teams: [])
+    ) async throws -> ReviewCandidateCompleteTraversalReceiptToken {
+        let pullRequest = pullRequest ?? self.pullRequest
+        guard let pullRequestNumber: Int = pullRequest.number else {
+            throw FixtureError.missingPullRequestNumber
+        }
+        let scope = SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-1")!
+        )
+        let candidate = PullRequestReviewCandidate(
+            nodeID: pullRequest.nodeID,
+            repositoryID: repositoryID,
+            repository: try GitHubRepositoryPath(owner: "github", repository: "triage"),
+            number: pullRequestNumber,
+            sourceRevision: pullRequest.sourceRevision
+        )
+        let page = { (requestKey: String) in
+            ReviewCandidateTraversalPage(
+                ordinal: 1,
+                rawSnapshotID: .make(),
+                requestIdentity: .init(
+                    scope: scope,
+                    feature: .reviews,
+                    streamID: self.reviewStreamID,
+                    requestKey: requestKey
+                ),
+                endpoint: requestKey,
+                payload: Data("{}".utf8),
+                isTerminal: true
+            )
+        }
+        return try await ReviewCandidateCompleteTraversalReceiptRepository(vault: vault).persist(
+            .init(
+                scope: scope,
+                feature: .reviews,
+                streamID: self.reviewStreamID,
+                candidate: candidate,
+                candidateSourceRevision: pullRequest.sourceRevision,
+                parserVersion: 1,
+                observedAt: date,
+                normalizedDigest: PullRequestReviewReplacementProof.normalizedDigest(
+                    reviews: reviews,
+                    requestedReviewers: requestedReviewers
+                ),
+                segments: [
+                    .init(
+                        kind: .reviewHistory,
+                        pages: [page("GET /repos/github/triage/pulls/\(pullRequestNumber)/reviews?per_page=100")]
+                    ),
+                    .init(
+                        kind: .requestedReviewers,
+                        pages: [page("GET /repos/github/triage/pulls/\(pullRequestNumber)/requested_reviewers")]
+                    )
+                ]
+            )
+        )
+    }
+
+    func reviewProof(
+        reviews: [GitHubPullRequestReviewDTO] = [],
+        requestedReviewers: GitHubRequestedReviewersDTO = .init(users: [], teams: []),
+        for pullRequest: NormalizedGitHubNode? = nil
+    ) async throws -> PullRequestReviewReplacementProof {
+        let receipt = try await reviewReceipt(
+            for: pullRequest,
+            reviews: reviews,
+            requestedReviewers: requestedReviewers
+        )
+        return try await vault.writeTransaction { database in
+            try PullRequestReviewReplacementProof.make(
+                reviews: reviews,
+                requestedReviewers: requestedReviewers,
+                completeTraversalReceipt: receipt,
+                in: database
+            )
+        }
+    }
 }
 
 private enum FixtureError: Error, Equatable {
     case expectedRollback
+    case missingPullRequestNumber
 }
 
 private actor ReviewRefreshSession: HTTPSession {

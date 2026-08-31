@@ -1,5 +1,6 @@
 import XCTest
 @testable import Triage
+import GRDB
 
 final class SearchRepositoryTests: XCTestCase {
     func testRebuildIndexesEncryptedCachedContentByOrganization() async throws {
@@ -192,5 +193,188 @@ final class SearchRepositoryTests: XCTestCase {
         )
 
         XCTAssertTrue(results.isEmpty)
+    }
+
+    func testMatchQueryBoundsPathologicalInput() {
+        let query = (0..<24)
+            .map { _ in String(repeating: "a", count: 1_024) }
+            .joined(separator: " ")
+
+        let matchQuery = SearchRepository.matchQuery(for: query)
+
+        XCTAssertNotNil(matchQuery)
+        XCTAssertLessThanOrEqual(matchQuery?.utf8.count ?? .max, SearchRepository.maximumMatchQueryBytes)
+        XCTAssertEqual(matchQuery?.components(separatedBy: " AND ").count, 12)
+    }
+
+    func testRebuildBoundsPathologicalDocumentAndRetainsDeterministicPrefix() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: "github")!
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        let accountRepository = AccountRepository(vault: vault)
+        let date = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = GitHubAccount(
+            id: accountID,
+            githubUserID: 1,
+            nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjE=")!,
+            login: "octocat",
+            authenticationKind: .oauth,
+            credentialID: CredentialID.make(),
+            credentialStatus: .active,
+            createdAt: date,
+            lastValidatedAt: date
+        )
+        let organization = GitHubOrganization(
+            id: organizationID,
+            githubOrganizationID: 2,
+            nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjE=")!,
+            login: "github"
+        )
+        let access = OrganizationAccess(
+            accountID: accountID,
+            organizationID: organizationID,
+            state: .available,
+            capabilityRevision: CapabilityRevision(rawValue: "cap-1")!,
+            capabilities: [],
+            checkedAt: date
+        )
+        try await accountRepository.save(account, credentialRevision: CredentialRevision(rawValue: "cred-1")!)
+        try await accountRepository.save(organization, access: access, selectedAt: date)
+
+        let prefix = "retainedprefixterm"
+        let suffix = "discardedsuffixterm"
+        let node = NormalizedGitHubNode(
+            nodeID: GitHubNodeID(rawValue: "MDU6SXNzdWU5OTk=")!,
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: nil,
+            kind: .issue,
+            numericID: "999",
+            number: 999,
+            title: String(repeating: "title ", count: 3_000),
+            state: .open,
+            url: URL(string: "https://github.com/github/triage/issues/999")!,
+            bodyMarkdown: "\(prefix) \(String(repeating: "x", count: 100_000)) \(suffix)",
+            authorID: nil,
+            createdAt: date,
+            updatedAt: date,
+            closedAt: nil,
+            mergedAt: nil,
+            sourceRevision: "999",
+            observedAt: date,
+            accessibility: .accessible
+        )
+        try await GitHubNodeRepository(vault: vault).save(node)
+        let workItemID = try await WorkItemRepository(vault: vault).ensureWorkItem(for: node)
+
+        let repository = SearchRepository(vault: vault)
+        try await repository.rebuild(accountID: accountID, organizationID: organizationID)
+
+        let storedFields: [String] = try await vault.read { database -> [String] in
+            guard let row = try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT title, body, repository, labels, people, project_values, action_text, local_note
+                    FROM search_documents
+                    """
+            ) else {
+                return []
+            }
+            guard let title: String = row["title"],
+                  let body: String = row["body"],
+                  let repository: String = row["repository"],
+                  let labels: String = row["labels"],
+                  let people: String = row["people"],
+                  let projectValues: String = row["project_values"],
+                  let actionText: String = row["action_text"],
+                  let localNote: String = row["local_note"]
+            else {
+                return []
+            }
+            return [title, body, repository, labels, people, projectValues, actionText, localNote]
+        }
+        XCTAssertLessThanOrEqual(
+            storedFields.reduce(0) { $0 + $1.utf8.count },
+            SearchRepository.maximumDocumentBytes
+        )
+        XCTAssertEqual(storedFields.count, 8)
+        guard storedFields.count == 8 else { return }
+        XCTAssertLessThanOrEqual(storedFields[0].utf8.count, 8 * 1_024)
+        XCTAssertTrue(storedFields[1].hasSuffix("…"))
+
+        let prefixResults = try await repository.search(
+            prefix,
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        XCTAssertEqual(prefixResults.compactMap(\.workItemID), [workItemID])
+        let suffixResults = try await repository.search(
+            suffix,
+            accountID: accountID,
+            organizationID: organizationID
+        )
+        XCTAssertTrue(suffixResults.isEmpty)
+    }
+
+    func testCancelledRebuildStopsBeforeReadingOrMutatingVault() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let vault = try await VaultRegistry(rootDirectory: directory).open(
+            accountID: accountID,
+            vaultKey: try VaultKey.generate()
+        )
+        let repository = SearchRepository(vault: vault)
+        let gate = SearchRepositoryTestGate()
+        let task = Task {
+            await gate.wait()
+            try await repository.rebuild(
+                accountID: accountID,
+                organizationID: OrganizationID(rawValue: "github")!
+            )
+        }
+
+        await gate.waitUntilEntered()
+        task.cancel()
+        await gate.open()
+
+        do {
+            try await task.value
+            XCTFail("Expected cancelled rebuild to stop before accessing the vault.")
+        } catch is CancellationError {
+            // Expected: rebuild checks cancellation before its first vault read.
+        }
+    }
+}
+
+private actor SearchRepositoryTestGate {
+    private var entered = false
+    private var enteredWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        entered = true
+        enteredWaiter?.resume()
+        enteredWaiter = nil
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiter = $0 }
+    }
+
+    func open() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }

@@ -1,12 +1,32 @@
 import Foundation
 import Security
 
-final class CopilotHelperProcess {
+protocol CopilotHelperProcessing: AnyObject {
+  func cancel()
+  func exchange(frame: Data) throws -> Data
+}
+
+final class CopilotHelperProcess: CopilotHelperProcessing {
   private static let helperRelativePath =
     "Contents/Resources/TriageCopilotHelper"
   private static let helperIdentifier = "com.triage.mac.copilot-helper"
   private static let maximumRuntime: DispatchTimeInterval = .seconds(60)
+  private let bundle: Bundle
+  private let signatureValidator: (URL, String) throws -> Void
+  private let processLauncher: (Process) throws -> Void
   private let supervisor = CopilotProcessSupervisor()
+
+  init(
+    bundle: Bundle = .main,
+    signatureValidator: @escaping (URL, String) throws -> Void = {
+      try CopilotCodeSignatureValidator.validate(executableURL: $0, identifier: $1)
+    },
+    processLauncher: @escaping (Process) throws -> Void = { try $0.run() }
+  ) {
+    self.bundle = bundle
+    self.signatureValidator = signatureValidator
+    self.processLauncher = processLauncher
+  }
 
   func cancel() {
     supervisor.cancel()
@@ -14,10 +34,7 @@ final class CopilotHelperProcess {
 
   func exchange(frame: Data) throws -> Data {
     let helperURL = try helperURL()
-    try CopilotCodeSignatureValidator.validate(
-      executableURL: helperURL,
-      identifier: Self.helperIdentifier
-    )
+    try signatureValidator(helperURL, Self.helperIdentifier)
     let privateDirectory = try makePrivateDirectory()
     defer { try? FileManager.default.removeItem(at: privateDirectory) }
 
@@ -65,7 +82,7 @@ final class CopilotHelperProcess {
     }
 
     do {
-      try supervisor.run(process)
+      try supervisor.run(process, launchingWith: processLauncher)
       launched = true
       defer { supervisor.finish(process) }
       let timeout = DispatchSource.makeTimerSource()
@@ -91,7 +108,7 @@ final class CopilotHelperProcess {
     }
   }
 
-  private func helperURL(bundle: Bundle = .main) throws -> URL {
+  private func helperURL() throws -> URL {
     let bundleURL = bundle.bundleURL.standardizedFileURL.resolvingSymlinksInPath()
     let executableURL = bundleURL
       .appending(path: Self.helperRelativePath)
@@ -153,11 +170,14 @@ private final class CopilotProcessSupervisor: @unchecked Sendable {
   private var process: Process?
   private var stopReason: StopReason = .none
 
-  func run(_ process: Process) throws {
+  func run(
+    _ process: Process,
+    launchingWith launch: (Process) throws -> Void
+  ) throws {
     lock.lock()
     defer { lock.unlock() }
     try throwIfStoppedLocked()
-    try process.run()
+    try launch(process)
     self.process = process
   }
 
@@ -208,16 +228,9 @@ private final class CopilotProcessSupervisor: @unchecked Sendable {
 
 enum CopilotCodeSignatureValidator {
   static func validate(executableURL: URL, identifier: String) throws {
-    guard let teamIdentifier = Bundle.main.object(
-      forInfoDictionaryKey: "TriageExpectedTeamIdentifier"
-    ) as? String,
-      teamIdentifier.range(
-        of: #"^[A-Z0-9]{10}$"#,
-        options: .regularExpression
-      ) != nil
-    else {
-      throw CopilotXPCServiceError.codeSignatureNotValidated
-    }
+    let teamIdentifier = try validatedTeamIdentifier(
+      Bundle.main.object(forInfoDictionaryKey: "TriageExpectedTeamIdentifier") as? String
+    )
     let requirementString =
       "anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
     var requirement: SecRequirement?
@@ -233,5 +246,14 @@ enum CopilotCodeSignatureValidator {
     else {
       throw CopilotXPCServiceError.codeSignatureNotValidated
     }
+  }
+
+  static func validatedTeamIdentifier(_ value: String?) throws -> String {
+    guard let value,
+      value.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil
+    else {
+      throw CopilotXPCServiceError.codeSignatureNotValidated
+    }
+    return value
   }
 }

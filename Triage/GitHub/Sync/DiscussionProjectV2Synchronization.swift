@@ -166,10 +166,14 @@ actor ProjectV2SynchronizationService {
 
     func refreshProjects(
         scope: SynchronizationScope, organization: GitHubOrganization, streamID: SyncStreamID,
-        previousHighWater: Date?, observedAt: Date = .now
+        previousHighWater: Date?,
+        reconciliationIntent: SynchronizationReconciliationIntent = .incremental,
+        observedAt: Date = .now
     ) async throws -> ProjectV2SynchronizationResult {
-        let intervalStart = previousHighWater.map { $0.addingTimeInterval(-Self.overlap) }
-            ?? Date(timeIntervalSince1970: 0)
+        let intervalStart = coverageIntervalStart(
+            previousHighWater: previousHighWater,
+            reconciliationIntent: reconciliationIntent
+        )
         do {
             try Task.checkCancellation()
             try await validateCurrentScope(scope)
@@ -237,10 +241,14 @@ actor ProjectV2SynchronizationService {
 
     func refreshItems(
         project: GitHubProjectV2Record, scope: SynchronizationScope, organization: GitHubOrganization,
-        streamID: SyncStreamID, previousHighWater: Date?, observedAt: Date = .now
+        streamID: SyncStreamID, previousHighWater: Date?,
+        reconciliationIntent: SynchronizationReconciliationIntent = .incremental,
+        observedAt: Date = .now
     ) async throws -> CoverageRecord {
-        let intervalStart = previousHighWater.map { $0.addingTimeInterval(-Self.overlap) }
-            ?? Date(timeIntervalSince1970: 0)
+        let intervalStart = coverageIntervalStart(
+            previousHighWater: previousHighWater,
+            reconciliationIntent: reconciliationIntent
+        )
         do {
             try Task.checkCancellation()
             try await validateCurrentScope(scope)
@@ -251,9 +259,18 @@ actor ProjectV2SynchronizationService {
             )
             try Task.checkCancellation()
             try await validateCurrentScope(scope)
-            let status: CoverageStatus = inventory.items.contains(where: { !$0.fieldValuesComplete }) ? .partial : .complete
-            let result = coverageRecord(status: status, detail: status == .partial ? "one or more field unions were incomplete" : nil,
-                                        success: status == .complete ? observedAt : nil)
+            let incompleteFields = inventory.hasIncompleteFieldValues
+            let redactedItems = !inventory.redactedItemNodeIDs.isEmpty
+            let status: CoverageStatus = incompleteFields || redactedItems ? .partial : .complete
+            let detail = partialItemCoverageDetail(
+                incompleteFields: incompleteFields,
+                redactedItems: redactedItems
+            )
+            let result = coverageRecord(
+                status: status,
+                detail: detail,
+                success: status == .complete ? observedAt : nil
+            )
             try await repository.replaceItems(
                 inventory.items,
                 project: project,
@@ -263,7 +280,8 @@ actor ProjectV2SynchronizationService {
                 organization: organization,
                 streamID: streamID,
                 observedAt: observedAt,
-                coverageRecords: [result]
+                coverageRecords: [result],
+                redactedItemNodeIDs: inventory.redactedItemNodeIDs
             )
             try await validateCurrentScope(scope)
             return result
@@ -310,6 +328,31 @@ actor ProjectV2SynchronizationService {
         } catch ProjectV2RepositoryError.staleSynchronizationScope,
                 ProjectV2RepositoryError.organizationScopeMismatch {
             throw CancellationError()
+        }
+    }
+
+    private func coverageIntervalStart(
+        previousHighWater: Date?,
+        reconciliationIntent: SynchronizationReconciliationIntent
+    ) -> Date {
+        switch reconciliationIntent {
+        case .incremental:
+            previousHighWater.map { $0.addingTimeInterval(-Self.overlap) }
+                ?? Date(timeIntervalSince1970: 0)
+        case .fullReconciliation:
+            Date(timeIntervalSince1970: 0)
+        }
+    }
+
+    private func partialItemCoverageDetail(
+        incompleteFields: Bool,
+        redactedItems: Bool
+    ) -> String? {
+        switch (incompleteFields, redactedItems) {
+        case (false, false): nil
+        case (true, false): "One or more Project field unions were incomplete."
+        case (false, true): "One or more Project items are redacted for the current credential."
+        case (true, true): "One or more Project field unions were incomplete and one or more Project items are redacted for the current credential."
         }
     }
 }

@@ -1,13 +1,51 @@
 import AppKit
 import SwiftUI
+@preconcurrency import UserNotifications
 
 @MainActor
-private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
+private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private weak var appModel: TriageAppModel?
+    private var notificationActionHandler: (any NotificationLocalActionHandling)?
+    private var pendingNotificationActions: [NotificationLocalAction] = []
     private var terminationTask: Task<Void, Never>?
+    private var wakeObserver: NSObjectProtocol?
 
-    func install(appModel: TriageAppModel) {
+    func install(
+        appModel: TriageAppModel,
+        notificationActionHandler: any NotificationLocalActionHandling
+    ) {
         self.appModel = appModel
+        self.notificationActionHandler = notificationActionHandler
+        UNUserNotificationCenter.current().delegate = self
+        if wakeObserver == nil {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.appModel?.handleSystemWake()
+                }
+            }
+        }
+        let pending = pendingNotificationActions
+        pendingNotificationActions = []
+        Task { @MainActor in
+            for action in pending {
+                await notificationActionHandler.handle(action)
+            }
+        }
+    }
+
+    private func stopWakeObservation() {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -15,11 +53,35 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
             return terminationTask == nil ? .terminateNow : .terminateLater
         }
         terminationTask = Task { [weak self, weak sender] in
+            self?.stopWakeObservation()
             await appModel.shutdown()
             sender?.reply(toApplicationShouldTerminate: true)
             self?.terminationTask = nil
         }
         return .terminateLater
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        guard let action = NotificationResponseRouter.localAction(from: response) else {
+            completionHandler()
+            return
+        }
+        completionHandler()
+        Task { @MainActor in
+            await handleNotificationAction(action)
+        }
+    }
+
+    private func handleNotificationAction(_ action: NotificationLocalAction) async {
+        guard let notificationActionHandler else {
+            pendingNotificationActions.append(action)
+            return
+        }
+        await notificationActionHandler.handle(action)
     }
 }
 
@@ -27,26 +89,66 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
 struct TriageApp: App {
     @NSApplicationDelegateAdaptor(TriageApplicationDelegate.self) private var appDelegate
     @StateObject private var navigation = AppNavigationModel()
-    @StateObject private var appModel = TriageAppModel()
+    @StateObject private var appModel: TriageAppModel
     @StateObject private var preferences = AppPreferences()
     @StateObject private var softwareUpdates = SoftwareUpdateController()
+    @StateObject private var externalNavigation = ExternalNavigationConfirmationCoordinator()
     private let notificationScheduler = UserNotificationCenterScheduler()
+    private let notificationResponseAdapter = NotificationResponseApplicationAdapter()
+
+    init() {
+        do {
+            let fileManager = FileManager.default
+            let applicationSupportDirectory = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let cachesDirectory = try fileManager.url(
+                for: .cachesDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let vaultRegistry = try VaultRegistry()
+            let composition = TriageProductionComposition(
+                vaultRegistry: vaultRegistry,
+                secretStore: KeychainSecretStore(),
+                applicationSupportDirectory: applicationSupportDirectory,
+                cachesDirectory: cachesDirectory
+            )
+            _appModel = StateObject(wrappedValue: TriageAppModel(
+                dependencies: composition.dependencies(),
+                vaultRegistry: vaultRegistry
+            ))
+        } catch {
+            fatalError("Triage could not construct its local encrypted workspace: \(error)")
+        }
+    }
 
     var body: some Scene {
         Window("Triage", id: "main") {
-            RootView()
-                .environmentObject(appModel)
-                .environmentObject(navigation)
-                .environmentObject(preferences)
-                .environmentObject(softwareUpdates)
-                .frame(minWidth: 940, minHeight: 680)
-                .task {
-                    appDelegate.install(appModel: appModel)
-                    await appModel.restoreAccounts()
-                    await appModel.startAutomaticRefreshes()
-                    await appModel.refreshSelectedOrganizationAfterAccessCheck()
-                    await notificationScheduler.registerLocalActions()
-                }
+            ExternalNavigationConfirmationHost(coordinator: externalNavigation) {
+                RootView()
+                    .environmentObject(appModel)
+                    .environmentObject(navigation)
+                    .environmentObject(preferences)
+                    .environmentObject(softwareUpdates)
+                    .frame(minWidth: 940, minHeight: 680)
+                    .task {
+                        notificationResponseAdapter.install(routeHandler: appModel)
+                        appDelegate.install(
+                            appModel: appModel,
+                            notificationActionHandler: notificationResponseAdapter
+                        )
+                        await appModel.restoreAccounts()
+                        await appModel.startAutomaticRefreshes()
+                        await appModel.refreshSelectedOrganizationAfterAccessCheck()
+                        await appModel.launchOrganizationRefreshLifecycle()
+                        await notificationScheduler.registerLocalActions()
+                    }
+            }
         }
         .defaultSize(width: 1080, height: 760)
         .windowStyle(.hiddenTitleBar)
@@ -57,58 +159,11 @@ struct TriageApp: App {
                 }
                 .disabled(!softwareUpdates.canCheckForUpdates)
             }
-
-            CommandGroup(after: .toolbar) {
-                Button("Refresh GitHub Work") {
-                    Task {
-                        await appModel.refreshSelectedOrganizationAfterAccessCheck()
-                    }
-                }
-                .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
-                .keyboardShortcut("r", modifiers: .command)
-            }
-
-            CommandMenu("Navigate") {
-                navigationCommand("Inbox", section: .inbox, key: "1")
-                navigationCommand("My Work", section: .myWork, key: "2")
-                navigationCommand("Reviews", section: .reviews, key: "3")
-                navigationCommand("Waiting", section: .waiting, key: "4")
-                navigationCommand("Snoozed", section: .snoozed, key: "5")
-                navigationCommand("All Work", section: .allWork, key: "6")
-            }
-
-            CommandMenu("Work") {
-                Button("Archive in Triage") {
-                    applyWorkflow(.archive)
-                }
-                .disabled(appModel.selectedWorkItem == nil)
-                .keyboardShortcut(.delete, modifiers: .command)
-
-                Button("Pin") {
-                    guard let item = appModel.selectedWorkItem else { return }
-                    applyWorkflow(.setPinned(!item.workflow.isPinned))
-                }
-                .disabled(appModel.selectedWorkItem == nil)
-                .keyboardShortcut("p", modifiers: [.control, .command])
-
-                Menu("Priority") {
-                    priorityCommand("Low", priority: .low, key: "1")
-                    priorityCommand("Normal", priority: .normal, key: "2")
-                    priorityCommand("High", priority: .high, key: "3")
-                }
-
-                Menu("Snooze") {
-                    snoozeCommand("1 Hour", interval: 3_600)
-                    snoozeCommand("Tomorrow", interval: 86_400)
-                    snoozeCommand("Next Week", interval: 7 * 86_400)
-                }
-
-                Button("Mark Waiting") {
-                    applyWorkflow(.markWaiting(followUpAt: nil))
-                }
-                .disabled(appModel.selectedWorkItem == nil)
-                .keyboardShortcut("w", modifiers: [.control, .command])
-            }
+            TriageWorkspaceCommands(
+                appModel: appModel,
+                navigation: navigation,
+                externalNavigation: externalNavigation
+            )
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
@@ -141,40 +196,4 @@ struct TriageApp: App {
         )
     }
 
-    private func navigationCommand(
-        _ title: String,
-        section: AppSection,
-        key: KeyEquivalent
-    ) -> some View {
-        Button(title) {
-            navigation.section = section
-        }
-        .keyboardShortcut(key, modifiers: .command)
-    }
-
-    private func priorityCommand(
-        _ title: String,
-        priority: WorkPriority,
-        key: KeyEquivalent
-    ) -> some View {
-        Button(title) {
-            applyWorkflow(.setPriority(priority))
-        }
-        .disabled(appModel.selectedWorkItem == nil)
-        .keyboardShortcut(key, modifiers: [.control, .command])
-    }
-
-    private func applyWorkflow(_ action: WorkflowAction) {
-        guard let item = appModel.selectedWorkItem else { return }
-        Task {
-            await appModel.applyWorkflowAction(action, to: item)
-        }
-    }
-
-    private func snoozeCommand(_ title: String, interval: TimeInterval) -> some View {
-        Button(title) {
-            applyWorkflow(.snooze(until: Date().addingTimeInterval(interval)))
-        }
-        .disabled(appModel.selectedWorkItem == nil)
-    }
 }

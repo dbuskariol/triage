@@ -70,7 +70,7 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
                     "X-GitHub-SSO": "partial-results; organizations=\(fixture.githubOrganizationID)"
                 ]
             )
-        ])
+        ], persistsFailures: true)
 
         let result = try await service.refresh(
             scope: fixture.scope,
@@ -163,13 +163,93 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
                 streamID: fixture.streamID
             )
             XCTFail("Expected the second fetch to fail.")
-        } catch let error as URLError {
-            XCTAssertEqual(error.code, .networkConnectionLost)
+        } catch let error as GitHubPullRequestReviewFetchFailure {
+            XCTAssertTrue(error.rawPages.isEmpty)
+            guard case .transport = error.terminalFailure else {
+                return XCTFail("Expected transport failure classification.")
+            }
         }
 
         let cached = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
         XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
         XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
+    }
+
+    func testCandidateLocalNotFoundPublishesDurableFailureAndRetainsCachedState() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.seedCachedReviewState()
+        let service = try fixture.service(
+            responses: [
+                fixture.reviewsPath: .status(404, Data(#"{"message":"Not Found"}"#.utf8))
+            ],
+            persistsFailures: true
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertFalse(result.hasRemainingCandidates)
+        XCTAssertFalse(result.hasBlockedKnownCandidates)
+        XCTAssertEqual(result.failureClassifications, [.unavailableOrPermission])
+        let cached = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
+        XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
+        XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
+        let durableFailureCount = try await fixture.vault.read { database in
+            try Int.fetchOne(
+                database,
+                sql: """
+                    SELECT COUNT(*) FROM review_candidate_failure_envelopes
+                    WHERE candidate_node_id = ? AND classification = ?
+                    """,
+                arguments: [
+                    fixture.pullRequest.nodeID.rawValue,
+                    ReviewCandidateFailureClassification.unavailableOrPermission.rawValue
+                ]
+            )
+        }
+        XCTAssertEqual(durableFailureCount, 1)
+    }
+
+    func testCandidateLocalNotFoundAdvancesFairlyToTheNextCandidate() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.seedCachedReviewState()
+        let secondPullRequestNodeID = try await fixture.seedAccessibleSecondPullRequestState()
+        let service = try fixture.service(
+            responses: [
+                fixture.reviewsPath: .status(404, Data(#"{"message":"Not Found"}"#.utf8)),
+                "/repos/github/triage/pulls/2/reviews?per_page=100": .response(
+                    fixture.reviewPayload(nodeID: fixture.secondReviewNodeID.rawValue)
+                ),
+                "/repos/github/triage/pulls/2/requested_reviewers": .response(
+                    fixture.requestedReviewersPayload(nodeID: fixture.secondReviewerNodeID.rawValue)
+                )
+            ],
+            persistsFailures: true
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            limit: 2,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertEqual(result.failureClassifications, [.unavailableOrPermission])
+        XCTAssertEqual(result.refreshedPullRequestNodeIDs, [secondPullRequestNodeID])
+        let first = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
+        XCTAssertEqual(first.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
+        XCTAssertEqual(first.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
+        let second = try await fixture.persistedReviewState(for: secondPullRequestNodeID)
+        XCTAssertEqual(second.reviewNodeIDs, [fixture.secondReviewNodeID.rawValue])
+        XCTAssertEqual(second.requestedReviewerNodeIDs, [fixture.secondReviewerNodeID.rawValue])
     }
 
     func testSecondFetchCancellationRetainsBothCachedInventories() async throws {
@@ -401,7 +481,8 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
 
     func service(
         responses: [String: PullRequestReviewRefreshSession.Outcome],
-        gate: PullRequestReviewResponseGate? = nil
+        gate: PullRequestReviewResponseGate? = nil,
+        persistsFailures: Bool = false
     ) throws -> PullRequestReviewRefreshService {
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(
@@ -411,7 +492,10 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
         )
         return PullRequestReviewRefreshService(
             client: GitHubPullRequestClient(client: restClient),
-            candidateRepository: PullRequestReviewCandidateRepository(vault: vault)
+            candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
+            failureEnvelopeRepository: persistsFailures
+                ? ReviewCandidateFailureEnvelopeRepository(vault: vault)
+                : nil
         )
     }
 
@@ -511,6 +595,25 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
         return secondPullRequest.nodeID
     }
 
+    func seedAccessibleSecondPullRequestState() async throws -> GitHubNodeID {
+        let secondPullRequest = Self.pullRequest(
+            nodeID: GitHubNodeID(rawValue: "PR_2")!,
+            accountID: accountID,
+            organizationID: organizationID,
+            repositoryID: repositoryID,
+            number: 2,
+            date: date.addingTimeInterval(1),
+            accessibility: .accessible
+        )
+        try await savePullRequest(secondPullRequest)
+        try await seedReviewState(
+            pullRequestNodeID: secondPullRequest.nodeID,
+            reviewNodeID: secondReviewNodeID,
+            reviewerNodeID: secondReviewerNodeID
+        )
+        return secondPullRequest.nodeID
+    }
+
     func persistedReviewState(for pullRequestNodeID: GitHubNodeID) async throws -> PersistedReviewState {
         try await vault.read { database in
             PersistedReviewState(
@@ -570,6 +673,18 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                 )
             ],
             pullRequestNodeID: pullRequestNodeID,
+            replacementProof: try await reviewProof(
+                reviews: [
+                    GitHubPullRequestReviewDTO(
+                        id: 1,
+                        nodeID: reviewNodeID.rawValue,
+                        state: "APPROVED",
+                        body: "Cached review",
+                        submittedAt: date
+                    )
+                ],
+                for: pullRequestNodeID
+            ),
             observedAt: date
         )
         try await PullRequestReviewRequestRepository(vault: vault).replace(
@@ -580,8 +695,87 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                 teams: []
             ),
             pullRequestNodeID: pullRequestNodeID,
+            replacementProof: try await reviewProof(
+                requestedReviewers: GitHubRequestedReviewersDTO(
+                    users: [.init(nodeID: reviewerNodeID.rawValue, login: "cached-reviewer", slug: nil)],
+                    teams: []
+                ),
+                for: pullRequestNodeID
+            ),
             observedAt: date
         )
+    }
+
+    private func reviewReceipt(
+        for pullRequestNodeID: GitHubNodeID,
+        reviews: [GitHubPullRequestReviewDTO] = [],
+        requestedReviewers: GitHubRequestedReviewersDTO = .init(users: [], teams: [])
+    ) async throws -> ReviewCandidateCompleteTraversalReceiptToken {
+        let candidate = PullRequestReviewCandidate(
+            nodeID: pullRequestNodeID,
+            repositoryID: repositoryID,
+            repository: try GitHubRepositoryPath(owner: "github", repository: "triage"),
+            number: pullRequestNodeID == pullRequest.nodeID ? 1 : 2,
+            sourceRevision: pullRequestNodeID == pullRequest.nodeID ? "revision-1" : "revision-2"
+        )
+        let requestKeyPrefix = "GET /repos/github/triage/pulls/\(candidate.number)"
+        func page(_ endpoint: String) -> ReviewCandidateTraversalPage {
+            let requestKey: String = endpoint == "reviews"
+                ? "\(requestKeyPrefix)/reviews?per_page=100"
+                : "\(requestKeyPrefix)/\(endpoint)"
+            return ReviewCandidateTraversalPage(
+                ordinal: 1,
+                rawSnapshotID: .make(),
+                requestIdentity: .init(
+                    scope: scope,
+                    feature: .reviews,
+                    streamID: streamID,
+                    requestKey: requestKey
+                ),
+                endpoint: requestKey,
+                payload: Data("{}".utf8),
+                isTerminal: true
+            )
+        }
+        return try await ReviewCandidateCompleteTraversalReceiptRepository(vault: vault).persist(
+            .init(
+                scope: scope,
+                feature: .reviews,
+                streamID: streamID,
+                candidate: candidate,
+                candidateSourceRevision: candidate.sourceRevision,
+                parserVersion: 1,
+                observedAt: date,
+                normalizedDigest: PullRequestReviewReplacementProof.normalizedDigest(
+                    reviews: reviews,
+                    requestedReviewers: requestedReviewers
+                ),
+                segments: [
+                    .init(kind: .reviewHistory, pages: [page("reviews")]),
+                    .init(kind: .requestedReviewers, pages: [page("requested_reviewers")])
+                ]
+            )
+        )
+    }
+
+    private func reviewProof(
+        reviews: [GitHubPullRequestReviewDTO] = [],
+        requestedReviewers: GitHubRequestedReviewersDTO = .init(users: [], teams: []),
+        for pullRequestNodeID: GitHubNodeID
+    ) async throws -> PullRequestReviewReplacementProof {
+        let receipt = try await reviewReceipt(
+            for: pullRequestNodeID,
+            reviews: reviews,
+            requestedReviewers: requestedReviewers
+        )
+        return try await vault.writeTransaction { database in
+            try PullRequestReviewReplacementProof.make(
+                reviews: reviews,
+                requestedReviewers: requestedReviewers,
+                completeTraversalReceipt: receipt,
+                in: database
+            )
+        }
     }
 
     private func savePullRequest(_ node: NormalizedGitHubNode) async throws {
@@ -644,6 +838,7 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
 private actor PullRequestReviewRefreshSession: HTTPSession {
     enum Outcome: Sendable {
         case response(Data, headers: [String: String] = [:])
+        case status(Int, Data, headers: [String: String] = [:])
         case failure(URLError.Code)
         case cancellation
     }
@@ -677,6 +872,16 @@ private actor PullRequestReviewRefreshSession: HTTPSession {
                 HTTPURLResponse(
                     url: url,
                     statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: headers
+                )!
+            )
+        case let .status(statusCode, body, headers):
+            return (
+                body,
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: statusCode,
                     httpVersion: nil,
                     headerFields: headers
                 )!

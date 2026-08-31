@@ -1,0 +1,217 @@
+import Foundation
+
+extension WorkspaceSearchScope {
+    var title: String {
+        switch self {
+        case .currentView: "Current View"
+        case .organization: "Selected Organization"
+        }
+    }
+}
+
+extension WorkspaceSearchSort {
+    var title: String {
+        switch self {
+        case .relevance: "Relevance"
+        case .attention: "Attention"
+        case .recent: "Recent Activity"
+        }
+    }
+}
+
+extension WorkspaceListFilter {
+    var title: String {
+        switch self {
+        case .all: "All Work"
+        case .pinned: "Pinned"
+        case .highPriority: "High Priority"
+        case .openActionItems: "Open Action Items"
+        }
+    }
+}
+
+/// Pure queue-row and request-identity decisions. These stay out of the
+/// SwiftUI hierarchy so accessibility semantics and stale-search protection
+/// are deterministic and testable.
+enum WorkListPresentation {
+    static func accessibilityLabel(for item: WorkItem, at now: Date) -> String {
+        var components = ["\(sourceTitle(item.sourceKind)), \(item.title)"]
+
+        if let repository = item.repository {
+            components.append("Repository \(repository.fullName)")
+        }
+
+        if item.state != .active {
+            components.append("Source \(item.state.rawValue)")
+        }
+
+        if let reason = item.attentionReasons.max(by: { $0.strength < $1.strength }) {
+            components.append("Attention: \(reason.title)")
+        }
+
+        if item.workflow.isPinned {
+            components.append("Pinned in Triage")
+        }
+
+        switch item.workflow.status {
+        case .active:
+            break
+        case .archived:
+            components.append("Archived in Triage")
+        case .waiting:
+            components.append("Waiting in Triage")
+        }
+
+        if item.workflow.priority != .normal {
+            components.append("\(priorityTitle(item.workflow.priority)) priority in Triage")
+        }
+
+        if item.workflow.isSnoozed(at: now), let snoozedUntil = item.workflow.snoozedUntil {
+            components.append("Snoozed until \(snoozedUntil.formatted(date: .abbreviated, time: .shortened))")
+        }
+
+        if let followUpAt = item.workflow.followUpAt {
+            components.append("Follow up \(followUpAt.formatted(date: .abbreviated, time: .shortened))")
+        }
+
+        let actionCount = item.openActionItems.count
+        if actionCount > 0 {
+            components.append("\(actionCount) open action \(actionCount == 1 ? "item" : "items")")
+        }
+
+        components.append("Freshness: \(freshnessTitle(item.freshness.status))")
+        return components.joined(separator: ". ")
+    }
+
+    static func shouldApplySearchResult(
+        for request: WorkListSearchRequest,
+        currentRequest: WorkListSearchRequest,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled && request == currentRequest
+    }
+
+    private static func sourceTitle(_ kind: GitHubContentKind) -> String {
+        switch kind {
+        case .issue: "Issue"
+        case .pullRequest: "Pull Request"
+        case .discussion: "Discussion"
+        default: kind.rawValue
+        }
+    }
+
+    private static func priorityTitle(_ priority: WorkPriority) -> String {
+        switch priority {
+        case .low: "Low"
+        case .normal: "Normal"
+        case .high: "High"
+        }
+    }
+
+    private static func freshnessTitle(_ status: FreshnessStatus) -> String {
+        switch status {
+        case .fresh: "Current"
+        case .refreshing: "Refreshing"
+        case .stale: "Stale cache"
+        case .partial: "Partial coverage"
+        case .offline: "Offline cache"
+        case .authenticationRequired: "Sign-in required"
+        case .ssoRequired: "SSO authorization required"
+        case .approvalRequired: "Organization approval required"
+        case .rateLimited: "Rate limited"
+        case .failed: "Refresh failed"
+        }
+    }
+}
+
+struct WorkListSearchRequest: Equatable, Hashable {
+    let accountID: AccountID?
+    let organizationID: OrganizationID?
+    let query: String
+
+    init(accountID: AccountID?, organizationID: OrganizationID?, query: String) {
+        self.accountID = accountID
+        self.organizationID = organizationID
+        self.query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// The observation identity for restoring a scoped selection. It changes when
+/// the active account, organization, or locally available work changes, so a
+/// stale stored selection is cleared before it can reach the detail view.
+struct WorkListSelectionRestorationRequest: Equatable, Hashable {
+    let accountID: AccountID?
+    let organizationID: OrganizationID?
+    let validWorkItemIDs: Set<WorkItemID>
+}
+
+enum WorkItemContextMenuOperation: Equatable {
+    case archive
+    case unarchive
+    case setPinned(Bool)
+    case setPriority(WorkPriority)
+    case snooze(SnoozePreset)
+    case clearSnooze
+    case markWaiting
+    case clearWaiting
+
+    enum SnoozePreset: Equatable {
+        case oneHour
+        case tomorrow
+        case nextWeek
+
+        func action(now: Date) -> WorkflowAction {
+            let interval: TimeInterval
+            switch self {
+            case .oneHour: interval = 3_600
+            case .tomorrow: interval = 86_400
+            case .nextWeek: interval = 7 * 86_400
+            }
+            return .snooze(until: now.addingTimeInterval(interval))
+        }
+    }
+
+    func workflowAction(now: Date) -> WorkflowAction {
+        switch self {
+        case .archive: .archive
+        case .unarchive: .unarchive
+        case let .setPinned(isPinned): .setPinned(isPinned)
+        case let .setPriority(priority): .setPriority(priority)
+        case let .snooze(preset): preset.action(now: now)
+        case .clearSnooze: .clearSnooze
+        case .markWaiting: .markWaiting(followUpAt: nil)
+        case .clearWaiting: .clearWaiting
+        }
+    }
+}
+
+/// A pure projection of command availability for one native list-row context
+/// menu. Keeping this policy shared with the list presentation lets its menu
+/// stay deterministic while all mutations still route to the app model.
+struct WorkItemContextMenuPolicy: Equatable {
+    static let localOnlyAccessibilityHint =
+        "Changes only Triage’s local workflow state; it does not modify GitHub."
+
+    let archiveOperation: WorkItemContextMenuOperation?
+    let pinOperation: WorkItemContextMenuOperation
+    let priorityOperations: [WorkItemContextMenuOperation]
+    let snoozeOperations: [WorkItemContextMenuOperation]
+    let clearSnoozeOperation: WorkItemContextMenuOperation?
+    let waitingOperation: WorkItemContextMenuOperation?
+
+    init(item: WorkItem) {
+        let availability = TriageWorkflowCommandAvailability(item: item)
+        archiveOperation = availability.canArchive
+            ? .archive
+            : (availability.canUnarchive ? .unarchive : nil)
+        pinOperation = .setPinned(!item.workflow.isPinned)
+        priorityOperations = WorkPriority.allCases.map(WorkItemContextMenuOperation.setPriority)
+        snoozeOperations = availability.canSnooze
+            ? [.snooze(.oneHour), .snooze(.tomorrow), .snooze(.nextWeek)]
+            : []
+        clearSnoozeOperation = availability.canClearSnooze ? .clearSnooze : nil
+        waitingOperation = availability.canMarkWaiting
+            ? .markWaiting
+            : (availability.canClearWaiting ? .clearWaiting : nil)
+    }
+}
