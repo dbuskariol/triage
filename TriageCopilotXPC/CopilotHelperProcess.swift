@@ -588,6 +588,7 @@ private struct CopilotRuntimeBootstrap: Encodable {
 /// crafted Application Support ancestor cannot redirect private prompts.
 private enum CopilotScratchFilesystem {
   private static let directoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+  private static let trustedRootDirectoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_CLOEXEC
 
   static func ensureDirectory(at root: URL, components: [String]) throws {
     var descriptor = try openRoot(root)
@@ -633,11 +634,23 @@ private enum CopilotScratchFilesystem {
   private static func openRoot(_ root: URL) throws -> Int32 {
     let path = root.standardizedFileURL.path
     guard path.hasPrefix("/") else { throw posixError(code: EINVAL) }
-    var descriptor = Darwin.open("/", directoryFlags)
+    // The system-selected Application Support/temp root may be reached through
+    // macOS aliases or firmlinks. Create only that trusted boundary with
+    // ordinary directory traversal, then reopen its final component with
+    // O_NOFOLLOW before entering the private Copilot namespace.
+    var descriptor = Darwin.open("/", trustedRootDirectoryFlags)
     guard descriptor != -1 else { throw posixError() }
     for component in path.split(separator: "/").map(String.init) {
       do {
-        let next = try openDirectory(named: component, relativeTo: descriptor, create: true)
+        guard isSafeComponent(component) else { throw posixError(code: EINVAL) }
+        var next = Darwin.openat(descriptor, component, trustedRootDirectoryFlags)
+        if next == -1, errno == ENOENT {
+          guard Darwin.mkdirat(descriptor, component, 0o700) == 0 || errno == EEXIST else {
+            throw posixError()
+          }
+          next = Darwin.openat(descriptor, component, trustedRootDirectoryFlags)
+        }
+        guard next != -1 else { throw posixError() }
         _ = Darwin.close(descriptor)
         descriptor = next
       } catch {
@@ -645,6 +658,9 @@ private enum CopilotScratchFilesystem {
         throw error
       }
     }
+    _ = Darwin.close(descriptor)
+    descriptor = Darwin.open(path, directoryFlags)
+    guard descriptor != -1 else { throw posixError() }
     return descriptor
   }
 
@@ -964,20 +980,12 @@ final class CopilotRuntimeTrustVerifier: CopilotRuntimeTrustVerifying {
   private func openAbsoluteDirectory(_ root: URL) throws -> Int32 {
     let path = root.standardizedFileURL.path
     guard path.hasPrefix("/") else { throw RuntimeFailure.corrupt }
-    var descriptor = Darwin.open("/", Self.directoryFlags)
+    // The trusted system Application Support root may contain a firmlink in
+    // its ancestors. O_NOFOLLOW on the final root still rejects caller-level
+    // redirection; all runtime-owned descendants are opened component-wise.
+    let descriptor = Darwin.open(path, Self.directoryFlags)
     guard descriptor != -1 else { throw RuntimeFailure.fromErrno() }
-    do {
-      for component in path.split(separator: "/") {
-        let next = Darwin.openat(descriptor, String(component), Self.directoryFlags)
-        guard next != -1 else { throw RuntimeFailure.fromErrno() }
-        _ = Darwin.close(descriptor)
-        descriptor = next
-      }
-      return descriptor
-    } catch {
-      _ = Darwin.close(descriptor)
-      throw error
-    }
+    return descriptor
   }
 
   private func assertPrivateDirectory(_ descriptor: Int32) throws {
