@@ -375,6 +375,24 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             // the immutable PR head commit SHA.
             let primaryRevision = now.ISO8601Format()
             let headCommitSHA = String(repeating: "a", count: 64)
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO repositories (
+                            id, organization_id, github_repository_id, github_node_id,
+                            owner_login, name, is_private, is_archived, has_discussions,
+                            html_url, updated_at_ms, archived_at_ms
+                        ) VALUES (?, ?, 1, ?, 'acme', 'derived-e2e', 1, 0, 1, ?, ?, NULL)
+                        """,
+                    arguments: [
+                        repositoryID.rawValue,
+                        organizationID.rawValue,
+                        "derived-e2e-repository-node",
+                        "https://github.com/acme/derived-e2e",
+                        milliseconds(now)
+                    ]
+                )
+            }
             try await GitHubNodeRepository(vault: vault).save(
                 Self.node(
                     id: pullRequestNodeID,
@@ -925,7 +943,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 mergedAt: nil,
                 sourceRevision: sourceRevision,
                 pullRequestHeadCommitSHA: kind == .pullRequest
-                    ? (pullRequestHeadCommitSHA ?? sourceRevision)
+                    ? (pullRequestHeadCommitSHA ?? String(repeating: "b", count: 64))
                     : nil,
                 observedAt: now,
                 accessibility: .accessible
