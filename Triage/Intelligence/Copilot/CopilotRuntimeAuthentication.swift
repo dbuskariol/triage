@@ -785,7 +785,10 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         for accountID: AccountID,
         runtimeMutationGeneration: UInt64? = nil
     ) -> Bool {
-        guard authenticationGenerations[accountID] == generation else { return false }
+        // An untouched account is generation zero. Treating the missing map
+        // entry as stale discards the first verified runtime-state read and
+        // leaves Settings incorrectly cached at Missing until authentication.
+        guard (authenticationGenerations[accountID] ?? 0) == generation else { return false }
         guard let runtimeMutationGeneration else { return true }
         return !isRuntimeMutationInProgress && self.runtimeMutationGeneration == runtimeMutationGeneration
     }
