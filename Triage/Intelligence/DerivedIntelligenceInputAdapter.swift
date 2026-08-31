@@ -154,6 +154,7 @@ actor DerivedIntelligenceInputAdapter {
                 pullRequestStatusChecks: support.statusChecks[workItem.id] ?? [],
                 pullRequestMergeableState: support.mergeableStates[workItem.id],
                 pullRequestStatusCheckMarkerEvidence: support.statusCheckMarkerEvidence[workItem.id],
+                pullRequestStatusCheckRevision: primary.pullRequestHeadCommitSHA,
                 searchDocument: document,
                 hasChangedAIFingerprint: cacheDecision.hasChanged,
                 hasValidCachedAIAnalysis: cacheDecision.hasCachedAnalysis
@@ -307,6 +308,7 @@ actor DerivedIntelligenceInputAdapter {
         let repositoryID: RepositoryID?
         let kind: GitHubContentKind
         let sourceRevision: String
+        let pullRequestHeadCommitSHA: String?
         let lastObservedAt: Date?
 
         var isCurrent: Bool {
@@ -403,7 +405,7 @@ actor DerivedIntelligenceInputAdapter {
                 database,
                 sql: """
                     SELECT work_items.id, work_items.primary_node_id, github_nodes.repository_id,
-                           github_nodes.kind, github_nodes.source_revision,
+                           github_nodes.kind, github_nodes.source_revision, github_nodes.pull_request_head_commit_sha,
                            github_nodes.last_observed_at_ms
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
@@ -441,6 +443,7 @@ actor DerivedIntelligenceInputAdapter {
                     repositoryID: repositoryID,
                     kind: kind,
                     sourceRevision: sourceRevision,
+                    pullRequestHeadCommitSHA: row["pull_request_head_commit_sha"],
                     lastObservedAt: Self.date(milliseconds: row["last_observed_at_ms"])
                 )
             }
@@ -900,7 +903,10 @@ actor DerivedIntelligenceInputAdapter {
         scope: SynchronizationScope,
         in database: Database
     ) throws -> Bool {
-        guard primary.kind == .pullRequest else { return false }
+        guard primary.kind == .pullRequest,
+              let sourceRevision = primary.pullRequestHeadCommitSHA,
+              isCommitSHA(sourceRevision)
+        else { return false }
         // An authoritative empty rollup has no status_check rows. Coverage
         // plus the PR-scoped current-row marker proves that empty result; a
         // missing marker remains unknown rather than green.
@@ -915,7 +921,7 @@ actor DerivedIntelligenceInputAdapter {
             arguments: [
                 primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
                 scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
-                primary.sourceRevision
+                sourceRevision
             ]
         ) ?? 0
         return markerCount == 1
@@ -926,11 +932,14 @@ actor DerivedIntelligenceInputAdapter {
         records: [CoverageRecord],
         scope: SynchronizationScope
     ) -> Bool {
-        guard let repositoryID = primary.repositoryID else { return false }
+        guard let repositoryID = primary.repositoryID,
+              let sourceRevision = primary.pullRequestHeadCommitSHA,
+              isCommitSHA(sourceRevision)
+        else { return false }
         let streamID = PullRequestStatusCheckRefreshService.sourceStreamID(
             organizationID: scope.organizationID,
             pullRequestNodeID: primary.nodeID,
-            sourceRevision: primary.sourceRevision
+            sourceRevision: sourceRevision
         )
         return records.contains {
             $0.accountID == scope.accountID && $0.organizationID == scope.organizationID
@@ -947,10 +956,13 @@ actor DerivedIntelligenceInputAdapter {
         scope: SynchronizationScope,
         in database: Database
     ) throws -> (checks: [PullRequestStatusCheck], mergeableState: String, markerEvidence: EvidenceReference) {
+        guard let sourceRevision = primary.pullRequestHeadCommitSHA,
+              isCommitSHA(sourceRevision)
+        else { throw DerivedIntelligenceInputAdapterError.invalidPersistedData }
         let streamID = PullRequestStatusCheckRefreshService.sourceStreamID(
             organizationID: scope.organizationID,
             pullRequestNodeID: primary.nodeID,
-            sourceRevision: primary.sourceRevision
+            sourceRevision: sourceRevision
         )
         guard let marker = try Row.fetchOne(
             database,
@@ -963,7 +975,7 @@ actor DerivedIntelligenceInputAdapter {
             arguments: [
                 primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
                 scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
-                primary.sourceRevision
+                sourceRevision
             ]
         ), let mergeableState: String = marker["mergeable_state"],
            let markerObservedAt = date(milliseconds: marker["observed_at_ms"]),
@@ -983,7 +995,7 @@ actor DerivedIntelligenceInputAdapter {
             arguments: [
                 primary.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
                 scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
-                primary.sourceRevision
+                sourceRevision
             ]
         ).map { row -> PullRequestStatusCheck in
             guard let context: String = row["context"],
@@ -1007,7 +1019,7 @@ actor DerivedIntelligenceInputAdapter {
                         streamID: streamID
                     ),
                     nodeID: primary.nodeID,
-                    sourceRevision: primary.sourceRevision,
+                    sourceRevision: sourceRevision,
                     confidence: .confirmed,
                     confirmation: .confirmed,
                     observedAt: observedAt
@@ -1026,12 +1038,16 @@ actor DerivedIntelligenceInputAdapter {
                 locator: .query("TriagePullRequestStatusChecks"),
                 authority: .github(scope: scope, feature: .statusChecks, streamID: streamID),
                 nodeID: primary.nodeID,
-                sourceRevision: primary.sourceRevision,
+                sourceRevision: sourceRevision,
                 confidence: .confirmed,
                 confirmation: .confirmed,
                 observedAt: markerObservedAt
             )
         )
+    }
+
+    private nonisolated static func isCommitSHA(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { $0.isASCII && ($0.properties.numericType != nil || (97...102).contains($0.value)) }
     }
 
     private nonisolated static func document(

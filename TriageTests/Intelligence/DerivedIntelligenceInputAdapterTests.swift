@@ -489,6 +489,11 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         }
 
         func insertAuthoredRelation(credentialRevision: CredentialRevision) async throws {
+            // relation_evidence retains a real stream foreign key even when
+            // the evidence is deliberately stale. Materialize that exact
+            // historical stream so this fixture exercises the adapter's
+            // authority filter rather than violating persistence integrity.
+            try await saveCoverage(feature: .pullRequests, revision: credentialRevision)
             try await vault.write { database in
                 try database.execute(
                     sql: """
@@ -651,7 +656,7 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                 CoverageRecord(
                     accountID: accountID,
                     organizationID: organizationID,
-                    repositoryID: nil,
+                    repositoryID: repositoryID,
                     feature: .timelines,
                     streamID: SyncStreamID(rawValue: "timeline:\(pullRequestNodeID.rawValue)")!,
                     intervalStart: nil,

@@ -31,7 +31,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         XCTAssertEqual(loaded, didFinalize)
         XCTAssertEqual(
             loaded?.cachedState?.coverageRequirements?.count,
-            13 + RoleDiscoveryStreamKind.allCases.count
+            14 + RoleDiscoveryStreamKind.allCases.count
         )
         XCTAssertEqual(persistedSchedule, completed)
     }
@@ -529,7 +529,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         XCTAssertEqual(committedState.cachedState?.coverage, [failedCoverage])
         XCTAssertEqual(
             committedState.cachedState?.coverageRequirements?.count,
-            13 + RoleDiscoveryStreamKind.allCases.count
+            14 + RoleDiscoveryStreamKind.allCases.count
         )
         XCTAssertEqual(committedState.freshness.status, .ssoRequired)
         XCTAssertNil(committedState.freshness.lastSuccessfulSyncAt)
@@ -568,7 +568,7 @@ final class AccountOrganizationDurableStateRepositoryTests: XCTestCase {
         XCTAssertEqual(committedState.cachedState?.coverage, [])
         XCTAssertEqual(
             committedState.cachedState?.coverageRequirements?.count,
-            13 + RoleDiscoveryStreamKind.allCases.count
+            14 + RoleDiscoveryStreamKind.allCases.count
         )
         XCTAssertEqual(committedState.freshness.status, .offline)
         let loaded = try await repository.loadState(for: scope)

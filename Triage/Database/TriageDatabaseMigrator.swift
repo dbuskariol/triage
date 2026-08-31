@@ -3181,6 +3181,21 @@ enum TriageDatabaseMigrator {
                     AND automatic_action_confidence_threshold <= 1.0
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "059-pull-request-head-commit-authority-v1",
+            checksum: "f2d54196288e2c0c0b1dc01b20b06bc45da27e2bfb73ab710a0114f59f311d4a"
+        ) { database in
+            // `updatedAt` remains node freshness only. Status-check rollups
+            // are fenced by the immutable pull-request head commit.
+            try database.execute(sql: """
+                ALTER TABLE github_nodes
+                ADD COLUMN pull_request_head_commit_sha TEXT
+                CHECK (pull_request_head_commit_sha IS NULL OR (
+                    length(pull_request_head_commit_sha) = 64
+                    AND pull_request_head_commit_sha NOT GLOB '*[^0-9a-f]*'
+                ))
+                """)
         }
     ]
 }

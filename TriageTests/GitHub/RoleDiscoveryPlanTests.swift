@@ -14,7 +14,7 @@ final class RoleDiscoveryPlanTests: XCTestCase {
         )
 
         XCTAssertEqual(plan.streams.map(\.kind), RoleDiscoveryStreamKind.allCases)
-        XCTAssertEqual(plan.streams.count, 11)
+        XCTAssertEqual(plan.streams.count, 12)
         XCTAssertEqual(
             plan.streams.first { $0.kind == .openReviewRequested }?.queries.first?.value,
             "org:github is:open review-requested:octocat"

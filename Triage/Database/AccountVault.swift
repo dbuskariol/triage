@@ -185,7 +185,7 @@ enum NoFollowFilesystem {
         guard let directory else { return }
         defer { _ = Darwin.close(directory) }
 
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if file == -1 {
             guard errno == ENOENT else { throw posixError() }
             return
@@ -204,7 +204,7 @@ enum NoFollowFilesystem {
         let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
         guard let directory else { return false }
         defer { _ = Darwin.close(directory) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if file == -1 {
             guard errno == ENOENT else { throw posixError() }
             return false
@@ -233,21 +233,25 @@ enum NoFollowFilesystem {
         return descriptor
     }
 
-    /// Checks a file within an already-opened directory. Keeping the caller's
-    /// descriptor open lets SQLite use a `/dev/fd` path without reopening any
-    /// account-owned pathname after this no-follow check.
-    static func regularFileExists(relativeTo directory: Int32, name: String) throws -> Bool {
+    /// Opens a regular file through an already-held directory descriptor. The
+    /// caller can pass `/dev/fd/<file-fd>` to a read-only SQLite pool without
+    /// resolving another account-owned path after the no-follow open.
+    static func withRegularFileIfPresent<Value>(
+        relativeTo directory: Int32,
+        name: String,
+        _ operation: (Int32) throws -> Value
+    ) throws -> Value? {
         guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if file == -1 {
             guard errno == ENOENT else { throw posixError() }
-            return false
+            return nil
         }
         defer { _ = Darwin.close(file) }
         var status = stat()
         guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
         guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
-        return true
+        return try operation(file)
     }
 
     static func createRegularFileIfMissing(
@@ -264,7 +268,11 @@ enum NoFollowFilesystem {
         )
         if file == -1 {
             guard errno == EEXIST,
-                  try regularFileExists(relativeTo: directory, name: name)
+                  try withRegularFileIfPresent(
+                      relativeTo: directory,
+                      name: name,
+                      { _ in true }
+                  ) == true
             else {
                 throw posixError()
             }
@@ -290,7 +298,7 @@ enum NoFollowFilesystem {
         let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
         guard let directory else { return nil }
         defer { _ = Darwin.close(directory) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         if file == -1 {
             guard errno == ENOENT else { throw posixError() }
             return nil
@@ -351,7 +359,7 @@ enum NoFollowFilesystem {
         permissions: mode_t = 0o600
     ) throws {
         guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard file != -1 else { throw posixError() }
         defer { _ = Darwin.close(file) }
         var status = stat()
@@ -371,7 +379,7 @@ enum NoFollowFilesystem {
         guard isSafeComponent(sourceName), isSafeComponent(destinationName) else {
             throw posixError(code: EINVAL)
         }
-        let source = Darwin.openat(directory, sourceName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let source = Darwin.openat(directory, sourceName, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard source != -1 else { throw posixError() }
         defer { _ = Darwin.close(source) }
         var sourceStatus = stat()
@@ -489,7 +497,7 @@ enum NoFollowFilesystem {
             throw posixError(code: ENOENT)
         }
         defer { _ = Darwin.close(sourceDirectory) }
-        let source = Darwin.openat(sourceDirectory, sourceName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let source = Darwin.openat(sourceDirectory, sourceName, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard source != -1 else { throw posixError() }
         defer { _ = Darwin.close(source) }
         var sourceStatus = stat()
@@ -955,27 +963,28 @@ actor AccountVault {
                 var verifiedIDs: [String] = []
                 for migrationID in destructiveMigrationBackupIDs {
                     let backupName = "\(migrationID).sqlite"
-                    guard try NoFollowFilesystem.regularFileExists(
-                        relativeTo: backupDirectory,
-                        name: backupName
-                    ) else { continue }
                     do {
-                        let pool = try DatabasePool(
-                            path: "/dev/fd/\(backupDirectory)/\(backupName)",
-                            configuration: configuration(vaultKey: vaultKey, readonly: true)
-                        )
-                        defer { try? pool.close() }
-                        try verify(pool)
-                        let isExpectedPreMigrationBackup = try pool.read { database in
-                            let hasReplayTable = try database.tableExists("role_search_page_replays")
-                            let migrationChecksum = try String.fetchOne(
-                                database,
-                                sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                                arguments: [migrationID]
+                        let isExpectedPreMigrationBackup = try NoFollowFilesystem.withRegularFileIfPresent(
+                            relativeTo: backupDirectory,
+                            name: backupName
+                        ) { backupFile in
+                            let pool = try DatabasePool(
+                                path: "/dev/fd/\(backupFile)",
+                                configuration: configuration(vaultKey: vaultKey, readonly: true)
                             )
-                            return hasReplayTable && migrationChecksum == nil
+                            defer { try? pool.close() }
+                            try verify(pool)
+                            return try pool.read { database in
+                                let hasReplayTable = try database.tableExists("role_search_page_replays")
+                                let migrationChecksum = try String.fetchOne(
+                                    database,
+                                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                                    arguments: [migrationID]
+                                )
+                                return hasReplayTable && migrationChecksum == nil
+                            }
                         }
-                        if isExpectedPreMigrationBackup { verifiedIDs.append(migrationID) }
+                        if isExpectedPreMigrationBackup == true { verifiedIDs.append(migrationID) }
                     } catch {
                         // A corrupt or replaced backup is never advertised as a
                         // recovery option. The caller still reports the vault issue.
@@ -1056,26 +1065,28 @@ actor AccountVault {
             components: vaultComponents,
             create: false
         ) { vaultDirectory in
-            guard try NoFollowFilesystem.regularFileExists(
+            let validation = try NoFollowFilesystem.withRegularFileIfPresent(
                 relativeTo: vaultDirectory,
                 name: "triage.sqlite"
-            ) else {
-                throw VaultError.invalidMigrationBackup
-            }
-            let restored = try DatabasePool(
-                path: "/dev/fd/\(vaultDirectory)/triage.sqlite",
-                configuration: configuration(vaultKey: vaultKey, readonly: true)
-            )
-            defer { try? restored.close() }
-            try verify(restored)
-            let isExpectedPreMigrationBackup = try restored.read { database in
-                let hasReplayTable = try database.tableExists("role_search_page_replays")
-                let migrationChecksum = try String.fetchOne(
-                    database,
-                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                    arguments: [migrationID]
+            ) { restoredFile in
+                let restored = try DatabasePool(
+                    path: "/dev/fd/\(restoredFile)",
+                    configuration: configuration(vaultKey: vaultKey, readonly: true)
                 )
-                return hasReplayTable && migrationChecksum == nil
+                defer { try? restored.close() }
+                try verify(restored)
+                return try restored.read { database in
+                    let hasReplayTable = try database.tableExists("role_search_page_replays")
+                    let migrationChecksum = try String.fetchOne(
+                        database,
+                        sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                        arguments: [migrationID]
+                    )
+                    return hasReplayTable && migrationChecksum == nil
+                }
+            }
+            guard let isExpectedPreMigrationBackup = validation else {
+                throw VaultError.invalidMigrationBackup
             }
             guard isExpectedPreMigrationBackup else {
                 throw VaultError.invalidMigrationBackup

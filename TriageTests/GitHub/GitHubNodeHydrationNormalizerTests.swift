@@ -481,6 +481,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         XCTAssertEqual(node.authorID, ActorID(rawValue: "USER_1"))
         XCTAssertEqual(node.bodyMarkdown, "Authoritative body")
         XCTAssertEqual(node.sourceRevision, updatedAt.ISO8601Format())
+        XCTAssertEqual(node.pullRequestHeadCommitSHA, String(repeating: "a", count: 64))
     }
 
     func testRejectsMissingRequestedNode() throws {
@@ -691,6 +692,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
     private func pullRequest(
         createdAt: Date = Date(timeIntervalSince1970: 1_000),
         updatedAt: Date = Date(timeIntervalSince1970: 2_000),
+        headRefOid: String? = String(repeating: "a", count: 64),
         labelsHasNextPage: Bool = false,
         containsNilLabel: Bool = false,
         assigneeNodes: [GitHubNodeHydrationPayload.Actor?] = [],
@@ -716,6 +718,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
             comments: nil,
             mergeable: "MERGEABLE",
             headRefName: "feature",
+            headRefOid: headRefOid,
             baseRefName: "main",
             reviewDecision: "APPROVED",
             author: .init(id: "USER_1", login: "octocat", avatarUrl: nil),

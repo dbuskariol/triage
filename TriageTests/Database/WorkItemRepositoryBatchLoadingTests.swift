@@ -439,7 +439,14 @@ final class WorkItemRepositoryBatchLoadingTests: XCTestCase {
                 """,
                 arguments: [wakeUpID]
             )
-            let sourceRevision = String(repeating: "a", count: 64)
+            // The page query and full graph both publish only the current
+            // derived run. Bind this fixture's wake-up rule to the exact
+            // aggregate revision rather than a syntactically valid stale
+            // placeholder, so the assertion exercises eligibility parity.
+            let sourceRevision = try DerivedIntelligenceRepository.currentSourceRevision(
+                scope: fixture.scope,
+                in: database
+            )
             try database.execute(
                 sql: """
                     INSERT INTO derived_intelligence_runs (
@@ -537,10 +544,12 @@ final class WorkItemRepositoryBatchLoadingTests: XCTestCase {
         )
 
         XCTAssertEqual(page.count, 50)
-        // One page-root query plus one bounded batch for each child graph
-        // shape. The 501-row fixture crosses SQLite's 500-value boundary, so
-        // this guards against regressing to a full graph then `prefix(50)`.
-        XCTAssertEqual(counter.value, 9)
+        // One page-root query plus the bounded child graph reads needed by
+        // these selected 50 roots. No current rule rows exist in this fixture,
+        // so the empty attention-reason batch does not issue a second evidence
+        // query. The 501-row fixture still guards against regressing to a full
+        // graph followed by `prefix(50)`.
+        XCTAssertEqual(counter.value, 8)
     }
 
     func testInboxPageUsesConstituentActionsForCanonicalGroupEligibilityAndRank() async throws {

@@ -328,6 +328,13 @@ final class WorkListPresentationTests: XCTestCase {
         XCTAssertEqual(selection.selectedWorkItemIDs, [itemA, itemB])
         XCTAssertEqual(selection.primaryWorkItemID, itemB)
 
+        // The app model echoes the contextual target back through its primary
+        // selection binding. That echo must preserve the native row set.
+        selection.synchronizePrimarySelection(itemB)
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemA, itemB])
+
+        // A subsequent history target is external rather than contextual and
+        // therefore becomes the list's single, visible selection.
         selection.synchronizePrimarySelection(itemA)
         XCTAssertEqual(selection.selectedWorkItemIDs, [itemA])
         XCTAssertEqual(selection.primaryWorkItemID, itemA)

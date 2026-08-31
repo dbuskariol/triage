@@ -749,5 +749,6 @@ private struct OnboardingPersonalAccessTokenSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+        .accessibilityIdentifier("personal-access-token-entry-sheet")
     }
 }

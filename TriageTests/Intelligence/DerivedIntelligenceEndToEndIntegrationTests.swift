@@ -17,6 +17,12 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             aiPolicy: fixture.aiPolicy,
             evaluatedAt: fixture.now
         )
+        XCTAssertEqual(
+            snapshot.sourceStates.first {
+                $0.workItemID == fixture.workItemID && $0.feature == .statusChecks
+            }?.availability,
+            .trusted
+        )
         let output = try DerivedIntelligenceCoordinator().recompute(snapshot.input)
         let result = try XCTUnwrap(output.items.first)
         let ruleIDs = Set(result.attentionReasons.map(\.ruleID))
@@ -234,6 +240,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000201")!
         let organizationID = OrganizationID(rawValue: "derived-e2e-org")!
         let accountNodeID = GitHubNodeID(rawValue: "derived-e2e-user")!
+        let repositoryID = RepositoryID(rawValue: "derived-e2e-repository")!
         let pullRequestNodeID = GitHubNodeID(rawValue: "derived-e2e-pr")!
         let reviewNodeID = GitHubNodeID(rawValue: "derived-e2e-review")!
         let reviewThreadNodeID = GitHubNodeID(rawValue: "derived-e2e-review-thread")!
@@ -363,12 +370,16 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         }
 
         func seedAuthoritativeRuleSources() async throws {
-            let primaryRevision = now.ISO8601Format()
+            // Status-check rollups are revision-qualified by the immutable
+            // pull-request source revision. Use a valid revision rather than
+            // treating an ISO timestamp as that authority token.
+            let primaryRevision = String(repeating: "a", count: 64)
             try await GitHubNodeRepository(vault: vault).save(
                 Self.node(
                     id: pullRequestNodeID,
                     accountID: accountID,
                     organizationID: organizationID,
+                    repositoryID: repositoryID,
                     now: now,
                     kind: .pullRequest,
                     title: "Derived end-to-end pull request",
@@ -378,6 +389,45 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             )
             let hydrationStreamID = SyncStreamID(rawValue: "hydration-pull-requests-\(organizationID.rawValue)")!
             try await saveCoverage(.pullRequests, stream: hydrationStreamID.rawValue)
+            let statusCheckStreamID = PullRequestStatusCheckRefreshService.sourceStreamID(
+                organizationID: organizationID,
+                pullRequestNodeID: pullRequestNodeID,
+                sourceRevision: primaryRevision
+            )
+            let statusCheckCoverage = CoverageRecord(
+                accountID: accountID,
+                organizationID: organizationID,
+                repositoryID: repositoryID,
+                feature: .statusChecks,
+                streamID: statusCheckStreamID,
+                intervalStart: nil,
+                intervalEnd: nil,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision,
+                status: .complete,
+                lastSuccessfulAt: now,
+                failureDetail: nil
+            )
+            try await StatusCheckRepository(vault: vault).replace(
+                .init(
+                    mergeableState: "MERGEABLE",
+                    checks: [],
+                    sourceRevision: primaryRevision,
+                    observedAt: now
+                ),
+                authority: .init(
+                    scope: scope,
+                    pullRequestNodeID: pullRequestNodeID,
+                    pullRequestSourceRevision: primaryRevision,
+                    streamID: statusCheckStreamID,
+                    schedulingStreamID: SyncStreamID(
+                        rawValue: "pull-request-status-checks-\(organizationID.rawValue)"
+                    )!,
+                    observedAt: now
+                ),
+                coverage: statusCheckCoverage,
+                attemptedAt: now
+            )
             try await ActorRepository(vault: vault).save(
                 ActorSummary(
                     id: ActorID(rawValue: reviewerNodeID.rawValue)!,
@@ -437,7 +487,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 scope: scope,
                 streamID: mentionStreamID
             )
-            let timestamp = primaryRevision
+            let timestamp = now.ISO8601Format()
             let mentionSnapshot = RawAPISnapshot(
                 id: RawAPISnapshotID(rawValue: "derived-e2e-direct-mention")!,
                 accountID: accountID,
@@ -477,7 +527,11 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             )
 
             try await saveCoverage(.timelines, stream: "timelines-\(organizationID.rawValue)")
-            try await saveCoverage(.timelines, stream: "timeline:\(pullRequestNodeID.rawValue)")
+            try await saveCoverage(
+                .timelines,
+                stream: "timeline:\(pullRequestNodeID.rawValue)",
+                repositoryID: repositoryID
+            )
             try await TimelineRepository(vault: vault).save(
                 TimelineEventSummary(
                     id: GitHubEventID(rawValue: "derived-e2e-reviewer-response")!,
@@ -614,12 +668,16 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             }
         }
 
-        private func saveCoverage(_ feature: CoverageFeature, stream: String) async throws {
+        private func saveCoverage(
+            _ feature: CoverageFeature,
+            stream: String,
+            repositoryID: RepositoryID? = nil
+        ) async throws {
             try await CoverageRepository(vault: vault).save(
                 CoverageRecord(
                     accountID: accountID,
                     organizationID: organizationID,
-                    repositoryID: nil,
+                    repositoryID: repositoryID,
                     feature: feature,
                     streamID: SyncStreamID(rawValue: stream)!,
                     intervalStart: nil,
@@ -833,6 +891,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             id: GitHubNodeID,
             accountID: AccountID,
             organizationID: OrganizationID,
+            repositoryID: RepositoryID? = nil,
             now: Date,
             kind: GitHubContentKind,
             title: String,
@@ -843,7 +902,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 nodeID: id,
                 accountID: accountID,
                 organizationID: organizationID,
-                repositoryID: nil,
+                repositoryID: repositoryID,
                 kind: kind,
                 numericID: id.rawValue,
                 number: kind == .pullRequest ? 1 : nil,
@@ -857,6 +916,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 closedAt: nil,
                 mergedAt: nil,
                 sourceRevision: sourceRevision,
+                pullRequestHeadCommitSHA: kind == .pullRequest ? sourceRevision : nil,
                 observedAt: now,
                 accessibility: .accessible
             )

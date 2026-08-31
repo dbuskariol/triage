@@ -44,7 +44,7 @@ final class GitHubPullRequestStatusCheckClientTests: XCTestCase {
 
     private func payload(nodes: String, hasNextPage: Bool, cursor: String?) -> Data {
         Data("""
-        {"data":{"node":{"id":"PR_1","mergeable":"MERGEABLE","statusCheckRollup":{"contexts":{"nodes":[\(nodes)],"pageInfo":{"hasNextPage":\(hasNextPage),"endCursor":\(cursor.map { "\\\"\($0)\\\"" } ?? "null")}}}},"rateLimit":{"cost":1,"remaining":499,"resetAt":"2026-08-31T00:00:00Z"}}}
+        {"data":{"node":{"id":"PR_1","mergeable":"MERGEABLE","statusCheckRollup":{"contexts":{"nodes":[\(nodes)],"pageInfo":{"hasNextPage":\(hasNextPage),"endCursor":\(cursor.map { "\"\($0)\"" } ?? "null")}}}},"rateLimit":{"cost":1,"remaining":499,"resetAt":"2026-08-31T00:00:00Z"}}}
         """.utf8)
     }
 }

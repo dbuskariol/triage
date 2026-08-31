@@ -80,11 +80,32 @@ final class BusinessDayPolicyTests: XCTestCase {
         preferences.setStaleAfterBusinessDays(0)
         XCTAssertEqual(preferences.businessDayPolicy.staleAfterBusinessDays, 3)
 
-        for weekday in WorkingWeekday.defaultWorkweek.dropFirst() {
+        for weekday in WorkingWeekday.defaultWorkweek where weekday != .monday {
             preferences.setWorkingDay(weekday, enabled: false)
         }
         preferences.setWorkingDay(.monday, enabled: false)
         XCTAssertEqual(preferences.businessDayPolicy.workingDays, [.monday])
+    }
+
+    @MainActor
+    func testCannotRemoveAnyConfiguredLastWorkingDay() {
+        for remainingWeekday in WorkingWeekday.allCases {
+            let defaults = makeDefaults()
+            defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+            let preferences = AppPreferences(defaults: defaults)
+
+            for weekday in WorkingWeekday.allCases where weekday != remainingWeekday {
+                preferences.setWorkingDay(weekday, enabled: false)
+            }
+            XCTAssertEqual(preferences.businessDayPolicy.workingDays, [remainingWeekday])
+
+            preferences.setWorkingDay(remainingWeekday, enabled: false)
+            XCTAssertEqual(preferences.businessDayPolicy.workingDays, [remainingWeekday])
+            XCTAssertEqual(
+                AppPreferences(defaults: defaults).businessDayPolicy.workingDays,
+                [remainingWeekday]
+            )
+        }
     }
 
     func testProviderReadsPersistedPolicyForLiveRecomputation() {

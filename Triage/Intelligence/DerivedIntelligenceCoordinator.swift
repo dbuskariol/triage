@@ -66,6 +66,9 @@ struct DerivedIntelligenceItemInput: Sendable {
     let pullRequestStatusChecks: [PullRequestStatusCheck]
     let pullRequestMergeableState: String?
     let pullRequestStatusCheckMarkerEvidence: EvidenceReference?
+    /// Immutable PR head SHA that status-check rollups must match. This is
+    /// intentionally not the primary node's `updatedAt` revision.
+    let pullRequestStatusCheckRevision: String?
     let searchDocument: SearchDocument
     let hasChangedAIFingerprint: Bool
     let hasValidCachedAIAnalysis: Bool
@@ -80,6 +83,7 @@ struct DerivedIntelligenceItemInput: Sendable {
         pullRequestStatusChecks: [PullRequestStatusCheck] = [],
         pullRequestMergeableState: String? = nil,
         pullRequestStatusCheckMarkerEvidence: EvidenceReference? = nil,
+        pullRequestStatusCheckRevision: String? = nil,
         searchDocument: SearchDocument,
         hasChangedAIFingerprint: Bool = true,
         hasValidCachedAIAnalysis: Bool = false
@@ -93,6 +97,7 @@ struct DerivedIntelligenceItemInput: Sendable {
         self.pullRequestStatusChecks = pullRequestStatusChecks
         self.pullRequestMergeableState = pullRequestMergeableState
         self.pullRequestStatusCheckMarkerEvidence = pullRequestStatusCheckMarkerEvidence
+        self.pullRequestStatusCheckRevision = pullRequestStatusCheckRevision
         self.searchDocument = searchDocument
         self.hasChangedAIFingerprint = hasChangedAIFingerprint
         self.hasValidCachedAIAnalysis = hasValidCachedAIAnalysis
@@ -507,13 +512,10 @@ struct DerivedIntelligenceCoordinator: Sendable {
             }
             .map(\.occurredAt)
             .max()
-        let currentPrimaryRevision: String? = item.primaryEvidence.flatMap { evidence -> String? in
-            isCurrentEvidence(evidence, scope: scope) ? evidence.sourceRevision : nil
-        }
         let statusMarker: EvidenceReference? = item.pullRequestStatusCheckMarkerEvidence.flatMap { evidence -> EvidenceReference? in
             guard isCurrentEvidence(evidence, scope: scope),
                   evidence.nodeID == item.workItem.primaryNodeID,
-                  evidence.sourceRevision == currentPrimaryRevision
+                  evidence.sourceRevision == item.pullRequestStatusCheckRevision
             else { return nil }
             return evidence
         }

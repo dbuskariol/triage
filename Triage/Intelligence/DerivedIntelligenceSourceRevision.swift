@@ -216,7 +216,7 @@ enum DerivedIntelligenceSourceRevision {
                   AND status_check_rollup_markers.account_id = ? AND status_check_rollup_markers.organization_id = ?
                   AND status_check_rollup_markers.credential_revision = ?
                   AND status_check_rollup_markers.capability_revision = ?
-                  AND status_check_rollup_markers.source_revision = github_nodes.source_revision
+                  AND status_check_rollup_markers.source_revision = github_nodes.pull_request_head_commit_sha
                 ORDER BY work_items.id
                 """,
             arguments: [
@@ -249,7 +249,7 @@ enum DerivedIntelligenceSourceRevision {
                   AND github_nodes.kind = 'pullRequest'
                   AND status_checks.account_id = ? AND status_checks.organization_id = ?
                   AND status_checks.credential_revision = ? AND status_checks.capability_revision = ?
-                  AND status_checks.source_revision = github_nodes.source_revision
+                  AND status_checks.source_revision = github_nodes.pull_request_head_commit_sha
                 ORDER BY work_items.id, status_checks.context
                 """,
             arguments: [

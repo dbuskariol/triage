@@ -80,6 +80,12 @@ actor WorkRelationRepository {
         accountID: AccountID,
         subjectNodeID: GitHubNodeID,
         authority: RelationReplacementAuthority,
+        /// A complete raw response can independently reconcile more than one
+        /// relation family for the same subject.  When supplied, retain the
+        /// exact raw authority but limit removal to this family's kinds.
+        /// This lets an empty family remove its own stale evidence without
+        /// erasing another complete family parsed from that same response.
+        replacingKinds: Set<WorkRelationKind>? = nil,
         in database: Database
     ) throws {
         try Task.checkCancellation()
@@ -90,6 +96,13 @@ actor WorkRelationRepository {
         try validateCurrentScope(authority.scope, in: database)
         try validateSubjectNodeScope(subjectNodeID, scope: authority.scope, in: database)
         try validate(relations, subjectNodeID: subjectNodeID, authority: authority, in: database)
+        if let replacingKinds {
+            guard !replacingKinds.isEmpty,
+                  Set(relations.map(\.kind)).isSubset(of: replacingKinds)
+            else {
+                throw WorkRelationRepositoryError.invalidSourceAuthority
+            }
+        }
         try validateCoverage(authority, in: database)
         try validateRawSnapshot(
             authority,
@@ -99,6 +112,21 @@ actor WorkRelationRepository {
         )
 
         if authority.mode == .completeReconciliation {
+            let relationKindClause: String
+            let relationKindArguments: [DatabaseValueConvertible?]
+            if let replacingKinds {
+                let kinds = replacingKinds.map(\.rawValue).sorted()
+                relationKindClause = """
+                      AND relation_id IN (
+                          SELECT id FROM relations
+                          WHERE kind IN (\(kinds.map { _ in "?" }.joined(separator: ", ")))
+                      )
+                    """
+                relationKindArguments = kinds
+            } else {
+                relationKindClause = ""
+                relationKindArguments = []
+            }
             try database.execute(
                 sql: """
                     DELETE FROM relation_evidence
@@ -114,8 +142,9 @@ actor WorkRelationRepository {
                       AND authority_credential_revision = ?
                       AND authority_capability_revision = ?
                       AND source_revision = ?
+                    \(relationKindClause)
                 """,
-                arguments: [
+                arguments: StatementArguments([
                     accountID.rawValue, subjectNodeID.rawValue, authority.source.rawValue,
                     authority.locator.kind, authority.locator.value,
                     authority.scope.accountID.rawValue, authority.scope.organizationID.rawValue,
@@ -123,7 +152,7 @@ actor WorkRelationRepository {
                     authority.scope.credentialRevision.rawValue,
                     authority.scope.capabilityRevision.rawValue,
                     authority.sourceRevision
-                ]
+                ] + relationKindArguments)
             )
         }
 

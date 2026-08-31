@@ -111,6 +111,10 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
     // deallocation is an XPC invalidation fence rather than a safe way to
     // retain that engine.
     private var sessions: [SessionScope: any TriageCopilotHelping] = [:]
+    // An authenticate call can suspend while its connection is being removed.
+    // This generation fence prevents the older completion from retaining a
+    // session after disconnect has revoked that scope.
+    private var authenticationGenerations: [SessionScope: UInt64] = [:]
 
     init(makeClient: @escaping @Sendable () -> any TriageCopilotHelping = {
         CopilotHelperClient(
@@ -126,32 +130,51 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
         credential: SecretValue
     ) async throws -> CopilotRuntimeAuthenticationResult {
         let scope = SessionScope(accountID: accountID, organizationID: organizationID)
+        let generation = beginAuthentication(for: scope)
         let helper = sessions[scope] ?? makeClient()
-        let response = try await helper.authenticate(
-            CopilotAuthenticateRequest(
-                accountID: accountID,
-                organizationID: organizationID,
-                credential: credential
+        do {
+            let response = try await helper.authenticate(
+                CopilotAuthenticateRequest(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    credential: credential
+                )
             )
-        )
-        guard response.authentication.isAuthenticated else {
+            guard isCurrent(generation, for: scope) else {
+                try? await helper.shutdown(
+                    CopilotShutdownRequest(accountID: accountID, organizationID: organizationID)
+                )
+                throw CancellationError()
+            }
+            guard response.authentication.isAuthenticated else {
             // Do not retain a transport whose helper explicitly rejected the
             // credential; that client must not keep a stale session alive.
-            sessions.removeValue(forKey: scope)
+                sessions.removeValue(forKey: scope)
+                return .init(
+                    isAuthenticated: false,
+                    host: response.authentication.host,
+                    login: response.authentication.login,
+                    authenticationType: response.authentication.authenticationType
+                )
+            }
+            sessions[scope] = helper
             return .init(
-                isAuthenticated: false,
+                isAuthenticated: response.authentication.isAuthenticated,
                 host: response.authentication.host,
                 login: response.authentication.login,
                 authenticationType: response.authentication.authenticationType
             )
+        } catch {
+            guard isCurrent(generation, for: scope) else {
+                if !(error is CancellationError) {
+                    try? await helper.shutdown(
+                        CopilotShutdownRequest(accountID: accountID, organizationID: organizationID)
+                    )
+                }
+                throw CancellationError()
+            }
+            throw error
         }
-        sessions[scope] = helper
-        return .init(
-            isAuthenticated: response.authentication.isAuthenticated,
-            host: response.authentication.host,
-            login: response.authentication.login,
-            authenticationType: response.authentication.authenticationType
-        )
     }
 
     func authenticateWithDeviceLogin(accountID _: AccountID, organizationID _: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
@@ -172,8 +195,11 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
         // namespace. Match only retained sessions; no pathname is passed to
         // XPC or the helper.
         let accountValue = profileDirectory.lastPathComponent
-        let doomed = sessions.keys.filter { $0.accountID.rawValue == accountValue }
+        let doomed = Set(sessions.keys)
+            .union(authenticationGenerations.keys)
+            .filter { $0.accountID.rawValue == accountValue }
         for scope in doomed {
+            invalidateAuthentication(for: scope)
             guard let helper = sessions.removeValue(forKey: scope) else { continue }
             try? await helper.shutdown(
                 CopilotShutdownRequest(
@@ -182,6 +208,20 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
                 )
             )
         }
+    }
+
+    private func beginAuthentication(for scope: SessionScope) -> UInt64 {
+        let generation = (authenticationGenerations[scope] ?? 0) &+ 1
+        authenticationGenerations[scope] = generation
+        return generation
+    }
+
+    private func invalidateAuthentication(for scope: SessionScope) {
+        authenticationGenerations[scope] = (authenticationGenerations[scope] ?? 0) &+ 1
+    }
+
+    private func isCurrent(_ generation: UInt64, for scope: SessionScope) -> Bool {
+        authenticationGenerations[scope] == generation
     }
 }
 
@@ -222,6 +262,7 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
     private let profileRoot: URL
     private var states: [AccountID: CopilotAccountAuthorizationState] = [:]
     private var modelIDs: [String: Set<String>] = [:]
+    private var authenticationGenerations: [AccountID: UInt64] = [:]
 
     init(
         applicationSupportDirectory: URL,
@@ -315,6 +356,7 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         hasOrganizationConsent: Bool,
         isEntitled: Bool
     ) async throws {
+        let generation = beginAuthentication(for: account.id)
         // A newly presented credential, organization consent, or entitlement
         // result invalidates the in-memory model authority before it can be
         // used by another request. The encrypted database cache remains
@@ -332,9 +374,11 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         do {
             _ = try await runtime.runtimeForUse()
         } catch {
+            guard isCurrent(generation, for: account.id) else { throw CancellationError() }
             update(accountID: account.id, authentication: .signedOut, entitlement: isEntitled, consent: hasOrganizationConsent)
             throw CopilotAuthenticationError.runtimeUnavailable
         }
+        guard isCurrent(generation, for: account.id) else { throw CancellationError() }
         update(accountID: account.id, authentication: .verifyingIdentity, entitlement: isEntitled, consent: hasOrganizationConsent)
         do {
         switch account.authenticationKind {
@@ -346,6 +390,9 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
             do {
                 result = try await withEphemeralCredential(for: account) { credential in
                     let githubUser = try await self.loadAuthenticatedUser(credential)
+                    guard await self.isCurrent(generation, for: account.id) else {
+                        throw CancellationError()
+                    }
                     guard githubUser.id == account.githubUserID,
                           githubUser.login.caseInsensitiveCompare(account.login) == .orderedSame
                     else {
@@ -359,15 +406,20 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
                         organizationID: organizationID,
                         credential: credential
                     )
+                    guard await self.isCurrent(generation, for: account.id) else {
+                        throw CancellationError()
+                    }
                     return (githubUser, authenticated)
                 }
             } catch let error as CopilotAuthenticationError {
+                guard isCurrent(generation, for: account.id) else { throw CancellationError() }
                 if case let .identityMismatch(expected, actual) = error {
                     update(accountID: account.id, authentication: .identityMismatch(expected: expected, actual: actual), entitlement: isEntitled, consent: hasOrganizationConsent)
                 }
                 throw error
             }
             guard let result else { throw CopilotAuthenticationError.credentialUnavailable }
+            guard isCurrent(generation, for: account.id) else { throw CancellationError() }
             let (_, authenticated) = result
             guard authenticated.isAuthenticated,
                   authenticated.host.caseInsensitiveCompare("github.com") == .orderedSame,
@@ -396,8 +448,15 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
             accountID: account.id,
             credentialID: nil
         )
+        guard isCurrent(generation, for: account.id) else { throw CancellationError() }
         update(accountID: account.id, authentication: .authenticated, entitlement: isEntitled, consent: hasOrganizationConsent)
         } catch {
+            guard isCurrent(generation, for: account.id) else { throw error }
+            if let error = error as? CopilotXPCError,
+               error == .runtimeUnavailable || error == .runtimeCorrupt {
+                update(accountID: account.id, authentication: .signedOut, entitlement: isEntitled, consent: hasOrganizationConsent)
+                throw CopilotAuthenticationError.runtimeUnavailable
+            }
             if case .verifyingIdentity = states[account.id]?.authentication {
                 update(accountID: account.id, authentication: .failed("Copilot could not verify this account. Authenticate again after checking your GitHub connection."), entitlement: isEntitled, consent: hasOrganizationConsent)
             }
@@ -406,8 +465,11 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
     }
 
     func disconnect(accountID: AccountID) async {
+        let generation = invalidateAuthentication(for: accountID)
         await authenticator.removeSession(profileDirectory: profileDirectory(for: accountID))
+        guard isCurrent(generation, for: accountID) else { return }
         try? await secretStore.remove(kind: .copilotCredential, accountID: accountID, credentialID: nil)
+        guard isCurrent(generation, for: accountID) else { return }
         invalidateModelIDs(for: accountID)
         states[accountID] = nil
     }
@@ -459,9 +521,11 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
     /// still discards the retained client, so the next use must authenticate
     /// afresh rather than retaining a stale authority.
     private func disconnectAllSessions() async {
-        let accountIDs = Set(states.keys)
+        let accountIDs = Set(states.keys).union(authenticationGenerations.keys)
         for accountID in accountIDs {
+            let generation = invalidateAuthentication(for: accountID)
             await authenticator.removeSession(profileDirectory: profileDirectory(for: accountID))
+            guard isCurrent(generation, for: accountID) else { continue }
             let state = states[accountID] ?? .unavailable
             states[accountID] = .init(
                 runtime: state.runtime,
@@ -470,6 +534,22 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
                 hasOrganizationConsent: state.hasOrganizationConsent
             )
         }
+    }
+
+    private func beginAuthentication(for accountID: AccountID) -> UInt64 {
+        let generation = (authenticationGenerations[accountID] ?? 0) &+ 1
+        authenticationGenerations[accountID] = generation
+        return generation
+    }
+
+    private func invalidateAuthentication(for accountID: AccountID) -> UInt64 {
+        let generation = (authenticationGenerations[accountID] ?? 0) &+ 1
+        authenticationGenerations[accountID] = generation
+        return generation
+    }
+
+    private func isCurrent(_ generation: UInt64, for accountID: AccountID) -> Bool {
+        authenticationGenerations[accountID] == generation
     }
 
     private func runtimeStatus() async -> CopilotRuntimeStatus {

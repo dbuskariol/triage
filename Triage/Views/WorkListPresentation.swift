@@ -330,6 +330,11 @@ struct WorkListSelection: Equatable {
     private(set) var primaryWorkItemID: WorkItemID?
     private var accountID: AccountID?
     private var organizationID: OrganizationID?
+    /// A context menu updates the app-model's primary item after preserving a
+    /// native multi-selection. Consume this one-shot marker when that same
+    /// update returns through the externally-observed primary binding; every
+    /// other external selection (including Back/Forward) is single-row.
+    private var pendingContextualPrimaryWorkItemID: WorkItemID?
 
     /// Applies the selection emitted by SwiftUI's native `List`. Additive
     /// selection retains the current primary detail item while it remains
@@ -339,6 +344,7 @@ struct WorkListSelection: Equatable {
         _ workItemIDs: Set<WorkItemID>,
         orderedWorkItemIDs: [WorkItemID]
     ) -> WorkItemID? {
+        pendingContextualPrimaryWorkItemID = nil
         let newlySelectedIDs = workItemIDs.subtracting(selectedWorkItemIDs)
         selectedWorkItemIDs = workItemIDs
 
@@ -355,17 +361,28 @@ struct WorkListSelection: Equatable {
     }
 
     /// Mirrors an externally selected primary item, such as selection history
-    /// navigation. An existing multi-selection remains intact when it already
-    /// includes that item; otherwise the external single selection becomes the
-    /// native list selection.
+    /// navigation. History is a single-target operation, so it replaces any
+    /// native multi-selection. The sole exception is the immediately following
+    /// app-model update made by `selectContextualWorkItem`, which preserves the
+    /// row set macOS keeps for a contextual action on an already-selected row.
     mutating func synchronizePrimarySelection(_ workItemID: WorkItemID?) {
+        let preservesContextualSelection: Bool
+        if let workItemID {
+            preservesContextualSelection = workItemID == pendingContextualPrimaryWorkItemID
+                && selectedWorkItemIDs.contains(workItemID)
+        } else {
+            preservesContextualSelection = false
+        }
+        pendingContextualPrimaryWorkItemID = nil
         primaryWorkItemID = workItemID
         guard let workItemID else {
             selectedWorkItemIDs = []
             return
         }
-        guard !selectedWorkItemIDs.contains(workItemID) else { return }
-        selectedWorkItemIDs = [workItemID]
+        guard preservesContextualSelection else {
+            selectedWorkItemIDs = [workItemID]
+            return
+        }
     }
 
     /// Restores the persisted primary selection only in its exact workspace.
@@ -379,6 +396,7 @@ struct WorkListSelection: Equatable {
             || organizationID != request.organizationID
         accountID = request.accountID
         organizationID = request.organizationID
+        pendingContextualPrimaryWorkItemID = nil
 
         if didChangeWorkspace {
             selectedWorkItemIDs = []
@@ -407,6 +425,7 @@ struct WorkListSelection: Equatable {
             selectedWorkItemIDs = [workItemID]
         }
         primaryWorkItemID = workItemID
+        pendingContextualPrimaryWorkItemID = workItemID
     }
 
     private func firstID(

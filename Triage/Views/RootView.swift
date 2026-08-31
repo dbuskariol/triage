@@ -276,7 +276,7 @@ struct RootView: View {
     }
 
     private var validWorkItemIDs: Set<WorkItemID> {
-        Set(appModel.workItems.map(\.id))
+        appModel.selectableWorkItemIDs
     }
 
     private var canNavigateSelectionBack: Bool {
@@ -663,5 +663,10 @@ struct PersonalAccessTokenSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+        .accessibilityIdentifier(
+            account == nil
+                ? "personal-access-token-entry-sheet"
+                : "personal-access-token-replacement-sheet"
+        )
     }
 }

@@ -161,6 +161,22 @@ final class OnboardingPresentationStateTests: XCTestCase {
         )
     }
 
+    func testOnlyClassicPATAccountsOfferCredentialReplacement() {
+        XCTAssertEqual(
+            PersonalAccessTokenReplacementPresentation.action(for: .classicPersonalAccessToken),
+            .replaceClassicToken
+        )
+        XCTAssertEqual(
+            PersonalAccessTokenReplacementPresentation.action(for: .fineGrainedPersonalAccessToken),
+            .fineGrainedReplacementUnavailable
+        )
+        XCTAssertNil(PersonalAccessTokenReplacementPresentation.action(for: .oauth))
+        XCTAssertEqual(
+            PersonalAccessTokenReplacementPresentation.fineGrainedReplacementUnavailable.unavailableDetail,
+            "Fine-grained tokens cannot be replaced in place. Connect the new token as a separate account and enter the resource-owner organization selected when you created it."
+        )
+    }
+
     func testSynchronizationRoutePrecedesWorkflowExplanation() {
         let state = makeState(isSynchronizing: true)
 

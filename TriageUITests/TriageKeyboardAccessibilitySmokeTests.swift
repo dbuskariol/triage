@@ -25,6 +25,51 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["Use a Personal Access Token"].exists)
     }
 
+    func testPATEntrySheetHidesFixtureOAuthErrorAndExposesLayout() throws {
+        launchFixture(scenario: "personal-access-token")
+
+        let oauth = app.buttons["Continue with GitHub"]
+        XCTAssertTrue(oauth.waitForExistence(timeout: 10))
+        oauth.click()
+        XCTAssertTrue(
+            element(named: "GitHub sign-in is unavailable in the local UI fixture.").waitForExistence(timeout: 5)
+        )
+
+        app.buttons["Use a Personal Access Token"].click()
+        let sheet = element(named: "personal-access-token-entry-sheet")
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["GitHub personal access token"].exists)
+        XCTAssertTrue(
+            element(named: "Fine-grained tokens are preferred. Classic tokens should include `repo` and `read:org`.").exists
+        )
+        XCTAssertFalse(
+            element(named: "GitHub sign-in is unavailable in the local UI fixture.").exists,
+            "A parent OAuth failure must not be repeated in the independent PAT sheet."
+        )
+    }
+
+    func testClassicPATReplacementFixtureExposesReplacementSheet() throws {
+        launchFixture(scenario: "personal-access-token-replacement")
+        try requireMainWindow()
+        app.typeKey(",", modifierFlags: .command)
+
+        let settingsWindow = app.windows["Settings"]
+        XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3))
+        let accounts = settingsWindow.descendants(matching: .any)["Accounts"]
+        XCTAssertTrue(accounts.waitForExistence(timeout: 3))
+        accounts.click()
+        let replace = settingsWindow.buttons["Replace Token"]
+        XCTAssertTrue(replace.waitForExistence(timeout: 5))
+        replace.click()
+
+        let sheet = element(named: "personal-access-token-replacement-sheet")
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["GitHub personal access token"].exists)
+        XCTAssertTrue(
+            element(named: "Triage validates that the new token belongs to this GitHub account before replacing the Keychain credential.").exists
+        )
+    }
+
     func testSeededWorkspaceSupportsKeyboardSearchInspectorAndAccessibility() throws {
         try requireMainWindow()
         let sidebar = element(named: "Triage sidebar")

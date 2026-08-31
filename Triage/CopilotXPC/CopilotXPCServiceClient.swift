@@ -43,8 +43,8 @@ actor CopilotXPCServiceClient: CopilotXPCFrameService {
           return
         }
         helper.exchange(frame: frame) { responseFrame, error in
-          if error != nil {
-            reply.resume(throwing: CopilotXPCError.helperUnavailable)
+          if let error {
+            reply.resume(throwing: Self.mapServiceError(error))
             return
           }
           guard let responseFrame else {
@@ -69,6 +69,27 @@ actor CopilotXPCServiceClient: CopilotXPCFrameService {
 
   func invalidate() async {
     connection.invalidate()
+  }
+
+  /// XPC failures cross the process boundary as NSError values. Keep this
+  /// mapping deliberately closed: only stable, path-free service codes that
+  /// callers need to present or fence have a public identity; everything else
+  /// is helper-unavailable. Never forward an NSError description from the
+  /// privileged service.
+  nonisolated static func mapServiceError(_ error: Error) -> CopilotXPCError {
+    let error = error as NSError
+    guard error.domain == "com.triage.mac.copilot-xpc" else {
+      return .helperUnavailable
+    }
+    switch error.code {
+    case 2: return .malformedFrame
+    case 10: return .operationCancelled
+    case 11: return .operationTimedOut
+    case 12: return .invalidAccountID
+    case 14: return .runtimeUnavailable
+    case 15: return .runtimeCorrupt
+    default: return .helperUnavailable
+    }
   }
 }
 

@@ -1,3 +1,4 @@
+import Darwin
 import GRDB
 import XCTest
 @testable import Triage
@@ -1471,7 +1472,28 @@ final class AccountVaultTests: XCTestCase {
         key: VaultKey,
         externalDirectory: URL
     ) async throws {
-        let registry = try VaultRegistry(rootDirectory: root)
+        let registry: VaultRegistry
+        do {
+            registry = try VaultRegistry(rootDirectory: root)
+        } catch let error as VaultError {
+            // A configured root that is itself a symlink is now rejected at
+            // registry construction. Descendant symlinks are rejected later,
+            // when the registry opens the account namespace.
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+            XCTAssertThrowsError(
+                try AccountVault(accountID: accountID, vaultKey: key, rootDirectory: root)
+            ) { error in
+                XCTAssertEqual(error as? VaultError, .unsafeAccountIDPath)
+            }
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    at: externalDirectory,
+                    includingPropertiesForKeys: nil
+                ),
+                []
+            )
+            return
+        }
 
         do {
             _ = try await registry.open(accountID: accountID, vaultKey: key)
@@ -1611,28 +1633,95 @@ final class AccountVaultTests: XCTestCase {
                 components: components,
                 create: false
             ) { descriptor in
-                // Both backup-candidate and post-install verification must keep
-                // reading the opened account directory after its pathname has
-                // been replaced by an attacker-controlled symlink.
-                try FileManager.default.moveItem(at: targetDirectory, to: heldDirectory)
-                try FileManager.default.createSymbolicLink(at: targetDirectory, withDestinationURL: external)
+                try NoFollowFilesystem.withRegularFileIfPresent(
+                    relativeTo: descriptor,
+                    name: databaseName
+                ) { databaseFile in
+                    // Both backup-candidate and post-install verification must
+                    // keep reading the opened database after its pathname has
+                    // been replaced by an attacker-controlled symlink.
+                    try FileManager.default.moveItem(at: targetDirectory, to: heldDirectory)
+                    try FileManager.default.createSymbolicLink(at: targetDirectory, withDestinationURL: external)
 
-                let pool = try DatabasePool(
-                    path: "/dev/fd/\(descriptor)/\(databaseName)",
-                    configuration: AccountVault.configuration(vaultKey: key, readonly: true)
-                )
-                defer { try? pool.close() }
-                try AccountVault.verify(pool)
-                let value = try pool.read { database in
-                    try Int.fetchOne(database, sql: "SELECT value FROM held_descriptor_values")
+                    let pool = try DatabasePool(
+                        path: "/dev/fd/\(databaseFile)",
+                        configuration: AccountVault.configuration(vaultKey: key, readonly: true)
+                    )
+                    defer { try? pool.close() }
+                    try AccountVault.verify(pool)
+                    let value = try pool.read { database in
+                        try Int.fetchOne(database, sql: "SELECT value FROM held_descriptor_values")
+                    }
+                    XCTAssertEqual(value, 1)
                 }
-                XCTAssertEqual(value, 1)
             }
 
             XCTAssertFalse(FileManager.default.fileExists(
                 atPath: external.appendingPathComponent(databaseName).path
             ))
         }
+    }
+
+    func testRegularFileReadHelpersRejectFIFOWithoutBlocking() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fifoName = "candidate.sqlite"
+        XCTAssertEqual(
+            Darwin.mkfifo(directory.appendingPathComponent(fifoName).path, 0o600),
+            0
+        )
+
+        XCTAssertThrowsError(
+            try NoFollowFilesystem.regularFileExists(
+                beneath: directory,
+                directoryComponents: [],
+                name: fifoName
+            )
+        )
+        XCTAssertThrowsError(
+            try NoFollowFilesystem.readRegularFileIfPresent(
+                beneath: directory,
+                directoryComponents: [],
+                name: fifoName,
+                maximumBytes: 1_024
+            )
+        )
+
+        try NoFollowFilesystem.withDirectory(
+            beneath: directory,
+            components: [],
+            create: false
+        ) { descriptor in
+            XCTAssertThrowsError(
+                try NoFollowFilesystem.withRegularFileIfPresent(
+                    relativeTo: descriptor,
+                    name: fifoName,
+                    { _ in () }
+                )
+            )
+            XCTAssertThrowsError(
+                try NoFollowFilesystem.setRegularFilePermissions(
+                    relativeTo: descriptor,
+                    name: fifoName
+                )
+            )
+            XCTAssertThrowsError(
+                try NoFollowFilesystem.copyRegularFileWithinDirectoryAtomically(
+                    descriptor,
+                    sourceName: fifoName,
+                    destinationName: "within.sqlite"
+                )
+            )
+        }
+        XCTAssertThrowsError(
+            try NoFollowFilesystem.copyRegularFileAtomically(
+                beneath: directory,
+                sourceDirectoryComponents: [],
+                sourceName: fifoName,
+                destinationDirectoryComponents: [],
+                destinationName: "copied.sqlite"
+            )
+        )
     }
 
     private func makePre033LegacyRoleReplayVault(
