@@ -196,7 +196,12 @@ struct TriageApp: App {
                 .environmentObject(notificationSettings)
                 .environmentObject(notificationAuthorization)
                 .environmentObject(softwareUpdates)
-                .frame(width: 720, height: 620)
+                .frame(
+                    minWidth: SettingsSidebarLayout.minimumWindowWidth,
+                    idealWidth: SettingsSidebarLayout.defaultWindowWidth,
+                    minHeight: 620,
+                    idealHeight: 680
+                )
         }
     }
 

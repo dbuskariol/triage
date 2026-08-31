@@ -3,6 +3,17 @@ import XCTest
 
 @MainActor
 final class AppNavigationModelTests: XCTestCase {
+    func testSettingsSidebarUsesReadableNativeColumnWidths() {
+        XCTAssertEqual(SettingsSidebarLayout.contentAlignmentInset, 13)
+        XCTAssertEqual(SettingsSidebarLayout.minimumWidth, 240)
+        XCTAssertEqual(SettingsSidebarLayout.idealWidth, 260)
+        XCTAssertEqual(SettingsSidebarLayout.maximumWidth, 320)
+        XCTAssertGreaterThan(SettingsSidebarLayout.idealWidth, SettingsSidebarLayout.minimumWidth)
+        XCTAssertGreaterThan(SettingsSidebarLayout.maximumWidth, SettingsSidebarLayout.idealWidth)
+        XCTAssertGreaterThanOrEqual(SettingsSidebarLayout.minimumWindowWidth, 800)
+        XCTAssertGreaterThan(SettingsSidebarLayout.defaultWindowWidth, SettingsSidebarLayout.minimumWindowWidth)
+    }
+
     func testRestoresPersistedSectionAndSettingsCategory() {
         let suiteName = "AppNavigationModelTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
