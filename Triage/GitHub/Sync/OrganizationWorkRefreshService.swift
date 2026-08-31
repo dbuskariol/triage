@@ -1088,6 +1088,8 @@ actor OrganizationWorkRefreshService {
                 .requiresSSO
             } else if result.hasBlockedKnownCandidates {
                 .unavailable
+            } else if result.hasUncorroboratedRequestedReviewers {
+                .partial
             } else if result.hasRemainingCandidates {
                 .partial
             } else {
@@ -1099,6 +1101,8 @@ actor OrganizationWorkRefreshService {
                 "GitHub returned partial pull request review results due to SSO."
             } else if result.hasBlockedKnownCandidates {
                 "Some known pull requests are no longer accessible to the selected account. Restore repository access or refresh the repository inventory."
+            } else if result.hasUncorroboratedRequestedReviewers {
+                "Requested-reviewer sources did not corroborate the current pull request revision. Existing review data was retained."
             } else if result.hasRemainingCandidates {
                 "Additional pull request review candidates remain for the next refresh."
             } else {

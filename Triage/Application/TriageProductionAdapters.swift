@@ -27,22 +27,27 @@ struct TriageProductionComposition: Sendable {
     ) -> TriageApplicationDependencies {
         let workspaceCoordinator = TriageWorkspaceCoordinator(
             vaultRegistry: vaultRegistry,
-            secretStore: secretStore
+            secretStore: secretStore,
+            backgroundScheduler: NSBackgroundOrganizationRefreshScheduler()
         )
         let databaseObserver = DatabaseWorkspaceObserver(
             vaultRegistry: vaultRegistry,
             secretStore: secretStore
         )
         let workspaceObserver: any WorkspaceObserving
+        let workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling
         if let notificationSettings {
-            workspaceObserver = NotificationDeliveringWorkspaceObserver(
+            let notificationObserver = NotificationDeliveringWorkspaceObserver(
                 source: databaseObserver,
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
                 settings: notificationSettings
             )
+            workspaceObserver = notificationObserver
+            workspaceObservationLifecycle = notificationObserver
         } else {
             workspaceObserver = databaseObserver
+            workspaceObservationLifecycle = NoopWorkspaceObservationLifecycle()
         }
         return TriageApplicationDependencies(
             accountSession: TriageAccountSessionService(
@@ -54,6 +59,7 @@ struct TriageProductionComposition: Sendable {
             workspaceCoordinator: workspaceCoordinator,
             refreshLifecycle: workspaceCoordinator,
             workspaceObserver: workspaceObserver,
+            workspaceObservationLifecycle: workspaceObservationLifecycle,
             workspaceMutator: TriageWorkspaceMutator(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore
@@ -187,6 +193,7 @@ private actor OrganizationRefreshLifecycleInputs {
 actor TriageWorkspaceCoordinator: WorkspaceCoordinating, OrganizationRefreshLifecycleHandling {
     private let vaultRegistry: VaultRegistry
     private let secretStore: KeychainSecretStore
+    private let backgroundScheduler: any OrganizationRefreshBackgroundScheduling
     private var runtimes: [AccountID: AccountOrganizationRefreshRuntime] = [:]
     private var isShutDown = false
     private let lifecycleInputs = OrganizationRefreshLifecycleInputs()
@@ -202,12 +209,18 @@ actor TriageWorkspaceCoordinator: WorkspaceCoordinating, OrganizationRefreshLife
         resolveRuntime: { [weak self] accountID in
             guard let self else { throw CancellationError() }
             return try await self.runtime(for: accountID)
-        }
+        },
+        backgroundScheduler: backgroundScheduler
     )
 
-    init(vaultRegistry: VaultRegistry, secretStore: KeychainSecretStore) {
+    init(
+        vaultRegistry: VaultRegistry,
+        secretStore: KeychainSecretStore,
+        backgroundScheduler: any OrganizationRefreshBackgroundScheduling
+    ) {
         self.vaultRegistry = vaultRegistry
         self.secretStore = secretStore
+        self.backgroundScheduler = backgroundScheduler
     }
 
     func select(_ scope: SynchronizationScope) async throws -> AccountOrganizationCoordinatorState? {

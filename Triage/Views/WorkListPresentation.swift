@@ -34,6 +34,33 @@ extension WorkspaceListFilter {
 /// SwiftUI hierarchy so accessibility semantics and stale-search protection
 /// are deterministic and testable.
 enum WorkListPresentation {
+    /// Short, model-backed row metadata. The list deliberately omits a field
+    /// rather than inventing a placeholder when the cached item has no value.
+    static func visibleMetadata(for item: WorkItem, at now: Date) -> [String] {
+        var components = [String]()
+
+        if let responsibility = responsibilityTitle(for: item) {
+            components.append(responsibility)
+        }
+        if let author = item.members.first(where: { $0.role == .primary })?.content.author {
+            components.append("by \(author.displayName ?? author.login)")
+        }
+        if item.workflow.priority != .normal {
+            components.append("\(priorityTitle(item.workflow.priority)) priority")
+        }
+        if item.workflow.status == .waiting {
+            components.append("Waiting")
+        }
+        if item.workflow.isSnoozed(at: now), let snoozedUntil = item.workflow.snoozedUntil {
+            components.append("Snoozed until \(snoozedUntil.formatted(date: .abbreviated, time: .shortened))")
+        }
+        if item.freshness.status != .fresh {
+            components.append(freshnessTitle(item.freshness.status))
+        }
+        components.append("Activity \(item.lastRelevantActivityAt.formatted(date: .abbreviated, time: .omitted))")
+        return components
+    }
+
     static func accessibilityLabel(for item: WorkItem, at now: Date) -> String {
         var components = ["\(sourceTitle(item.sourceKind)), \(item.title)"]
 
@@ -91,6 +118,13 @@ enum WorkListPresentation {
         !isCancelled && request == currentRequest
     }
 
+    static func shouldUseSearchResults(
+        producedFor request: WorkListSearchRequest?,
+        currentRequest: WorkListSearchRequest
+    ) -> Bool {
+        request == currentRequest
+    }
+
     private static func sourceTitle(_ kind: GitHubContentKind) -> String {
         switch kind {
         case .issue: "Issue"
@@ -106,6 +140,22 @@ enum WorkListPresentation {
         case .normal: "Normal"
         case .high: "High"
         }
+    }
+
+    private static func responsibilityTitle(for item: WorkItem) -> String? {
+        if item.relations.contains(where: { $0.kind == .assigned }) {
+            return "Assigned to you"
+        }
+        if item.relations.contains(where: { $0.kind == .authored }) {
+            return "Authored by you"
+        }
+        if item.relations.contains(where: { $0.kind == .reviewRequestedDirectly }) {
+            return "Your review requested"
+        }
+        if item.relations.contains(where: { $0.kind == .reviewRequestedFromTeam }) {
+            return "Team review requested"
+        }
+        return nil
     }
 
     private static func freshnessTitle(_ status: FreshnessStatus) -> String {

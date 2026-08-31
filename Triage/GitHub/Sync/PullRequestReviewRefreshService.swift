@@ -1,6 +1,12 @@
 import Foundation
 import GRDB
 
+enum RequestedReviewerCorroboration: Sendable, Equatable {
+    case agreement
+    case disagreement
+    case sourceUnavailable
+}
+
 struct PullRequestReviewRefreshResult: Sendable {
     let refreshedPullRequestNodeIDs: [GitHubNodeID]
     let hasRemainingCandidates: Bool
@@ -10,6 +16,23 @@ struct PullRequestReviewRefreshResult: Sendable {
     /// The organization coordinator must not treat an otherwise exhausted batch
     /// containing these classifications as complete coverage.
     let failureClassifications: [ReviewCandidateFailureClassification]
+    let hasUncorroboratedRequestedReviewers: Bool
+
+    init(
+        refreshedPullRequestNodeIDs: [GitHubNodeID],
+        hasRemainingCandidates: Bool,
+        hasBlockedKnownCandidates: Bool,
+        ssoHeaders: [GitHubSSOHeader],
+        failureClassifications: [ReviewCandidateFailureClassification],
+        hasUncorroboratedRequestedReviewers: Bool = false
+    ) {
+        self.refreshedPullRequestNodeIDs = refreshedPullRequestNodeIDs
+        self.hasRemainingCandidates = hasRemainingCandidates
+        self.hasBlockedKnownCandidates = hasBlockedKnownCandidates
+        self.ssoHeaders = ssoHeaders
+        self.failureClassifications = failureClassifications
+        self.hasUncorroboratedRequestedReviewers = hasUncorroboratedRequestedReviewers
+    }
 
     var ssoHeader: GitHubSSOHeader? {
         GitHubSSOHeader.combined(ssoHeaders)
@@ -20,15 +43,18 @@ actor PullRequestReviewRefreshService {
     private let client: GitHubPullRequestClient
     private let candidateRepository: PullRequestReviewCandidateRepository
     private let failureEnvelopeRepository: ReviewCandidateFailureEnvelopeRepository?
+    private let corroborationOverride: RequestedReviewerCorroboration?
 
     init(
         client: GitHubPullRequestClient,
         candidateRepository: PullRequestReviewCandidateRepository,
-        failureEnvelopeRepository: ReviewCandidateFailureEnvelopeRepository? = nil
+        failureEnvelopeRepository: ReviewCandidateFailureEnvelopeRepository? = nil,
+        corroborationOverride: RequestedReviewerCorroboration? = nil
     ) {
         self.client = client
         self.candidateRepository = candidateRepository
         self.failureEnvelopeRepository = failureEnvelopeRepository
+        self.corroborationOverride = corroborationOverride
     }
 
     func refresh(
@@ -49,6 +75,7 @@ actor PullRequestReviewRefreshService {
         var refreshedPullRequestNodeIDs = [GitHubNodeID]()
         var ssoHeaders = [GitHubSSOHeader]()
         var failureClassifications = [ReviewCandidateFailureClassification]()
+        var hasUncorroboratedRequestedReviewers = false
         let observedAtMilliseconds = Self.milliseconds(observedAt)
 
         candidateLoop: for candidate in inventory.candidates {
@@ -181,6 +208,24 @@ actor PullRequestReviewRefreshService {
                 failureClassifications.append(classification)
                 break candidateLoop
             }
+            let corroboration: RequestedReviewerCorroboration
+            if let corroborationOverride {
+                corroboration = corroborationOverride
+            } else {
+                corroboration = try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                    try Self.validateCurrentScope(scope, in: database)
+                    return Self.corroborateRequestedReviewers(
+                        requestedReviewers.value,
+                        candidate: candidate,
+                        accountID: accountID,
+                        in: database
+                    )
+                }
+            }
+            guard corroboration == .agreement else {
+                hasUncorroboratedRequestedReviewers = true
+                continue
+            }
             let traversal = Self.completeTraversal(
                 candidate: candidate,
                 scope: scope,
@@ -265,8 +310,50 @@ actor PullRequestReviewRefreshService {
             hasRemainingCandidates: inventory.hasRemainingCandidates,
             hasBlockedKnownCandidates: inventory.hasBlockedKnownCandidates,
             ssoHeaders: ssoHeaders,
-            failureClassifications: failureClassifications
+            failureClassifications: failureClassifications,
+            hasUncorroboratedRequestedReviewers: hasUncorroboratedRequestedReviewers
         )
+    }
+
+    private nonisolated static func corroborateRequestedReviewers(
+        _ rest: GitHubRequestedReviewersDTO,
+        candidate: PullRequestReviewCandidate,
+        accountID: AccountID,
+        in database: Database
+    ) -> RequestedReviewerCorroboration {
+        guard let restIDs = reviewerIDs(from: rest) else { return .sourceUnavailable }
+        let payloads = (try? Data.fetchAll(
+            database,
+            sql: "SELECT payload FROM raw_api_snapshots WHERE account_id = ? AND endpoint = ? ORDER BY observed_at_ms DESC",
+            arguments: [accountID.rawValue, "graphql:TriageHydrateNodes"]
+        )) ?? []
+        for payload in payloads {
+            guard let root = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                  let data = root["data"] as? [String: Any],
+                  let nodes = data["nodes"] as? [[String: Any]]
+            else { continue }
+            for node in nodes where node["id"] as? String == candidate.nodeID.rawValue {
+                guard node["updatedAt"] as? String == candidate.sourceRevision,
+                      let requests = node["reviewRequests"] as? [String: Any],
+                      let pageInfo = requests["pageInfo"] as? [String: Any],
+                      pageInfo["hasNextPage"] as? Bool == false,
+                      let requestNodes = requests["nodes"] as? [[String: Any]]
+                else { return .sourceUnavailable }
+                let graphQLIDs = requestNodes.compactMap { ($0["requestedReviewer"] as? [String: Any])?["id"] as? String }
+                    .compactMap(GitHubNodeID.init(rawValue:))
+                guard graphQLIDs.count == requestNodes.count, Set(graphQLIDs).count == graphQLIDs.count else {
+                    return .sourceUnavailable
+                }
+                return Set(graphQLIDs) == restIDs ? .agreement : .disagreement
+            }
+        }
+        return .sourceUnavailable
+    }
+
+    private nonisolated static func reviewerIDs(from value: GitHubRequestedReviewersDTO) -> Set<GitHubNodeID>? {
+        let ids = (value.users + value.teams).compactMap { GitHubNodeID(rawValue: $0.nodeID) }
+        guard ids.count == value.users.count + value.teams.count, Set(ids).count == ids.count else { return nil }
+        return Set(ids)
     }
 
     private func selectCandidates(
@@ -435,22 +522,68 @@ actor PullRequestReviewRefreshService {
         accumulatedRawPages: [GitHubPullRequestReviewRawPage],
         classification: ReviewCandidateFailureClassification
     ) -> ReviewCandidateFailureRawProvenance {
-        if accumulatedRawPages.isEmpty,
-           failure.rawPages.isEmpty,
+        let rawPages = accumulatedRawPages + failure.rawPages
+        let hasTerminalRawPage = rawPages.last?.requestKey == failure.terminalRequestKey
+        if !rawPages.isEmpty, !hasTerminalRawPage {
+            switch failure.terminalFailure {
+            case .transport:
+                return .accumulatedPagesBodylessTerminalTransportFailure
+            case let .github(githubFailure) where Self.isBodylessHTTPFailure(
+                classification,
+                statusCode: githubFailure.statusCode
+            ):
+                return .accumulatedPagesBodylessTerminalHTTPFailure(
+                    statusCode: githubFailure.statusCode
+                )
+            case .github, .malformedResponse, .pagination, .normalization:
+                return .terminalRawPage
+            }
+        }
+        if rawPages.isEmpty,
+           case .transport = failure.terminalFailure {
+            return .zeroRawTransportFailure
+        }
+        if rawPages.isEmpty,
            classification == .ssoRequired,
            case let .github(githubFailure) = failure.terminalFailure,
            githubFailure.kind == .forbidden,
            githubFailure.statusCode == 403 {
             return .zeroRawBodylessSelectedOrganizationSSOFailure
         }
-        guard accumulatedRawPages.isEmpty, failure.rawPages.isEmpty,
-              case let .github(githubFailure) = failure.terminalFailure,
-              (githubFailure.kind == .forbidden || githubFailure.kind == .notFound),
-              githubFailure.statusCode == 403 || githubFailure.statusCode == 404
-        else {
-            return .terminalRawPage
+        if rawPages.isEmpty,
+           case let .github(githubFailure) = failure.terminalFailure,
+           classification == .unavailableOrPermission,
+           (githubFailure.kind == .forbidden || githubFailure.kind == .notFound),
+           githubFailure.statusCode == 403 || githubFailure.statusCode == 404 {
+            return .zeroRawBodylessHTTPAccessFailure(statusCode: githubFailure.statusCode)
         }
-        return .zeroRawBodylessHTTPAccessFailure(statusCode: githubFailure.statusCode)
+        if rawPages.isEmpty,
+           case let .github(githubFailure) = failure.terminalFailure,
+           Self.isBodylessHTTPFailure(classification, statusCode: githubFailure.statusCode) {
+            return .zeroRawBodylessTerminalHTTPFailure(statusCode: githubFailure.statusCode)
+        }
+        return .terminalRawPage
+    }
+
+    private nonisolated static func isBodylessHTTPFailure(
+        _ classification: ReviewCandidateFailureClassification,
+        statusCode: Int
+    ) -> Bool {
+        switch statusCode {
+        case 401:
+            classification == .authenticationRequired
+        case 403:
+            [.approvalRequired, .ssoRequired, .rateLimited, .unavailableOrPermission]
+                .contains(classification)
+        case 404:
+            classification == .unavailableOrPermission
+        case 429:
+            classification == .rateLimited
+        case 500...599:
+            classification == .serverFailure
+        default:
+            false
+        }
     }
 
     private nonisolated static func continuesAfter(

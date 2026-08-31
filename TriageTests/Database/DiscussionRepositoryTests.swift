@@ -989,7 +989,7 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertEqual(link.1, contentNodeID.rawValue)
     }
 
-    func testDiscussionSynchronizationPersistsMetadataAndUnavailableNestedCoverageAtomically() async throws {
+    func testDiscussionSynchronizationPersistsMetadataWithoutOverwritingIndependentNestedCoverage() async throws {
         let fixture = try await DiscussionFixture()
         defer { fixture.remove() }
         let session = OneShotDiscussionSession(.data(discussionInventoryResponse()))
@@ -1002,6 +1002,34 @@ final class DiscussionRepositoryTests: XCTestCase {
         )
         let streamID = SyncStreamID(rawValue: "discussions-acme-R_1")!
         let prior = fixture.date.addingTimeInterval(-3_600)
+        let commentsStreamID = SyncStreamID(
+            rawValue: "discussion-comments-\(fixture.organization.id.rawValue)-\(fixture.repositoryID.rawValue)"
+        )!
+        let repliesStreamID = SyncStreamID(
+            rawValue: "discussion-replies-\(fixture.organization.id.rawValue)-\(fixture.repositoryID.rawValue)"
+        )!
+        try await CoverageRepository(vault: fixture.vault).save(
+            fixture.coverage(
+                accountID: fixture.account.id,
+                feature: .discussionComments,
+                stream: commentsStreamID.rawValue,
+                status: .partial
+            ),
+            attemptedAt: prior
+        )
+        try await CoverageRepository(vault: fixture.vault).save(
+            fixture.coverage(
+                accountID: fixture.account.id,
+                feature: .discussionReplies,
+                stream: repliesStreamID.rawValue,
+                status: .requiresSSO
+            ),
+            attemptedAt: prior
+        )
+        let nestedBefore = try await CoverageRepository(vault: fixture.vault).records(
+            for: fixture.account.id,
+            organizationID: fixture.organization.id
+        ).filter { $0.feature == .discussionComments || $0.feature == .discussionReplies }
 
         let result = try await service.refresh(
             scope: fixture.scope,
@@ -1014,12 +1042,14 @@ final class DiscussionRepositoryTests: XCTestCase {
         )
 
         XCTAssertEqual(result.coverage.status, .complete)
-        XCTAssertEqual(result.commentCoverage, .unavailable)
-        XCTAssertEqual(result.replyCoverage, .unavailable)
         let coverage = try await CoverageRepository(vault: fixture.vault).records(
             for: fixture.account.id,
             organizationID: fixture.organization.id
         )
+        let nestedAfter = coverage.filter {
+            $0.feature == .discussionComments || $0.feature == .discussionReplies
+        }
+        XCTAssertEqual(nestedAfter, nestedBefore)
         XCTAssertEqual(
             Set(coverage.map(\.feature)),
             [.discussions, .discussionComments, .discussionReplies]

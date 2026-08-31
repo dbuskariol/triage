@@ -3,8 +3,10 @@ import SwiftUI
 struct WorkListView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @State private var searchText = ""
     @State private var searchResults: [SearchResult] = []
+    @State private var searchResultsRequest: WorkListSearchRequest?
     @State private var isSearching = false
     @State private var searchError: String?
     @FocusState private var searchFocus: Bool
@@ -65,13 +67,19 @@ struct WorkListView: View {
         .onChange(of: appModel.selectedWorkItemID) { _, workItemID in
             persistSelectedWorkItem(workItemID)
         }
+        .onChange(of: workspaceAccessibility.requestedFocus) { _, _ in
+            consumeAccessibilityFocusRequest()
+        }
+        .task {
+            consumeAccessibilityFocusRequest()
+        }
         .onKeyPress(.escape) {
             guard !searchText.isEmpty else { return .ignored }
             searchText = ""
             return .handled
         }
         .overlay {
-            if filteredWorkItems.isEmpty {
+            if !isSearching, filteredWorkItems.isEmpty {
                 ContentUnavailableView(
                     navigation.section == .inbox ? "Inbox zero" : "No work",
                     systemImage: navigation.section.systemImage,
@@ -141,6 +149,15 @@ struct WorkListView: View {
             ? currentViewItems
             : appModel.workItems.filter(matchesListFilter)
         let itemsByID = Dictionary(uniqueKeysWithValues: allowedItems.map { ($0.id, $0) })
+        // Results only belong to the exact query and workspace that produced
+        // them. This prevents an old query (or another organization with an
+        // overlapping work-item ID) from rendering during a new debounce.
+        guard WorkListPresentation.shouldUseSearchResults(
+            producedFor: searchResultsRequest,
+            currentRequest: searchRequest
+        ) else {
+            return []
+        }
         let resultRanks = Dictionary(
             uniqueKeysWithValues: searchResults.compactMap { result in
                 result.workItemID.map { ($0, result.rank) }
@@ -241,6 +258,12 @@ struct WorkListView: View {
         )
     }
 
+    private func consumeAccessibilityFocusRequest() {
+        guard workspaceAccessibility.requestedFocus == .search else { return }
+        searchFocus = true
+        workspaceAccessibility.consumeFocusRequest(.search)
+    }
+
     private func persistSelectedWorkItem(_ workItemID: WorkItemID?) {
         guard let accountID = appModel.selectedAccountID,
               let organizationID = appModel.selectedOrganizationID
@@ -259,11 +282,17 @@ struct WorkListView: View {
         let query = request.query
         guard !query.isEmpty else {
             searchResults = []
+            searchResultsRequest = nil
             searchError = nil
             isSearching = false
             return
         }
 
+        // Clear immediately, before the debounce and database await. The
+        // request identity remains a second line of defence if cancellation
+        // is observed after a newer task has begun.
+        searchResults = []
+        searchResultsRequest = nil
         isSearching = true
         searchError = nil
         do {
@@ -278,6 +307,7 @@ struct WorkListView: View {
                 return
             }
             searchResults = results
+            searchResultsRequest = request
         } catch is CancellationError {
             return
         } catch {
@@ -289,6 +319,7 @@ struct WorkListView: View {
                 return
             }
             searchResults = []
+            searchResultsRequest = request
             searchError = "Triage could not search its encrypted cache."
         }
         guard WorkListPresentation.shouldApplySearchResult(
@@ -350,6 +381,8 @@ private struct WorkItemRow: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+
+            WorkItemRowMetadata(item: item)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
@@ -403,6 +436,25 @@ private struct WorkItemRow: View {
 
     private var accessibilityLabel: String {
         WorkListPresentation.accessibilityLabel(for: item, at: Date())
+    }
+}
+
+private struct WorkItemRowMetadata: View {
+    let item: WorkItem
+
+    var body: some View {
+        let metadata = WorkListPresentation.visibleMetadata(for: item, at: Date())
+        if !metadata.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(metadata, id: \.self) { value in
+                    Text(value)
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .accessibilityHidden(true)
+        }
     }
 }
 

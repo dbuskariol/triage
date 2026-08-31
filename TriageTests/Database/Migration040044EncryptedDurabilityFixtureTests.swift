@@ -7,9 +7,9 @@ import XCTest
 /// individual repositories validate their domain semantics elsewhere; this
 /// fixture verifies that their durable evidence keeps its guarantees after an
 /// encrypted-vault restart.
-final class Migration040044EncryptedDurabilityFixtureTests: XCTestCase {
-    func testMigration040Through044EvidenceAndReceiptsSurviveEncryptedRestartAndCompaction() async throws {
-        let fixture = try await Migration040044EncryptedFixture()
+final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
+    func testMigration040Through045EvidenceAndReceiptsSurviveEncryptedRestartAndCompaction() async throws {
+        let fixture = try await Migration040045EncryptedFixture()
         defer { fixture.remove() }
         try await fixture.persistMatrix()
         try await fixture.registry.closeAll()
@@ -87,7 +87,7 @@ final class Migration040044EncryptedDurabilityFixtureTests: XCTestCase {
     }
 
     func testEncryptedFixtureAccountIsolationDoesNotLeakRawEvidenceAcrossVaults() async throws {
-        let fixture = try await Migration040044EncryptedFixture()
+        let fixture = try await Migration040045EncryptedFixture()
         defer { fixture.remove() }
         try await fixture.persistMatrix()
 
@@ -142,7 +142,7 @@ final class Migration040044EncryptedDurabilityFixtureTests: XCTestCase {
     }
 }
 
-private final class Migration040044EncryptedFixture: @unchecked Sendable {
+private final class Migration040045EncryptedFixture: @unchecked Sendable {
     let rootDirectory: URL
     let accountID = AccountID(rawValue: "migration-matrix-account")!
     let organizationID = OrganizationID(rawValue: "migration-matrix-organization")!

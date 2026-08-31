@@ -149,4 +149,111 @@ final class AppNavigationModelTests: XCTestCase {
             validWorkItemIDs: [itemB]
         ), itemB)
     }
+
+    func testSelectionHistoryNavigatesBackAndForwardWithoutRecordingReplay() {
+        let defaults = makeDefaults()
+        let navigation = AppNavigationModel(defaults: defaults)
+        let accountID = AccountID(rawValue: "account")!
+        let organizationID = OrganizationID(rawValue: "organization")!
+        let first = WorkItemID(rawValue: "first")!
+        let second = WorkItemID(rawValue: "second")!
+        let third = WorkItemID(rawValue: "third")!
+        let valid: Set<WorkItemID> = [first, second, third]
+
+        navigation.setSelectedWorkItem(first, accountID: accountID, organizationID: organizationID)
+        navigation.setSelectedWorkItem(second, accountID: accountID, organizationID: organizationID)
+        navigation.setSelectedWorkItem(third, accountID: accountID, organizationID: organizationID)
+
+        XCTAssertTrue(navigation.canNavigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ))
+        XCTAssertEqual(navigation.navigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ), second)
+        // This mirrors the list's onChange after the toolbar/command changes
+        // the app-model selection; it must not create a new history entry.
+        navigation.setSelectedWorkItem(second, accountID: accountID, organizationID: organizationID)
+        XCTAssertEqual(navigation.navigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ), first)
+        XCTAssertEqual(navigation.navigateSelectionForward(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ), second)
+        XCTAssertEqual(navigation.navigateSelectionForward(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ), third)
+    }
+
+    func testSelectionHistoryIsScopeSafeAndPrunesUnavailableTargets() {
+        let defaults = makeDefaults()
+        let navigation = AppNavigationModel(defaults: defaults)
+        let accountID = AccountID(rawValue: "account")!
+        let organizationA = OrganizationID(rawValue: "organization-a")!
+        let organizationB = OrganizationID(rawValue: "organization-b")!
+        let first = WorkItemID(rawValue: "first")!
+        let unavailable = WorkItemID(rawValue: "unavailable")!
+        let current = WorkItemID(rawValue: "current")!
+        let otherScope = WorkItemID(rawValue: "other-scope")!
+
+        navigation.setSelectedWorkItem(first, accountID: accountID, organizationID: organizationA)
+        navigation.setSelectedWorkItem(unavailable, accountID: accountID, organizationID: organizationA)
+        navigation.setSelectedWorkItem(current, accountID: accountID, organizationID: organizationA)
+        navigation.setSelectedWorkItem(otherScope, accountID: accountID, organizationID: organizationB)
+
+        XCTAssertEqual(navigation.navigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationA,
+            validWorkItemIDs: [first, current]
+        ), first)
+        XCTAssertNil(navigation.navigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationB,
+            validWorkItemIDs: [otherScope]
+        ))
+    }
+
+    func testSelectionHistoryIsBounded() {
+        let navigation = AppNavigationModel(defaults: makeDefaults())
+        let accountID = AccountID(rawValue: "account")!
+        let organizationID = OrganizationID(rawValue: "organization")!
+        let items = (0...22).map { WorkItemID(rawValue: "item-\($0)")! }
+        let valid = Set(items)
+
+        for item in items {
+            navigation.setSelectedWorkItem(item, accountID: accountID, organizationID: organizationID)
+        }
+
+        var visited = [WorkItemID]()
+        while let item = navigation.navigateSelectionBack(
+            accountID: accountID,
+            organizationID: organizationID,
+            validWorkItemIDs: valid
+        ) {
+            visited.append(item)
+            navigation.setSelectedWorkItem(item, accountID: accountID, organizationID: organizationID)
+        }
+
+        XCTAssertEqual(visited.count, 20)
+        XCTAssertEqual(visited.first, items[21])
+        XCTAssertEqual(visited.last, items[2])
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "AppNavigationModelTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
 }

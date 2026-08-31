@@ -55,6 +55,30 @@ final class WorkDetailPresentationTests: XCTestCase {
         }
     }
 
+    func testWaitingActionCarriesTheInspectorChosenFollowUpDate() {
+        let chosenDate = Date(timeIntervalSinceReferenceDate: 5_000)
+
+        let action = WorkDetailPresentation.waitingAction(
+            for: WorkflowState(updatedAt: .now),
+            followUpAt: chosenDate
+        )
+
+        guard case let .markWaiting(followUpAt) = action else {
+            return XCTFail("An active item should transition to Waiting.")
+        }
+        XCTAssertEqual(followUpAt, chosenDate)
+    }
+
+    func testDefaultFollowUpDateIsOneCalendarDayLater() {
+        let calendar = Calendar(identifier: .gregorian)
+        let date = Date(timeIntervalSinceReferenceDate: 5_000)
+
+        XCTAssertEqual(
+            WorkDetailPresentation.defaultFollowUpDate(from: date, calendar: calendar),
+            calendar.date(byAdding: .day, value: 1, to: date)
+        )
+    }
+
     private func makeWorkItem(
         reasons: [AttentionReason] = [],
         relations: [WorkRelation] = [],

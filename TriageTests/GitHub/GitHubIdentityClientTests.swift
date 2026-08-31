@@ -95,6 +95,43 @@ final class GitHubIdentityClientTests: XCTestCase {
         XCTAssertEqual(approvalPaths, ["/orgs/acme"])
     }
 
+    func testConditionalIdentityEndpointsPreserve304EvidenceAndExactETagAuthority() async throws {
+        let validators = try GitHubHTTPValidators(eTag: "\"identity-v1\"", lastModified: nil)
+
+        let userSession = IdentityFixtureSession(responses: [
+            "/user": .init(statusCode: 304, body: Data())
+        ])
+        let userResult = try await GitHubIdentityClient(client: try identityClient(session: userSession))
+            .fetchAuthenticatedUser(validators: validators)
+        guard case .notModified = userResult else {
+            return XCTFail("A conditional /user 304 must remain evidence, never a profile.")
+        }
+        let userETag = await userSession.requestedHeader(named: "If-None-Match")
+        XCTAssertEqual(userETag, "\"identity-v1\"")
+
+        let organizationsSession = IdentityFixtureSession(responses: [
+            "/user/orgs?per_page=100": .init(statusCode: 304, body: Data())
+        ])
+        let organizationsResult = try await GitHubIdentityClient(client: try identityClient(session: organizationsSession))
+            .fetchAllOrganizations(validators: validators)
+        guard case .notModified = organizationsResult else {
+            return XCTFail("A conditional /user/orgs 304 must not become an empty inventory.")
+        }
+        let organizationsETag = await organizationsSession.requestedHeader(named: "If-None-Match")
+        XCTAssertEqual(organizationsETag, "\"identity-v1\"")
+
+        let organizationSession = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(statusCode: 304, body: Data())
+        ])
+        let organizationResult = try await GitHubIdentityClient(client: try identityClient(session: organizationSession))
+            .fetchOrganization(named: "acme", validators: validators)
+        guard case .notModified = organizationResult else {
+            return XCTFail("A conditional selected-organization 304 must remain scoped evidence.")
+        }
+        let organizationETag = await organizationSession.requestedHeader(named: "If-None-Match")
+        XCTAssertEqual(organizationETag, "\"identity-v1\"")
+    }
+
     func testOrganizationInventoryPaginatesDeduplicatesAndAggregatesSSOHeaders() async throws {
         let secondPage = URL(string: "https://api.github.com/user/orgs?page=2")!
         let client = GitHubRESTClient(
@@ -224,6 +261,7 @@ private actor IdentityFixtureSession: HTTPSession {
 
     private let responses: [String: Response]
     private var paths = [String]()
+    private var requests = [URLRequest]()
 
     init(responses: [String: Response]) {
         self.responses = responses
@@ -234,6 +272,7 @@ private actor IdentityFixtureSession: HTTPSession {
         let path = [url.path, url.query].compactMap { $0 }.joined(separator: "?")
         guard let response = responses[path] else { throw URLError(.resourceUnavailable) }
         paths.append(path)
+        requests.append(request)
         return (
             response.body,
             HTTPURLResponse(
@@ -247,6 +286,10 @@ private actor IdentityFixtureSession: HTTPSession {
 
     func requestedPaths() -> [String] {
         paths
+    }
+
+    func requestedHeader(named name: String) -> String? {
+        requests.last?.value(forHTTPHeaderField: name)
     }
 }
 

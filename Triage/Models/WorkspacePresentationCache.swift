@@ -42,6 +42,15 @@ struct WorkspacePresentationCache<Value> {
         leastRecentlyUsedFirst.removeAll { $0.scope.accountID == accountID }
     }
 
+    mutating func removeAll(for accountID: AccountID, organizationID: OrganizationID) {
+        values = values.filter {
+            $0.key.scope.accountID != accountID || $0.key.scope.organizationID != organizationID
+        }
+        leastRecentlyUsedFirst.removeAll {
+            $0.scope.accountID == accountID && $0.scope.organizationID == organizationID
+        }
+    }
+
     private mutating func touch(_ key: Key) {
         leastRecentlyUsedFirst.removeAll { $0 == key }
         leastRecentlyUsedFirst.append(key)

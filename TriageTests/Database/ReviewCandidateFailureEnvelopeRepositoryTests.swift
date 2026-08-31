@@ -211,6 +211,90 @@ final class ReviewCandidateFailureEnvelopeRepositoryTests: XCTestCase {
         XCTAssertEqual(counts.envelopes, 1)
         XCTAssertEqual(counts.rawSnapshots, 0)
     }
+
+    func testAllowsOnlyExactClassifiedBodylessTerminalHTTPFailuresWithoutRawPages() async throws {
+        let accepted: [(ReviewCandidateFailureClassification, Int)] = [
+            (.authenticationRequired, 401),
+            (.approvalRequired, 403),
+            (.rateLimited, 403),
+            (.unavailableOrPermission, 404),
+            (.rateLimited, 429),
+            (.serverFailure, 503)
+        ]
+        for (classification, statusCode) in accepted {
+            let fixture = try await ReviewFailureEnvelopeFixture()
+            defer { fixture.remove() }
+            let source = fixture.publication(pages: [])
+            let publication = ReviewCandidateFailurePublication(
+                id: source.id, scope: source.scope, feature: source.feature, streamID: source.streamID,
+                candidate: source.candidate,
+                requestIdentity: .init(
+                    scope: source.scope, feature: .reviews, streamID: source.streamID,
+                    requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100"
+                ),
+                parserVersion: source.parserVersion, attemptedAt: source.attemptedAt, terminalAt: source.terminalAt,
+                classification: classification, redactedDiagnostic: source.redactedDiagnostic,
+                rawProvenance: .zeroRawBodylessTerminalHTTPFailure(statusCode: statusCode), rawPages: []
+            )
+            try await fixture.repository.publish(publication)
+            let counts = try await fixture.counts()
+            XCTAssertEqual(counts.envelopes, 1)
+            let envelopes = try await fixture.repository.envelopes(
+                scope: fixture.scope,
+                feature: .reviews,
+                candidateNodeID: fixture.candidate.nodeID
+            )
+            XCTAssertEqual(envelopes.map(\.classification), [classification])
+        }
+
+        let fixture = try await ReviewFailureEnvelopeFixture()
+        defer { fixture.remove() }
+        let source = fixture.publication(pages: [])
+        let invalid = ReviewCandidateFailurePublication(
+            id: source.id, scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate,
+            requestIdentity: .init(
+                scope: source.scope, feature: .reviews, streamID: source.streamID,
+                requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100&unexpected=true"
+            ),
+            parserVersion: source.parserVersion, attemptedAt: source.attemptedAt, terminalAt: source.terminalAt,
+            classification: .malformedResponse, redactedDiagnostic: source.redactedDiagnostic,
+            rawProvenance: .zeroRawBodylessTerminalHTTPFailure(statusCode: 503), rawPages: []
+        )
+        do {
+            try await fixture.repository.publish(invalid)
+            XCTFail("Bodyless terminal HTTP provenance must bind an exact recognized request and classification.")
+        } catch let error as ReviewCandidateFailureEnvelopeRepositoryError {
+            XCTAssertEqual(error, .invalidRawPages)
+        }
+    }
+
+    func testAllowsAccumulatedPagesWithExactBodylessTerminalHTTPAttemptOnly() async throws {
+        let fixture = try await ReviewFailureEnvelopeFixture()
+        defer { fixture.remove() }
+        let accumulated = fixture.page(
+            requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100",
+            ordinal: 1,
+            endpoint: "GET /repos/acme/repo/pulls/7/reviews?per_page=100"
+        )
+        let publication = ReviewCandidateFailurePublication(
+            scope: fixture.scope, feature: .reviews, streamID: fixture.streamID,
+            candidate: fixture.candidate,
+            requestIdentity: .init(
+                scope: fixture.scope, feature: .reviews, streamID: fixture.streamID,
+                requestKey: "GET /repos/acme/repo/pulls/7/requested_reviewers"
+            ),
+            parserVersion: 1, attemptedAt: fixture.date, terminalAt: fixture.date.addingTimeInterval(1),
+            classification: .unavailableOrPermission,
+            redactedDiagnostic: "The requested-reviewers endpoint is unavailable.",
+            rawProvenance: .accumulatedPagesBodylessTerminalHTTPFailure(statusCode: 404),
+            rawPages: [accumulated]
+        )
+        try await fixture.repository.publish(publication)
+        let counts = try await fixture.counts()
+        XCTAssertEqual(counts.envelopes, 1)
+        XCTAssertEqual(counts.rawSnapshots, 1)
+    }
 }
 
 private final class ReviewFailureEnvelopeFixture: @unchecked Sendable {

@@ -19,9 +19,9 @@ struct DerivedIntelligenceSourceState: Equatable, Sendable {
 }
 
 /// A database-free, Sendable hand-off from normalized storage to the pure
-/// derived-intelligence coordinator. `isProvisional` tells the persistence and
-/// presentation layers that the snapshot must never be represented as fully
-/// trusted; it does not turn an incomplete source into an empty one.
+/// derived-intelligence coordinator. Its provisional state is derived from the
+/// input so the coordinator, persistence, and presentation layers cannot
+/// disagree about whether AI work is eligible.
 struct DerivedIntelligenceInputSnapshot: Sendable {
     let input: DerivedIntelligenceInput
     let sourceStates: [DerivedIntelligenceSourceState]
@@ -29,7 +29,8 @@ struct DerivedIntelligenceInputSnapshot: Sendable {
     /// Stable SHA-256 digest of primary and scoped supplemental source
     /// authorities, suitable for binding a durable derived projection.
     let aggregateSourceRevision: String
-    let isProvisional: Bool
+
+    var isProvisional: Bool { input.isProvisional }
 }
 
 enum DerivedIntelligenceInputAdapterError: Error, Equatable, Sendable {
@@ -126,6 +127,9 @@ actor DerivedIntelligenceInputAdapter {
         let sourceRevisions = Dictionary(uniqueKeysWithValues: after.primarySources.map {
             ($0.workItemID, $0.sourceRevision)
         })
+        let isProvisional = !fullCoverage.isComplete
+            || after.primarySources.contains(where: { !$0.isCurrent })
+            || sourceStates.contains(where: { $0.availability != .trusted })
         return DerivedIntelligenceInputSnapshot(
             input: DerivedIntelligenceInput(
                 scope: scope,
@@ -136,6 +140,7 @@ actor DerivedIntelligenceInputAdapter {
                 businessDayPolicy: businessDayPolicy,
                 calendar: calendar,
                 aiPolicy: aiPolicy,
+                isProvisional: isProvisional,
                 evaluatedAt: evaluatedAt,
                 items: inputItems
             ),
@@ -144,10 +149,7 @@ actor DerivedIntelligenceInputAdapter {
             aggregateSourceRevision: DerivedIntelligenceSourceRevision.aggregate(
                 primaryRevisions: sourceRevisions,
                 supplementalSources: after.supplementalSources
-            ),
-            isProvisional: !fullCoverage.isComplete
-                || after.primarySources.contains(where: { !$0.isCurrent })
-                || sourceStates.contains(where: { $0.availability != .trusted })
+            )
         )
     }
 

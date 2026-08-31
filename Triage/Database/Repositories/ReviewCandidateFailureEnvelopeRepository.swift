@@ -235,6 +235,23 @@ actor ReviewCandidateFailureEnvelopeRepository {
             guard publication.classification == .ssoRequired,
                   publication.rawPages.isEmpty
             else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
+        case let .zeroRawBodylessTerminalHTTPFailure(statusCode):
+            guard publication.rawPages.isEmpty,
+                  isCanonicalRESTReviewRequest(publication.requestIdentity.requestKey, candidate: publication.candidate),
+                  bodylessHTTPClassification(publication.classification, matches: statusCode)
+            else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
+        case .accumulatedPagesBodylessTerminalTransportFailure:
+            guard publication.classification == .transportFailure,
+                  !publication.rawPages.isEmpty,
+                  publication.rawPages.last?.requestIdentity != publication.requestIdentity,
+                  isCanonicalRESTReviewRequest(publication.requestIdentity.requestKey, candidate: publication.candidate)
+            else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
+        case let .accumulatedPagesBodylessTerminalHTTPFailure(statusCode):
+            guard !publication.rawPages.isEmpty,
+                  publication.rawPages.last?.requestIdentity != publication.requestIdentity,
+                  isCanonicalRESTReviewRequest(publication.requestIdentity.requestKey, candidate: publication.candidate),
+                  bodylessHTTPClassification(publication.classification, matches: statusCode)
+            else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
         }
         try validateScheduleStream(publication, in: database)
         try validateCandidate(publication.candidate, scope: publication.scope, in: database)
@@ -340,6 +357,39 @@ actor ReviewCandidateFailureEnvelopeRepository {
         return !forbidden.contains(where: lowered.contains)
     }
 
+    private nonisolated static func bodylessHTTPClassification(
+        _ classification: ReviewCandidateFailureClassification,
+        matches statusCode: Int
+    ) -> Bool {
+        switch statusCode {
+        case 401: return classification == .authenticationRequired
+        case 403: return [.approvalRequired, .ssoRequired, .rateLimited, .unavailableOrPermission].contains(classification)
+        case 404: return classification == .unavailableOrPermission
+        case 429: return classification == .rateLimited
+        case 500...599: return classification == .serverFailure
+        default: return false
+        }
+    }
+
+    private nonisolated static func isCanonicalRESTReviewRequest(
+        _ requestKey: String,
+        candidate: PullRequestReviewCandidate
+    ) -> Bool {
+        let path = "\(candidate.repository.path)/pulls/\(candidate.number)"
+        if requestKey == "GET \(path)/requested_reviewers" { return true }
+        if requestKey == "GET \(path)/reviews?per_page=100" { return true }
+        guard requestKey.hasPrefix("GET /"),
+              let components = URLComponents(string: "https://api.github.com" + requestKey.dropFirst(4)),
+              components.percentEncodedPath == "\(path)/reviews",
+              components.fragment == nil, components.user == nil, components.password == nil,
+              components.queryItems?.count == 2,
+              components.queryItems?.filter({ $0.name == "per_page" }).map(\.value) == ["100"],
+              let page = components.queryItems?.first(where: { $0.name == "page" })?.value,
+              let pageNumber = Int(page), pageNumber > 1, String(pageNumber) == page
+        else { return false }
+        return true
+    }
+
     private nonisolated static func envelope(
         from row: Row,
         expectedScope: SynchronizationScope,
@@ -375,7 +425,11 @@ actor ReviewCandidateFailureEnvelopeRepository {
               rawPageCount >= 0,
               (rawPageCount > 0
                 || classification == .transportFailure
+                || classification == .authenticationRequired
+                || classification == .approvalRequired
+                || classification == .rateLimited
                 || classification == .unavailableOrPermission
+                || classification == .serverFailure
                 || classification == .ssoRequired),
               redactedDiagnosticIsSafe(diagnostic)
         else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidPersistedData }

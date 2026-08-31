@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkDetailView: View {
     @Environment(\.undoManager) private var undoManager
     @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     let item: WorkItem?
     @FocusState private var accessibilityFocus: WorkDetailPresentation.AccessibilityFocusTarget?
     @StateObject private var workflowUndo = LocalWorkflowUndoCoordinator()
@@ -52,6 +53,15 @@ struct WorkDetailView: View {
         .onChange(of: navigation.isInspectorVisible) { _, isPresented in
             accessibilityFocus = WorkDetailPresentation.inspectorFocusTarget(isPresented: isPresented)
         }
+        .onChange(of: workspaceAccessibility.requestedFocus) { _, _ in
+            consumeAccessibilityFocusRequest()
+        }
+        .onChange(of: item?.id) { _, _ in
+            consumeAccessibilityFocusRequest()
+        }
+        .task {
+            consumeAccessibilityFocusRequest()
+        }
         .inspector(isPresented: inspectorVisibility) {
             if let item {
                 WorkInspectorView(
@@ -81,6 +91,20 @@ struct WorkDetailView: View {
     private var inspectorCommandBinding: Binding<Bool>? {
         guard WorkDetailPresentation.inspectorIsAvailable(hasSelection: item != nil) else { return nil }
         return inspectorVisibility
+    }
+
+    private func consumeAccessibilityFocusRequest() {
+        guard let request = workspaceAccessibility.requestedFocus, item != nil else { return }
+        switch request {
+        case .search:
+            return
+        case .inspectorToggle:
+            accessibilityFocus = .inspectorToggle
+        case .inspectorFirstWorkflowControl:
+            navigation.isInspectorVisible = true
+            accessibilityFocus = .inspectorFirstWorkflowAction
+        }
+        workspaceAccessibility.consumeFocusRequest(request)
     }
 }
 
@@ -425,6 +449,7 @@ private struct WorkInspectorView: View {
     @FocusState.Binding var focus: WorkDetailPresentation.AccessibilityFocusTarget?
     @ObservedObject var undoCoordinator: LocalWorkflowUndoCoordinator
     let undoManager: UndoManager?
+    @State private var followUpAt = WorkDetailPresentation.defaultFollowUpDate(from: .now)
 
     var body: some View {
         Form {
@@ -478,10 +503,24 @@ private struct WorkInspectorView: View {
                 }
                 .accessibilityIdentifier("work-inspector-snooze")
                 .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
-                Button(item.workflow.status == .waiting ? "Stop Waiting" : "Mark Waiting") {
-                    applyLocalWorkflowAction(
-                        item.workflow.status == .waiting ? .clearWaiting : .markWaiting(followUpAt: nil)
+
+                if item.workflow.status == .active {
+                    DatePicker(
+                        "Follow up",
+                        selection: $followUpAt,
+                        in: Date()...,
+                        displayedComponents: [.date, .hourAndMinute]
                     )
+                    .accessibilityIdentifier("work-inspector-follow-up")
+                    .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)
+                }
+
+                Button(item.workflow.status == .waiting ? "Stop Waiting" : "Mark Waiting") {
+                    guard let action = WorkDetailPresentation.waitingAction(
+                        for: item.workflow,
+                        followUpAt: item.workflow.status == .active ? followUpAt : nil
+                    ) else { return }
+                    applyLocalWorkflowAction(action)
                 }
                 .accessibilityIdentifier("work-inspector-waiting")
                 .accessibilityHint(WorkDetailPresentation.localWorkflowAccessibilityHint)

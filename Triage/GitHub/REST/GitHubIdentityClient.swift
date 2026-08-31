@@ -4,6 +4,25 @@ enum GitHubIdentityClientError: Error, Equatable, Sendable {
     case invalidOrganizationLogin
     case paginationLoop
     case paginationLimitExceeded
+    case notModifiedWithoutCachedState
+}
+
+/// A conditional identity response preserves a 304 as transport evidence. The
+/// caller that owns an exact scoped, durable normalized record decides whether
+/// it can be replayed; a client must never turn a 304 into an empty identity.
+enum GitHubIdentityFetch<Value: Sendable>: Sendable {
+    case modified(GitHubResponse<Value>)
+    case notModified(ssoHeader: GitHubSSOHeader?)
+}
+
+enum GitHubOrganizationPageFetch: Sendable {
+    case modified(GitHubPage<GitHubOrganizationDTO>)
+    case notModified(ssoHeader: GitHubSSOHeader?)
+}
+
+enum GitHubOrganizationInventoryFetch: Sendable {
+    case modified(GitHubOrganizationInventory)
+    case notModified(ssoHeader: GitHubSSOHeader?)
 }
 
 struct GitHubOrganizationInventory: Sendable {
@@ -39,24 +58,67 @@ actor GitHubIdentityClient {
     }
 
     func authenticatedUser() async throws -> GitHubResponse<GitHubUserDTO> {
-        try await client.getResponse(
+        let result = try await fetchAuthenticatedUser(validators: nil)
+        guard case let .modified(response) = result else {
+            throw GitHubIdentityClientError.notModifiedWithoutCachedState
+        }
+        return response
+    }
+
+    func fetchAuthenticatedUser(
+        validators: GitHubHTTPValidators?
+    ) async throws -> GitHubIdentityFetch<GitHubUserDTO> {
+        try await conditionalResponse(
             GitHubUserDTO.self,
-            request: try GitHubRESTRequest(path: "/user")
+            request: try GitHubRESTRequest(path: "/user", validators: validators)
         )
     }
 
     func organizations() async throws -> GitHubPage<GitHubOrganizationDTO> {
-        try await client.getPage(
+        let result = try await fetchOrganizations(validators: nil)
+        guard case let .modified(page) = result else {
+            throw GitHubIdentityClientError.notModifiedWithoutCachedState
+        }
+        return page
+    }
+
+    func fetchOrganizations(
+        validators: GitHubHTTPValidators?
+    ) async throws -> GitHubOrganizationPageFetch {
+        do {
+            return .modified(try await client.getPage(
             GitHubOrganizationDTO.self,
             request: try GitHubRESTRequest(
                 path: "/user/orgs",
-                query: [URLQueryItem(name: "per_page", value: "100")]
+                query: [URLQueryItem(name: "per_page", value: "100")],
+                validators: validators
             )
-        )
+            ))
+        } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            return .notModified(ssoHeader: failure.ssoHeader)
+        }
     }
 
     func allOrganizations() async throws -> GitHubOrganizationInventory {
-        var page = try await organizations()
+        let result = try await fetchAllOrganizations(validators: nil)
+        guard case let .modified(inventory) = result else {
+            throw GitHubIdentityClientError.notModifiedWithoutCachedState
+        }
+        return inventory
+    }
+
+    func fetchAllOrganizations(
+        validators: GitHubHTTPValidators?
+    ) async throws -> GitHubOrganizationInventoryFetch {
+        let initial = try await fetchOrganizations(validators: validators)
+        let initialPage: GitHubPage<GitHubOrganizationDTO>
+        switch initial {
+        case let .modified(page):
+            initialPage = page
+        case let .notModified(ssoHeader):
+            return .notModified(ssoHeader: ssoHeader)
+        }
+        var page = initialPage
         var organizations: [GitHubOrganizationDTO] = []
         var organizationIDs = Set<UInt64>()
         var ssoHeaders = [page.ssoHeader].compactMap { $0 }
@@ -90,17 +152,28 @@ actor GitHubIdentityClient {
             }
         }
 
-        return GitHubOrganizationInventory(
+        return .modified(GitHubOrganizationInventory(
             organizations: organizations,
             ssoHeaders: ssoHeaders
-        )
+        ))
     }
 
     func organization(named login: String) async throws -> GitHubResponse<GitHubOrganizationDTO> {
+        let result = try await fetchOrganization(named: login, validators: nil)
+        guard case let .modified(response) = result else {
+            throw GitHubIdentityClientError.notModifiedWithoutCachedState
+        }
+        return response
+    }
+
+    func fetchOrganization(
+        named login: String,
+        validators: GitHubHTTPValidators?
+    ) async throws -> GitHubIdentityFetch<GitHubOrganizationDTO> {
         try validateOrganizationLogin(login)
-        return try await client.getResponse(
+        return try await conditionalResponse(
             GitHubOrganizationDTO.self,
-            request: try GitHubRESTRequest(path: "/orgs/\(login)")
+            request: try GitHubRESTRequest(path: "/orgs/\(login)", validators: validators)
         )
     }
 
@@ -150,6 +223,17 @@ actor GitHubIdentityClient {
               })
         else {
             throw GitHubIdentityClientError.invalidOrganizationLogin
+        }
+    }
+
+    private func conditionalResponse<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        request: GitHubRESTRequest
+    ) async throws -> GitHubIdentityFetch<Value> {
+        do {
+            return .modified(try await client.getResponse(type, request: request))
+        } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            return .notModified(ssoHeader: failure.ssoHeader)
         }
     }
 }

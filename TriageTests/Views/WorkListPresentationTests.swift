@@ -60,6 +60,41 @@ final class WorkListPresentationTests: XCTestCase {
             currentRequest: initial,
             isCancelled: true
         ))
+        XCTAssertTrue(WorkListPresentation.shouldUseSearchResults(
+            producedFor: initial,
+            currentRequest: initial
+        ))
+        XCTAssertFalse(WorkListPresentation.shouldUseSearchResults(
+            producedFor: initial,
+            currentRequest: replacement
+        ))
+        XCTAssertFalse(WorkListPresentation.shouldUseSearchResults(
+            producedFor: nil,
+            currentRequest: initial
+        ))
+    }
+
+    func testVisibleMetadataUsesOnlyAvailableCachedWorkflowAndResponsibilityFields() {
+        let item = makeWorkItem(
+            workflow: WorkflowState(
+                status: .waiting,
+                priority: .high,
+                snoozedUntil: now.addingTimeInterval(3_600),
+                updatedAt: now
+            ),
+            freshness: .partial,
+            actions: [],
+            relations: [relation(.assigned)]
+        )
+
+        let metadata = WorkListPresentation.visibleMetadata(for: item, at: now)
+
+        XCTAssertTrue(metadata.contains("Assigned to you"))
+        XCTAssertTrue(metadata.contains("High priority"))
+        XCTAssertTrue(metadata.contains("Waiting"))
+        XCTAssertTrue(metadata.contains(where: { $0.hasPrefix("Snoozed until ") }))
+        XCTAssertTrue(metadata.contains("Partial coverage"))
+        XCTAssertTrue(metadata.contains(where: { $0.hasPrefix("Activity ") }))
     }
 
     func testSelectionRestorationBindingTracksExactScopeAndAvailableItems() {
@@ -161,7 +196,8 @@ final class WorkListPresentationTests: XCTestCase {
     private func makeWorkItem(
         workflow: WorkflowState,
         freshness: FreshnessStatus,
-        actions: [ActionItem]
+        actions: [ActionItem],
+        relations: [WorkRelation] = []
     ) -> WorkItem {
         WorkItem(
             id: WorkItemID(rawValue: "work")!,
@@ -184,7 +220,7 @@ final class WorkListPresentationTests: XCTestCase {
             ),
             members: [],
             contextLinks: [],
-            relations: [],
+            relations: relations,
             attentionReasons: [
                 AttentionReason(
                     id: "review-requested",
@@ -203,6 +239,17 @@ final class WorkListPresentationTests: XCTestCase {
             freshness: FreshnessState(status: freshness),
             lastRelevantActivityAt: now,
             score: AttentionScore(value: 1, breakdown: [:])
+        )
+    }
+
+    private func relation(_ kind: WorkRelationKind) -> WorkRelation {
+        WorkRelation(
+            kind: kind,
+            subjectNodeID: GitHubNodeID(rawValue: "subject")!,
+            objectNodeID: nil,
+            confidence: .confirmed,
+            evidence: [],
+            observedAt: now
         )
     }
 

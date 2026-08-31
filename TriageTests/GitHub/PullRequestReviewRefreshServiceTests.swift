@@ -58,6 +58,36 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         XCTAssertFalse(result.hasBlockedKnownCandidates)
     }
 
+    func testRequestedReviewerCorroborationDisagreementOrMissingGraphQLPreservesCachedState() async throws {
+        for corroboration in [
+            RequestedReviewerCorroboration.disagreement,
+            .sourceUnavailable
+        ] {
+            let fixture = try await PullRequestReviewRefreshFixture()
+            defer { fixture.remove() }
+            try await fixture.seedCachedReviewState()
+            let before = try await fixture.durableState()
+            let result = try await fixture.service(
+                responses: [
+                    fixture.reviewsPath: .response(fixture.reviewPayload(nodeID: "REVIEW_NEW")),
+                    fixture.requestedReviewersPath: .response(
+                        fixture.requestedReviewersPayload(nodeID: "REVIEWER_NEW")
+                    )
+                ],
+                corroboration: corroboration
+            ).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.date.addingTimeInterval(10),
+                streamID: fixture.streamID
+            )
+            XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+            XCTAssertTrue(result.hasUncorroboratedRequestedReviewers)
+            let after = try await fixture.durableState()
+            XCTAssertEqual(after, before)
+        }
+    }
+
     func testSelectedOrganizationPartialRequestedReviewersRetainsBothCachedInventories() async throws {
         let fixture = try await PullRequestReviewRefreshFixture()
         defer { fixture.remove() }
@@ -136,6 +166,32 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
             )
         }
         XCTAssertEqual(durableFailureCount, 1)
+    }
+
+    func testInitialBodylessRateLimitPublishesDurableFailure() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        let service = try fixture.service(
+            responses: [fixture.reviewsPath: .status(429, Data())],
+            persistsFailures: true
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertEqual(result.failureClassifications, [.rateLimited])
+        let envelopes = try await ReviewCandidateFailureEnvelopeRepository(vault: fixture.vault).envelopes(
+            scope: fixture.scope,
+            feature: .reviews,
+            candidateNodeID: fixture.pullRequest.nodeID
+        )
+        XCTAssertEqual(envelopes.count, 1)
+        XCTAssertEqual(envelopes[0].rawSnapshotIDs, [])
+        XCTAssertEqual(envelopes[0].requestIdentity.requestKey, "GET \(fixture.reviewsPath)")
     }
 
     func testUnrelatedOrganizationPartialHeaderAllowsCleanReplacement() async throws {
@@ -299,6 +355,83 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         let second = try await fixture.persistedReviewState(for: secondPullRequestNodeID)
         XCTAssertEqual(second.reviewNodeIDs, [fixture.secondReviewNodeID.rawValue])
         XCTAssertEqual(second.requestedReviewerNodeIDs, [fixture.secondReviewerNodeID.rawValue])
+    }
+
+    func testTransportFailureAfterFirstReviewPagePersistsAccumulatedEvidence() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.seedCachedReviewState()
+        let secondReviewsPage = "/repos/github/triage/pulls/1/reviews?page=2&per_page=100"
+        let service = try fixture.service(
+            responses: [
+                fixture.reviewsPath: .response(
+                    Data("[]".utf8),
+                    headers: [
+                        "Link": "<https://api.github.com\(secondReviewsPage)>; rel=\"next\""
+                    ]
+                ),
+                secondReviewsPage: .failure(.networkConnectionLost)
+            ],
+            persistsFailures: true
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertEqual(result.failureClassifications, [.transportFailure])
+        let envelopes = try await ReviewCandidateFailureEnvelopeRepository(vault: fixture.vault).envelopes(
+            scope: fixture.scope,
+            feature: .reviews,
+            candidateNodeID: fixture.pullRequest.nodeID
+        )
+        XCTAssertEqual(envelopes.count, 1)
+        XCTAssertEqual(envelopes[0].requestIdentity.requestKey, "GET \(secondReviewsPage)")
+        XCTAssertEqual(envelopes[0].rawSnapshotIDs.count, 1)
+        let cached = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
+        XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
+        XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
+    }
+
+    func testBodylessRequestedReviewersRateLimitPersistsReviewPageEvidence() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.seedCachedReviewState()
+        let service = try fixture.service(
+            responses: [
+                fixture.reviewsPath: .response(Data("[]".utf8)),
+                fixture.requestedReviewersPath: .status(429, Data())
+            ],
+            persistsFailures: true
+        )
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertEqual(result.failureClassifications, [.rateLimited])
+        let envelopes = try await ReviewCandidateFailureEnvelopeRepository(vault: fixture.vault).envelopes(
+            scope: fixture.scope,
+            feature: .reviews,
+            candidateNodeID: fixture.pullRequest.nodeID
+        )
+        XCTAssertEqual(envelopes.count, 1)
+        XCTAssertEqual(
+            envelopes[0].requestIdentity.requestKey,
+            "GET \(fixture.requestedReviewersPath)"
+        )
+        XCTAssertEqual(envelopes[0].rawSnapshotIDs.count, 1)
+        let cached = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
+        XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
+        XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
     }
 
     func testSecondFetchCancellationRetainsBothCachedInventories() async throws {
@@ -531,7 +664,8 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
     func service(
         responses: [String: PullRequestReviewRefreshSession.Outcome],
         gate: PullRequestReviewResponseGate? = nil,
-        persistsFailures: Bool = false
+        persistsFailures: Bool = false,
+        corroboration: RequestedReviewerCorroboration = .agreement
     ) throws -> PullRequestReviewRefreshService {
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(
@@ -544,7 +678,8 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
             candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
             failureEnvelopeRepository: persistsFailures
                 ? ReviewCandidateFailureEnvelopeRepository(vault: vault)
-                : nil
+                : nil,
+            corroborationOverride: corroboration
         )
     }
 
@@ -768,6 +903,10 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
             sourceRevision: pullRequestNodeID == pullRequest.nodeID ? "revision-1" : "revision-2"
         )
         let requestKeyPrefix = "GET /repos/github/triage/pulls/\(candidate.number)"
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let reviewPayload = try encoder.encode(reviews)
+        let requestedReviewerPayload = try encoder.encode(requestedReviewers)
         func page(_ endpoint: String) -> ReviewCandidateTraversalPage {
             let requestKey: String = endpoint == "reviews"
                 ? "\(requestKeyPrefix)/reviews?per_page=100"
@@ -782,7 +921,7 @@ private final class PullRequestReviewRefreshFixture: @unchecked Sendable {
                     requestKey: requestKey
                 ),
                 endpoint: requestKey,
-                payload: Data("{}".utf8),
+                payload: endpoint == "reviews" ? reviewPayload : requestedReviewerPayload,
                 isTerminal: true
             )
         }

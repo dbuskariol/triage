@@ -114,6 +114,20 @@ final class TriageCommandSupportTests: XCTestCase {
         XCTAssertTrue(availability.canClearWaiting)
     }
 
+    func testWaitingKeyboardCommandUsesNoFollowUpAndTogglesWaitingState() {
+        let active = WorkflowState(status: .active, updatedAt: .now)
+        let waiting = WorkflowState(status: .waiting, updatedAt: .now)
+
+        guard case let .markWaiting(followUpAt) = WorkDetailPresentation.waitingAction(for: active) else {
+            return XCTFail("The command should mark active work Waiting.")
+        }
+        XCTAssertNil(followUpAt)
+        guard case .clearWaiting? = WorkDetailPresentation.waitingAction(for: waiting) else {
+            return XCTFail("The command should stop waiting work.")
+        }
+        XCTAssertNil(WorkDetailPresentation.waitingAction(for: WorkflowState(status: .archived, updatedAt: .now)))
+    }
+
     func testActiveSelectionKeepsExternalAndLocalCommandAvailabilitySeparate() {
         let item = makeWorkItem(
             workflow: WorkflowState(status: .active, updatedAt: .now)
