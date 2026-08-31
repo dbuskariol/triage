@@ -163,12 +163,21 @@ if [[ ! -s "$RESULT_PATH" ]]; then
   exit 65
 fi
 
-/usr/bin/grep -Eq '"status"[[:space:]]*:[[:space:]]*"passed"' "$RESULT_PATH" || {
+if [[ "${TRIAGE_PERFORMANCE_INCLUDE_UI:-0}" == "1" ]]; then
+  /usr/bin/ruby "$ROOT_DIR/scripts/extract-performance-scroll-metrics.rb" \
+    --mark-top-level-unbaselined \
+    "$RESULT_PATH" \
+    "$UI_SCROLL_RESULT_PATH" \
+    "$BENCHMARK_SESSION"
+fi
+
+if ! /usr/bin/ruby "$ROOT_DIR/scripts/extract-performance-scroll-metrics.rb" \
+  --require-top-level-status "$RESULT_PATH" passed; then
   echo 'Triage performance result: benchmark did not produce a passing report' >&2
   /bin/cat "$RESULT_PATH"
   copy_report_if_present
   exit 67
-}
+fi
 
 /bin/cat "$RESULT_PATH"
 copy_report_if_present

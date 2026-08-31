@@ -224,8 +224,8 @@ final class PerformanceBudgetTests: XCTestCase {
                 PerformanceMeasurement.measure(name: "localSearchFirstPage", budgetMilliseconds: 150) {
                     _ = try await fixture.searchFirstPage()
                 },
-                PerformanceMeasurement.measure(name: "detailInitialPage", budgetMilliseconds: 100) {
-                    _ = try await fixture.detailInitialPresentation()
+                PerformanceMeasurement.measure(name: "detailRepositoryLoad", budgetMilliseconds: 100) {
+                    _ = try await fixture.detailRepositoryLoad()
                 }
             ]
             let passesDatabaseBudgets = measurements.allSatisfy {

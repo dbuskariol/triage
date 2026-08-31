@@ -323,6 +323,55 @@ final class TriageAppModelSelectionTests: XCTestCase {
         )
     }
 
+    func testInboxSelectionRepairReplacesArchivedOrSnoozedSelectionWithVisiblePageRow() {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let evaluatedAt = Date(timeIntervalSinceReferenceDate: 10_000)
+        let visible = workItem(account: accountID, organization: organizationID, id: "visible")
+            .replacing(workflow: WorkflowState(isPinned: true, updatedAt: evaluatedAt))
+        let archived = workItem(account: accountID, organization: organizationID, id: "archived")
+            .replacing(workflow: WorkflowState(status: .archived, updatedAt: evaluatedAt))
+        let snoozed = workItem(account: accountID, organization: organizationID, id: "snoozed")
+            .replacing(workflow: WorkflowState(
+                isPinned: true,
+                snoozedUntil: evaluatedAt.addingTimeInterval(60),
+                updatedAt: evaluatedAt
+            ))
+
+        for noLongerEligible in [archived, snoozed] {
+            let repaired = TriageAppModel.repairedInboxSelection(
+                selectedWorkItemID: noLongerEligible.id,
+                selectedWorkItemIDs: [noLongerEligible.id],
+                inboxPage: [visible],
+                fullGraph: [visible, noLongerEligible],
+                evaluatedAt: evaluatedAt
+            )
+            XCTAssertEqual(repaired.primaryWorkItemID, visible.id)
+            XCTAssertEqual(repaired.selectedWorkItemIDs, [visible.id])
+        }
+    }
+
+    func testInboxSelectionRepairPreservesOffPageInboxMultiSelection() {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let evaluatedAt = Date(timeIntervalSinceReferenceDate: 10_000)
+        let pageItem = workItem(account: accountID, organization: organizationID, id: "page")
+            .replacing(workflow: WorkflowState(isPinned: true, updatedAt: evaluatedAt))
+        let offPageItem = workItem(account: accountID, organization: organizationID, id: "off-page")
+            .replacing(workflow: WorkflowState(isPinned: true, updatedAt: evaluatedAt))
+
+        let repaired = TriageAppModel.repairedInboxSelection(
+            selectedWorkItemID: offPageItem.id,
+            selectedWorkItemIDs: [pageItem.id, offPageItem.id],
+            inboxPage: [pageItem],
+            fullGraph: [pageItem, offPageItem],
+            evaluatedAt: evaluatedAt
+        )
+
+        XCTAssertEqual(repaired.primaryWorkItemID, offPageItem.id)
+        XCTAssertEqual(repaired.selectedWorkItemIDs, [pageItem.id, offPageItem.id])
+    }
+
     func testInboxPageRefreshDeadlineUsesBoundaryLearnedFromFullGraph() {
         let accountID = AccountID.make()
         let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!

@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import GRDB
 
@@ -37,8 +36,9 @@ struct WorkspaceObservationRevision: Equatable, Sendable {
     /// the resulting coarse freshness label stays the same.
     let coverageFingerprint: String
     /// Tracks every persisted relation that can change Inbox eligibility or
-    /// rank without touching the owning work-item row. This keeps lightweight
-    /// page observation responsive to local workflow/action/derived writes.
+    /// rank without touching the owning work-item row. The database updates
+    /// this scope-local generation in the same transaction as its source
+    /// write, so page observation remains bounded even for large workspaces.
     let inboxPresentationFingerprint: String
     /// Keeps a presentation's optional derived timestamp revision-fenced with
     /// the work rows it summarizes.
@@ -420,117 +420,33 @@ struct WorkspaceDatabaseObservationService: Sendable {
 }
 
 private extension WorkspaceDatabaseObservationService {
-    /// A compact dependency fingerprint for the SQL relations used by Inbox
-    /// eligibility/ranking but owned outside `work_items`. Every row is
-    /// account/organization-qualified and serialized with SQLite `quote()`
-    /// before a SHA-256 digest is made, so an in-place authority or source
-    /// revision edit cannot be hidden behind an unchanged row count/timestamp.
-    /// This reads only compact ordering/authority columns, never a work-item
-    /// graph or its content bodies.
+    /// A scope-local generation maintained by database triggers for every
+    /// Inbox eligibility/ranking dependency that is owned outside
+    /// `work_items`. Reading its primary-key row is constant-time and, unlike
+    /// an in-memory counter, observes writes committed by another process.
+    ///
+    /// A missing row is the valid initial state for a scope whose dependencies
+    /// have not changed since the migration installed the triggers.
     static func inboxPresentationFingerprint(
         in database: Database,
         scope: SynchronizationScope
     ) throws -> String {
-        let rows = try String.fetchAll(
+        let generation = try Int64.fetchOne(
             database,
             sql: """
-                SELECT fingerprint_value
-                FROM (
-                    SELECT 'workflow|' || quote(workflow_states.work_item_id) || '|'
-                           || quote(workflow_states.status) || '|' || quote(workflow_states.pinned) || '|'
-                           || quote(workflow_states.priority) || '|' || quote(workflow_states.snoozed_until_ms) || '|'
-                           || quote(workflow_states.follow_up_at_ms) || '|'
-                           || quote(workflow_states.updated_at_ms) AS fingerprint_value
-                    FROM workflow_states
-                    JOIN work_items ON work_items.id = workflow_states.work_item_id
-                    WHERE work_items.account_id = ? AND work_items.organization_id = ?
-
-                    UNION ALL
-
-                    SELECT 'action|' || quote(action_items.id) || '|' || quote(action_items.work_item_id) || '|'
-                           || quote(action_items.state) || '|'
-                           || quote(action_items.due_at_ms) || '|'
-                           || quote(action_items.updated_at_ms)
-                    FROM action_items
-                    JOIN work_items ON work_items.id = action_items.work_item_id
-                    WHERE work_items.account_id = ? AND work_items.organization_id = ?
-
-                    UNION ALL
-
-                    SELECT 'score|' || quote(attention_scores.work_item_id) || '|'
-                           || quote(attention_scores.score) || '|'
-                           || quote(attention_scores.evaluated_at_ms)
-                    FROM attention_scores
-                    JOIN work_items ON work_items.id = attention_scores.work_item_id
-                    WHERE work_items.account_id = ? AND work_items.organization_id = ?
-
-                    UNION ALL
-
-                    SELECT 'rule|' || quote(rule_evaluations.id) || '|'
-                           || quote(rule_evaluations.work_item_id) || '|'
-                           || quote(rule_evaluations.credential_revision) || '|'
-                           || quote(rule_evaluations.capability_revision) || '|'
-                           || quote(rule_evaluations.source_revision) || '|'
-                           || quote(rule_evaluations.rule_id) || '|'
-                           || quote(rule_evaluations.evaluated_at_ms)
-                    FROM rule_evaluations
-                    WHERE account_id = ? AND organization_id = ?
-                      AND credential_revision = ? AND capability_revision = ?
-
-                    UNION ALL
-
-                    SELECT 'rule-evidence|' || quote(rule_evaluation_evidence.rule_evaluation_id) || '|'
-                           || quote(rule_evaluation_evidence.evidence_id) || '|'
-                           || quote(rule_evaluation_evidence.authority_kind) || '|'
-                           || quote(rule_evaluation_evidence.authority_account_id) || '|'
-                           || quote(rule_evaluation_evidence.authority_organization_id) || '|'
-                           || quote(rule_evaluation_evidence.authority_credential_revision) || '|'
-                           || quote(rule_evaluation_evidence.authority_capability_revision)
-                    FROM rule_evaluation_evidence
-                    JOIN rule_evaluations
-                      ON rule_evaluations.id = rule_evaluation_evidence.rule_evaluation_id
-                    WHERE rule_evaluations.account_id = ? AND rule_evaluations.organization_id = ?
-                      AND rule_evaluations.credential_revision = ?
-                      AND rule_evaluations.capability_revision = ?
-
-                    UNION ALL
-
-                    SELECT 'group|' || quote(constituent_work_item_id) || '|'
-                           || quote(canonical_work_item_id) || '|'
-                           || quote(credential_revision) || '|'
-                           || quote(capability_revision) || '|'
-                           || quote(source_revision) || '|'
-                           || quote(projected_at_ms)
-                    FROM work_item_group_memberships
-                    WHERE account_id = ? AND organization_id = ?
-
-                    UNION ALL
-
-                    SELECT 'graph-run|' || quote(credential_revision) || '|'
-                           || quote(capability_revision) || '|'
-                           || quote(source_revision) || '|'
-                           || quote(projected_at_ms)
-                    FROM work_item_graph_runs
-                    WHERE account_id = ? AND organization_id = ?
-                )
-                ORDER BY fingerprint_value
+                SELECT generation
+                FROM workspace_inbox_revisions
+                WHERE account_id = ? AND organization_id = ?
                 """,
-            arguments: StatementArguments(
-                [
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.accountID.rawValue, scope.organizationID.rawValue
-                ]
-            )
+            arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
         )
-        let material = Data(rows.joined(separator: "\u{1E}").utf8)
-        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
+        guard let generation else {
+            return "0"
+        }
+        guard generation >= 0 else {
+            throw WorkspaceObservationError.invalidPersistedData
+        }
+        return String(generation)
     }
 
     struct DurableProjection: Sendable {

@@ -83,9 +83,11 @@ final class PerformanceFixtureContractTests: XCTestCase {
         let fixture = try await PerformanceFixtureStore(generator: generator)
         let metrics: PerformanceFixtureSeedMetrics
         let counts: [String: Int]
+        let selectedDetailPageItemCount: Int
         do {
             metrics = try await fixture.seed(maximumBatchSize: 2)
             counts = try await fixture.recordCounts()
+            selectedDetailPageItemCount = try await fixture.selectedDetailPageItemCount()
             await fixture.close()
         } catch {
             await fixture.close()
@@ -105,6 +107,11 @@ final class PerformanceFixtureContractTests: XCTestCase {
         XCTAssertEqual(counts["discussion_replies"], 3)
         XCTAssertEqual(counts["searchable_comments"], 3)
         XCTAssertEqual(counts["actionable_items"], 3)
+        XCTAssertEqual(
+            selectedDetailPageItemCount,
+            PerformanceFixtureQueryShape.detailSelectionPageLimit,
+            "Detail setup must select through a bounded Inbox page, never a full work-item graph."
+        )
     }
 
     func testRepresentativeQueryPagesRemainBounded() {
@@ -113,6 +120,32 @@ final class PerformanceFixtureContractTests: XCTestCase {
         XCTAssertEqual(PerformanceFixtureQueryShape.searchPageLimit, 50)
         XCTAssertEqual(PerformanceFixtureQueryShape.timelinePageLimit, 100)
         XCTAssertEqual(PerformanceFixtureQueryShape.commentPageLimit, 32)
+        XCTAssertEqual(PerformanceFixtureQueryShape.detailSelectionPageLimit, 1)
+    }
+
+    func testSeederSelectsDetailThroughBoundedPageLoader() async throws {
+        let selectionRequests = DetailSelectionRequestRecorder()
+        let fixture = try await PerformanceFixtureStore(
+            generator: .init(counts: [:]),
+            detailSelectionPageLoader: { _, _, limit in
+                await selectionRequests.record(limit: limit)
+                return []
+            }
+        )
+        do {
+            _ = try await fixture.seed()
+            await fixture.close()
+        } catch {
+            await fixture.close()
+            throw error
+        }
+
+        let recordedLimits = await selectionRequests.limits()
+        XCTAssertEqual(
+            recordedLimits,
+            [PerformanceFixtureQueryShape.detailSelectionPageLimit],
+            "Seeder detail setup must invoke the bounded Inbox-page loader; a full graph fetch bypasses this seam."
+        )
     }
 
     func testBenchmarkSamplingUsesElevenMeasuredSamplesAndNearestRankP95() {
@@ -133,4 +166,16 @@ final class PerformanceFixtureContractTests: XCTestCase {
         )
     }
 
+}
+
+private actor DetailSelectionRequestRecorder {
+    private var recordedLimits: [Int] = []
+
+    func record(limit: Int) {
+        recordedLimits.append(limit)
+    }
+
+    func limits() -> [Int] {
+        recordedLimits
+    }
 }

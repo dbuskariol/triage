@@ -110,28 +110,104 @@ struct CopilotModelsRequest: Codable, Equatable, Sendable {
   }
 }
 
+/// Exclusive owner for a UTF-8 credential during one Copilot authentication
+/// exchange. It deliberately never exposes a `String`, is redacted in every
+/// diagnostic representation, and clears its mutable bytes when consumed or
+/// discarded. Foundation/XPC may make boundary copies while marshalling the
+/// final frame; the caller-owned buffer is still wiped before that handoff
+/// begins.
+final class CopilotEphemeralCredential: @unchecked Sendable, CustomStringConvertible {
+  private let lock = NSLock()
+  private var storage: Data
+
+  init(copying bytes: Data) {
+    storage = bytes.withUnsafeBytes { rawBytes in
+      guard let baseAddress = rawBytes.baseAddress else { return Data() }
+      return Data(bytes: baseAddress, count: rawBytes.count)
+    }
+  }
+
+  deinit { wipe() }
+
+  var description: String { "<redacted>" }
+
+  /// Appends a JSON string without materializing the credential as a Swift
+  /// `String`. This consumes and wipes the credential even when framing fails.
+  func appendJSONString(to destination: inout Data) throws {
+    lock.lock()
+    defer {
+      wipeLocked()
+      lock.unlock()
+    }
+    guard !storage.isEmpty else { throw CopilotXPCError.malformedFrame }
+
+    destination.append(0x22)
+    for byte in storage {
+      switch byte {
+      case 0x22:
+        destination.append(contentsOf: [0x5c, 0x22])
+      case 0x5c:
+        destination.append(contentsOf: [0x5c, 0x5c])
+      case 0x08:
+        destination.append(contentsOf: [0x5c, 0x62])
+      case 0x0c:
+        destination.append(contentsOf: [0x5c, 0x66])
+      case 0x0a:
+        destination.append(contentsOf: [0x5c, 0x6e])
+      case 0x0d:
+        destination.append(contentsOf: [0x5c, 0x72])
+      case 0x09:
+        destination.append(contentsOf: [0x5c, 0x74])
+      case 0x00...0x1f:
+        destination.append(contentsOf: [0x5c, 0x75, 0x30, 0x30])
+        let digits = Array("0123456789abcdef".utf8)
+        destination.append(digits[Int(byte >> 4)])
+        destination.append(digits[Int(byte & 0x0f)])
+      default:
+        destination.append(byte)
+      }
+    }
+    destination.append(0x22)
+  }
+
+  func wipe() {
+    lock.lock()
+    wipeLocked()
+    lock.unlock()
+  }
+
+  var isWipedForTesting: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage.isEmpty
+  }
+
+  private func wipeLocked() {
+    guard !storage.isEmpty else { return }
+    storage.resetBytes(in: storage.startIndex..<storage.endIndex)
+    storage.removeAll(keepingCapacity: false)
+  }
+}
+
 /// This request exists only in an in-memory, length-framed XPC exchange.
 /// Callers must never serialize it to disk, diagnostics, command arguments,
 /// or a process environment. The Rust helper zeroizes its frame credential.
-struct CopilotAuthenticateRequest: Codable, Equatable, Sendable {
+struct CopilotAuthenticateRequest: Sendable, CustomStringConvertible {
   let header: CopilotRequestHeader
-  let credential: SecretValue
+  let credential: CopilotEphemeralCredential
 
-  init(accountID: AccountID, organizationID: OrganizationID, credential: SecretValue, requestID: UUID = UUID()) {
+  init(
+    accountID: AccountID,
+    organizationID: OrganizationID,
+    credential: CopilotEphemeralCredential,
+    requestID: UUID = UUID()
+  ) {
     header = CopilotRequestHeader(accountID: accountID, organizationID: organizationID, operation: .authenticate, requestID: requestID)
     self.credential = credential
   }
 
-  init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CopilotWireCodingKey.self)
-    header = try CopilotRequestHeader(container: container)
-    credential = try container.decode(SecretValue.self, forKey: .credential)
-  }
-
-  func encode(to encoder: any Encoder) throws {
-    var container = encoder.container(keyedBy: CopilotWireCodingKey.self)
-    try header.encode(to: &container)
-    try container.encode(credential, forKey: .credential)
+  var description: String {
+    "CopilotAuthenticateRequest(header: \(header), credential: <redacted>)"
   }
 }
 

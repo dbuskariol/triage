@@ -70,6 +70,120 @@ final class CopilotHelperClientTests: XCTestCase {
     XCTAssertNil(requestObject["header"])
   }
 
+  func testAuthenticationConsumesAndWipesCredentialAfterSuccessfulFrame() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let requestID = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+    let credential = CopilotEphemeralCredential(copying: Data("fixture-token".utf8))
+    let response = CopilotAuthenticationResponse(
+      header: responseHeader(
+        requestID: requestID,
+        organizationID: organizationID,
+        status: .authentication
+      ),
+      authentication: CopilotAuthentication(
+        host: "github.com",
+        login: "fixture-user",
+        authenticationType: "token",
+        isAuthenticated: true
+      )
+    )
+    let transport = FakeFrameTransport(responses: [try encode(response)])
+    let client = CopilotHelperClient(transport: transport)
+    let request = CopilotAuthenticateRequest(
+      accountID: copilotTestAccountID,
+      organizationID: organizationID,
+      credential: credential,
+      requestID: requestID
+    )
+
+    XCTAssertEqual(String(describing: credential), "<redacted>")
+    XCTAssertFalse(String(describing: request).contains("fixture-token"))
+    let result = try await client.authenticate(request)
+
+    XCTAssertTrue(result.authentication.isAuthenticated)
+    XCTAssertTrue(credential.isWipedForTesting)
+    let payloads = await transport.writtenPayloads
+    let requestObject = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: try XCTUnwrap(payloads.first)) as? [String: Any]
+    )
+    XCTAssertEqual(requestObject["operation"] as? String, "authenticate")
+    XCTAssertEqual(requestObject["credential"] as? String, "fixture-token")
+  }
+
+  func testAuthenticationWipesCredentialWhenResponseIsRejected() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let credential = CopilotEphemeralCredential(copying: Data("fixture-token".utf8))
+    let client = CopilotHelperClient(
+      transport: FakeFrameTransport(responses: [Data("not-json".utf8)])
+    )
+
+    do {
+      _ = try await client.authenticate(
+        CopilotAuthenticateRequest(
+          accountID: copilotTestAccountID,
+          organizationID: organizationID,
+          credential: credential
+        )
+      )
+      XCTFail("Expected the malformed response to be rejected.")
+    } catch {
+      XCTAssertEqual(error as? CopilotXPCError, .invalidResponse)
+    }
+    XCTAssertTrue(credential.isWipedForTesting)
+  }
+
+  func testAuthenticationWipesCredentialWhenCallerCancels() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let credential = CopilotEphemeralCredential(copying: Data("fixture-token".utf8))
+    let transport = BlockingFrameTransport()
+    let client = CopilotHelperClient(transport: transport)
+    let operation = Task {
+      try await client.authenticate(
+        CopilotAuthenticateRequest(
+          accountID: copilotTestAccountID,
+          organizationID: organizationID,
+          credential: credential
+        )
+      )
+    }
+
+    await transport.waitUntilReadStarted()
+    operation.cancel()
+    let result = await operation.result
+
+    XCTAssertEqual(error(from: result), .operationCancelled)
+    XCTAssertTrue(credential.isWipedForTesting)
+    await transport.waitUntilTerminated()
+  }
+
+  func testAuthenticationWipesCredentialWhenTimedOut() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let credential = CopilotEphemeralCredential(copying: Data("fixture-token".utf8))
+    let transport = BlockingFrameTransport()
+    let timeout = TimeoutGate()
+    let client = CopilotHelperClient(
+      transport: transport,
+      waitForTimeout: { _ in await timeout.wait() }
+    )
+    let operation = Task {
+      try await client.authenticate(
+        CopilotAuthenticateRequest(
+          accountID: copilotTestAccountID,
+          organizationID: organizationID,
+          credential: credential
+        )
+      )
+    }
+
+    await transport.waitUntilReadStarted()
+    await timeout.fire()
+    let result = await operation.result
+
+    XCTAssertEqual(error(from: result), .operationTimedOut)
+    XCTAssertTrue(credential.isWipedForTesting)
+    await transport.waitUntilTerminated()
+  }
+
   func testAnalysisRejectsInvalidConfidence() async throws {
     let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
     let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))

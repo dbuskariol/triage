@@ -26,12 +26,26 @@ MEMORY_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageTests/FullReconciliation
 UI_LAUNCH_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageUITests/TriagePerformanceLaunchTests' "$RUNNER" | /usr/bin/head -n 1 | /usr/bin/cut -d: -f1)"
 UI_SCROLL_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageUITests/TriagePerformanceScrollTests' "$RUNNER" | /usr/bin/head -n 1 | /usr/bin/cut -d: -f1)"
 DATABASE_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageTests/PerformanceBudgetTests' "$RUNNER" | /usr/bin/head -n 1 | /usr/bin/cut -d: -f1)"
-[[ -n "$MEMORY_OPT_IN_LINE" && -n "$MEMORY_LINE" && -n "$UI_LAUNCH_LINE" && -n "$UI_SCROLL_LINE" && -n "$DATABASE_LINE" ]] || {
-  echo 'runner must select full-reconciliation, launch, scroll, and database benchmark tests' >&2
+UI_UNBASELINED_LINE="$(/usr/bin/grep -n -F -- '--mark-top-level-unbaselined' "$RUNNER" | /usr/bin/head -n 1 | /usr/bin/cut -d: -f1)"
+PASS_GATE_LINE="$(/usr/bin/grep -n -F -- 'benchmark did not produce a passing report' "$RUNNER" | /usr/bin/head -n 1 | /usr/bin/cut -d: -f1)"
+[[ -n "$MEMORY_OPT_IN_LINE" && -n "$MEMORY_LINE" && -n "$UI_LAUNCH_LINE" && -n "$UI_SCROLL_LINE" && -n "$DATABASE_LINE" && -n "$UI_UNBASELINED_LINE" && -n "$PASS_GATE_LINE" ]] || {
+  echo 'runner must select and classify full-reconciliation, launch, scroll, and database benchmark tests' >&2
   exit 1
 }
 [[ "$MEMORY_OPT_IN_LINE" -lt "$MEMORY_LINE" && "$MEMORY_LINE" -lt "$UI_LAUNCH_LINE" && "$UI_LAUNCH_LINE" -le "$UI_SCROLL_LINE" && "$UI_SCROLL_LINE" -lt "$DATABASE_LINE" ]] || {
   echo 'runner must sequence memory, UI launch/scroll, then database reporting' >&2
+  exit 1
+}
+[[ "$DATABASE_LINE" -lt "$UI_UNBASELINED_LINE" && "$UI_UNBASELINED_LINE" -lt "$PASS_GATE_LINE" ]] || {
+  echo 'runner must downgrade a UI scroll/hitch report before the passing-status gate' >&2
+  exit 1
+}
+/usr/bin/grep -Fq -- '--mark-top-level-unbaselined \' "$RUNNER" || {
+  echo 'runner must mark unthresholded UI scroll/hitch metrics measured-unbaselined' >&2
+  exit 1
+}
+/usr/bin/grep -Fq -- '--require-top-level-status "$RESULT_PATH" passed' "$RUNNER" || {
+  echo 'runner must require the top-level report status, not a nested status value' >&2
   exit 1
 }
 /usr/bin/grep -Fq 'TRIAGE_FULL_RECONCILIATION_MEMORY_RESULT_PATH="$FULL_RECONCILIATION_MEMORY_RESULT_PATH"' "$RUNNER" || {
@@ -40,6 +54,10 @@ DATABASE_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageTests/PerformanceBudge
 }
 /usr/bin/grep -Fq 'TRIAGE_PERFORMANCE_UI_RESULT_PATH="$UI_RESULT_PATH"' "$RUNNER" || {
   echo 'runner must export the UI launch sidecar path' >&2
+  exit 1
+}
+/usr/bin/grep -Fq 'export TRIAGE_PERFORMANCE_BENCHMARK_SESSION="$BENCHMARK_SESSION"' "$RUNNER" || {
+  echo 'runner must export a fresh session for launch, memory, and scroll sidecars' >&2
   exit 1
 }
 /usr/bin/grep -Fq 'TRIAGE_PERFORMANCE_UI_SCROLL_RESULT_PATH="$UI_SCROLL_RESULT_PATH"' "$RUNNER" || {
@@ -58,6 +76,36 @@ DATABASE_LINE="$(/usr/bin/grep -n -- '-only-testing:TriageTests/PerformanceBudge
   echo 'runner must reduce XCTest metrics through the privacy-safe extractor' >&2
   exit 1
 }
+
+# A valid but unthresholded scroll/hitch aggregate must downgrade the final
+# database report. This stays entirely in the contract directory: no Xcode,
+# benchmark fixture, or DerivedData is involved.
+UNBASELINED_REPORT="$CONTRACT_DIRECTORY/unbaselined-performance-report.json"
+UNBASELINED_SCROLL_REPORT="$CONTRACT_DIRECTORY/unbaselined-scroll-report.json"
+/usr/bin/printf '%s' '{"status":"passed"}' >"$UNBASELINED_REPORT"
+/usr/bin/printf '%s' '{"schemaVersion":1,"status":"measured-unbaselined","benchmarkSession":"contract-session","systemMetrics":[{"identifier":"scroll"}]}' >"$UNBASELINED_SCROLL_REPORT"
+/usr/bin/ruby "$ROOT_DIR/scripts/extract-performance-scroll-metrics.rb" \
+  --mark-top-level-unbaselined \
+  "$UNBASELINED_REPORT" \
+  "$UNBASELINED_SCROLL_REPORT" \
+  contract-session
+/usr/bin/grep -Eq '"status"[[:space:]]*:[[:space:]]*"measured-unbaselined"' "$UNBASELINED_REPORT" || {
+  echo 'unthresholded scroll/hitch aggregate: final report remained pass-capable' >&2
+  exit 1
+}
+if /usr/bin/ruby "$ROOT_DIR/scripts/extract-performance-scroll-metrics.rb" \
+  --require-top-level-status "$UNBASELINED_REPORT" passed >/dev/null 2>&1; then
+  echo 'unthresholded scroll/hitch aggregate: accepted a non-passing top-level report' >&2
+  exit 1
+fi
+if /usr/bin/ruby "$ROOT_DIR/scripts/extract-performance-scroll-metrics.rb" \
+  --mark-top-level-unbaselined \
+  "$UNBASELINED_REPORT" \
+  "$UNBASELINED_SCROLL_REPORT" \
+  stale-session >/dev/null 2>&1; then
+  echo 'unthresholded scroll/hitch aggregate: accepted a stale session' >&2
+  exit 1
+fi
 
 /usr/bin/printf '%s\n' \
   '#!/usr/bin/env bash' \

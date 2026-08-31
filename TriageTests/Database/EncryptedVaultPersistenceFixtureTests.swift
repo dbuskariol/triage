@@ -113,10 +113,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
 
         XCTAssertEqual(firstMigrations, reopenedMigrations)
         XCTAssertEqual(reopenedMigrations.count, TriageDatabaseMigrator.migrationCount)
-        XCTAssertEqual(reopenedMigrations.last?.id, "058-ai-action-confidence-threshold-v1")
+        XCTAssertEqual(reopenedMigrations.last?.id, "060-workspace-inbox-presentation-revision-v1")
         XCTAssertEqual(
             reopenedMigrations.last?.checksum,
-            "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
+            "47e96afd4aec1db46e8036d516ceebed62dc1f9c3fc9ce1f9aedacda70809046"
         )
         XCTAssertTrue(reopenedMigrations.allSatisfy { migration in
             migration.checksum.range(
@@ -233,6 +233,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             MigrationRow(
                 id: "059-pull-request-head-commit-authority-v1",
                 checksum: "f2d54196288e2c0c0b1dc01b20b06bc45da27e2bfb73ab710a0114f59f311d4a"
+            ),
+            MigrationRow(
+                id: "060-workspace-inbox-presentation-revision-v1",
+                checksum: "47e96afd4aec1db46e8036d516ceebed62dc1f9c3fc9ce1f9aedacda70809046"
             )
         ])
         XCTAssertEqual(upgradedMigrations.count, TriageDatabaseMigrator.migrationCount)
@@ -328,7 +332,8 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "notification_preferences",
             "project_item_raw_provenance",
             "status_check_rollup_markers",
-            "ai_candidate_budget_attempts"
+            "ai_candidate_budget_attempts",
+            "workspace_inbox_revisions"
         ])))
         XCTAssertTrue(upgradedSchema.indexes.isSuperset(of: Set([
             "workspace_work_items_scope_activity",
@@ -384,7 +389,28 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "organization_metadata_replay_protect_snapshot_delete",
             "organization_metadata_replay_protect_snapshot_update",
             "authenticated_user_replay_protect_snapshot_delete",
-            "authenticated_user_replay_protect_snapshot_update"
+            "authenticated_user_replay_protect_snapshot_update",
+            "workspace_inbox_revision_workflow_insert",
+            "workspace_inbox_revision_workflow_update",
+            "workspace_inbox_revision_workflow_delete",
+            "workspace_inbox_revision_action_insert",
+            "workspace_inbox_revision_action_update",
+            "workspace_inbox_revision_action_delete",
+            "workspace_inbox_revision_score_insert",
+            "workspace_inbox_revision_score_update",
+            "workspace_inbox_revision_score_delete",
+            "workspace_inbox_revision_rule_insert",
+            "workspace_inbox_revision_rule_update",
+            "workspace_inbox_revision_rule_delete",
+            "workspace_inbox_revision_rule_evidence_insert",
+            "workspace_inbox_revision_rule_evidence_update",
+            "workspace_inbox_revision_rule_evidence_delete",
+            "workspace_inbox_revision_group_insert",
+            "workspace_inbox_revision_group_update",
+            "workspace_inbox_revision_group_delete",
+            "workspace_inbox_revision_graph_run_insert",
+            "workspace_inbox_revision_graph_run_update",
+            "workspace_inbox_revision_graph_run_delete"
         ])))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.database.path))
         try await registry.closeAll()

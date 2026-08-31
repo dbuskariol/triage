@@ -3196,6 +3196,225 @@ enum TriageDatabaseMigrator {
                     AND pull_request_head_commit_sha NOT GLOB '*[^0-9a-f]*'
                 ))
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "060-workspace-inbox-presentation-revision-v1",
+            checksum: "47e96afd4aec1db46e8036d516ceebed62dc1f9c3fc9ce1f9aedacda70809046"
+        ) { database in
+            // Inbox page observation must not sort every workflow/action/
+            // derived row merely to discover a local eligibility or rank
+            // change. These database-owned generations are updated by the
+            // same transaction as every source mutation, including writes
+            // from another process using the vault.
+            try database.execute(sql: """
+                CREATE TABLE workspace_inbox_revisions (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+
+            // `workflow_states`, `action_items`, and `attention_scores` are
+            // work-item-owned, so their triggers recover the durable scope
+            // from the owning work item. DELETE triggers run before a parent
+            // cascade can remove that owning row.
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_workflow_insert
+                AFTER INSERT ON workflow_states
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = NEW.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_workflow_update
+                AFTER UPDATE ON workflow_states
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items
+                    WHERE id IN (OLD.work_item_id, NEW.work_item_id)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_workflow_delete
+                BEFORE DELETE ON workflow_states
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = OLD.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_action_insert
+                AFTER INSERT ON action_items
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = NEW.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_action_update
+                AFTER UPDATE ON action_items
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items
+                    WHERE id IN (OLD.work_item_id, NEW.work_item_id)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_action_delete
+                BEFORE DELETE ON action_items
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = OLD.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_score_insert
+                AFTER INSERT ON attention_scores
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = NEW.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_score_update
+                AFTER UPDATE ON attention_scores
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items
+                    WHERE id IN (OLD.work_item_id, NEW.work_item_id)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_score_delete
+                BEFORE DELETE ON attention_scores
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM work_items WHERE id = OLD.work_item_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+
+            // Rule and grouping projections already carry their scope. Bump
+            // both old and new scopes for a defensive primary-key/scope move.
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_insert
+                AFTER INSERT ON rule_evaluations
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_update
+                AFTER UPDATE ON rule_evaluations
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_delete
+                BEFORE DELETE ON rule_evaluations
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_evidence_insert
+                AFTER INSERT ON rule_evaluation_evidence
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM rule_evaluations WHERE id = NEW.rule_evaluation_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_evidence_update
+                AFTER UPDATE ON rule_evaluation_evidence
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM rule_evaluations
+                    WHERE id IN (OLD.rule_evaluation_id, NEW.rule_evaluation_id)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_rule_evidence_delete
+                BEFORE DELETE ON rule_evaluation_evidence
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions (account_id, organization_id, generation)
+                    SELECT account_id, organization_id, 1 FROM rule_evaluations WHERE id = OLD.rule_evaluation_id
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_group_insert
+                AFTER INSERT ON work_item_group_memberships
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_group_update
+                AFTER UPDATE ON work_item_group_memberships
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_group_delete
+                BEFORE DELETE ON work_item_group_memberships
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_graph_run_insert
+                AFTER INSERT ON work_item_graph_runs
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_graph_run_update
+                AFTER UPDATE ON work_item_graph_runs
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                    INSERT INTO workspace_inbox_revisions VALUES (NEW.account_id, NEW.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER workspace_inbox_revision_graph_run_delete
+                BEFORE DELETE ON work_item_graph_runs
+                BEGIN
+                    INSERT INTO workspace_inbox_revisions VALUES (OLD.account_id, OLD.organization_id, 1)
+                    ON CONFLICT(account_id, organization_id) DO UPDATE SET generation = generation + 1;
+                END
+                """)
         }
     ]
 }

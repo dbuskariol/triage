@@ -122,6 +122,59 @@ final class PersonalAccessTokenTests: XCTestCase {
     }
 
     @MainActor
+    func testPATConnectionIsSingleFlightAndAllowsRetryAfterCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-pat-single-flight-\(UUID().uuidString)", isDirectory: true)
+        let defaultsSuite = "triage-pat-single-flight-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsSuite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let session = SuspendedPATAccountSession()
+        let model = TriageAppModel(
+            dependencies: .init(
+                accountSession: session,
+                workspaceCoordinator: PATFailureWorkspaceCoordinator(),
+                refreshLifecycle: PATFailureRefreshLifecycle(),
+                workspaceObserver: PATFailureWorkspaceObserver(),
+                workspaceMutator: PATFailureWorkspaceMutator()
+            ),
+            vaultRegistry: try VaultRegistry(rootDirectory: directory),
+            defaults: defaults
+        )
+
+        let first = Task { @MainActor in
+            await model.connectPersonalAccessToken(
+                "ghp_abcdefghijklmnopqrstuvwxyz",
+                resourceOwnerOrganization: nil
+            )
+        }
+        await session.waitForFirstConnection()
+        XCTAssertTrue(model.isConnecting)
+
+        await model.connectPersonalAccessToken(
+            "ghp_abcdefghijklmnopqrstuvwxyz",
+            resourceOwnerOrganization: nil
+        )
+        let connectionCountDuringFirstAttempt = await session.connectionCount()
+        XCTAssertEqual(connectionCountDuringFirstAttempt, 1)
+
+        await session.releaseFirstConnection()
+        await first.value
+        XCTAssertFalse(model.isConnecting)
+
+        await model.connectPersonalAccessToken(
+            "ghp_abcdefghijklmnopqrstuvwxyz",
+            resourceOwnerOrganization: nil
+        )
+        let connectionCountAfterRetry = await session.connectionCount()
+        XCTAssertEqual(connectionCountAfterRetry, 2)
+        await model.shutdown()
+    }
+
+    @MainActor
     func testReplacementPATFailureReplacesPriorOAuthConfigurationError() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("triage-pat-replacement-oauth-isolation-\(UUID().uuidString)", isDirectory: true)
@@ -300,6 +353,63 @@ private struct PATFailureAccountSession: AccountSessionServing {
         throw URLError(.badServerResponse)
     }
     func removeAccount(_: AccountID) async throws {}
+
+    private func emptySnapshot() throws -> AccountSessionSnapshot {
+        try AccountSessionSnapshot(
+            accounts: [],
+            organizationsByAccount: [:],
+            organizationAccessesByAccount: [:],
+            accountCapabilitiesByAccount: [:]
+        )
+    }
+}
+
+private actor SuspendedPATAccountSession: AccountSessionServing {
+    private var calls = 0
+    private var firstConnectionStarted: CheckedContinuation<Void, Never>?
+    private var firstConnectionRelease: CheckedContinuation<Void, Never>?
+
+    func restoreAccounts() async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func connectOAuth(_: AuthBrokerExchangeRequest) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+
+    func connectPersonalAccessToken(
+        _: PersonalAccessToken,
+        resourceOwnerOrganization _: String?
+    ) async throws -> AccountSessionSnapshot {
+        calls += 1
+        if calls == 1 {
+            firstConnectionStarted?.resume()
+            firstConnectionStarted = nil
+            await withCheckedContinuation { continuation in
+                firstConnectionRelease = continuation
+            }
+        }
+        return try emptySnapshot()
+    }
+
+    func reconnectOAuth(
+        _: AuthBrokerExchangeRequest,
+        replacing _: GitHubAccount
+    ) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func replacePersonalAccessToken(
+        _: PersonalAccessToken,
+        replacing _: GitHubAccount
+    ) async throws -> AccountSessionSnapshot { try emptySnapshot() }
+    func removeAccount(_: AccountID) async throws {}
+
+    func waitForFirstConnection() async {
+        guard calls == 0 else { return }
+        await withCheckedContinuation { continuation in
+            firstConnectionStarted = continuation
+        }
+    }
+
+    func releaseFirstConnection() {
+        firstConnectionRelease?.resume()
+        firstConnectionRelease = nil
+    }
+
+    func connectionCount() -> Int { calls }
 
     private func emptySnapshot() throws -> AccountSessionSnapshot {
         try AccountSessionSnapshot(

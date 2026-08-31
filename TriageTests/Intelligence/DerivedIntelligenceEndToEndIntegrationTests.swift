@@ -370,10 +370,11 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         }
 
         func seedAuthoritativeRuleSources() async throws {
-            // Status-check rollups are revision-qualified by the immutable
-            // pull-request source revision. Use a valid revision rather than
-            // treating an ISO timestamp as that authority token.
-            let primaryRevision = String(repeating: "a", count: 64)
+            // Node freshness and status-check authority are deliberately
+            // distinct: the former is updated-at based, while the latter is
+            // the immutable PR head commit SHA.
+            let primaryRevision = now.ISO8601Format()
+            let headCommitSHA = String(repeating: "a", count: 64)
             try await GitHubNodeRepository(vault: vault).save(
                 Self.node(
                     id: pullRequestNodeID,
@@ -384,6 +385,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                     kind: .pullRequest,
                     title: "Derived end-to-end pull request",
                     sourceRevision: primaryRevision,
+                    pullRequestHeadCommitSHA: headCommitSHA,
                     body: "Normalized pull request body"
                 )
             )
@@ -392,7 +394,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             let statusCheckStreamID = PullRequestStatusCheckRefreshService.sourceStreamID(
                 organizationID: organizationID,
                 pullRequestNodeID: pullRequestNodeID,
-                sourceRevision: primaryRevision
+                sourceRevision: headCommitSHA
             )
             let statusCheckCoverage = CoverageRecord(
                 accountID: accountID,
@@ -412,13 +414,13 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 .init(
                     mergeableState: "MERGEABLE",
                     checks: [],
-                    sourceRevision: primaryRevision,
+                    sourceRevision: headCommitSHA,
                     observedAt: now
                 ),
                 authority: .init(
                     scope: scope,
                     pullRequestNodeID: pullRequestNodeID,
-                    pullRequestSourceRevision: primaryRevision,
+                    pullRequestSourceRevision: headCommitSHA,
                     streamID: statusCheckStreamID,
                     schedulingStreamID: SyncStreamID(
                         rawValue: "pull-request-status-checks-\(organizationID.rawValue)"
@@ -428,6 +430,11 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 coverage: statusCheckCoverage,
                 attemptedAt: now
             )
+            let statusSnapshot = try await StatusCheckRepository(vault: vault).snapshot(
+                pullRequestNodeID: pullRequestNodeID,
+                scope: scope
+            )
+            XCTAssertEqual(statusSnapshot?.sourceRevision, headCommitSHA)
             try await ActorRepository(vault: vault).save(
                 ActorSummary(
                     id: ActorID(rawValue: reviewerNodeID.rawValue)!,
@@ -896,6 +903,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             kind: GitHubContentKind,
             title: String,
             sourceRevision: String,
+            pullRequestHeadCommitSHA: String? = nil,
             body: String?
         ) -> NormalizedGitHubNode {
             NormalizedGitHubNode(
@@ -916,7 +924,9 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                 closedAt: nil,
                 mergedAt: nil,
                 sourceRevision: sourceRevision,
-                pullRequestHeadCommitSHA: kind == .pullRequest ? sourceRevision : nil,
+                pullRequestHeadCommitSHA: kind == .pullRequest
+                    ? (pullRequestHeadCommitSHA ?? sourceRevision)
+                    : nil,
                 observedAt: now,
                 accessibility: .accessible
             )

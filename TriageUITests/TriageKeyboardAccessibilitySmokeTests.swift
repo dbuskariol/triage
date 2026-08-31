@@ -25,6 +25,38 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(app.buttons["Use a Personal Access Token"].exists)
     }
 
+    func testAccountRecoveryFixtureShowsSanitizedRecoveryControls() throws {
+        launchFixture(scenario: "account-recovery")
+
+        let recoveryCopy = "Recover encrypted local account data. Triage cannot open encrypted local data for one or more saved accounts. In Account Settings, remove each unavailable account’s local data. This removes data stored on this Mac only; it does not change GitHub. Then reconnect to GitHub to resync."
+        XCTAssertTrue(element(named: recoveryCopy).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Open Account Settings…"].exists)
+        XCTAssertTrue(app.buttons["Try Again"].exists)
+
+        let rawIdentity = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "fixture-unavailable-account")
+        )
+        XCTAssertEqual(rawIdentity.count, 0, "Recovery UI must not expose its opaque local account identity.")
+    }
+
+    func testPartialAccessFixtureRetainsCachedWorkWithoutBrowserAuthorization() throws {
+        launchFixture(scenario: "partial-access")
+        try requireMainWindow()
+
+        XCTAssertTrue(
+            element(named: "Fixture Acme keyboard accessibility smoke").waitForExistence(timeout: 10),
+            "Partial access must retain already synchronized local work."
+        )
+        let partialStatus = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Partial access")
+        )
+        XCTAssertTrue(partialStatus.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(
+            app.buttons["Authorize in Browser"].exists,
+            "Partial access without an authorization-required URL must not offer a browser action."
+        )
+    }
+
     func testPATEntrySheetHidesFixtureOAuthErrorAndExposesLayout() throws {
         launchFixture(scenario: "personal-access-token")
 
@@ -67,6 +99,35 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(app.secureTextFields["GitHub personal access token"].exists)
         XCTAssertTrue(
             element(named: "Triage validates that the new token belongs to this GitHub account before replacing the Keychain credential.").exists
+        )
+    }
+
+    func testAddAccountFixtureExposesOwnerQualifiedPATEntryWithoutRemovingAccounts() throws {
+        launchFixture(scenario: "personal-access-token-replacement")
+        try requireMainWindow()
+        app.typeKey(",", modifierFlags: .command)
+
+        let settingsWindow = app.windows["Settings"]
+        XCTAssertTrue(settingsWindow.waitForExistence(timeout: 3))
+        let accounts = settingsWindow.descendants(matching: .any)["Accounts"]
+        XCTAssertTrue(accounts.waitForExistence(timeout: 3))
+        accounts.click()
+        let addAccount = settingsWindow.buttons["Add Account…"]
+        XCTAssertTrue(addAccount.waitForExistence(timeout: 5))
+        addAccount.click()
+        let tokenChoice = app.buttons["Use a Personal Access Token"]
+        XCTAssertTrue(tokenChoice.waitForExistence(timeout: 3))
+        tokenChoice.click()
+
+        let sheet = element(named: "personal-access-token-entry-sheet")
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["GitHub personal access token"].exists)
+        XCTAssertTrue(
+            element(named: "Triage stores the token only in your macOS Keychain and uses GitHub read APIs.").exists
+        )
+        XCTAssertTrue(
+            element(named: "Fixture Primary").exists,
+            "Opening Add Account must retain the existing local account."
         )
     }
 

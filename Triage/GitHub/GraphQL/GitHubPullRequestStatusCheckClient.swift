@@ -43,6 +43,7 @@ enum GitHubPullRequestStatusCheckClientError: Error, Equatable, Sendable {
     case paginationLoop
     case paginationLimitExceeded
     case incompleteConnection
+    case headCommitMismatch
     case invalidContext
     case duplicateContext
 }
@@ -63,8 +64,12 @@ actor GitHubPullRequestStatusCheckClient {
     }
 
     func allStatusChecks(
-        pullRequestNodeID: GitHubNodeID
+        pullRequestNodeID: GitHubNodeID,
+        expectedHeadCommitSHA: String
     ) async throws -> GitHubPullRequestStatusCheckInventory {
+        guard Self.isCommitSHA(expectedHeadCommitSHA) else {
+            throw GitHubPullRequestStatusCheckClientError.headCommitMismatch
+        }
         let query = try GitHubGraphQLQueries.pullRequestStatusChecks()
         var after: String?
         var visitedCursors = Set<String>()
@@ -120,6 +125,9 @@ actor GitHubPullRequestStatusCheckClient {
             }
             guard let pullRequest = payload.node, pullRequest.id == pullRequestNodeID.rawValue else {
                 throw GitHubPullRequestStatusCheckClientError.missingPullRequest
+            }
+            guard pullRequest.headRefOid == expectedHeadCommitSHA else {
+                throw GitHubPullRequestStatusCheckClientError.headCommitMismatch
             }
             guard let rollup = pullRequest.statusCheckRollup else {
                 throw GitHubPullRequestStatusCheckClientError.missingRollup
@@ -212,6 +220,12 @@ actor GitHubPullRequestStatusCheckClient {
         return "graphql:TriagePullRequestStatusChecks/pull-request=\(pullRequestNodeID.rawValue)/after=\(cursor)"
     }
 
+    private nonisolated static func isCommitSHA(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy {
+            $0.isASCII && ($0.properties.numericType != nil || (97...102).contains($0.value))
+        }
+    }
+
     private struct CursorVariables: Encodable, Sendable {
         let pullRequestID: String
         let after: String?
@@ -225,6 +239,7 @@ struct GitHubPullRequestStatusCheckPayload: Decodable, Sendable {
     struct PullRequest: Decodable, Sendable {
         let id: String
         let mergeable: String
+        let headRefOid: String?
         let statusCheckRollup: Rollup?
     }
 

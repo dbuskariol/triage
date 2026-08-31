@@ -17,6 +17,8 @@ jobs:
     name: Verify Triage (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      TRIAGE_CI_DERIVED_DATA: ${{ runner.temp }}/triage-ci-derived-data
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +28,13 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      - name: Install pinned Rust helper toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup override set 1.94.0
+          rustc --version
+          cargo --version
+          cargo fetch --locked --manifest-path TriageCopilotHelper/Cargo.toml
       - name: Show toolchain
         run: |
           sw_vers

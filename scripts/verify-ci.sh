@@ -11,12 +11,18 @@ while IFS= read -r -d '' script; do
   /bin/bash -n "$script"
 done < <(/usr/bin/find "$ROOT_DIR/scripts" -type f -name '*.sh' -print0)
 /bin/bash "$ROOT_DIR/scripts/test-performance-benchmark-runner.sh"
+/bin/bash "$ROOT_DIR/scripts/test-build-copilot-helper.sh"
+/bin/bash "$ROOT_DIR/scripts/test-release-verification-helpers.sh"
+/bin/bash "$ROOT_DIR/scripts/verify-xpc-package-mirror.sh"
 /usr/bin/xcrun swiftc -typecheck "$ROOT_DIR/scripts/sparkle-public-key.swift"
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/Triage-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/Triage.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/TriageDebug.entitlements" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/Configuration/TriageCopilotXPC-Info.plist" >/dev/null
 /usr/bin/plutil -lint "$ROOT_DIR/TriageCopilotXPC/TriageCopilotXPC.entitlements" >/dev/null
+triage_assert_no_unsafe_entitlements \
+  "$ROOT_DIR/TriageCopilotXPC/TriageCopilotXPC.entitlements" \
+  'Copilot XPC source'
 /usr/bin/plutil -lint "$ROOT_DIR/Triage/PrivacyInfo.xcprivacy" >/dev/null
 /bin/bash "$ROOT_DIR/scripts/verify-vendored-dependencies.sh" >/dev/null
 /usr/bin/grep -Fq '"revision" : "b6496a74a087257ef5e6da1c5b29a447a60f5bd7"' \
@@ -62,6 +68,16 @@ XPC_SERVICE="$UNSIGNED_APP/Contents/XPCServices/TriageCopilotXPC.xpc"
   || triage_fail 'CI release has an unexpected Copilot XPC service bundle identifier'
 [[ -x "$XPC_SERVICE/Contents/MacOS/TriageCopilotXPC" ]] \
   || triage_fail 'CI release is missing the Copilot XPC service executable'
+COPILOT_HELPER="$XPC_SERVICE/Contents/Resources/TriageCopilotHelper"
+[[ -x "$COPILOT_HELPER" ]] \
+  || triage_fail 'CI release is missing the Copilot helper executable'
+/usr/bin/codesign --verify --strict --verbose=2 "$COPILOT_HELPER" \
+  || triage_fail 'CI release Copilot helper signature is invalid'
+triage_assert_code_identifier \
+  "$COPILOT_HELPER" 'com.triage.mac.TriageCopilotHelper' 'CI release Copilot helper'
+grep -Eq '^CodeDirectory .*flags=.*\(runtime\)' <<<"$(triage_codesign_details "$COPILOT_HELPER")" \
+  || triage_fail 'CI release Copilot helper does not enable the hardened runtime'
+triage_assert_safe_signed_entitlements "$COPILOT_HELPER" 'CI release Copilot helper'
 PRIVACY_MANIFEST="$UNSIGNED_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 [[ -f "$PRIVACY_MANIFEST" ]] || triage_fail 'CI release is missing its privacy manifest'
 /usr/bin/plutil -lint "$PRIVACY_MANIFEST" >/dev/null \
@@ -75,10 +91,8 @@ PRIVACY_MANIFEST="$UNSIGNED_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 [[ "$(/usr/bin/plutil -extract NSPrivacyAccessedAPITypes.0.NSPrivacyAccessedAPITypeReasons.0 raw -o - "$PRIVACY_MANIFEST")" == "CA92.1" ]] \
   || triage_fail 'CI release has an unexpected UserDefaults required reason'
 
-ARCHITECTURES="$(/usr/bin/lipo -archs "$UNSIGNED_APP/Contents/MacOS/Triage")"
-for architecture in "${TRIAGE_EXPECTED_ARCHITECTURES[@]}"; do
-  [[ " $ARCHITECTURES " == *" $architecture "* ]] \
-    || triage_fail "CI release is missing $architecture (found: $ARCHITECTURES)"
-done
+triage_assert_expected_architectures "$UNSIGNED_APP/Contents/MacOS/Triage" 'CI release app executable'
+triage_assert_expected_architectures "$XPC_SERVICE/Contents/MacOS/TriageCopilotXPC" 'CI release Copilot XPC service executable'
+triage_assert_expected_architectures "$COPILOT_HELPER" 'CI release Copilot helper executable'
 
 triage_note 'CI verification passed'

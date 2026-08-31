@@ -308,21 +308,32 @@ final class PrivateDataArtifactsTests: XCTestCase {
         // A fresh registry simulates app relaunch: the in-memory removal gate
         // is gone, so recovery must depend on the durable journal instead.
         let restartedRegistry = try VaultRegistry(rootDirectory: vaultRoot)
+        let recoveryOrdering = RecoveryCryptoErasureOrdering()
         let recovery = AccountDataRemovalService(
             vaultRegistry: restartedRegistry,
             applicationSupportDirectory: support,
             cachesDirectory: caches,
-            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+            eraseSecrets: { recoveredAccountID in
+                await recoveryOrdering.record(.secretsErased(recoveredAccountID))
+                await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true)
+            },
+            willBeginCryptoErasureForAccount: { recoveredAccountID in
+                await recoveryOrdering.record(.drained(recoveredAccountID))
+            }
         )
         let recoveredAccountIDs = try await recovery.recoverInterruptedRemovals()
 
         let totalSecretErasures = await events.secretErasures()
+        let recoveryEvents = await recoveryOrdering.events()
         let secondReplay = try await recovery.recoverInterruptedRemovals()
         let secretErasuresAfterSecondReplay = await events.secretErasures()
+        let recoveryEventsAfterSecondReplay = await recoveryOrdering.events()
         XCTAssertEqual(recoveredAccountIDs, [accountID])
         XCTAssertEqual(totalSecretErasures, 2)
+        XCTAssertEqual(recoveryEvents, [.drained(accountID), .secretsErased(accountID)])
         XCTAssertEqual(secondReplay, [])
         XCTAssertEqual(secretErasuresAfterSecondReplay, 2)
+        XCTAssertEqual(recoveryEventsAfterSecondReplay, recoveryEvents)
         XCTAssertTrue(artifacts.allSatisfy {
             !FileManager.default.fileExists(atPath: $0.url.path)
         })
@@ -685,6 +696,18 @@ private actor DeletionEventLog {
     func secretErasures() -> Int { secretErasureCount }
     func vaultWasOpenAtSecretErasure() -> Bool? { vaultOpenAtSecretErasure }
     func removalWasActiveAtSecretErasure() -> Bool? { removalActiveAtSecretErasure }
+}
+
+private actor RecoveryCryptoErasureOrdering {
+    enum Event: Equatable, Sendable {
+        case drained(AccountID)
+        case secretsErased(AccountID)
+    }
+
+    private var storage = [Event]()
+
+    func record(_ event: Event) { storage.append(event) }
+    func events() -> [Event] { storage }
 }
 
 private actor DeletionBarrier {

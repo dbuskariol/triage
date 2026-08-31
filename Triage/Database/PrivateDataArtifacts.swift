@@ -199,6 +199,10 @@ actor AccountDataRemovalService {
     private let eraseSecrets: @Sendable (AccountID) async throws -> Void
     private let eraseArtifacts: @Sendable ([PrivateDataArtifact]) throws -> Void
     private let willBeginCryptoErasure: @Sendable () async -> Void
+    /// The account-qualified lifecycle fence is used by startup journal
+    /// recovery as well as interactive removal. Keeping it here ensures the
+    /// same drain completes before every irreversible crypto-erasure path.
+    private let willBeginCryptoErasureForAccount: @Sendable (AccountID) async -> Void
     private let journalAuthority: any AccountDeletionJournalAuthenticating
 
     init(
@@ -206,7 +210,8 @@ actor AccountDataRemovalService {
         secretStore: KeychainSecretStore,
         applicationSupportDirectory: URL,
         cachesDirectory: URL,
-        willBeginCryptoErasure: @escaping @Sendable () async -> Void = {}
+        willBeginCryptoErasure: @escaping @Sendable () async -> Void = {},
+        willBeginCryptoErasureForAccount: @escaping @Sendable (AccountID) async -> Void = { _ in }
     ) {
         self.vaultRegistry = vaultRegistry
         self.applicationSupportDirectory = applicationSupportDirectory
@@ -216,6 +221,7 @@ actor AccountDataRemovalService {
         }
         eraseArtifacts = Self.removeArtifacts
         self.willBeginCryptoErasure = willBeginCryptoErasure
+        self.willBeginCryptoErasureForAccount = willBeginCryptoErasureForAccount
         journalAuthority = AccountDeletionJournalKeychainAuthority.shared
     }
 
@@ -226,6 +232,7 @@ actor AccountDataRemovalService {
         eraseSecrets: @escaping @Sendable (AccountID) async throws -> Void,
         eraseArtifacts: (@Sendable ([PrivateDataArtifact]) throws -> Void)? = nil,
         willBeginCryptoErasure: (@Sendable () async -> Void)? = nil,
+        willBeginCryptoErasureForAccount: (@Sendable (AccountID) async -> Void)? = nil,
         journalAuthority: (any AccountDeletionJournalAuthenticating)? = nil
     ) {
         self.vaultRegistry = vaultRegistry
@@ -234,6 +241,7 @@ actor AccountDataRemovalService {
         self.eraseSecrets = eraseSecrets
         self.eraseArtifacts = eraseArtifacts ?? Self.removeArtifacts
         self.willBeginCryptoErasure = willBeginCryptoErasure ?? {}
+        self.willBeginCryptoErasureForAccount = willBeginCryptoErasureForAccount ?? { _ in }
         self.journalAuthority = journalAuthority ?? AccountDeletionJournalKeychainAuthority.shared
     }
 
@@ -259,6 +267,7 @@ actor AccountDataRemovalService {
         do {
             try await vaultRegistry.close(accountID: accountID)
             await willBeginCryptoErasure()
+            await willBeginCryptoErasureForAccount(accountID)
             try Task.checkCancellation()
         } catch {
             await vaultRegistry.cancelRemoval(accountID: accountID)

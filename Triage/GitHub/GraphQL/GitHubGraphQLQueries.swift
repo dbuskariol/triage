@@ -222,6 +222,7 @@ enum GitHubGraphQLQueries {
                   id
                   number
                   mergeable
+                  headRefOid
                   statusCheckRollup {
                     contexts(first: 50, after: $after) {
                       nodes {

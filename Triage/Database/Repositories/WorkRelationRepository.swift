@@ -59,7 +59,8 @@ actor WorkRelationRepository {
         _ relations: [WorkRelation],
         accountID: AccountID,
         subjectNodeID: GitHubNodeID,
-        authority: RelationReplacementAuthority
+        authority: RelationReplacementAuthority,
+        replacingKinds: Set<WorkRelationKind>? = nil
     ) async throws {
         guard accountID == vault.accountID else {
             throw WorkRelationRepositoryError.accountScopeMismatch
@@ -70,6 +71,7 @@ actor WorkRelationRepository {
                 accountID: accountID,
                 subjectNodeID: subjectNodeID,
                 authority: authority,
+                replacingKinds: replacingKinds,
                 in: database
             )
         }
