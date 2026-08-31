@@ -1,11 +1,11 @@
 # Triage development handoff
 
 **Handoff state:** the current committed source checkpoint preceding this
-documentation update is `3105e3f` (`Repair full-suite authority fixtures`) on
-`main`. It includes the production acceptance slice committed as `cc46e7e`,
-the focused fixture/race repairs in `65ea09f`, and the three stale full-suite
-fixture repairs in `3105e3f`. Only this documentation update remains in the
-active worktree.
+documentation update is `134f51a` (`Separate host plugin deployment settings`)
+on `main`. It includes the production acceptance slice committed as `cc46e7e`,
+the final full-suite fixture repairs through `3105e3f`, and the macOS 27
+universal Rust-helper build corrections through `134f51a`. Only this
+documentation update remains in the active worktree.
 
 `0f80baf` remains the historical local-integration checkpoint, with focused
 evidence through the later committed Settings work noted below. Historical
@@ -13,9 +13,11 @@ results are retained for traceability only; they do not validate the current
 tree. Triage is **not** globally complete: the linked-development/“work
 underway” source contract is still undefined, UI XCTest still cannot enter
 automation mode on this host, OAuth deployment values and controlled live GitHub access are
-absent, acquired-runtime Copilot acceptance has not been run, and signing,
-notarization, and release operations remain external or explicitly authorized
-work. This document records the exact remaining gates.
+absent, acquired-runtime Copilot acceptance has not been run, and notarization
+and release operations remain external or explicitly authorized work. A local
+universal Developer ID-signed Release build has been installed for inspection;
+it is not a notarized or published release. This document records the exact
+remaining gates.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -29,7 +31,7 @@ boundaries, sequencing, and acceptance criteria.
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
 - Production integration commit: `9d9a566`
-- Source checkpoint preceding this documentation update: `main` at `3105e3f`
+- Source checkpoint preceding this documentation update: `main` at `134f51a`
 - Historical local-acceptance checkpoint: `0f80baf`; later historical Settings
   evidence is recorded through `a77fa56`, not as evidence for the active tree.
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
@@ -459,13 +461,13 @@ not a claim that external or release acceptance has occurred.
 
 | Graph node | Current state | Remaining closure |
 | --- | --- | --- |
-| Product integration | Organization refresh/coordinator flow, revision-fenced GitHub streams, encrypted observations, derived intelligence, ranking, workflow actions, notification delivery, recovery/deletion, and native workspace/Settings injection are committed through `3105e3f`. | Controlled live GitHub authority testing remains external; local tests cannot prove SSO, approval, or production rate-limit behavior. |
+| Product integration | Organization refresh/coordinator flow, revision-fenced GitHub streams, encrypted observations, derived intelligence, ranking, workflow actions, notification delivery, recovery/deletion, and native workspace/Settings injection are committed through `134f51a`. | Controlled live GitHub authority testing remains external; local tests cannot prove SSO, approval, or production rate-limit behavior. |
 | Authentication | OAuth/PAT isolation, refresh/replacement fencing, identity replay, broker anti-replay controls, PAT-specific presentation, and account-local key/vault recovery are implemented. | Supply the real OAuth client ID and broker URL as deployment configuration, then run controlled OAuth/PAT acceptance. |
-| Copilot | Explicit pinned CLI acquisition, vendor signature/architecture/hash verification, XPC/Rust session boundary, authenticated model inventory, consent, candidate budgets, caching, cancellation, and fail-closed action claims are implemented. XPC and Rust suites pass locally. | Acquire the pinned runtime and exercise entitled/non-entitled authentication with controlled accounts; shipping helper/XPC/app signatures remain a release gate. |
+| Copilot | Explicit pinned CLI acquisition, vendor signature/architecture/hash verification, XPC/Rust session boundary, authenticated model inventory, consent, candidate budgets, caching, cancellation, and fail-closed action claims are implemented. XPC and Rust suites pass locally. A universal helper/XPC/app Developer ID signing pass succeeded at `134f51a`. | Acquire the pinned runtime and exercise entitled/non-entitled authentication with controlled accounts; repeat signing verification on the exact release candidate and complete notarization/Gatekeeper acceptance. |
 | Linked-PR progress rules | The plan still requires linked-PR grouping and two progress predicates, but no production source emits `.linkedPullRequest`; `closingIssuesReferences` is intentionally distinct. Stable Project option identity/underway mapping and a PR-staleness policy are also absent. | Add the typed, revision-fenced source contract recorded in `GITHUB_FEATURE_CONTRACTS.md`; until then these relations/rules remain disabled and unknown. |
 | Native UI and performance | Native windows, sidebar/detail/inspector, Settings navigation, commands, accessibility semantics, restoration, bounded inbox paging, and opt-in deterministic benchmark machinery are implemented. | Fixture-backed UI XCTest must run on a host where the runner bootstraps. Hardware benchmarks must run on a declared supported Mac; this Mac is not a supported baseline. |
 | Encrypted migrations | Current fresh/idempotent paths cover migrations through `060`; the frozen fixture remains immutable. The schema-039 upgrade through current migration `060` passed during the full verifier on 2026-08-31 (35.585 s). | Never regenerate the frozen artifact from acceptance code; repeat on release candidates. |
-| Local verification | Canonical arm64 build-for-testing, the complete 1,415-test non-UI production/XPC suite, the 298-test production plus 25-test fail-closed XPC matrix, focused vault selectors, Rust, broker, performance-runner, helper-build, release-helper, and package-mirror contracts pass. The full verifier's static phases and frozen migration test passed. Its Debug test action reached the app/UI runner but ended on one host automation timeout plus three stale fixture failures; all three fixture selectors and the complete non-UI suite pass after `3105e3f`. | Re-run the full verifier on an XCTest UI host that can enter automation mode, then complete release-candidate validation; do not convert host-only UI or release blocks into a pass. |
+| Local verification | Canonical arm64 build-for-testing, the complete 1,415-test non-UI production/XPC suite, the 298-test production plus 25-test fail-closed XPC matrix, focused vault selectors, Rust, broker, performance-runner, helper-build, release-helper, and package-mirror contracts pass. The full verifier's static phases and frozen migration test passed. Its Debug test action reached the app/UI runner but ended on one host automation timeout plus three stale fixture failures; all three fixture selectors and the complete non-UI suite pass after `3105e3f`. The universal Release app, XPC, Rust helper, Sparkle executables, and SQLCipher framework built for arm64/x86_64 and passed deep strict Developer ID signature verification at `134f51a`. | Re-run the full verifier on an XCTest UI host that can enter automation mode, then complete notarized release-candidate validation; do not convert host-only UI or release blocks into a pass. |
 
 ### Known historical results and current blockers
 
@@ -484,6 +486,7 @@ identify the recorded runs; the bundles are not retained in the checkout or in
 | Current focused production/XPC matrix | Passed at `65ea09f`. | `/private/tmp/triage-broad-green-20260831-194203.xcresult`: 298 selected production tests and 25 fail-closed XPC tests, zero failures or skips. This is focused evidence, not a substitute for `scripts/verify-ci.sh`. |
 | Full-suite regression repair | Passed at `3105e3f`. | `/private/tmp/triage-full-regressions-green-20260831.xcresult`: working-day invariant, relation grouping authority, and timeline input source/coverage identity selectors all pass together after their fixture repairs. |
 | Complete non-UI production/XPC suite | Passed at `3105e3f`. | `/private/tmp/triage-full-nonui-green-20260831.xcresult`: 1,415 tests passed with zero failures, skips, or expected failures in 156.563 seconds. UI tests were explicitly excluded because this host cannot enter XCTest automation mode. |
+| Universal signed Release build | Passed at `134f51a`. | Xcode 27.0 with pinned Rust 1.94 built version 0.1.0 (1) for arm64/x86_64. The app, XPC service, Rust helper, Sparkle executables, and SQLCipher framework are universal; app/XPC/helper carry Developer ID team `BJCVJ5G7MJ` with Hardened Runtime and pass `codesign --verify --deep --strict`. The 66 MiB bundle is installed at `/Applications/Triage.app` and launches locally. It is intentionally unnotarized and is not release acceptance. |
 
 ### External and host-only gates
 
@@ -523,9 +526,9 @@ identify the recorded runs; the bundles are not retained in the checkout or in
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
 - The recorded 997/997 unit/XPC and 998 deterministic results are historical
-  only. They do not validate `3105e3f` or the documentation worktree. Full UI/verifier
+  only. They do not validate `134f51a` or the documentation worktree. Full UI/verifier
   acceptance remains pending because no UI test method launched on this host.
   OAuth deployment configuration, controlled live GitHub validation, production
-  acceptance of the acquired-runtime authentication/consent path, Developer ID
-  signing/notarization/publish, and final release acceptance remain open and are
-  not implied by local coverage.
+  acceptance of the acquired-runtime authentication/consent path, exact
+  release-candidate signing, notarization/publish, and final release acceptance
+  remain open and are not implied by local coverage.
