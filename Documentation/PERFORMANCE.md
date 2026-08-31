@@ -21,10 +21,12 @@ production Inbox observation-to-presentation bridge, including its revision
 fence and persisted-rank 50-item Inbox page consumed by the unfiltered Inbox
 UI, plus the `SearchRepository` search path. The complete graph remains an
 independent projection for notifications and other workspace sections, so it
-cannot block this Inbox measurement. Detail presentation receives a selected item
-from the already-cached production graph before timing `WorkDetailRepository`
-source and bounded timeline reads; it does not issue benchmark-only timeline or
-comment SQL. Its fixed 32-byte key is a test-only input for an isolated
+cannot block this Inbox measurement. Detail setup selects from a one-item
+production Inbox page before timing `WorkDetailRepository` source and bounded
+timeline reads; it does not decode the complete 10,000-item graph or issue
+benchmark-only timeline or comment SQL. This is a repository detail-load
+measurement, not a SwiftUI selection-to-render acceptance. Its fixed 32-byte
+key is a test-only input for an isolated
 temporary directory; it is never written to the repository as a credential.
 Timing is opt-in because a wall-clock result on an arbitrary developer or
 hosted CI machine is not a reliable regression signal.
@@ -59,7 +61,7 @@ measurement, and the runner refuses to complete successfully unless its status
 is `passed`. It uses nearest-rank percentiles: for eleven samples, median is the
 sixth sorted observation and p95 is the slowest observation. Median
 targets are 150 ms for cached workspace switch, 100 ms for the Inbox first
-page, 150 ms for local search, and 100 ms for initial detail data. P95 has a
+page, 150 ms for local search, and 100 ms for repository detail data. P95 has a
 documented 20% host-noise tolerance. The Xcode test fails when an identified
 baseline exceeds either threshold.
 
@@ -69,7 +71,7 @@ or optional UI samples. That measurement is currently `measured-unbaselined`:
 it records bounded-page and persistence-batch metadata, but has no approved
 per-profile physical-footprint limit. Accordingly, a run that opts into it is
 intentionally not a passing hardware benchmark; ordinary supported baseline
-runs record `not-measured` and remain pass-capable. The memory and scroll
+runs record `not-measured` and remain pass-capable. Launch, memory, and scroll
 sidecars carry schema version 1 and a per-run opaque session token; the database
 report rejects missing, stale, malformed, schema-mismatched, non-finite, or
 inconsistent requested sidecars instead of accepting a nonempty file.
@@ -86,7 +88,10 @@ has the correct architecture.
 The same opt-in UI run performs the native 10,000-row scroll/hitch capture.
 Its unbaselined aggregate is embedded in the top-level report only after the
 runner verifies both expected XCTest metric identifiers are present. It does
-not invent frame counts or claim a scrolling hardware pass.
+not invent frame counts or claim a scrolling hardware pass. Because there is
+not yet an approved scroll/hitch threshold, any run that includes those metrics
+is rewritten to top-level `measured-unbaselined` and fails the runner's passing
+status gate; it is diagnostic evidence, not a green CI baseline.
 
 GitHub Actions may opt in by setting
 `TRIAGE_PERFORMANCE_APPLE_SILICON_PROFILE` and/or
