@@ -85,8 +85,10 @@ HELPER="$BUILD_DIRECTORY/TriageCopilotXPC.xpc/Contents/Resources/TriageCopilotHe
 grep -Fq -- '--locked --offline --target aarch64-apple-darwin --release' "$LOG"
 grep -Fq -- '--locked --offline --target x86_64-apple-darwin --release' "$LOG"
 grep -Fq -- "--manifest-path $ROOT_DIR/TriageCopilotHelper/Cargo.toml" "$LOG"
-[[ "$(grep -Fc "cargo-target-dir $CACHE_DIRECTORY/TriageCopilotHelper-Cargo/Release" "$LOG")" -eq 2 ]] \
-  || { echo 'helper build contract: Release slices must share the CI derived-data cache' >&2; exit 1; }
+grep -Fq -- "cargo-target-dir $CACHE_DIRECTORY/TriageCopilotHelper-Cargo/Release/aarch64-apple-darwin" "$LOG"
+grep -Fq -- "cargo-target-dir $CACHE_DIRECTORY/TriageCopilotHelper-Cargo/Release/x86_64-apple-darwin" "$LOG"
+[[ "$(grep -c '^cargo-target-dir ' "$LOG")" -eq 2 ]] \
+  || { echo 'helper build contract: Release slices must use isolated target caches' >&2; exit 1; }
 grep -q '^lipo -create ' "$LOG"
 grep -Fq -- '--sign - ' "$LOG"
 
@@ -115,7 +117,7 @@ env \
 [[ "$(grep -c '^cargo ' "$LOG")" -eq 1 ]] \
   || { echo 'helper build contract: Debug must build one active architecture' >&2; exit 1; }
 grep -Fq -- '--locked --offline --target aarch64-apple-darwin' "$LOG"
-grep -Fq -- "cargo-target-dir $CACHE_DIRECTORY/TriageCopilotHelper-Cargo/Debug" "$LOG"
+grep -Fq -- "cargo-target-dir $CACHE_DIRECTORY/TriageCopilotHelper-Cargo/Debug/aarch64-apple-darwin" "$LOG"
 if grep -Fq -- '--release' "$LOG"; then
   echo 'helper build contract: Debug must not request the Cargo release profile' >&2
   exit 1
