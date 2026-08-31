@@ -77,6 +77,24 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         XCTAssertEqual(currentState.authentication, .signedOut)
     }
 
+    func testFirstStateQueryPublishesVerifiedRuntimeAtInitialGeneration() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "triage-copilot-initial-state-\(UUID().uuidString)"
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = CopilotRuntimeAuthenticationService(
+            applicationSupportDirectory: root,
+            secretStore: SecretStoreSpy(),
+            runtimeStatusProvider: { .ready }
+        )
+
+        let state = await service.state(for: makeAccount().id)
+
+        XCTAssertEqual(state.runtime, .ready)
+        XCTAssertEqual(state.authentication, .signedOut)
+        XCTAssertFalse(state.permitsAI)
+    }
+
     func testAuthenticationIsRejectedForEntireRuntimeAcquisitionMutation() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-mutation-fence-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
