@@ -1,13 +1,14 @@
 # Triage development handoff
 
-**Handoff state:** `9d9a566` (`Integrate production refresh intelligence and
-native workspace`) completed the local integration wave, and `8010305`
-(`Stabilize lifecycle ordering regression`) is the current HEAD stabilization
-checkpoint. The final local acceptance wave below is awaiting its own commit
-and a final verifier result. Triage is **not** globally complete: controlled
-live validation, the approved Copilot runtime, and release operations remain
-external or explicitly authorized work. This document records the local
-closure chronology and the exact residual order.
+**Handoff state:** `d61c378` (`Close coordinator authority and native acceptance
+gaps`) is the current committed local acceptance checkpoint. Its combined Debug
+test bundle, focused selectors, unit/XPC suite, and unsigned universal Release
+bundle are validated below. Triage is **not** globally complete: the final UI
+runner remains host-environment blocked, two identity replay/cardinality contract
+items remain local work, and controlled live validation, the
+approved Copilot runtime, and release operations remain external or explicitly
+authorized work. This document records the local closure chronology and the
+exact residual order.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -21,9 +22,7 @@ boundaries, sequencing, and acceptance criteria.
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
 - Production integration commit: `9d9a566`
-- Current local stabilization checkpoint: `8010305`
-- Forthcoming local commit: final acceptance closure work and this handoff;
-  it will not represent a release or external-service acceptance.
+- Current committed local acceptance checkpoint: `d61c378`
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
   tag, publication, notarization, release finalization, or release-automation
   change was performed during this continuation.
@@ -36,7 +35,7 @@ encrypted vaults, and Sparkle 2.9.4 for updates. It is local-first, read-only
 toward GitHub, and must never add telemetry, diagnostics upload, hosted
 content, local-repository scanning, or GitHub mutations.
 
-## Validation at current continuation checkpoint
+## Validation through the committed continuation checkpoint
 
 | Check | Result | Notes |
 | --- | --- | --- |
@@ -46,12 +45,17 @@ content, local-repository scanning, or GitHub mutations.
 | Discussion and comment synchronization | Passed | 48/48 focused discussion/comment tests. |
 | Observation and AppModel injection | Passed | 11/11 focused observation/injection tests. |
 | Security and accessibility | Passed | 143/143 focused security/accessibility coverage. |
+| Current acceptance regression set | Passed | 180/180 from the freshly regenerated canonical bundle, including cache revision fencing, background/wake scheduling, derived batching/cancellation, notifications, native workflow/navigation, accessibility, and encrypted migration fixtures. |
+| Review authority/failure regression set | Passed | 36/36: semantic REST raw binding, accumulated and zero-body classified failures, corroboration, and atomic reconciliation. |
+| Full unit and fail-closed XPC suite | Passed | 943/943, zero failures or skips, from `/tmp/triage-final-unit-xpc-20260831-1125.xcresult`. |
+| Unsigned universal Release build | Passed | `Triage` and `TriageCopilotXPC` both contain `x86_64 arm64`; privacy manifest passes `plutil`; bundle identifier/version/minimum OS are `com.triage.mac` / `0.1.0` / `26.0`. |
 | `git diff --check` | Passed | No whitespace errors at this handoff update. |
 | Previous full-verifier attempt | Environment-blocked | 883 unit tests passed; the UI runner received `SIGKILL` before bootstrap. This is not a UI/product acceptance result. |
-| Final `scripts/verify-ci.sh` | Pending | The final verifier has not yet passed and no overall green claim is made here. |
+| Final `scripts/verify-ci.sh` | Environment-blocked | Its product/unit phase is covered by the green canonical runs above, but this host still cannot bootstrap `TriageUITests-Runner`; no overall verifier-green claim is made. |
 
-Focused evidence proves the completed local slices only. Re-run and pass the
-final verifier before treating the checkout as a CI checkpoint.
+Focused evidence proves the committed local slices only. It does not replace
+the blocked UI runner, controlled live GitHub, Copilot, signing, notarization,
+or release acceptance.
 
 The earlier Command Line Tools limitation is resolved on the current machine.
 Keep using the locked Sparkle, GRDB, and SQLCipher dependencies; do not change
@@ -109,17 +113,24 @@ Subsequent local continuation commits, also on `main`, are:
   binding: `e320532`.
 - production refresh intelligence, observations/AppModel injection, native
   workspace actions and secure navigation: `9d9a566`;
-- deterministic account-scope lifecycle dispatch ordering: `8010305`.
+- deterministic account-scope lifecycle dispatch ordering: `8010305`;
+- final local acceptance closure, production notification/Settings wiring,
+  revision fencing, read-side authority hardening, migration `045` evidence,
+  encrypted fixture/tamper coverage, privacy disclosure, and inspector/timeline
+  authority: `6c8fd42`.
+- exact-scope cache rotation, process-alive background and forced wake refresh,
+  semantic REST review authority/failure provenance, requested-reviewer
+  corroboration, derived provisional/batching/cancellation hardening,
+  notification-vault lifecycle, accessibility injection, follow-up dates,
+  scope-safe navigation history, and native workspace completion: `d61c378`.
 
-### Final local acceptance wave (forthcoming commit)
+### Current local acceptance validation wave
 
-The pending final local commit adds production notification refresh and
-Settings wiring; supplemental revision fencing; read-side tamper protection
-and batching; append-only migration `045` receipts, exact raw memberships, and
-revision-scoped cache state; encrypted `039` to `045` migration and database
-tamper coverage; privacy diagnostics and deletion disclosure; and
-inspector/timeline authority. These are local implementation and test changes,
-not a claim of live GitHub, Copilot, signing, notarization, or release
+The acceptance corrections are committed in `d61c378`. The canonical Debug
+bundle compiled, focused selectors passed 180/180 plus the review group 36/36,
+the full unit/XPC suite passed 943/943, and the unsigned universal Release
+bundle passed architecture/privacy/bundle inspection. These results do not
+imply UI-runner, live GitHub, Copilot, signing, notarization, or release
 acceptance.
 
 The crash reports supplied during this checkpoint both describe the same old
@@ -414,30 +425,35 @@ artifact and release signing identity.
 
 ## Residual order after local integration
 
-The production integration graph is complete through `9d9a566` and its
-lifecycle ordering stabilization through `8010305`; do not reopen those
-finished edges merely because the work was originally split across tracks. The
-remaining work, in required order, is:
+The production integration graph is complete through the committed local
+acceptance checkpoint `d61c378`; do not reopen those finished edges merely
+because the work was originally split across tracks. The known remaining work,
+in required order, is:
 
-1. Commit the final local acceptance wave, then re-run
-   `scripts/verify-ci.sh`. The previous attempt reached 883 passing unit tests
-   before an environment `SIGKILL` stopped the UI runner pre-bootstrap; retain
-   that distinction and diagnose only a confirmed product regression. Until a
-   final run passes, this is not a full CI checkpoint.
-2. With controlled access to a real GitHub account and explicit authorization,
+1. Complete the remaining local GitHub contract work: encrypted exact-scope
+   replay owners for post-account `/user/orgs` and `/orgs/{org}` conditional
+   responses, plus the static connection-cardinality audit for committed
+   GraphQL documents (`labels(first: 100)` must either be independently paged
+   or explicitly fail incomplete within the mandatory `<= 50` contract). Keep
+   pre-account `/user` unconditional because no trusted account vault exists.
+2. Re-run `scripts/verify-ci.sh` when the host XCTest/LaunchServices UI-runner
+   bootstrap is healthy. The current canonical unit/XPC suite is 943/943 green,
+   but the prior UI runner was killed before XCTest connection and a later
+   isolated attempt hung before any test method launched.
+3. With controlled access to a real GitHub account and explicit authorization,
    run the live GitHub scenario matrix. Validate source authority, redacted
    failures, bodyless REST `403`/`404`, SSO/approval, pagination, conditional
    reuse, deletion/recovery, and no-write behavior without adding live data to
    the repository.
-3. Keep Copilot fail-closed. Resume only after an approved redistributable
+4. Keep Copilot fail-closed. Resume only after an approved redistributable
    runtime, SDK/entitlement, consent and policy decisions, signing identity,
    and their explicit authorization are supplied; then perform its isolated
    security and end-to-end acceptance.
-4. After a green local verifier and authorized live validation, perform the
+5. After a green local verifier and authorized live validation, perform the
    final runtime acceptance walkthrough (native windows, commands, keyboard,
    VoiceOver, appearance, resizing, restoration, performance, and security)
    against the assembled app.
-5. Release packaging, Developer ID signing, notarization, tag/publish, and
+6. Release packaging, Developer ID signing, notarization, tag/publish, and
    release automation require their external credentials, a clean exact tag,
    and explicit authorization. They are not implied by this handoff.
 
@@ -445,6 +461,7 @@ remaining work, in required order, is:
 
 | Track | Local status | Residual boundary |
 | --- | --- | --- |
+| Identity and organization metadata | Conditional client APIs reject validatorless `304` and expose exact validator evidence. | Add encrypted post-account `/user/orgs` and `/orgs/{org}` replay receipts; keep first-connect `/user` unconditional. |
 | REST reviews and review threads | Complete: durable scoped failure provenance, narrow bodyless `403`/`404` grammar, fair retry, reconciliation, and derived input. | Controlled live GitHub validation. |
 | Discussions, comments, Projects V2, notifications | Complete: independently scoped retrieval, normalization, coverage, organization-work integration, and production notification/Settings wiring. | Controlled live GitHub validation. |
 | Account/organization lifecycle and derived intelligence | Complete: production composition, launch/active/wake/background/stop reachability, scope fences, post-normalized derived projection, and explicit outcome handling. | Full verifier and live acceptance. |
@@ -467,9 +484,11 @@ remaining work, in required order, is:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- Focused tests through `8010305` and the final local wave are recorded above,
-  but the prior verifier ended after 883 unit passes when the UI runner was
-  `SIGKILL`ed before bootstrap; the final verifier is pending. Controlled live
-  GitHub validation, the externally approved Copilot runtime/signing/consent
-  path, Developer ID signing/notarization/publish, and final release acceptance
-  remain open and are not implied by local coverage.
+- Focused tests through the committed `d61c378` checkpoint are recorded above;
+  the canonical unit/XPC suite is 943/943 green and the unsigned universal
+  Release bundle is valid. The prior verifier ended after 883 unit passes when
+  the UI runner was `SIGKILL`ed before bootstrap, so full UI/verifier acceptance
+  is still pending. Controlled live GitHub
+  validation, the externally approved Copilot runtime/signing/consent path,
+  Developer ID signing/notarization/publish, and final release acceptance remain
+  open and are not implied by local coverage.
