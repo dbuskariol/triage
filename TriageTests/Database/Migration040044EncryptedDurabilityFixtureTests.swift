@@ -30,7 +30,8 @@ final class Migration040044EncryptedDurabilityFixtureTests: XCTestCase {
                         '041-notification-source-authority-v1',
                         '042-derived-intelligence-revision-evidence-v1',
                         '043-review-candidate-complete-traversal-receipts-v1',
-                        '044-workspace-query-performance-indexes-v1'
+                        '044-workspace-query-performance-indexes-v1',
+                        '045-review-candidate-receipt-append-only-v1'
                     ) ORDER BY id
                     """
             ).map { row in
@@ -55,7 +56,8 @@ final class Migration040044EncryptedDurabilityFixtureTests: XCTestCase {
             "041-notification-source-authority-v1": "6e396d1e9e4142d866ad417b9845bcaa274bec64babb4b929ac3a42206153f7a",
             "042-derived-intelligence-revision-evidence-v1": "aee0510ac9a74c252acf9cf2d8227ebd7da278fa879d9fa64efa5a2370a0285f",
             "043-review-candidate-complete-traversal-receipts-v1": "1e339b7fbdaa9acafb7463f213ab27828b8d5e0a1d74cbb6d51a79c2620d8802",
-            "044-workspace-query-performance-indexes-v1": "8b9e0ec0885167e950ef210c8d3a8697559ca1e1c897c41069830417afb90188"
+            "044-workspace-query-performance-indexes-v1": "8b9e0ec0885167e950ef210c8d3a8697559ca1e1c897c41069830417afb90188",
+            "045-review-candidate-receipt-append-only-v1": "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95"
         ])
         XCTAssertEqual(durableState.1, 1, "040 failure envelope must survive restart")
         XCTAssertEqual(durableState.2, 1, "041 notification receipt must survive restart")

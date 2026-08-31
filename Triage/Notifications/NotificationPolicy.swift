@@ -3,14 +3,41 @@ import Foundation
 struct NotificationPreferences: Codable, Equatable, Sendable {
   var isEnabled: Bool
   var privacy: NotificationPrivacy
+  var enabledReasons: Set<NotificationReason>
+  var quietSchedule: NotificationQuietSchedule?
 
-  init(isEnabled: Bool = false, privacy: NotificationPrivacy = .generic) {
+  init(
+    isEnabled: Bool = false,
+    privacy: NotificationPrivacy = .generic,
+    enabledReasons: Set<NotificationReason> = Set(NotificationReason.allCases),
+    quietSchedule: NotificationQuietSchedule? = nil
+  ) {
     self.isEnabled = isEnabled
     self.privacy = privacy
+    self.enabledReasons = enabledReasons
+    self.quietSchedule = quietSchedule
   }
 }
 
-enum NotificationPrivacy: String, Codable, Sendable {
+struct NotificationQuietSchedule: Codable, Equatable, Sendable {
+  var startMinute: Int
+  var endMinute: Int
+
+  init(startMinute: Int, endMinute: Int) {
+    self.startMinute = min(max(startMinute, 0), 1_439)
+    self.endMinute = min(max(endMinute, 0), 1_439)
+  }
+
+  func contains(_ date: Date, calendar: Calendar) -> Bool {
+    guard startMinute != endMinute else { return false }
+    let components = calendar.dateComponents([.hour, .minute], from: date)
+    let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    if startMinute < endMinute { return minute >= startMinute && minute < endMinute }
+    return minute >= startMinute || minute < endMinute
+  }
+}
+
+enum NotificationPrivacy: String, Codable, Hashable, Sendable {
   case generic
   case showDetails
 }

@@ -27,6 +27,10 @@ enum WorkDetailPresentation {
         isPresented ? .inspectorFirstWorkflowAction : .inspectorToggle
     }
 
+    static func inspectorIsAvailable(hasSelection: Bool) -> Bool {
+        hasSelection
+    }
+
     static func sourceTitle(_ kind: GitHubContentKind) -> String {
         switch kind {
         case .issue: "Issue"

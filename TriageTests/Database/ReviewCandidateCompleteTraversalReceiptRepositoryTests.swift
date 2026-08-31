@@ -85,6 +85,7 @@ final class ReviewCandidateCompleteTraversalReceiptRepositoryTests: XCTestCase {
             candidate: fixture.candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
             observedAt: fixture.date, normalizedDigest: Data(repeating: 4, count: 32),
             discoveredThreadNodeIDs: [threadA],
+            discoveredCommentNodeIDsByThread: [threadA: []],
             segments: [
                 .init(kind: .reviewThreads, pages: [root]),
                 .init(kind: .threadComments, parentThreadNodeID: threadA, pages: [mismatchedComment])
@@ -283,6 +284,62 @@ final class ReviewCandidateCompleteTraversalReceiptRepositoryTests: XCTestCase {
                     arguments: [page.rawSnapshotID.rawValue]
                 )
             )
+        }
+    }
+
+    func testReceiptTopologyRowsAreAppendOnly() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let traversal = fixture.reviewTraversal()
+        _ = try await fixture.repository.persist(traversal)
+        let receiptID = traversal.id.uuidString.lowercased()
+
+        try await fixture.vault.write { database in
+            let mutations: [(String, StatementArguments)] = [
+                (
+                    "UPDATE review_candidate_complete_traversal_receipts SET parser_version = parser_version WHERE id = ?",
+                    [receiptID]
+                ),
+                (
+                    "UPDATE review_candidate_complete_traversal_segments SET page_count = page_count WHERE receipt_id = ?",
+                    [receiptID]
+                ),
+                (
+                    "UPDATE review_candidate_complete_traversal_pages SET is_terminal = is_terminal WHERE receipt_id = ?",
+                    [receiptID]
+                ),
+                ("DELETE FROM review_candidate_complete_traversal_pages WHERE receipt_id = ?", [receiptID]),
+                ("DELETE FROM review_candidate_complete_traversal_segments WHERE receipt_id = ?", [receiptID]),
+                ("DELETE FROM review_candidate_complete_traversal_receipts WHERE id = ?", [receiptID])
+            ]
+            for (sql, arguments) in mutations {
+                XCTAssertThrowsError(try database.execute(sql: sql, arguments: arguments))
+            }
+        }
+    }
+
+    func testPersistedTopologyRejectsCountPreservingSegmentKindCorruption() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let token = try await fixture.repository.persist(fixture.reviewTraversal())
+
+        try await fixture.vault.write { database in
+            // Simulate a pre-045 corrupted vault: the append-only trigger is
+            // absent, but the receipt retains the same row and page counts.
+            try database.execute(sql: "DROP TRIGGER review_candidate_complete_traversal_segment_no_update")
+            try database.execute(
+                sql: """
+                    UPDATE review_candidate_complete_traversal_segments
+                    SET segment_kind = 'reviewThreads'
+                    WHERE receipt_id = ? AND segment_key = 'reviewHistory'
+                    """,
+                arguments: [token.id.uuidString.lowercased()]
+            )
+            XCTAssertThrowsError(
+                try ReviewCandidateCompleteTraversalReceiptRepository.validate(token, in: database)
+            ) { error in
+                XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidReceiptToken)
+            }
         }
     }
 

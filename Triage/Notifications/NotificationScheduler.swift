@@ -21,6 +21,8 @@ protocol NotificationScheduling: Sendable {
 enum NotificationScheduleResult: Equatable, Sendable {
   case scheduled(replacing: Int)
   case suppressedDisabled
+  case suppressedReasonDisabled
+  case suppressedQuietHours
   case suppressedIneligible(NotificationEligibilityDecision)
   case suppressedDuplicate
 }
@@ -30,17 +32,20 @@ actor NotificationScheduler {
   private let eligibilityPolicy: NotificationEligibilityPolicy
   private let scheduling: any NotificationScheduling
   private let deliveryLedger: any NotificationDeliveryLedger
+  private let calendar: Calendar
 
   init(
     preferences: NotificationPreferences = .init(),
     eligibilityPolicy: NotificationEligibilityPolicy = .init(),
     scheduling: any NotificationScheduling,
-    deliveryLedger: any NotificationDeliveryLedger
+    deliveryLedger: any NotificationDeliveryLedger,
+    calendar: Calendar = .current
   ) {
     self.preferences = preferences
     self.eligibilityPolicy = eligibilityPolicy
     self.scheduling = scheduling
     self.deliveryLedger = deliveryLedger
+    self.calendar = calendar
   }
 
   func updatePreferences(_ preferences: NotificationPreferences) {
@@ -54,6 +59,12 @@ actor NotificationScheduler {
   ) async throws -> NotificationScheduleResult {
     guard preferences.isEnabled else {
       return .suppressedDisabled
+    }
+    guard preferences.enabledReasons.contains(candidate.reason) else {
+      return .suppressedReasonDisabled
+    }
+    if preferences.quietSchedule?.contains(date, calendar: calendar) == true {
+      return .suppressedQuietHours
     }
 
     let eligibility = eligibilityPolicy.decision(for: candidate, at: date)

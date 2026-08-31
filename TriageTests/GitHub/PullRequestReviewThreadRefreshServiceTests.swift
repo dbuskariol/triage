@@ -231,6 +231,67 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         XCTAssertEqual(persisted.2, 1)
     }
 
+    func testRawCommentMembershipMismatchRollsBackAndDoesNotAdvanceCandidate() async throws {
+        for rawCommentNodeIDs in [
+            [GitHubNodeID](),
+            [GitHubNodeID(rawValue: "COMMENT_NOT_IN_NORMALIZED_RECORDS")!]
+        ] {
+            let fixture = try await ReviewThreadRefreshFixture()
+            defer { fixture.remove() }
+            let valid = fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            let rawPages = [
+                valid.rawPages[0],
+                GitHubPullRequestReviewThreadRawPage(
+                    endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/page=1",
+                    requestKey: "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/after=none",
+                    payload: fixture.commentPayload(
+                        threadNodeID: GitHubNodeID(rawValue: "THREAD_1")!,
+                        commentNodeIDs: rawCommentNodeIDs
+                    )
+                )
+            ]
+            let mismatched = GitHubPullRequestReviewThreadInventory(
+                records: valid.records,
+                rawPages: rawPages,
+                metrics: .init(
+                    pageCount: rawPages.count,
+                    responseBytes: rawPages.reduce(0) { $0 + $1.payload.count },
+                    queryCost: valid.metrics.queryCost
+                )
+            )
+            let before = try await fixture.durableState()
+
+            await XCTAssertThrowsErrorAsync({
+                _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+                    fixture.firstPullRequest.nodeID: .inventory(mismatched)
+                ])).refresh(
+                    scope: fixture.scope,
+                    githubOrganizationID: fixture.githubOrganizationID,
+                    observedAt: fixture.observedAt,
+                    streamID: fixture.streamID
+                )
+            }) { error in
+                XCTAssertEqual(
+                    error as? ReviewCandidateCompleteTraversalReceiptRepositoryError,
+                    .invalidTraversal
+                )
+            }
+
+            let after = try await fixture.durableState()
+            XCTAssertEqual(after, before)
+            let candidate = try await PullRequestReviewCandidateRepository(vault: fixture.vault)
+                .fairCandidates(
+                    scope: fixture.scope,
+                    streamID: fixture.streamID,
+                    feature: .reviewThreads,
+                    limit: 1
+                )
+                .candidates
+                .first
+            XCTAssertEqual(candidate?.nodeID, fixture.firstPullRequest.nodeID)
+        }
+    }
+
     func testCrossScopeReceiptCannotAuthorizePruning() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
@@ -1283,7 +1344,7 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
         )
     }
 
-    private func commentPayload(
+    func commentPayload(
         threadNodeID: GitHubNodeID,
         commentNodeIDs: [GitHubNodeID]
     ) -> Data {

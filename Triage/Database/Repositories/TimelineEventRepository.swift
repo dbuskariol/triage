@@ -512,7 +512,12 @@ actor TimelineEventRepository {
         }
     }
 
-    func replace(
+    #if DEBUG
+    /// Fixture-only seeding for deterministic tests. This intentionally does
+    /// not ship in Release: source reconciliation must use
+    /// `replaceAndComplete`, which validates staged raw-page authority before
+    /// it can delete normalized timeline events.
+    func replaceForFixture(
         _ events: [NormalizedGitHubTimelineEvent],
         candidate: TimelineCandidate,
         accountID: AccountID,
@@ -537,6 +542,7 @@ actor TimelineEventRepository {
             )
         }
     }
+    #endif
 
     func replaceAndComplete(
         _ events: [NormalizedGitHubTimelineEvent],

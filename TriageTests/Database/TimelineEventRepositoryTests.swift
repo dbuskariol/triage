@@ -63,7 +63,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let repository = TimelineEventRepository(vault: fixture.vault)
-        try await repository.replace(
+        try await repository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -249,7 +249,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let repository = TimelineEventRepository(vault: fixture.vault)
-        try await repository.replace(
+        try await repository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"mentioned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -474,7 +474,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let repository = TimelineEventRepository(vault: fixture.vault)
-        try await repository.replace(
+        try await repository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"mentioned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -751,7 +751,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -1647,7 +1647,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -1706,7 +1706,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -1827,7 +1827,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -1917,7 +1917,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,
@@ -1964,7 +1964,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
-        try await eventRepository.replace(
+        try await eventRepository.replaceForFixture(
             [fixture.event(id: "old-event", payload: #"{"event":"assigned"}"#)],
             candidate: fixture.candidate,
             accountID: fixture.accountID,

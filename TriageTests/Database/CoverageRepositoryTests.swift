@@ -297,6 +297,72 @@ final class CoverageRepositoryTests: XCTestCase {
         }
     }
 
+    func testScopedFailureCoverageMatrixPersistsExactIdentityForEachFailureClass() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = CoverageRepository(vault: fixture.vault)
+        let scope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        let cases: [(name: String, error: any Error, expectedStatus: CoverageStatus)] = [
+            ("permission", GitHubFailure(kind: .notFound, statusCode: 404), .unavailable),
+            (
+                "sso",
+                OrganizationRefreshError.ssoRequirement(
+                    .authorizationRequired(URL(string: "https://github.com/orgs/github/sso")!)
+                ),
+                .requiresSSO
+            ),
+            (
+                "approval",
+                GitHubFailure(
+                    kind: .forbidden,
+                    statusCode: 403,
+                    accessRestriction: .organizationApprovalRequired
+                ),
+                .requiresApproval
+            ),
+            ("rate", GitHubFailure(kind: .rateLimited, statusCode: 429), .failed),
+            ("malformed", GitHubRepositoryTeamClientError.invalidRepository, .failed),
+            ("incomplete", GitHubRepositoryTeamClientError.partialResults, .partial)
+        ]
+        var expected = [String: CoverageRecord]()
+
+        for entry in cases {
+            let status = OrganizationInventoryRefreshService.coverageStatus(for: entry.error)
+            XCTAssertEqual(status, entry.expectedStatus, "Unexpected coverage for \(entry.name).")
+            let streamID = SyncStreamID(rawValue: "coverage-matrix-\(entry.name)")!
+            let record = CoverageRecord(
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                repositoryID: nil,
+                feature: .repositories,
+                streamID: streamID,
+                intervalStart: fixture.date,
+                intervalEnd: fixture.date.addingTimeInterval(60),
+                credentialRevision: scope.credentialRevision,
+                capabilityRevision: scope.capabilityRevision,
+                status: status,
+                lastSuccessfulAt: nil,
+                failureDetail: "fixture-\(entry.name)"
+            )
+            try await repository.save(record, attemptedAt: fixture.date)
+            expected[streamID.rawValue] = record
+        }
+
+        let persisted = try await repository.records(
+            for: scope.accountID,
+            organizationID: scope.organizationID
+        )
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: persisted.map { ($0.streamID.rawValue, $0) }),
+            expected
+        )
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID.make()

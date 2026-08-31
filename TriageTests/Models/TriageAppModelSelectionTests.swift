@@ -38,15 +38,27 @@ final class TriageAppModelSelectionTests: XCTestCase {
         let second = OrganizationID(rawValue: UUID().uuidString.lowercased())!
         let third = OrganizationID(rawValue: UUID().uuidString.lowercased())!
         var cache = WorkspacePresentationCache<Int>(capacity: 2)
+        let firstScope = scope(account: account, organization: first)
+        let secondScope = scope(account: account, organization: second)
+        let thirdScope = scope(account: account, organization: third)
 
-        cache[account, first] = 1
-        cache[account, second] = 2
-        XCTAssertEqual(cache[account, first], 1) // refresh first's recency
-        cache[account, third] = 3
+        cache[firstScope] = 1
+        cache[secondScope] = 2
+        XCTAssertEqual(cache[firstScope], 1) // refresh first's recency
+        cache[thirdScope] = 3
 
-        XCTAssertEqual(cache[account, first], 1)
-        XCTAssertNil(cache[account, second])
-        XCTAssertEqual(cache[account, third], 3)
+        XCTAssertEqual(cache[firstScope], 1)
+        XCTAssertNil(cache[secondScope])
+        XCTAssertEqual(cache[thirdScope], 3)
+    }
+
+    private func scope(account: AccountID, organization: OrganizationID) -> SynchronizationScope {
+        SynchronizationScope(
+            accountID: account,
+            organizationID: organization,
+            credentialRevision: CredentialRevision(rawValue: "credential")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+        )
     }
 }
 

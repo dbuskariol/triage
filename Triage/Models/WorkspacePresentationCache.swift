@@ -2,8 +2,7 @@ import Foundation
 
 struct WorkspacePresentationCache<Value> {
     private struct Key: Hashable {
-        let accountID: AccountID
-        let organizationID: OrganizationID
+        let scope: SynchronizationScope
     }
 
     private let capacity: Int
@@ -15,15 +14,15 @@ struct WorkspacePresentationCache<Value> {
         self.capacity = capacity
     }
 
-    subscript(accountID: AccountID, organizationID: OrganizationID) -> Value? {
+    subscript(scope: SynchronizationScope) -> Value? {
         mutating get {
-            let key = Key(accountID: accountID, organizationID: organizationID)
+            let key = Key(scope: scope)
             guard let value = values[key] else { return nil }
             touch(key)
             return value
         }
         set {
-            let key = Key(accountID: accountID, organizationID: organizationID)
+            let key = Key(scope: scope)
             guard let newValue else {
                 values[key] = nil
                 leastRecentlyUsedFirst.removeAll { $0 == key }
@@ -39,8 +38,8 @@ struct WorkspacePresentationCache<Value> {
     }
 
     mutating func removeAll(for accountID: AccountID) {
-        values = values.filter { $0.key.accountID != accountID }
-        leastRecentlyUsedFirst.removeAll { $0.accountID == accountID }
+        values = values.filter { $0.key.scope.accountID != accountID }
+        leastRecentlyUsedFirst.removeAll { $0.scope.accountID == accountID }
     }
 
     private mutating func touch(_ key: Key) {

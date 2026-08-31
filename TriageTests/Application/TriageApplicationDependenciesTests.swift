@@ -3,6 +3,24 @@ import XCTest
 @testable import Triage
 
 final class TriageApplicationDependenciesTests: XCTestCase {
+    func testWorkspaceConstructionFatalDiagnosticNeverIncludesUnderlyingErrorDetails() {
+        let sensitiveText = "ghp_sensitive_token_and_private_path_must_not_escape"
+        let error = NSError(
+            domain: sensitiveText,
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: sensitiveText,
+                NSFilePathErrorKey: "/Users/person/Library/Application Support/Triage/private.sqlite"
+            ]
+        )
+
+        let diagnostic = TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error)
+
+        XCTAssertEqual(diagnostic, "Triage could not construct its local encrypted workspace.")
+        XCTAssertFalse(diagnostic.contains(sensitiveText))
+        XCTAssertFalse(diagnostic.contains("private.sqlite"))
+    }
+
     func testProductionCompositionHasConcreteServicesForEveryBoundary() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("triage-production-composition-\(UUID().uuidString)", isDirectory: true)

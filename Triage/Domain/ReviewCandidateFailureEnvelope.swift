@@ -23,6 +23,7 @@ enum ReviewCandidateFailureRawProvenance: Equatable, Sendable {
     case terminalRawPage
     case zeroRawTransportFailure
     case zeroRawBodylessHTTPAccessFailure(statusCode: Int)
+    case zeroRawBodylessSelectedOrganizationSSOFailure
 }
 
 /// A raw page accumulated before a terminal candidate failure. `ordinal` is

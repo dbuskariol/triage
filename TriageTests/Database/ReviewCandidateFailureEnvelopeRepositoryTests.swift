@@ -194,6 +194,23 @@ final class ReviewCandidateFailureEnvelopeRepositoryTests: XCTestCase {
         XCTAssertEqual(counts.envelopes, 1)
         XCTAssertEqual(counts.rawSnapshots, 0)
     }
+
+    func testAllowsOnlyExplicitBodylessSelectedOrganizationSSOFailureWithoutRawPages() async throws {
+        let fixture = try await ReviewFailureEnvelopeFixture()
+        defer { fixture.remove() }
+        let source = fixture.publication(pages: [])
+        let publication = ReviewCandidateFailurePublication(
+            id: source.id, scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, requestIdentity: source.requestIdentity,
+            parserVersion: source.parserVersion, attemptedAt: source.attemptedAt, terminalAt: source.terminalAt,
+            classification: .ssoRequired, redactedDiagnostic: source.redactedDiagnostic,
+            rawProvenance: .zeroRawBodylessSelectedOrganizationSSOFailure, rawPages: []
+        )
+        try await fixture.repository.publish(publication)
+        let counts = try await fixture.counts()
+        XCTAssertEqual(counts.envelopes, 1)
+        XCTAssertEqual(counts.rawSnapshots, 0)
+    }
 }
 
 private final class ReviewFailureEnvelopeFixture: @unchecked Sendable {

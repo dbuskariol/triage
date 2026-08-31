@@ -276,6 +276,105 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
         }
     }
 
+    func testProjectionFailsClosedWhenPersistedRawEvidenceAuthorityIsTampered() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let matchingRawID = RawAPISnapshotID(rawValue: "derived-matching-evidence")!
+        let mismatchedRawID = RawAPISnapshotID(rawValue: "derived-mismatched-evidence")!
+        let rawRepository = RawAPISnapshotRepository(vault: fixture.vault)
+        try await rawRepository.save(
+            RawAPISnapshot(
+                id: matchingRawID,
+                accountID: fixture.accountID,
+                githubNodeID: fixture.nodeID,
+                endpoint: "/repos/github/triage/pulls/1/reviews",
+                eTag: "matching",
+                parserVersion: 1,
+                observedAt: fixture.date,
+                payload: Data("[]".utf8),
+                requestIdentity: .init(
+                    scope: fixture.scope,
+                    feature: .reviews,
+                    streamID: SyncStreamID(rawValue: "reviews")!,
+                    requestKey: "GET /repos/github/triage/pulls/1/reviews"
+                )
+            )
+        )
+        try await rawRepository.save(
+            RawAPISnapshot(
+                id: mismatchedRawID,
+                accountID: fixture.accountID,
+                githubNodeID: fixture.nodeID,
+                endpoint: "/repos/github/triage/pulls/1/reviews",
+                eTag: "mismatched",
+                parserVersion: 1,
+                observedAt: fixture.date.addingTimeInterval(1),
+                payload: Data("[]".utf8)
+            )
+        )
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+        try await repository.replace(
+            fixture.snapshot(
+                reasonID: "raw-authority",
+                title: "Raw authority",
+                rawSnapshotID: matchingRawID
+            )
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE rule_evaluation_evidence SET raw_snapshot_id = ? WHERE rule_evaluation_id = ?",
+                arguments: [mismatchedRawID.rawValue, "raw-authority"]
+            )
+        }
+
+        do {
+            _ = try await repository.projection(for: fixture.scope)
+            XCTFail("Tampered raw evidence authority must fail closed.")
+        } catch {
+            XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .invalidEvidence)
+        }
+    }
+
+    func testProjectionFailsClosedWhenCandidateScoreIsTampered() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+        try await repository.replace(fixture.candidateSnapshot(reasonID: "candidate-score"))
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE ai_action_candidates SET score = ?, score_breakdown_json = ?",
+                arguments: [901, try JSONEncoder().encode(["attentionReason": 901])]
+            )
+        }
+
+        do {
+            _ = try await repository.projection(for: fixture.scope)
+            XCTFail("A candidate score must match the persisted attention score.")
+        } catch {
+            XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .invalidPersistedData)
+        }
+    }
+
+    func testProjectionFailsClosedWhenCandidateTriggerReasonsAreTampered() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+        try await repository.replace(fixture.candidateSnapshot(reasonID: "candidate-trigger"))
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE ai_action_candidates SET trigger_reason_ids_json = ?",
+                arguments: [try JSONEncoder().encode(["not-a-persisted-reason"])]
+            )
+        }
+
+        do {
+            _ = try await repository.projection(for: fixture.scope)
+            XCTFail("Candidate trigger reasons must resolve to persisted attention reasons.")
+        } catch {
+            XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .invalidPersistedData)
+        }
+    }
+
     func testExplicitLegacyEvidencePersistsOnlyAsProvisionalEvidence() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -651,6 +750,21 @@ final class DerivedIntelligenceRepositoryTests: XCTestCase {
                 ],
                 aiCandidates: aiCandidates,
                 aiCandidateExclusions: aiCandidateExclusions
+            )
+        }
+
+        func candidateSnapshot(reasonID: String) -> DerivedIntelligencePersistenceSnapshot {
+            snapshot(
+                reasonID: reasonID,
+                title: "Candidate \(reasonID)",
+                aiCandidates: [
+                    DerivedAICandidate(
+                        id: "candidate-\(reasonID)",
+                        workItemID: workItemID,
+                        score: AttentionScore(value: 900, breakdown: ["attentionReason": 900]),
+                        triggerReasonIDs: [reasonID]
+                    )
+                ]
             )
         }
 

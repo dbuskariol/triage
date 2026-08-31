@@ -75,6 +75,10 @@ struct ReviewCandidateCompleteTraversal: Sendable {
     let normalizedDigest: Data
     /// For `.reviewThreads`, exactly the normalized discovered thread IDs.
     let discoveredThreadNodeIDs: [GitHubNodeID]
+    /// For `.reviewThreads`, the exact normalized comment IDs for every
+    /// discovered thread. This binds each independently paginated raw comment
+    /// connection to the replacement it may authorize.
+    let discoveredCommentNodeIDsByThread: [GitHubNodeID: [GitHubNodeID]]
     let segments: [ReviewCandidateTraversalSegment]
 
     init(
@@ -88,6 +92,7 @@ struct ReviewCandidateCompleteTraversal: Sendable {
         observedAt: Date,
         normalizedDigest: Data,
         discoveredThreadNodeIDs: [GitHubNodeID] = [],
+        discoveredCommentNodeIDsByThread: [GitHubNodeID: [GitHubNodeID]] = [:],
         segments: [ReviewCandidateTraversalSegment]
     ) {
         self.id = id
@@ -100,6 +105,7 @@ struct ReviewCandidateCompleteTraversal: Sendable {
         self.observedAt = observedAt
         self.normalizedDigest = normalizedDigest
         self.discoveredThreadNodeIDs = discoveredThreadNodeIDs
+        self.discoveredCommentNodeIDsByThread = discoveredCommentNodeIDsByThread
         self.segments = segments
     }
 }

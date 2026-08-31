@@ -1,9 +1,24 @@
 import SwiftUI
 
+enum AccountRemovalPresentation {
+    static let externalBackupDisclosure = "Triage cannot erase Time Machine backups, user-created copies, filesystem snapshots, or other external backups."
+
+    static func confirmationMessage(accountLogin: String?) -> String {
+        let localRemoval = if let accountLogin {
+            "This removes \(accountLogin), its credentials, and all encrypted local Triage data from this Mac. GitHub content is not changed."
+        } else {
+            "This removes the account and its encrypted local data from this Mac."
+        }
+        return "\(localRemoval) \(externalBackupDisclosure)"
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var notificationSettings: NativeNotificationSettings
+    @EnvironmentObject private var notificationAuthorization: NotificationSystemAuthorization
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
     @EnvironmentObject private var appModel: TriageAppModel
     @State private var accountReplacingToken: GitHubAccount?
@@ -15,7 +30,7 @@ struct SettingsView: View {
             settingsPage(.accounts) { accountsSettings }
             settingsPage(.organizations) { organizationSettings }
             settingsPage(.inbox) { inboxSettings }
-            settingsPage(.notifications) { notificationSettings }
+            settingsPage(.notifications) { notificationSettingsSection }
             settingsPage(.ai) { aiSettings }
             settingsPage(.general) { generalSettings }
             settingsPage(.updates) { updateSettings }
@@ -285,11 +300,106 @@ struct SettingsView: View {
         }
     }
 
-    private var notificationSettings: some View {
-        SettingsCard(title: "Notifications") {
-            Text("Notifications are quiet by default and never change GitHub notification state.")
-                .foregroundStyle(.secondary)
+    private var notificationSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsCard(title: "Notifications") {
+                Toggle("Enable native notifications", isOn: Binding(
+                    get: { notificationSettings.preferences.isEnabled },
+                    set: { notificationSettings.setEnabled($0) }
+                ))
+                .accessibilityHint("Notifications remain disabled until enabled here and for an organization.")
+                SettingsDivider()
+                Picker("Lock Screen Content", selection: Binding(
+                    get: { notificationSettings.preferences.privacy },
+                    set: { notificationSettings.setPrivacy($0) }
+                )) {
+                    Text("Generic only").tag(NotificationPrivacy.generic)
+                    Text("Show details").tag(NotificationPrivacy.showDetails)
+                }
+                .accessibilityHint("Showing details may reveal private GitHub content on the Lock Screen.")
+                SettingsDivider()
+                ForEach(NotificationReason.allCases, id: \.self) { reason in
+                    Toggle(reason.notificationSettingsTitle, isOn: Binding(
+                        get: { notificationSettings.preferences.enabledReasons.contains(reason) },
+                        set: { notificationSettings.setReason(reason, enabled: $0) }
+                    ))
+                }
+            }
+
+            SettingsCard(title: "Selected Organization") {
+                if let organizationID = appModel.selectedOrganizationID {
+                    Toggle("Allow notifications for this organization", isOn: Binding(
+                        get: { notificationSettings.isEnabled(for: organizationID) },
+                        set: { notificationSettings.setEnabled($0, for: organizationID) }
+                    ))
+                } else {
+                    Text("Select an organization before enabling its notifications.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            SettingsCard(title: "Quiet Hours") {
+                Toggle("Pause during quiet hours", isOn: Binding(
+                    get: { notificationSettings.preferences.quietSchedule != nil },
+                    set: { enabled in
+                        notificationSettings.setQuietSchedule(enabled ? .init(startMinute: 1_320, endMinute: 420) : nil)
+                    }
+                ))
+                if notificationSettings.preferences.quietSchedule != nil {
+                    Picker("Start", selection: quietStartMinute) {
+                        ForEach([0, 360, 480, 1_080, 1_320], id: \.self) { minute in
+                            Text(quietHourTitle(minute)).tag(minute)
+                        }
+                    }
+                    Picker("End", selection: quietEndMinute) {
+                        ForEach([0, 360, 480, 1_080, 1_320], id: \.self) { minute in
+                            Text(quietHourTitle(minute)).tag(minute)
+                        }
+                    }
+                }
+            }
+
+            SettingsCard(title: "macOS Permission") {
+                Text("Triage asks macOS separately before it can show notifications. Changing the controls above does not grant system permission.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Text(notificationAuthorization.status.notificationAuthorizationTitle)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Allow Notifications") {
+                        Task { await notificationAuthorization.requestAuthorization() }
+                    }
+                    .disabled(notificationAuthorization.status == .authorized || notificationAuthorization.status == .provisional)
+                }
+            }
         }
+        .task { await notificationAuthorization.refresh() }
+    }
+
+    private var quietStartMinute: Binding<Int> {
+        Binding(
+            get: { notificationSettings.preferences.quietSchedule?.startMinute ?? 1_320 },
+            set: { value in
+                let end = notificationSettings.preferences.quietSchedule?.endMinute ?? 420
+                notificationSettings.setQuietSchedule(.init(startMinute: value, endMinute: end))
+            }
+        )
+    }
+
+    private var quietEndMinute: Binding<Int> {
+        Binding(
+            get: { notificationSettings.preferences.quietSchedule?.endMinute ?? 420 },
+            set: { value in
+                let start = notificationSettings.preferences.quietSchedule?.startMinute ?? 1_320
+                notificationSettings.setQuietSchedule(.init(startMinute: start, endMinute: value))
+            }
+        )
+    }
+
+    private func quietHourTitle(_ minute: Int) -> String {
+        let hour = minute / 60
+        let displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour)
+        return "\(displayHour) \(hour < 12 ? "AM" : "PM")"
     }
 
     private var aiSettings: some View {
@@ -444,10 +554,7 @@ struct SettingsView: View {
     }
 
     private var removalConfirmationMessage: String {
-        guard let account = accountPendingRemoval else {
-            return "This removes the account and its encrypted local data from this Mac."
-        }
-        return "This removes \(account.login), its credentials, and all encrypted local Triage data from this Mac. GitHub content is not changed."
+        AccountRemovalPresentation.confirmationMessage(accountLogin: accountPendingRemoval?.login)
     }
 
     private func removePendingAccount() {

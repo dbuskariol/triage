@@ -122,6 +122,143 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
+    func testCompleteProjectReplacementRejectsRawMembershipTampering() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let fabricated = GitHubProjectV2Record(
+            nodeID: GitHubNodeID(rawValue: "P_fabricated")!,
+            number: 99,
+            title: "Fabricated",
+            description: nil,
+            url: URL(string: "https://github.com/orgs/acme/projects/99")!,
+            updatedAt: fixture.date,
+            state: .open
+        )
+        let coverage = CoverageRecord(
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            repositoryID: nil,
+            feature: .projects,
+            streamID: SyncStreamID(rawValue: "projects-acme")!,
+            intervalStart: fixture.date,
+            intervalEnd: fixture.date,
+            credentialRevision: fixture.scope.credentialRevision,
+            capabilityRevision: fixture.scope.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: fixture.date,
+            failureDetail: nil
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replaceProjects(
+                [fabricated],
+                rawPages: [.init(
+                    endpoint: "graphql:TriageOrganizationProjectsV2/organization=O_2/page=1",
+                    requestKey: "graphql:TriageOrganizationProjectsV2/organization=O_2/after=none",
+                    payload: projectInventoryRawPayload(nodeIDs: ["P_1"])
+                )],
+                scope: fixture.scope,
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                streamID: SyncStreamID(rawValue: "projects-acme")!,
+                observedAt: fixture.date,
+                coverageRecords: [coverage]
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? ProjectV2RepositoryError, .invalidRawAuthority)
+        }
+
+        let counts = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM projects")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records")!
+            )
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+        XCTAssertEqual(counts.2, 0)
+    }
+
+    func testCompleteProjectItemReplacementRejectsRawMembershipTampering() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let project = fixture.project()
+        try await repository.replaceProjects(
+            [project],
+            rawPages: [],
+            scope: fixture.scope,
+            accountID: fixture.account.id,
+            organization: fixture.organization,
+            streamID: SyncStreamID(rawValue: "projects-acme")!,
+            observedAt: fixture.date
+        )
+        let fabricatedItemID = GitHubNodeID(rawValue: "PVTI_fabricated")!
+        let fabricated = GitHubProjectV2ItemRecord(
+            nodeID: fabricatedItemID,
+            projectNodeID: project.nodeID,
+            contentNodeID: nil,
+            contentKind: nil,
+            updatedAt: fixture.date,
+            fieldValues: [],
+            fieldValuesComplete: true
+        )
+        let coverage = CoverageRecord(
+            accountID: fixture.account.id,
+            organizationID: fixture.organization.id,
+            repositoryID: nil,
+            feature: .projectItems,
+            streamID: SyncStreamID(rawValue: "project-items-P_1")!,
+            intervalStart: fixture.date,
+            intervalEnd: fixture.date,
+            credentialRevision: fixture.scope.credentialRevision,
+            capabilityRevision: fixture.scope.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: fixture.date,
+            failureDetail: nil
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            try await repository.replaceItems(
+                [fabricated],
+                project: project,
+                rawPages: [
+                    .init(
+                        endpoint: "graphql:TriageProjectV2Items/project=P_1/page=1",
+                        requestKey: "graphql:TriageProjectV2Items/project=P_1/after=none",
+                        payload: projectItemsRawPayload(nodeIDs: ["PVTI_1"])
+                    ),
+                    .init(
+                        endpoint: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_fabricated/page=1",
+                        requestKey: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_fabricated/after=none",
+                        payload: projectFieldRawPayload(itemNodeID: fabricatedItemID.rawValue)
+                    )
+                ],
+                scope: fixture.scope,
+                accountID: fixture.account.id,
+                organization: fixture.organization,
+                streamID: SyncStreamID(rawValue: "project-items-P_1")!,
+                observedAt: fixture.date,
+                coverageRecords: [coverage]
+            )
+        } verify: { error in
+            XCTAssertEqual(error as? ProjectV2RepositoryError, .invalidRawAuthority)
+        }
+
+        let counts = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM project_items")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots")!,
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records WHERE feature = 'projectItems'")!
+            )
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+        XCTAssertEqual(counts.2, 0)
+    }
+
     func testCompleteDiscussionReplacementRejectsAnEmptyRawTraversalAndPreservesPriorContentAndCoverage() async throws {
         let fixture = try await DiscussionFixture()
         defer { fixture.remove() }
@@ -1199,14 +1336,16 @@ private func projectInventoryRawPayload(
     organizationNodeID: String = "O_2",
     hasNextPage: Bool = false,
     endCursor: String? = nil,
-    marker: String = ""
+    marker: String = "",
+    nodeIDs: [String] = []
 ) -> Data {
     graphQLRawPayload(
         nodeID: organizationNodeID,
         connection: "projectsV2",
         hasNextPage: hasNextPage,
         endCursor: endCursor,
-        marker: marker
+        marker: marker,
+        nodeIDs: nodeIDs
     )
 }
 
@@ -1214,14 +1353,16 @@ private func projectItemsRawPayload(
     projectNodeID: String = "P_1",
     hasNextPage: Bool = false,
     endCursor: String? = nil,
-    marker: String = ""
+    marker: String = "",
+    nodeIDs: [String] = []
 ) -> Data {
     graphQLRawPayload(
         nodeID: projectNodeID,
         connection: "items",
         hasNextPage: hasNextPage,
         endCursor: endCursor,
-        marker: marker
+        marker: marker,
+        nodeIDs: nodeIDs
     )
 }
 
@@ -1245,18 +1386,23 @@ private func graphQLRawPayload(
     connection: String,
     hasNextPage: Bool,
     endCursor: String?,
-    marker: String
+    marker: String,
+    nodeIDs: [String]? = nil
 ) -> Data {
     let pageInfo: [String: Any] = [
         "hasNextPage": hasNextPage,
         "endCursor": endCursor ?? NSNull()
     ]
+    var connectionPayload: [String: Any] = ["pageInfo": pageInfo]
+    if let nodeIDs {
+        connectionPayload["nodes"] = nodeIDs.map { ["id": $0] }
+    }
     return try! JSONSerialization.data(
         withJSONObject: [
             "data": [
                 "node": [
                     "id": nodeID,
-                    connection: ["pageInfo": pageInfo]
+                    connection: connectionPayload
                 ]
             ],
             "marker": marker

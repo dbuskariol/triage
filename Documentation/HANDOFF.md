@@ -1,13 +1,13 @@
 # Triage development handoff
 
-**Handoff state:** the original paused synchronization,
-deterministic-intelligence, native-shell, and XPC checkpoint has now been
-continued on a full-Xcode Mac. The latest verified implementation checkpoint
-is `e320532` (`Bind discussions and projects to immutable source authority`)
-on `main`; this handoff update is committed immediately after it. Triage
-remains intentionally incomplete. This document records both the original
-checkpoint and the current continuation state so another session does not
-need prior context.
+**Handoff state:** `9d9a566` (`Integrate production refresh intelligence and
+native workspace`) completed the local integration wave, and `8010305`
+(`Stabilize lifecycle ordering regression`) is the current HEAD stabilization
+checkpoint. The final local acceptance wave below is awaiting its own commit
+and a final verifier result. Triage is **not** globally complete: controlled
+live validation, the approved Copilot runtime, and release operations remain
+external or explicitly authorized work. This document records the local
+closure chronology and the exact residual order.
 
 **Authoritative product scope:** `Documentation/IMPLEMENTATION_PLAN.md`.
 Do not treat this handoff as a replacement for that plan. The plan remains the
@@ -20,9 +20,10 @@ boundaries, sequencing, and acceptance criteria.
 - Current continuation root: `/Users/nftdannyboy/Documents/Projects/swift/triage`
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
-- Latest verified implementation checkpoint: `e320532`
-- This handoff is committed together with every completed, previously
-  uncommitted implementation slice listed below.
+- Production integration commit: `9d9a566`
+- Current local stabilization checkpoint: `8010305`
+- Forthcoming local commit: final acceptance closure work and this handoff;
+  it will not represent a release or external-service acceptance.
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
   tag, publication, notarization, release finalization, or release-automation
   change was performed during this continuation.
@@ -39,20 +40,18 @@ content, local-repository scanning, or GitHub mutations.
 
 | Check | Result | Notes |
 | --- | --- | --- |
-| Full developer directory | Passed | `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; Xcode 27.0, build `27A5228h`. |
-| Focused handoff and continuation XCTest | Passed | Coordinator, lifecycle/runtime, source integration, conditional authority, timeline replay, role-search replay, migration, cancellation, rollback, and malformed-payload selectors passed. |
-| 2026-08-31 source-authority checkpoint | Passed | Fresh combined full-Xcode run passed 132/132: discussion/project, timeline, relation, migrations, review scheduling/reconciliation, and the inventory crash regression. Result: `/tmp/TriageSafeCheckpoint-r2-20260831.xcresult`. |
-| Focused checkpoint slices | Passed | Timeline 32/32 (`/tmp/TriageTimelineCheckpoint-r4-20260831.xcresult`); review/thread 22/22 (`/tmp/TriageThreadCheckpoint-r4-20260831.xcresult`); relation 19/19; discussion failure provenance 3/3 (`/tmp/TriageDiscussionFailure-r7-20260831.xcresult`). |
-| Historical coordinator crash regression | Passed | `AccountOrganizationCoordinatorTests/testAccessFailureRemainsScopedToItsAccountOrganization` passed 100/100 repetitions; current bounded/index-checked helper already contained the fix. |
-| Consolidated role-search gate | Passed | `AccountVaultTests`, `RoleSearchPageReplayRepositoryTests`, `GitHubIssueSearchTests`, `SearchShardExecutorTests`, and `RoleDiscoveryPlanTests` passed together after the final parser-authority bump. |
-| Independent final reviews | Passed | Security/source-authority and transaction/data-integrity re-audits reported no concrete defects after all fixes. |
-| `git diff --check` | Passed | No whitespace errors through the `e320532` implementation checkpoint or this handoff edit. |
-| `scripts/verify-ci.sh` | Passed | Full XCTest suite and unsigned universal arm64/x86_64 Release build passed after `7aba74f`; only known vendored GRDB Swift 6 `Any`/`Sendable` warnings remained. |
+| Coordinator/lifecycle acceptance | Passed | 42/42: production lifecycle, completion, account/organization coordinator, and end-to-end acceptance selectors. |
+| REST review failure provenance | Passed | 37/37, including bodyless `403`/`404` classification in the deliberately narrow source-bound grammar. |
+| Review thread synchronization | Passed | 56/56 focused thread/reconciliation tests. |
+| Discussion and comment synchronization | Passed | 48/48 focused discussion/comment tests. |
+| Observation and AppModel injection | Passed | 11/11 focused observation/injection tests. |
+| Security and accessibility | Passed | 143/143 focused security/accessibility coverage. |
+| `git diff --check` | Passed | No whitespace errors at this handoff update. |
+| Previous full-verifier attempt | Environment-blocked | 883 unit tests passed; the UI runner received `SIGKILL` before bootstrap. This is not a UI/product acceptance result. |
+| Final `scripts/verify-ci.sh` | Pending | The final verifier has not yet passed and no overall green claim is made here. |
 
-The full verifier has not been repeated after `e320532`; the fresh 132-test
-checkpoint above is the current proof. Repeat `scripts/verify-ci.sh` before
-starting the next broad integration wave or treating the checkout as a full
-CI checkpoint.
+Focused evidence proves the completed local slices only. Re-run and pass the
+final verifier before treating the checkout as a CI checkpoint.
 
 The earlier Command Line Tools limitation is resolved on the current machine.
 Keep using the locked Sparkle, GRDB, and SQLCipher dependencies; do not change
@@ -66,10 +65,8 @@ scripts/verify-ci.sh
 ```
 
 Then run focused XCTest selectors for every changed source slice before making
-new changes. The baseline full verifier was completed through `7aba74f`, and
-focused source-authority coverage was repeated through `e320532`; repeat the
-full verifier before the next broad integration wave. The implementation plan
-requires it again before any candidate release work.
+new changes. The implementation plan requires a passed full verifier again
+before any candidate release work.
 
 ## Continuation commits after `4584275`
 
@@ -110,6 +107,20 @@ Subsequent local continuation commits, also on `main`, are:
 - immutable discussion/Project raw authority, canonical traversal checks,
   partial Project field retention, and exact normalization-failure source
   binding: `e320532`.
+- production refresh intelligence, observations/AppModel injection, native
+  workspace actions and secure navigation: `9d9a566`;
+- deterministic account-scope lifecycle dispatch ordering: `8010305`.
+
+### Final local acceptance wave (forthcoming commit)
+
+The pending final local commit adds production notification refresh and
+Settings wiring; supplemental revision fencing; read-side tamper protection
+and batching; append-only migration `045` receipts, exact raw memberships, and
+revision-scoped cache state; encrypted `039` to `045` migration and database
+tamper coverage; privacy diagnostics and deletion disclosure; and
+inspector/timeline authority. These are local implementation and test changes,
+not a claim of live GitHub, Copilot, signing, notarization, or release
+acceptance.
 
 The crash reports supplied during this checkpoint both describe the same old
 `OrganizationInventoryRefreshService.validateCurrentScope` GRDB row-subscript
@@ -216,13 +227,15 @@ node/comment records, writes `review_threads`, and updates
 user response” is true only when a thread is unresolved, not outdated, has a
 known latest comment author, and that author is not the current user.
 
-`PullRequestReviewThreadRefreshService` is now invoked from organization work
+`PullRequestReviewThreadRefreshService` is invoked from organization work
 refresh with durable fair candidate scheduling, scoped blocked/inaccessible
-signals, redacted GraphQL SSO/approval classification, and conservative
-coverage. **Still required:** persist durable raw/classified failure provenance
-for failed candidate traversals. Until that exists, remote/SSO/approval failure
-stops the pass without advancing its durable cursor, so retry selects the same
-candidate. Newer-commit comparison and final derived-input wiring also remain.
+signals, redacted GraphQL SSO/approval classification, durable raw/classified
+failure provenance, and conservative coverage. A failed traversal cannot
+advance its candidate cursor. REST review failure provenance uses the same
+source-bound authority: bodyless `403` and `404` are classified only by the
+narrow endpoint/status grammar, never broadened into unrelated absence or
+access conclusions. Review and thread failure isolation is preserved through
+normalization, persistence, and publication.
 
 ### REST timeline synchronization
 
@@ -253,9 +266,10 @@ synchronization and its repository and aggregate assessments are translated to
 `.timelines` coverage. Migration `039` publishes exact current raw-page
 membership atomically from staged traversal state; a 2-page to 1-page shrink
 does not retain stale membership, while immutable raw history remains bounded
-and protected when authoritative. **Still required:** finish the integrated
-cadence/live matrix, remaining source-specific tombstone behavior, and final
-coordinator/derived-observation acceptance.
+and protected when authoritative. Integrated cadence, source-specific
+tombstone behavior, coordinator reachability, derived projection, and
+observation publication are complete locally; controlled live validation
+remains in the residual order below.
 
 ### Discussions and Projects V2
 
@@ -287,19 +301,14 @@ project field values and `content_node_reference` to project items. Never edit
 an already published migration; append a new migration if more schema is
 needed.
 
-Discussion comments/replies intentionally remain `.unavailable` until their
-own independently paginated source contract and implementation exist. This is
-not an empty discussion-comment result.
-
-`OrganizationContextRefreshService` now invokes
-`DiscussionSynchronizationService` and `ProjectV2SynchronizationService`, and
-organization work refresh invokes that context service. Raw pages are
-immutable and exact-scope bound; traversal is canonical; partial Project field
-collections retain prior authoritative values plus explicit provisional
-context. **Still required:** finish candidate/project cadence and redacted or
-draft item behavior, add independently paginated discussion-comment/reply
-synchronization, and complete production coordinator/derived-observation
-acceptance.
+Discussion comments and replies now use their independently paginated source
+contract; unavailable/partial/error states remain explicit and never become an
+empty comment result. `OrganizationContextRefreshService` invokes discussion,
+comment, Projects V2 inventory/item, and notification synchronization through
+the organization work path. Raw pages are immutable and exact-scope bound;
+traversal is canonical; partial Project field collections retain prior
+authoritative values plus explicit provisional context. Each source keeps its
+own cadence, coverage, cancellation, and failure authority.
 
 ### Deterministic derived intelligence
 
@@ -322,12 +331,13 @@ Waiting wake-up evidence now makes an item effectively Inbox-eligible without
 mutating the persisted local workflow state. Active snooze, archive, and
 inaccessible precedence still win.
 
-**Still required:** invoke `DerivedIntelligenceCoordinator.recompute(...)`
-after each complete normalized synchronization write and before observation/UI
-publication. Construct inputs from the repositories, persist the output using
-`DerivedIntelligenceRepository`, and add migrations for durable
-`rule_evaluations` and `ai_action_candidates` if their persistence is required
-instead of the current output-only contract.
+`OrganizationDerivedIntelligenceProjectionService` now runs after the complete
+normalized source transaction is durable and before the corresponding
+observation publication. It revalidates account/organization revision before
+and after every suspension, snapshots adapters, recomputes through
+`DerivedIntelligenceCoordinator`, and replaces the derived repository output.
+Cancellation, stale scope/revision, and failures fail closed; callers receive
+explicit published, partial, or failed outcomes rather than a hidden fallback.
 
 ### Account/organization coordination
 
@@ -341,12 +351,14 @@ activation, per-scope task ownership, cancellation, generation tokens to
 discard stale completions, priority mapping, durable-state abstraction, and
 account/organization scoped freshness/failure state.
 
-**Still required:** provide production implementations of
-`AccountOrganizationCachedStateStoring` and
-`AccountOrganizationRefreshOperating`; inject the coordinator from the app
-model/scene lifecycle; make its refresh operation call the fully integrated
-organization refresh pipeline; and expose its state through database
-observations to the UI.
+Production composition now supplies the durable cache/refresh adapters and
+retains `OrganizationRefreshLifecycleService`. Launch, scene activation,
+system wake, opportunistic background opportunity, and shutdown route through
+the explicit lifecycle dependency into `AccountOrganizationRefreshRuntime` and
+the coordinator. Scope enumeration is deterministic and fail-closed; runtime
+generation, single-flight ownership, cancellation, and post-await scope checks
+prevent stale work from publishing. AppModel receives explicit observation and
+lifecycle dependencies rather than constructing a hidden fallback.
 
 ### Native shell and onboarding
 
@@ -369,12 +381,13 @@ closures for OAuth, advanced PAT submission, identity confirmation,
 organization choice, SSO/approval recovery, initial sync, workflow
 explanation, notification settings, and AI consent/unavailability.
 
-The UI does not authenticate, persist secrets, or claim a non-existent Copilot
-runtime. To make it functional, inject actual app-model/coordinator actions
-and state observations. The pending `ui-*` work still includes commands,
-toolbar/history, detail, inspector, workflow commands, secure Markdown,
-notifications, restoration, complete Settings, accessibility/appearance, and
-UI automation.
+The workspace is connected to production observations and actions, native
+commands, secure scoped navigation, workflow/detail/inspector surfaces,
+toolbar/search, notification presentation, restoration, and Settings. It does
+not authenticate, persist secrets, or claim a non-existent Copilot runtime.
+Accessibility, keyboard, appearance, encrypted fixture, deletion/recovery,
+performance, and security tracks have local implementation and focused test
+coverage; controlled live and release acceptance remain separate work.
 
 ### Copilot XPC hardening
 
@@ -399,88 +412,46 @@ to use an ambient CLI, download a runtime, or accept unsigned artifacts. The
 `copilot-runtime` todo is blocked pending an approved redistributable official
 artifact and release signing identity.
 
-## Immediate integration order
+## Residual order after local integration
 
-Do not mark the next large batch complete merely because its isolated clients
-or repositories compile. Full Xcode restoration, focused handoff coverage,
-exact organization scope propagation, fair review scheduling, timeline page
-membership, source-scoped relation evidence, and the current discussion/
-Project authority hardening are complete through `e320532`. The next
-integration order preserves data authority:
+The production integration graph is complete through `9d9a566` and its
+lifecycle ordering stabilization through `8010305`; do not reopen those
+finished edges merely because the work was originally split across tracks. The
+remaining work, in required order, is:
 
-1. Add durable raw/classified accumulated failure provenance for REST reviews
-   and GraphQL review threads before allowing any failed candidate cursor to
-   advance. The current implementation deliberately stops at the first
-   unproven remote/SSO/approval failure and retries the same candidate.
-2. Finish source-specific normalized inputs without crossing coverage scopes:
-   discussion comments/replies; remaining Project cadence and redacted/draft
-   item behavior; newer-commit review comparison; notification reconciliation;
-   and authoritative source-specific tombstones. Each stream keeps independent
-   coverage and failure authority.
-3. Wire the now-hardened source streams into the production organization
-   coordinator in dependency order. Preserve staged/download state, validate
-   scope after every suspension, and publish coverage only with its normalized
-   transaction. Do not introduce placeholder or hidden fallback services.
-4. Run deterministic derived intelligence only after the relevant normalized
-   transaction is fully durable. Persist revision-bound evaluation/candidate
-   evidence and carry freshness, coverage, confidence, and provisional state;
-   never run derivation from a view.
-5. Implement storage observation streams and production coordinator adapters,
-   then inject those explicit dependencies into `TriageAppModel`. Do not add
-   placeholder or hidden fallback services.
-6. Bind the existing native SwiftUI shell to production observations and
-   actions, then finish commands, detail/inspector, toolbar/search, secure
-   Markdown, notifications, restoration, Settings, accessibility, appearance,
-   keyboard, resizing, and UI automation.
-7. Complete deletion/recovery, encrypted persistence, fixture, end-to-end,
-   performance, controlled live GitHub, and security validation in dependency
-   order. Keep Copilot fail-closed until its approved runtime and signing
-   prerequisites exist.
-8. Re-run focused tests after every slice and `scripts/verify-ci.sh` at each
-   integration checkpoint. Commit coherent local slices, but do not push or
-   perform release operations without explicit approval.
+1. Commit the final local acceptance wave, then re-run
+   `scripts/verify-ci.sh`. The previous attempt reached 883 passing unit tests
+   before an environment `SIGKILL` stopped the UI runner pre-bootstrap; retain
+   that distinction and diagnose only a confirmed product regression. Until a
+   final run passes, this is not a full CI checkpoint.
+2. With controlled access to a real GitHub account and explicit authorization,
+   run the live GitHub scenario matrix. Validate source authority, redacted
+   failures, bodyless REST `403`/`404`, SSO/approval, pagination, conditional
+   reuse, deletion/recovery, and no-write behavior without adding live data to
+   the repository.
+3. Keep Copilot fail-closed. Resume only after an approved redistributable
+   runtime, SDK/entitlement, consent and policy decisions, signing identity,
+   and their explicit authorization are supplied; then perform its isolated
+   security and end-to-end acceptance.
+4. After a green local verifier and authorized live validation, perform the
+   final runtime acceptance walkthrough (native windows, commands, keyboard,
+   VoiceOver, appearance, resizing, restoration, performance, and security)
+   against the assembled app.
+5. Release packaging, Developer ID signing, notarization, tag/publish, and
+   release automation require their external credentials, a clean exact tag,
+   and explicit authorization. They are not implied by this handoff.
 
-## Remaining todo graph
+### Local track closure
 
-At the original pause, 60 of 116 tracked todos were done, 15 were active, and
-40 were pending, with the Copilot runtime blocked. The continuation completed
-multiple prerequisites without bulk-closing these broader tracks. The rows
-below describe their current residual work:
-
-| Active track | Handoff status |
-| --- | --- |
-| `copilot-xpc` | Transport is hardened and remains fail-closed; the approved runtime, SDK integration, entitlement, consent, signing, and policy work remain blocked on external prerequisites. |
-| `storage-repositories` | Exact request authority, coverage profiles, encrypted migration backups, source-scoped relation evidence, immutable raw rows, and exact timeline membership are durable; observations, deletion/recovery, and complete persistence tests remain. |
-| `sync-account-org` | Revision-safe single-owner coordination, durable scheduling, scoped operations, projections, and lifecycle integration exist; production presentation adapters/injection and remaining stream actions remain. |
-| `sync-derived-intelligence` | Coordinator/repository foundations exist; revision-bound source integration and durable evaluation/candidate evidence remain. |
-| `sync-hydration` / `sync-normalization` | Core hydration plus selected timeline, Discussion, Project, inventory, and search streams are integrated; relation evidence is raw-bound and source-scoped; authoritative tombstones, remaining normalization, and end-to-end tests remain. |
-| `sync-repositories-teams` | Inventory participates in organization refresh and preserves topology across access loss; authoritative deletion reconciliation and controlled live validation remain. |
-| `sync-reviews` | REST reviews/requests and thread refresh use durable fair scheduling with explicit blocked-known candidates. Durable raw failure envelopes, newer-commit comparison, final complete-coverage publication, and derived-input wiring remain. |
-| `sync-search-discovery` / `sync-search-sharding` | Search has source-scoped plans, malformed provenance, exact conditional replay, parser authority, cancellation, and migration coverage; finish durable cross-stream reconciliation and the integrated/live matrix. |
-| `ui-app-coordinator`, `ui-onboarding`, `ui-sidebar`, `ui-menu-bar` | Presentation shells exist; bind them to production observation/action services and finish functional and UX validation. |
-| `ui-commands` | Still outstanding. |
-
-All currently pending work remains required. In practical dependency order:
-
-1. Add review/review-thread accumulated failure provenance, then finish the
-   residual `sync-discussions`, `sync-projects`, `sync-reviews`,
-   `sync-notifications`, authoritative tombstones, and `sync-tests` gaps
-   without merging their coverage authority.
-2. Wire the completed source streams into production organization coordination,
-   then complete `sync-freshness`, derived intelligence, and
-   `storage-observation` on the durable scheduler/coordinator foundation.
-3. Implement functional app coordination, workflow actions, detail/inspector,
-   toolbar/commands/search, secure Markdown, notifications, restoration,
-   Settings, accessibility, and UI tests.
-4. Implement storage deletion/recovery and complete encrypted persistence
-   tests.
-5. Keep every Copilot task pending/blocked until the approved runtime is
-   supplied; then implement consent, authentication, candidate selection,
-   strict output validation, cache/corrections, auto-entry validation,
-   sandboxing, and security tests.
-6. Complete documentation, fixture corpus, controlled live GitHub scenarios,
-   performance budgets, security audit, universal release packaging, final
-   review, and the final acceptance walkthrough.
+| Track | Local status | Residual boundary |
+| --- | --- | --- |
+| REST reviews and review threads | Complete: durable scoped failure provenance, narrow bodyless `403`/`404` grammar, fair retry, reconciliation, and derived input. | Controlled live GitHub validation. |
+| Discussions, comments, Projects V2, notifications | Complete: independently scoped retrieval, normalization, coverage, organization-work integration, and production notification/Settings wiring. | Controlled live GitHub validation. |
+| Account/organization lifecycle and derived intelligence | Complete: production composition, launch/active/wake/background/stop reachability, scope fences, post-normalized derived projection, and explicit outcome handling. | Full verifier and live acceptance. |
+| Observations and AppModel injection | Complete: explicit production dependencies and scoped UI publication. | Full verifier and runtime acceptance. |
+| Native UI, commands, and secure navigation | Complete locally, including production bindings and accessibility/security coverage. | Manual native runtime acceptance. |
+| Deletion/recovery, encrypted fixtures, performance, accessibility, security | Complete local implementation and focused test coverage, including encrypted `039` to `045` migration/tamper, privacy diagnostics, and deletion disclosure. | Controlled live/final acceptance where applicable. |
+| Copilot XPC | Hardened and intentionally fail-closed. | Approved runtime, signing, consent, and authorization. |
 
 ## Safety and release reminders
 
@@ -496,9 +467,9 @@ All currently pending work remains required. In practical dependency order:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- Full Xcode tests and the unsigned universal build passed through `7aba74f`;
-  a focused 132-test full-Xcode checkpoint passed through `e320532`, but the
-  subsequent changes still require a full verifier rerun. Live
-  controlled GitHub validation, UI accessibility exercise, security/release
-  review, signing/notarization, and all final acceptance steps remain open and
-  are not implied by the current green checkpoint.
+- Focused tests through `8010305` and the final local wave are recorded above,
+  but the prior verifier ended after 883 unit passes when the UI runner was
+  `SIGKILL`ed before bootstrap; the final verifier is pending. Controlled live
+  GitHub validation, the externally approved Copilot runtime/signing/consent
+  path, Developer ID signing/notarization/publish, and final release acceptance
+  remain open and are not implied by local coverage.

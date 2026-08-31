@@ -20,6 +20,10 @@ actor WorkspaceNotificationDeliveryAdapter {
         self.scheduler = scheduler
     }
 
+    func updatePreferences(_ preferences: NotificationPreferences) async {
+        await scheduler.updatePreferences(preferences)
+    }
+
     /// Delivers only from a committed observed projection whose authority is
     /// complete for the same credential/capability revisions as the route.
     /// Presentation text is passed to `NotificationContentFactory`, which
