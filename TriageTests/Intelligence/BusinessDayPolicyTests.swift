@@ -94,6 +94,7 @@ final class BusinessDayPolicyTests: XCTestCase {
             defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
             let preferences = AppPreferences(defaults: defaults)
 
+            preferences.setWorkingDay(remainingWeekday, enabled: true)
             for weekday in WorkingWeekday.allCases where weekday != remainingWeekday {
                 preferences.setWorkingDay(weekday, enabled: false)
             }

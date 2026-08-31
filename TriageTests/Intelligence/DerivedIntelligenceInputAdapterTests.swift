@@ -469,7 +469,8 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
             default:
                 fatalError("Unsupported fixture feature")
             }
-            try await CoverageRepository(vault: vault).save(
+            let credentialRevision = revision ?? scope.credentialRevision
+            let records = [
                 CoverageRecord(
                     accountID: accountID,
                     organizationID: organizationID,
@@ -478,14 +479,33 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                     streamID: SyncStreamID(rawValue: stream)!,
                     intervalStart: nil,
                     intervalEnd: nil,
-                    credentialRevision: revision ?? scope.credentialRevision,
+                    credentialRevision: credentialRevision,
                     capabilityRevision: scope.capabilityRevision,
                     status: status,
                     lastSuccessfulAt: status == .complete ? now : nil,
                     failureDetail: status == .complete ? nil : "Fixture intentionally lacks complete coverage."
-                ),
-                attemptedAt: now
-            )
+                )
+            ] + (feature == .timelines ? [
+                CoverageRecord(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    repositoryID: repositoryID,
+                    feature: .timelines,
+                    streamID: SyncStreamID(
+                        rawValue: "timelines-\(organizationID.rawValue)-\(repositoryID.rawValue)"
+                    )!,
+                    intervalStart: nil,
+                    intervalEnd: nil,
+                    credentialRevision: credentialRevision,
+                    capabilityRevision: scope.capabilityRevision,
+                    status: status,
+                    lastSuccessfulAt: status == .complete ? now : nil,
+                    failureDetail: status == .complete ? nil : "Fixture intentionally lacks complete coverage."
+                )
+            ] : [])
+            for record in records {
+                try await CoverageRepository(vault: vault).save(record, attemptedAt: now)
+            }
         }
 
         func insertAuthoredRelation(credentialRevision: CredentialRevision) async throws {

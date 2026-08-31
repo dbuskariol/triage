@@ -799,7 +799,9 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             organizationID: fixture.organizationID,
             authorityScope: fixture.scope
         )
-        let pullRequest = try XCTUnwrap(items.first { $0.primaryNodeID == fixture.secondNode.nodeID })
+        let pullRequest = try XCTUnwrap(items.first { item in
+            item.members.contains { $0.id == fixture.secondNode.nodeID }
+        })
         let materialized = Set(pullRequest.relations.map { relation in
             "\(relation.kind.rawValue)\u{0}\(relation.objectNodeID?.rawValue ?? "")"
         })
