@@ -54,17 +54,26 @@ final class NativeNotificationSettings: ObservableObject, NotificationDeliveryPr
 
     private static let storageKey = "notifications.delivery-settings.v1"
     @Published private(set) var preferences: NotificationPreferences
+    /// A Settings change is not authoritative until it has acquired the
+    /// shared delivery lease, persisted, and purged incompatible requests.
+    @Published private(set) var isDeliverySettingsMutationPending = false
+    @Published private(set) var deliverySettingsMutationError: String?
+    @Published private(set) var deliveryRevision: UInt64 = 0
     private let defaults: UserDefaults
     private let notificationRemover: any AccountNotificationRemoving
+    let notificationDeliveryLeaseGate: NotificationDeliveryLeaseGate
     private var consentResolver: (@Sendable (AccountID) async throws -> any NotificationOrganizationConsentPersisting)?
+    private var pendingDeliverySettingsMutationCount = 0
 
     init(
         defaults: UserDefaults = .standard,
         notificationRemover: any AccountNotificationRemoving = NativeNotificationAccountRemover(),
+        notificationDeliveryLeaseGate: NotificationDeliveryLeaseGate = .init(),
         consentResolver: (@Sendable (AccountID) async throws -> any NotificationOrganizationConsentPersisting)? = nil
     ) {
         self.defaults = defaults
         self.notificationRemover = notificationRemover
+        self.notificationDeliveryLeaseGate = notificationDeliveryLeaseGate
         self.consentResolver = consentResolver
         if let data = defaults.data(forKey: Self.storageKey),
            let stored = try? JSONDecoder().decode(Stored.self, from: data) {
@@ -101,31 +110,19 @@ final class NativeNotificationSettings: ObservableObject, NotificationDeliveryPr
     }
 
     func setEnabled(_ isEnabled: Bool) {
-        preferences.isEnabled = isEnabled
-        persist()
-        if !isEnabled {
-            Task { await notificationRemover.removeAllTriageNotifications() }
-        }
+        enqueueGlobalDeliveryMutation(.enabled(isEnabled))
     }
 
     func setPrivacy(_ privacy: NotificationPrivacy) {
-        let mustPurgeExistingContent = preferences.privacy == .showDetails && privacy == .generic
-        preferences.privacy = privacy
-        persist()
-        if mustPurgeExistingContent {
-            Task { await notificationRemover.removeAllTriageNotifications() }
-        }
+        enqueueGlobalDeliveryMutation(.privacy(privacy))
     }
 
     func setReason(_ reason: NotificationReason, enabled: Bool) {
-        if enabled { preferences.enabledReasons.insert(reason) }
-        else { preferences.enabledReasons.remove(reason) }
-        persist()
+        enqueueGlobalDeliveryMutation(.reason(reason, enabled: enabled))
     }
 
     func setQuietSchedule(_ schedule: NotificationQuietSchedule?) {
-        preferences.quietSchedule = schedule
-        persist()
+        enqueueGlobalDeliveryMutation(.quietSchedule(schedule))
     }
 
     func isEnabled(for organizationID: OrganizationID) -> Bool {
@@ -155,19 +152,31 @@ final class NativeNotificationSettings: ObservableObject, NotificationDeliveryPr
 
     @discardableResult
     func setEnabled(_ isEnabled: Bool, for scope: NotificationScope) async -> Bool {
-        guard let repository = try? await consentRepository(for: scope.accountID) else { return false }
-        guard (try? await repository.setEnabled(
-            isEnabled,
-            accountID: scope.accountID,
-            organizationID: scope.organizationID
-        )) != nil else { return false }
-        if !isEnabled {
-            await notificationRemover.removeNotifications(
-                for: scope.accountID,
+        beginDeliverySettingsMutation()
+        await notificationDeliveryLeaseGate.acquire()
+        do {
+            let repository = try await consentRepository(for: scope.accountID)
+            try await repository.setEnabled(
+                isEnabled,
+                accountID: scope.accountID,
                 organizationID: scope.organizationID
             )
+            deliveryRevision &+= 1
+            if !isEnabled {
+                await notificationRemover.removeNotifications(
+                    for: scope.accountID,
+                    organizationID: scope.organizationID
+                )
+            }
+            await notificationDeliveryLeaseGate.release()
+            finishDeliverySettingsMutation()
+            return true
+        } catch {
+            await notificationDeliveryLeaseGate.release()
+            deliverySettingsMutationError = error.localizedDescription
+            finishDeliverySettingsMutation()
+            return false
         }
-        return true
     }
 
     @discardableResult
@@ -203,6 +212,60 @@ final class NativeNotificationSettings: ObservableObject, NotificationDeliveryPr
             preferences: preferences
         )) else { return }
         defaults.set(data, forKey: Self.storageKey)
+    }
+
+    private enum GlobalDeliveryMutation {
+        case enabled(Bool)
+        case privacy(NotificationPrivacy)
+        case reason(NotificationReason, enabled: Bool)
+        case quietSchedule(NotificationQuietSchedule?)
+    }
+
+    private func enqueueGlobalDeliveryMutation(_ mutation: GlobalDeliveryMutation) {
+        beginDeliverySettingsMutation()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.notificationDeliveryLeaseGate.acquire()
+            let mustPurgeExistingContent: Bool
+            switch mutation {
+            case let .enabled(isEnabled):
+                self.preferences.isEnabled = isEnabled
+                mustPurgeExistingContent = !isEnabled
+            case let .privacy(privacy):
+                mustPurgeExistingContent = self.preferences.privacy == .showDetails && privacy == .generic
+                self.preferences.privacy = privacy
+            case let .reason(reason, enabled):
+                if enabled { self.preferences.enabledReasons.insert(reason) }
+                else { self.preferences.enabledReasons.remove(reason) }
+                // Requests cannot be selected by reason at the system API
+                // boundary. Purging our own pending and delivered requests is
+                // the fail-closed exact application scope.
+                mustPurgeExistingContent = !enabled
+            case let .quietSchedule(schedule):
+                self.preferences.quietSchedule = schedule
+                // A newly configured quiet range can cover already-delivered
+                // content, so make that transition fail closed too.
+                mustPurgeExistingContent = true
+            }
+            self.persist()
+            self.deliveryRevision &+= 1
+            if mustPurgeExistingContent {
+                await self.notificationRemover.removeAllTriageNotifications()
+            }
+            await self.notificationDeliveryLeaseGate.release()
+            self.finishDeliverySettingsMutation()
+        }
+    }
+
+    private func beginDeliverySettingsMutation() {
+        pendingDeliverySettingsMutationCount += 1
+        isDeliverySettingsMutationPending = true
+        deliverySettingsMutationError = nil
+    }
+
+    private func finishDeliverySettingsMutation() {
+        pendingDeliverySettingsMutationCount = max(0, pendingDeliverySettingsMutationCount - 1)
+        isDeliverySettingsMutationPending = pendingDeliverySettingsMutationCount > 0
     }
 
     private func consentRepository(

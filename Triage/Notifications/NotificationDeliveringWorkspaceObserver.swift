@@ -23,7 +23,12 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
     private let secretStore: KeychainSecretStore?
     private let settings: (any NotificationDeliveryPreferencesProviding)?
     private let scheduling: UserNotificationCenterScheduler
+    private let deliveryLeaseGate: NotificationDeliveryLeaseGate
     private let notificationRemover: any AccountNotificationRemoving
+    /// Test-only injection covers the observer's authority read and final
+    /// scheduling fence without opening a Keychain-backed vault.
+    private let deliveryPreferencesOverride: (@Sendable (SynchronizationScope) async -> NotificationPreferences?)?
+    private let deliveryAdapterOverride: WorkspaceNotificationDeliveryAdapter?
     private var adapters: [AccountID: WorkspaceNotificationDeliveryAdapter] = [:]
     private var deliveryTasks: [UUID: DeliveryTask] = [:]
     private var subscriptionTasks: [UUID: SubscriptionTask] = [:]
@@ -41,6 +46,7 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         secretStore: KeychainSecretStore,
         settings: any NotificationDeliveryPreferencesProviding,
         scheduling: UserNotificationCenterScheduler = .init(),
+        deliveryLeaseGate: NotificationDeliveryLeaseGate = .init(),
         notificationRemover: any AccountNotificationRemoving = NativeNotificationAccountRemover()
     ) {
         self.source = source
@@ -48,7 +54,10 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         self.secretStore = secretStore
         self.settings = settings
         self.scheduling = scheduling
+        self.deliveryLeaseGate = deliveryLeaseGate
         self.notificationRemover = notificationRemover
+        deliveryPreferencesOverride = nil
+        deliveryAdapterOverride = nil
         deliveryOverride = nil
     }
 
@@ -62,8 +71,29 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         secretStore = nil
         settings = nil
         scheduling = .init()
+        deliveryLeaseGate = .init()
         self.notificationRemover = notificationRemover
+        deliveryPreferencesOverride = nil
+        deliveryAdapterOverride = nil
         self.deliveryOverride = deliveryOverride
+    }
+
+    init(
+        source: any WorkspaceObserving,
+        deliveryPreferences: @escaping @Sendable (SynchronizationScope) async -> NotificationPreferences?,
+        deliveryAdapter: WorkspaceNotificationDeliveryAdapter,
+        notificationRemover: any AccountNotificationRemoving = NoopAccountNotificationRemover()
+    ) {
+        self.source = source
+        vaultRegistry = nil
+        secretStore = nil
+        settings = nil
+        scheduling = .init()
+        deliveryLeaseGate = .init()
+        self.notificationRemover = notificationRemover
+        deliveryPreferencesOverride = deliveryPreferences
+        deliveryAdapterOverride = deliveryAdapter
+        deliveryOverride = nil
     }
 
     func snapshots(
@@ -292,10 +322,7 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         }
         guard !Task.isCancelled,
               isActive(accountID: snapshot.scope.accountID, epoch: accountEpoch),
-              let settings,
-              vaultRegistry != nil,
-              secretStore != nil,
-              let preferences = await settings.deliveryPreferences(for: snapshot.scope)
+              let preferences = await deliveryPreferences(for: snapshot.scope)
         else { return }
         guard !Task.isCancelled,
               isActive(accountID: snapshot.scope.accountID, epoch: accountEpoch),
@@ -365,10 +392,13 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         preferences: NotificationPreferences
     ) async -> WorkspaceNotificationDeliveryAdapter? {
         guard !Task.isCancelled,
-              isActive(accountID: accountID, epoch: accountEpoch),
-              let secretStore,
-              let vaultRegistry
+              isActive(accountID: accountID, epoch: accountEpoch)
         else { return nil }
+        if let deliveryAdapterOverride {
+            await deliveryAdapterOverride.updatePreferences(preferences)
+            return deliveryAdapterOverride
+        }
+        guard let secretStore, let vaultRegistry else { return nil }
         if let adapter = adapters[accountID] {
             // The scheduler is actor-isolated behind this adapter; updating it
             // is safe and immediately applies persisted Settings changes.
@@ -388,11 +418,32 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         let scheduler = NotificationScheduler(
             preferences: preferences,
             scheduling: scheduling,
-            deliveryLedger: PersistentNotificationDeliveryLedger(vault: vault)
+            deliveryLedger: PersistentNotificationDeliveryLedger(vault: vault),
+            deliveryLeaseGate: deliveryLeaseGate
         )
-        let adapter = WorkspaceNotificationDeliveryAdapter(scheduler: scheduler)
+        let settings = settings
+        let adapter = WorkspaceNotificationDeliveryAdapter(
+            scheduler: scheduler,
+            authorizingPreferences: { route in
+                guard let settings else { return nil }
+                return await settings.deliveryPreferences(
+                    for: route.accountID,
+                    organizationID: route.organizationID
+                )
+            }
+        )
         adapters[accountID] = adapter
         return adapter
+    }
+
+    private func deliveryPreferences(
+        for scope: SynchronizationScope
+    ) async -> NotificationPreferences? {
+        if let deliveryPreferencesOverride {
+            return await deliveryPreferencesOverride(scope)
+        }
+        guard let settings else { return nil }
+        return await settings.deliveryPreferences(for: scope)
     }
 }
 

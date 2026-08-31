@@ -15,9 +15,14 @@ enum WorkspaceNotificationDeliveryDisposition: Equatable, Sendable {
 
 actor WorkspaceNotificationDeliveryAdapter {
     private let scheduler: NotificationScheduler
+    private let authorizingPreferences: NotificationPreferencesAuthorizing?
 
-    init(scheduler: NotificationScheduler) {
+    init(
+        scheduler: NotificationScheduler,
+        authorizingPreferences: NotificationPreferencesAuthorizing? = nil
+    ) {
         self.scheduler = scheduler
+        self.authorizingPreferences = authorizingPreferences
     }
 
     func updatePreferences(_ preferences: NotificationPreferences) async {
@@ -65,7 +70,8 @@ actor WorkspaceNotificationDeliveryAdapter {
             try await scheduler.schedule(
                 candidate: candidate,
                 presentation: presentation,
-                at: date
+                at: date,
+                authorizingPreferences: authorizingPreferences
             )
         )
     }
