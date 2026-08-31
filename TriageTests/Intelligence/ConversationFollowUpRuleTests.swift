@@ -56,23 +56,47 @@ final class ConversationFollowUpRuleTests: XCTestCase {
     }
 
     func testNewConversationActivityRequiresParticipationAndLaterActivity() {
+        let timeline = [
+            TimelineEventSummary(
+                id: GitHubEventID(rawValue: "event-1")!,
+                subjectNodeID: subjectNodeID,
+                kind: .commented,
+                actor: ActorSummary(
+                    id: ActorID(rawValue: "actor-2")!,
+                    nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjI=")!,
+                    login: "other",
+                    displayName: nil,
+                    avatarURL: nil
+                ),
+                occurredAt: laterDate,
+                url: nil,
+                body: "A new reply"
+            )
+        ]
         let result = ConversationFollowUpRule().evaluate(
             relations: [mention(kind: .commented, objectNodeID: userNodeID, observedAt: progressDate)],
-            timeline: [
-                TimelineEventSummary(
-                    id: GitHubEventID(rawValue: "event-1")!,
-                    subjectNodeID: subjectNodeID,
-                    kind: .commented,
-                    actor: ActorSummary(
-                        id: ActorID(rawValue: "actor-2")!,
-                        nodeID: GitHubNodeID(rawValue: "MDQ6VXNlcjI=")!,
-                        login: "other",
-                        displayName: nil,
-                        avatarURL: nil
+            timeline: timeline,
+            timelineEvidence: [
+                timeline[0].id: EvidenceReference(
+                    id: EvidenceID(rawValue: "timeline-event-1")!,
+                    source: .restTimeline,
+                    locator: .endpoint("/repos/example/repository/issues/1/timeline"),
+                    authority: .github(
+                        scope: SynchronizationScope(
+                            accountID: AccountID(rawValue: "account")!,
+                            organizationID: OrganizationID(rawValue: "organization")!,
+                            credentialRevision: CredentialRevision(rawValue: "credential")!,
+                            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+                        ),
+                        feature: .timelines,
+                        streamID: SyncStreamID(rawValue: "timeline:\(subjectNodeID.rawValue)")!
                     ),
-                    occurredAt: laterDate,
-                    url: nil,
-                    body: "A new reply"
+                    nodeID: subjectNodeID,
+                    eventID: timeline[0].id,
+                    sourceRevision: "timeline-r1",
+                    confidence: .confirmed,
+                    confirmation: .confirmed,
+                    observedAt: laterDate
                 )
             ],
             context: context()
@@ -107,10 +131,20 @@ final class ConversationFollowUpRuleTests: XCTestCase {
                 EvidenceReference(
                     id: EvidenceID(rawValue: "\(kind.rawValue)-\(observedAt.timeIntervalSinceReferenceDate)")!,
                     source: .restTimeline,
-                    locator: .legacyUnverified,
-                    authority: .legacyUnverified,
-                    confidence: .provisional,
-                    confirmation: .provisional,
+                    locator: .endpoint("/repos/example/repository/issues/1/timeline"),
+                    authority: .github(
+                        scope: SynchronizationScope(
+                            accountID: AccountID(rawValue: "account")!,
+                            organizationID: OrganizationID(rawValue: "organization")!,
+                            credentialRevision: CredentialRevision(rawValue: "credential")!,
+                            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+                        ),
+                        feature: .timelines,
+                        streamID: SyncStreamID(rawValue: "timeline:\(subjectNodeID.rawValue)")!
+                    ),
+                    sourceRevision: "timeline-r1",
+                    confidence: .confirmed,
+                    confirmation: .confirmed,
                     observedAt: observedAt
                 )
             ],

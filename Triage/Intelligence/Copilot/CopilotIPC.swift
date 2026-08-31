@@ -1,31 +1,36 @@
 import Foundation
 
 enum CopilotIPC {
-    static let version = 1
+    // Version 2 binds every request and response to one opaque Triage account.
+    // Version 1 only carried an organization ID, which cannot safely own
+    // helper scratch because organizations may be visible to multiple accounts.
+    static let version = 2
     static let maximumRequestBytes = 1_024 * 1_024
     static let maximumResponseBytes = 256 * 1_024
 }
 
 enum CopilotOperation: String, Codable, Sendable {
-    case health, models, analyze, cancel, shutdown
+    case health, authenticate, models, analyze, cancel, shutdown
 }
 
 struct CopilotWireRequest: Codable, Sendable {
     let protocolVersion: Int
     let requestID: UUID
+    let accountID: AccountID
     let organizationID: OrganizationID
     let operation: CopilotOperation
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol_version"
         case requestID = "request_id"
+        case accountID = "account_id"
         case organizationID = "organization_id"
         case operation
     }
 }
 
 enum CopilotResponseStatus: String, Codable, Sendable {
-    case health, models, analysis, cancelled, shutdown, failure
+    case health, authentication, models, analysis, cancelled, shutdown, failure
 }
 
 struct CopilotHealth: Codable, Equatable, Sendable {
@@ -45,19 +50,55 @@ struct CopilotFailure: Codable, Equatable, Sendable {
     let message: String
 }
 
+struct CopilotAuthentication: Codable, Equatable, Sendable {
+    let host: String
+    let login: String
+    let authenticationType: String
+    let isAuthenticated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case host, login
+        case authenticationType = "auth_type"
+        case isAuthenticated = "is_authenticated"
+    }
+}
+
 struct CopilotWireResponse: Codable, Sendable {
     let protocolVersion: Int
     let requestID: UUID?
+    let accountID: AccountID?
     let organizationID: OrganizationID?
     let status: CopilotResponseStatus
     let health: CopilotHealth?
+    let authentication: CopilotAuthentication?
     let failure: CopilotFailure?
+
+    init(
+        protocolVersion: Int,
+        requestID: UUID?,
+        accountID: AccountID?,
+        organizationID: OrganizationID?,
+        status: CopilotResponseStatus,
+        health: CopilotHealth?,
+        authentication: CopilotAuthentication? = nil,
+        failure: CopilotFailure?
+    ) {
+        self.protocolVersion = protocolVersion
+        self.requestID = requestID
+        self.accountID = accountID
+        self.organizationID = organizationID
+        self.status = status
+        self.health = health
+        self.authentication = authentication
+        self.failure = failure
+    }
 
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol_version"
         case requestID = "request_id"
+        case accountID = "account_id"
         case organizationID = "organization_id"
-        case status, health, failure
+        case status, health, authentication, failure
     }
 }
 

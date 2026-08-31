@@ -25,6 +25,7 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
     case commented
     case reviewRequested
     case reviewInvolves
+    case teamMentioned(teamNodeID: GitHubNodeID, teamSlug: String)
     case teamReviewRequested(teamNodeID: GitHubNodeID, teamSlug: String)
 
     var qualifier: String {
@@ -36,6 +37,7 @@ enum GitHubIssueSearchRelationship: Hashable, Sendable {
         case .commented: "commenter"
         case .reviewRequested: "review-requested"
         case .reviewInvolves: "reviewed-by"
+        case .teamMentioned: "mentions"
         case .teamReviewRequested: "team-review-requested"
         }
     }
@@ -74,7 +76,7 @@ struct GitHubIssueSearchQuery: Sendable {
         }
         let relationshipValue: String
         switch relationship {
-        case let .teamReviewRequested(_, teamSlug):
+        case let .teamMentioned(_, teamSlug), let .teamReviewRequested(_, teamSlug):
             guard Self.isTeamSlug(teamSlug) else {
                 throw GitHubIssueSearchError.invalidQualifier
             }

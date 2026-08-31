@@ -8,6 +8,7 @@ enum RoleDiscoveryStreamKind: String, CaseIterable, Sendable {
     case openCommenterInvolvement = "open-commenter-involvement"
     case openReviewRequested = "open-review-requested"
     case openReviewInvolvement = "open-review-involvement"
+    case openTeamMentions = "open-team-mentions"
     case openTeamReviewRequested = "open-team-review-requested"
     case recentClosedInvolvement = "recent-closed-involvement"
     case recentMergedReviewInvolvement = "recent-merged-review-involvement"
@@ -59,6 +60,22 @@ struct RoleDiscoveryPlan: Sendable {
                 if lhs.slug == rhs.slug { return lhs.nodeID.rawValue < rhs.nodeID.rawValue }
                 return lhs.slug < rhs.slug
             }
+        plannedStreams.append(
+            RoleDiscoveryStream(
+                kind: .openTeamMentions,
+                queries: try activeTeams.map { team in
+                    try GitHubIssueSearchQuery(
+                        organizationLogin: organizationLogin,
+                        userLogin: userLogin,
+                        state: .open,
+                        relationship: .teamMentioned(
+                            teamNodeID: team.nodeID,
+                            teamSlug: team.slug
+                        )
+                    )
+                }
+            )
+        )
         plannedStreams.append(
             RoleDiscoveryStream(
                 kind: .openTeamReviewRequested,

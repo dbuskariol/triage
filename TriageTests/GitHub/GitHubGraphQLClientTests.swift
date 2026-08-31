@@ -15,6 +15,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
                 "TriageHydrateNodes",
                 "TriagePullRequestReviewThreads",
                 "TriagePullRequestReviewThreadComments",
+                "TriagePullRequestStatusChecks",
                 "TriageRepositoryDiscussions",
                 "TriageDiscussionComments",
                 "TriageDiscussionCommentReplies",
@@ -57,6 +58,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         let independentlyPaginatedConnections = [
             ("TriagePullRequestReviewThreads", "reviewThreads(first: 50, after: $after)"),
             ("TriagePullRequestReviewThreadComments", "comments(first: 50, after: $after)"),
+            ("TriagePullRequestStatusChecks", "contexts(first: 50, after: $after)"),
             ("TriageRepositoryDiscussions", "discussions(first: 50, after: $after,"),
             ("TriageDiscussionComments", "comments(first: 50, after: $after)"),
             ("TriageDiscussionCommentReplies", "replies(first: 50, after: $after)"),
@@ -333,6 +335,51 @@ final class GitHubGraphQLClientTests: XCTestCase {
         XCTAssertEqual(response.metadata.requestID, "request-1")
         XCTAssertEqual(response.metadata.ssoHeader, .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso")!))
     }
+
+    func testGraphQLRejectsRedirectedFinalResponseOutsideGitHubAPI() async throws {
+        for url in [
+            URL(string: "https://example.invalid/graphql")!,
+            URL(string: "http://api.github.com/graphql")!
+        ] {
+            let client = GitHubGraphQLClient(
+                session: GraphQLStubSession(
+                    body: Data(#"{"data":{"viewer":{"login":"octocat"}}}"#.utf8),
+                    responseURL: url
+                ),
+                credential: SecretValue("token")
+            )
+
+            do {
+                _ = try await client.execute(
+                    try GitHubGraphQLQueries.viewer(),
+                    variables: EmptyVariables(),
+                    as: ViewerPayload.self
+                )
+                XCTFail("A final response outside the GitHub HTTPS API authority must fail closed.")
+            } catch let error as GitHubGraphQLError {
+                XCTAssertEqual(error, .invalidResponseAuthority)
+            }
+        }
+    }
+
+    func testGraphQLAcceptsExactGitHubAPIFinalResponseAndSetsStableUserAgent() async throws {
+        let responseURL = URL(string: "https://api.github.com/graphql?redirected=true")!
+        let session = GraphQLStubSession(
+            body: Data(#"{"data":{"viewer":{"login":"octocat"}}}"#.utf8),
+            responseURL: responseURL
+        )
+        let client = GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+
+        let response = try await client.execute(
+            try GitHubGraphQLQueries.viewer(),
+            variables: EmptyVariables(),
+            as: ViewerPayload.self
+        )
+
+        XCTAssertEqual(response.data?.viewer.login, "octocat")
+        let request = await session.request()
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "User-Agent"), GitHubRESTTransport.defaultUserAgent)
+    }
 }
 
 private struct EmptyVariables: Codable, Sendable {}
@@ -345,24 +392,29 @@ private actor GraphQLStubSession: HTTPSession {
     let body: Data
     let statusCode: Int
     let headers: [String: String]
+    let responseURL: URL?
     private var requests = 0
+    private var capturedRequest: URLRequest?
 
     init(
         body: Data,
         statusCode: Int = 200,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        responseURL: URL? = nil
     ) {
         self.body = body
         self.statusCode = statusCode
         self.headers = headers
+        self.responseURL = responseURL
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         requests += 1
+        capturedRequest = request
         return (
             body,
             HTTPURLResponse(
-                url: request.url!,
+                url: responseURL ?? request.url!,
                 statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: headers
@@ -371,6 +423,7 @@ private actor GraphQLStubSession: HTTPSession {
     }
 
     func requestCount() -> Int { requests }
+    func request() -> URLRequest? { capturedRequest }
 }
 
 private actor GraphQLBoundedErrorSession: BoundedHTTPSession {

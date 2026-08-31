@@ -7,6 +7,7 @@ final class PerformanceBudgetTests: XCTestCase {
     func testLaunchMeasurementRejectsInvalidSchemaAndSamples() throws {
         let samples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(Double.init)
         let valid = try PerformanceLaunchMeasurement(
+            benchmarkSession: "current-session",
             warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
             samplesMilliseconds: samples,
             budgetMilliseconds: 1_000,
@@ -17,7 +18,18 @@ final class PerformanceBudgetTests: XCTestCase {
 
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
+                benchmarkSession: "",
+                warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
+                samplesMilliseconds: samples,
+                budgetMilliseconds: 1_000,
+                p95BudgetMilliseconds: 1_200
+            )
+        )
+
+        XCTAssertThrowsError(
+            try PerformanceLaunchMeasurement(
                 schemaVersion: 0,
+                benchmarkSession: "current-session",
                 warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
                 samplesMilliseconds: samples,
                 medianMilliseconds: 6,
@@ -28,6 +40,7 @@ final class PerformanceBudgetTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
+                benchmarkSession: "current-session",
                 warmupSampleCount: 2,
                 samplesMilliseconds: samples,
                 budgetMilliseconds: 1_000,
@@ -36,6 +49,7 @@ final class PerformanceBudgetTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
+                benchmarkSession: "current-session",
                 warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
                 samplesMilliseconds: Array(samples.dropLast()),
                 budgetMilliseconds: 1_000,
@@ -45,6 +59,7 @@ final class PerformanceBudgetTests: XCTestCase {
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
                 schemaVersion: PerformanceLaunchMeasurement.currentSchemaVersion,
+                benchmarkSession: "current-session",
                 warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
                 samplesMilliseconds: samples,
                 medianMilliseconds: 7,
@@ -55,6 +70,7 @@ final class PerformanceBudgetTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
+                benchmarkSession: "current-session",
                 warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
                 samplesMilliseconds: Array(samples.dropLast()) + [.infinity],
                 budgetMilliseconds: 1_000,
@@ -63,6 +79,7 @@ final class PerformanceBudgetTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try PerformanceLaunchMeasurement(
+                benchmarkSession: "current-session",
                 warmupSampleCount: PerformanceBenchmarkSampling.warmupSampleCount,
                 samplesMilliseconds: samples,
                 budgetMilliseconds: 1_001,
@@ -75,6 +92,7 @@ final class PerformanceBudgetTests: XCTestCase {
                 from: Data("not a launch report".utf8)
             )
         )
+        XCTAssertThrowsError(try valid.validate(expectedBenchmarkSession: "stale-session"))
         XCTAssertThrowsError(
             try JSONDecoder().decode(
                 PerformanceLaunchMeasurement.self,
@@ -426,14 +444,27 @@ enum PerformanceLaunchAndInteractivity: Codable {
         }
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return .notMeasured("The requested XCUITest launch benchmark did not produce a result.")
+            throw PerformanceLaunchMeasurementError.missingResult
         }
-        return .measured(try JSONDecoder().decode(PerformanceLaunchMeasurement.self, from: Data(contentsOf: url)))
+        guard let benchmarkSession = ProcessInfo.processInfo.environment[
+            "TRIAGE_PERFORMANCE_BENCHMARK_SESSION"
+        ], !benchmarkSession.isEmpty else {
+            throw PerformanceLaunchMeasurementError.missingBenchmarkSession
+        }
+        let measurement = try JSONDecoder().decode(
+            PerformanceLaunchMeasurement.self,
+            from: Data(contentsOf: url)
+        )
+        try measurement.validate(expectedBenchmarkSession: benchmarkSession)
+        return .measured(measurement)
     }
 }
 
 enum PerformanceLaunchMeasurementError: Error, Equatable {
     case unsupportedSchemaVersion(Int)
+    case missingBenchmarkSession
+    case staleBenchmarkSession
+    case missingResult
     case incorrectWarmupCount(Int)
     case incorrectSampleCount(Int)
     case nonFiniteValue
@@ -451,6 +482,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
     static let expectedP95BudgetMilliseconds = 1_200.0
 
     let schemaVersion: Int
+    let benchmarkSession: String
     let warmupSampleCount: Int
     let samplesMilliseconds: [Double]
     let medianMilliseconds: Double
@@ -459,6 +491,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
     let p95BudgetMilliseconds: Double
 
     init(
+        benchmarkSession: String,
         warmupSampleCount: Int,
         samplesMilliseconds: [Double],
         budgetMilliseconds: Double,
@@ -473,6 +506,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
         let sorted = samplesMilliseconds.sorted()
         try self.init(
             schemaVersion: Self.currentSchemaVersion,
+            benchmarkSession: benchmarkSession,
             warmupSampleCount: warmupSampleCount,
             samplesMilliseconds: samplesMilliseconds,
             medianMilliseconds: PerformanceBenchmarkSampling.percentile(sorted, fraction: 0.5),
@@ -484,6 +518,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
 
     init(
         schemaVersion: Int,
+        benchmarkSession: String,
         warmupSampleCount: Int,
         samplesMilliseconds: [Double],
         medianMilliseconds: Double,
@@ -493,6 +528,9 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
     ) throws {
         guard schemaVersion == Self.currentSchemaVersion else {
             throw PerformanceLaunchMeasurementError.unsupportedSchemaVersion(schemaVersion)
+        }
+        guard !benchmarkSession.isEmpty else {
+            throw PerformanceLaunchMeasurementError.missingBenchmarkSession
         }
         guard warmupSampleCount == PerformanceBenchmarkSampling.warmupSampleCount else {
             throw PerformanceLaunchMeasurementError.incorrectWarmupCount(warmupSampleCount)
@@ -531,6 +569,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
         }
 
         self.schemaVersion = schemaVersion
+        self.benchmarkSession = benchmarkSession
         self.warmupSampleCount = warmupSampleCount
         self.samplesMilliseconds = samplesMilliseconds
         self.medianMilliseconds = medianMilliseconds
@@ -543,6 +582,7 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             schemaVersion: container.decode(Int.self, forKey: .schemaVersion),
+            benchmarkSession: container.decode(String.self, forKey: .benchmarkSession),
             warmupSampleCount: container.decode(Int.self, forKey: .warmupSampleCount),
             samplesMilliseconds: container.decode([Double].self, forKey: .samplesMilliseconds),
             medianMilliseconds: container.decode(Double.self, forKey: .medianMilliseconds),
@@ -550,6 +590,12 @@ struct PerformanceLaunchMeasurement: Codable, Equatable {
             budgetMilliseconds: container.decode(Double.self, forKey: .budgetMilliseconds),
             p95BudgetMilliseconds: container.decode(Double.self, forKey: .p95BudgetMilliseconds)
         )
+    }
+
+    func validate(expectedBenchmarkSession: String) throws {
+        guard benchmarkSession == expectedBenchmarkSession else {
+            throw PerformanceLaunchMeasurementError.staleBenchmarkSession
+        }
     }
 }
 

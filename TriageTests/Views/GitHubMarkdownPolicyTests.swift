@@ -13,6 +13,42 @@ final class GitHubMarkdownPolicyTests: XCTestCase {
         XCTAssertTrue(sanitized.contains("Text"))
     }
 
+    func testApprovedGitHubHostedImagesAreListedButNotLoadedByThePolicy() {
+        let source = "![Triage](https://raw.githubusercontent.com/openai/triage/main/icon.png)"
+
+        let sanitized = GitHubMarkdownPolicy.sanitizedSource(source)
+        let images = GitHubMarkdownPolicy.hostedImageReferences(in: source)
+
+        XCTAssertTrue(sanitized.contains("GitHub-hosted image available below: Triage"))
+        XCTAssertEqual(images, [
+            GitHubHostedImageReference(
+                url: URL(string: "https://raw.githubusercontent.com/openai/triage/main/icon.png")!,
+                altText: "Triage"
+            )
+        ])
+    }
+
+    func testHostedImagePolicyRejectsNonGitHubAndUnsafeAuthorities() {
+        XCTAssertTrue(GitHubMarkdownPolicy.permitsGitHubHostedImage(URL(string: "https://raw.githubusercontent.com/openai/triage/main/icon.png")!))
+        XCTAssertFalse(GitHubMarkdownPolicy.permitsGitHubHostedImage(URL(string: "https://tracker.example/pixel.png")!))
+        XCTAssertFalse(GitHubMarkdownPolicy.permitsGitHubHostedImage(URL(string: "http://raw.githubusercontent.com/openai/triage/main/icon.png")!))
+        XCTAssertFalse(GitHubMarkdownPolicy.permitsGitHubHostedImage(URL(string: "https://user@raw.githubusercontent.com/openai/triage/main/icon.png")!))
+        XCTAssertFalse(GitHubMarkdownPolicy.permitsImageContentType("image/svg+xml"))
+    }
+
+    func testHostedImagePolicyBoundsAndDeduplicatesReferences() {
+        let repeated = "![a](https://raw.githubusercontent.com/openai/triage/main/a.png)"
+        let source = [repeated, repeated,
+                      "![b](https://raw.githubusercontent.com/openai/triage/main/b.png)",
+                      "![c](https://raw.githubusercontent.com/openai/triage/main/c.png)",
+                      "![d](https://raw.githubusercontent.com/openai/triage/main/d.png)"].joined(separator: " ")
+
+        let images = GitHubMarkdownPolicy.hostedImageReferences(in: source)
+
+        XCTAssertEqual(images.count, GitHubMarkdownPolicy.maximumHostedImageCount)
+        XCTAssertEqual(images.map(\.altText), ["a", "b", "c"])
+    }
+
     func testSanitizerOmitsUnclosedExecutableMarkupAndItsExternalURL() {
         let source = "Before<script src=\"https://tracker.example/collect.js\">alert(1)"
 

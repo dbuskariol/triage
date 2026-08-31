@@ -1,24 +1,85 @@
-use std::io::{self, Read, Write};
 use std::sync::Arc;
+use std::{
+    io::{self, Read, Write},
+    path::PathBuf,
+};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::task::JoinSet;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::{
-    engine::{CancellationState, CopilotEngine},
-    schema::{AnalysisOutput, CandidateInput, ValidationError},
+    engine::{
+        AuthenticationResponse, CancellationScope, CancellationState, CopilotEngine,
+        EphemeralCredential, TrustedRuntimeBootstrap,
+    },
+    schema::{AnalysisInput, AnalysisOutput, ValidationError},
 };
 
-pub const PROTOCOL_VERSION: u16 = 1;
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+/// Must stay in lockstep with `CopilotIPC.version`.
+pub const PROTOCOL_VERSION: u16 = 2;
+pub const MAX_REQUEST_BYTES: usize = 1_024 * 1_024;
+pub const MAX_RESPONSE_BYTES: usize = 256 * 1_024;
+pub const BOOTSTRAP_VERSION: u16 = 1;
+pub const MAX_BOOTSTRAP_BYTES: usize = 16 * 1_024;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Reads the one anonymous-pipe bootstrap that must precede every protocol
+/// request. It is deliberately length-framed and schema-bound so arguments or
+/// inherited environment can never select a runtime or profile directory.
+pub fn read_trusted_runtime_bootstrap<R: Read>(
+    reader: &mut R,
+) -> Result<TrustedRuntimeBootstrap, ProtocolError> {
+    let payload = read_frame(reader, MAX_BOOTSTRAP_BYTES)?.ok_or(ProtocolError::InvalidFrame)?;
+    let bootstrap: TrustedRuntimeBootstrapWire =
+        serde_json::from_slice(&payload).map_err(|_| {
+            ProtocolError::InvalidRequest(ValidationError::new("invalid runtime bootstrap"))
+        })?;
+    if bootstrap.version != BOOTSTRAP_VERSION {
+        return Err(ProtocolError::InvalidRequest(ValidationError::new(
+            "unsupported runtime bootstrap",
+        )));
+    }
+    Ok(TrustedRuntimeBootstrap {
+        cli_path: bounded_absolute_path(bootstrap.executable_path)?,
+        runtime_lock_path: bounded_absolute_path(bootstrap.runtime_lock_path)?,
+        base_directory: bounded_absolute_path(bootstrap.base_directory_path)?,
+        working_directory: bounded_absolute_path(bootstrap.working_directory_path)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedRuntimeBootstrapWire {
+    version: u16,
+    executable_path: String,
+    runtime_lock_path: String,
+    base_directory_path: String,
+    working_directory_path: String,
+}
+
+fn bounded_absolute_path(value: String) -> Result<PathBuf, ProtocolError> {
+    if value.is_empty() || value.len() > 4_096 || value.contains('\0') {
+        return Err(ProtocolError::InvalidRequest(ValidationError::new(
+            "invalid runtime bootstrap",
+        )));
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(ProtocolError::InvalidRequest(ValidationError::new(
+            "invalid runtime bootstrap",
+        )));
+    }
+    Ok(path)
+}
+
+#[derive(Debug, Serialize)]
 pub struct WireRequest {
     pub protocol_version: u16,
     pub request_id: Uuid,
+    pub account_id: String,
     pub organization_id: String,
     #[serde(flatten)]
     pub operation: RequestOperation,
@@ -29,34 +90,33 @@ impl WireRequest {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(ProtocolError::UnsupportedVersion);
         }
-        if self.organization_id.is_empty()
-            || self.organization_id.len() > 255
-            || self.organization_id.chars().any(char::is_whitespace)
-        {
-            return Err(ProtocolError::InvalidRequest(ValidationError::new(
-                "organization_id is invalid",
-            )));
+        validate_identifier(&self.account_id, "account_id")?;
+        validate_identifier(&self.organization_id, "organization_id")?;
+        if let RequestOperation::Analyze { input, .. } = &self.operation {
+            input.validate().map_err(ProtocolError::InvalidRequest)?;
         }
-        if let RequestOperation::Analyze { candidate, model } = &self.operation {
-            candidate
-                .validate()
-                .map_err(ProtocolError::InvalidRequest)?;
-            if let Some(model) = model {
-                validate_model(model)?;
-            }
+        if let RequestOperation::Authenticate { credential } = &self.operation {
+            credential.validate().map_err(|_| {
+                ProtocolError::InvalidRequest(ValidationError::new("credential is invalid"))
+            })?;
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestOperation {
     Health,
     Models,
     Analyze {
-        candidate: CandidateInput,
-        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
+        input: AnalysisInput,
+        deadline: DateTime<Utc>,
+    },
+    Authenticate {
+        credential: EphemeralCredential,
     },
     Cancel {
         target_request_id: Uuid,
@@ -64,13 +124,99 @@ pub enum RequestOperation {
     Shutdown,
 }
 
+// Decoding is deliberately per-operation rather than through serde_json::Value.
+// In particular, authenticate receives a token and must not leave a generic
+// JSON tree or ordinary payload buffer holding it after this function returns.
+#[derive(Deserialize)]
+struct OperationProbe<'a> {
+    #[serde(borrow)]
+    operation: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeaderRequest {
+    protocol_version: u16,
+    request_id: Uuid,
+    account_id: String,
+    organization_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalyzeRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: AnalyzeOperation,
+    model_id: Option<String>,
+    input: AnalysisInput,
+    deadline: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+enum AnalyzeOperation {
+    #[serde(rename = "analyze")]
+    Analyze,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthenticateRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: AuthenticateOperation,
+    credential: EphemeralCredential,
+}
+
+#[derive(Deserialize)]
+enum AuthenticateOperation {
+    #[serde(rename = "authenticate")]
+    Authenticate,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: CancelOperation,
+    target_request_id: Uuid,
+}
+
+#[derive(Deserialize)]
+enum CancelOperation {
+    #[serde(rename = "cancel")]
+    Cancel,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SimpleRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: SimpleOperation,
+}
+
+#[derive(Deserialize)]
+enum SimpleOperation {
+    #[serde(rename = "health")]
+    Health,
+    #[serde(rename = "models")]
+    Models,
+    #[serde(rename = "shutdown")]
+    Shutdown,
+}
+
+/// Every emitted response, including every failure, is tied to the exact
+/// account and organization of one decoded request. A malformed frame cannot
+/// safely claim an identity, so the helper terminates the stream rather than
+/// emitting an unbound failure envelope.
 #[derive(Clone, Debug, Serialize)]
 pub struct WireResponse {
     pub protocol_version: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub organization_id: Option<String>,
+    pub request_id: Uuid,
+    pub account_id: String,
+    pub organization_id: String,
     #[serde(flatten)]
     pub result: ResponseResult,
 }
@@ -79,17 +225,19 @@ impl WireResponse {
     fn for_request(request: &WireRequest, result: ResponseResult) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            request_id: Some(request.request_id),
-            organization_id: Some(request.organization_id.clone()),
+            request_id: request.request_id,
+            account_id: request.account_id.clone(),
+            organization_id: request.organization_id.clone(),
             result,
         }
     }
 
-    fn failure(request: Option<&WireRequest>, failure: Failure) -> Self {
+    fn failure(request: &WireRequest, failure: Failure) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            request_id: request.map(|value| value.request_id),
-            organization_id: request.map(|value| value.organization_id.clone()),
+            request_id: request.request_id,
+            account_id: request.account_id.clone(),
+            organization_id: request.organization_id.clone(),
             result: ResponseResult::Failure { failure },
         }
     }
@@ -98,12 +246,26 @@ impl WireResponse {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ResponseResult {
-    Health { health: HealthResponse },
-    Models { models: Vec<ModelDescriptor> },
-    Analysis { analysis: AnalysisOutput },
-    Cancelled { cancelled: bool },
-    Shutdown { accepted: bool },
-    Failure { failure: Failure },
+    Health {
+        health: HealthResponse,
+    },
+    Models {
+        models: Vec<ModelDescriptor>,
+    },
+    Analysis {
+        #[serde(flatten)]
+        analysis: AnalysisOutput,
+    },
+    Authentication {
+        authentication: AuthenticationResponse,
+    },
+    Cancelled {
+        cancelled_request_id: Uuid,
+    },
+    Shutdown,
+    Failure {
+        failure: Failure,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -119,6 +281,7 @@ pub struct HealthResponse {
 pub struct ModelDescriptor {
     pub id: String,
     pub display_name: String,
+    pub is_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -130,6 +293,7 @@ pub enum FailureCode {
     UnsupportedVersion,
     ValidationFailed,
     RuntimeUnavailable,
+    AuthenticationFailed,
     Cancelled,
     Busy,
     ShuttingDown,
@@ -170,41 +334,88 @@ pub enum ProtocolError {
     Json(#[from] serde_json::Error),
 }
 
-impl ProtocolError {
-    fn failure(&self) -> Failure {
-        match self {
-            Self::InvalidFrame | Self::Io(_) | Self::Json(_) => Failure::new(
-                FailureCode::InvalidFrame,
-                "Invalid length-prefixed JSON frame",
-            ),
-            Self::RequestTooLarge => {
-                Failure::new(FailureCode::RequestTooLarge, "Request exceeds 1 MiB limit")
-            }
-            Self::ResponseTooLarge => {
-                Failure::new(FailureCode::Internal, "Response exceeds 256 KiB limit")
-            }
-            Self::InvalidRequest(_) => Failure::new(
-                FailureCode::ValidationFailed,
-                "Request failed schema validation",
-            ),
-            Self::UnsupportedVersion => Failure::new(
-                FailureCode::UnsupportedVersion,
-                "Unsupported protocol version",
-            ),
-        }
-    }
-}
-
-/// Reads a single big-endian u32-length JSON frame.
 pub fn read_request<R: Read>(reader: &mut R) -> Result<Option<WireRequest>, ProtocolError> {
     let Some(payload) = read_frame(reader, MAX_REQUEST_BYTES)? else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_slice(&payload)?;
-    validate_request_fields(&value)?;
-    let request: WireRequest = serde_json::from_value(value)?;
+    let request = decode_request(&payload)?;
     request.validate()?;
     Ok(Some(request))
+}
+
+fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
+    let operation = serde_json::from_slice::<OperationProbe<'_>>(payload)
+        .map_err(|_| {
+            ProtocolError::InvalidRequest(ValidationError::new("request failed schema validation"))
+        })?
+        .operation;
+    match operation {
+        "health" | "models" | "shutdown" => {
+            let request: SimpleRequest = decode_typed(payload)?;
+            let operation = match request.operation {
+                SimpleOperation::Health => RequestOperation::Health,
+                SimpleOperation::Models => RequestOperation::Models,
+                SimpleOperation::Shutdown => RequestOperation::Shutdown,
+            };
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation,
+            })
+        }
+        "analyze" => {
+            let request: AnalyzeRequest = decode_typed(payload)?;
+            let AnalyzeOperation::Analyze = request.operation;
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation: RequestOperation::Analyze {
+                    model_id: request.model_id,
+                    input: request.input,
+                    deadline: request.deadline,
+                },
+            })
+        }
+        "authenticate" => {
+            let mut request: AuthenticateRequest = decode_typed(payload)?;
+            let AuthenticateOperation::Authenticate = request.operation;
+            // Move the only secret-bearing field into its zeroizing owner.
+            let credential = request.credential.take();
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation: RequestOperation::Authenticate { credential },
+            })
+        }
+        "cancel" => {
+            let request: CancelRequest = decode_typed(payload)?;
+            let CancelOperation::Cancel = request.operation;
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation: RequestOperation::Cancel {
+                    target_request_id: request.target_request_id,
+                },
+            })
+        }
+        _ => Err(ProtocolError::InvalidRequest(ValidationError::new(
+            "unsupported operation",
+        ))),
+    }
+}
+
+fn decode_typed<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> Result<T, ProtocolError> {
+    serde_json::from_slice(payload).map_err(|_| {
+        ProtocolError::InvalidRequest(ValidationError::new("request failed schema validation"))
+    })
 }
 
 pub fn write_response<W: Write>(
@@ -218,12 +429,13 @@ pub fn write_response<W: Write>(
     write_frame(writer, &payload)
 }
 
-fn read_frame<R: Read>(reader: &mut R, maximum: usize) -> Result<Option<Vec<u8>>, ProtocolError> {
+fn read_frame<R: Read>(
+    reader: &mut R,
+    maximum: usize,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ProtocolError> {
     let mut first = [0_u8; 1];
-    match reader.read(&mut first)? {
-        0 => return Ok(None),
-        1 => {}
-        _ => unreachable!("single-byte buffer cannot read more than one byte"),
+    if reader.read(&mut first)? == 0 {
+        return Ok(None);
     }
     let mut header = [0_u8; 4];
     header[0] = first[0];
@@ -232,7 +444,7 @@ fn read_frame<R: Read>(reader: &mut R, maximum: usize) -> Result<Option<Vec<u8>>
     if length > maximum {
         return Err(ProtocolError::RequestTooLarge);
     }
-    let mut payload = vec![0_u8; length];
+    let mut payload = Zeroizing::new(vec![0_u8; length]);
     reader.read_exact(&mut payload)?;
     Ok(Some(payload))
 }
@@ -245,67 +457,41 @@ fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), ProtocolE
     Ok(())
 }
 
-fn validate_model(model: &str) -> Result<(), ProtocolError> {
-    if model.is_empty() || model.len() > 128 || model.contains('\0') || model.contains("```") {
+fn validate_identifier(value: &str, field: &str) -> Result<(), ProtocolError> {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
         return Err(ProtocolError::InvalidRequest(ValidationError::new(
-            "model has an invalid value",
+            format!("{field} is invalid"),
         )));
     }
     Ok(())
 }
 
-/// `serde(flatten)` and `deny_unknown_fields` are incompatible. The operation
-/// tag is flattened to keep the wire contract compact, so this check provides
-/// the equivalent fail-closed top-level unknown-field enforcement before
-/// strongly typed Serde deserialization handles every nested object.
-fn validate_request_fields(value: &serde_json::Value) -> Result<(), ProtocolError> {
-    let object = value.as_object().ok_or_else(|| {
-        ProtocolError::InvalidRequest(ValidationError::new("request must be an object"))
-    })?;
-    let operation = object
-        .get("operation")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            ProtocolError::InvalidRequest(ValidationError::new("operation must be a string"))
-        })?;
-    let allowed = match operation {
-        "health" | "models" | "shutdown" => &[
-            "protocol_version",
-            "request_id",
-            "organization_id",
-            "operation",
-        ][..],
-        "analyze" => &[
-            "protocol_version",
-            "request_id",
-            "organization_id",
-            "operation",
-            "candidate",
-            "model",
-        ][..],
-        "cancel" => &[
-            "protocol_version",
-            "request_id",
-            "organization_id",
-            "operation",
-            "target_request_id",
-        ][..],
-        _ => {
-            return Err(ProtocolError::InvalidRequest(ValidationError::new(
-                "unsupported operation",
-            )));
-        }
-    };
-    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err(ProtocolError::InvalidRequest(ValidationError::new(
-            "request contains an unknown field",
-        )));
-    }
-    Ok(())
+fn cancellation_scope(request: &WireRequest) -> CancellationScope {
+    CancellationScope::new(request.account_id.clone(), request.organization_id.clone())
 }
 
-/// Runs the production stdin/stdout protocol. One analysis runs at a time;
-/// input remains readable while it runs so a `cancel` can reach the engine.
+fn is_control_operation(operation: &RequestOperation) -> bool {
+    matches!(
+        operation,
+        RequestOperation::Cancel { .. } | RequestOperation::Shutdown
+    )
+}
+
+async fn abort_analyses_and_shutdown<E: CopilotEngine>(
+    engine: &E,
+    analyses: &mut JoinSet<WireResponse>,
+) -> Result<(), Failure> {
+    analyses.abort_all();
+    while analyses.join_next().await.is_some() {}
+    // A dropped analysis future cannot run its async cleanup. Its active
+    // session remains owned by the engine, so shutdown must drain it before a
+    // malformed frame or explicit shutdown returns control to the OS.
+    engine.shutdown().await
+}
+
+/// Runs one analysis at a time while retaining stdin availability for cancel.
+/// `cancel` only touches a currently active request ID; it cannot mark a later
+/// request cancelled or affect an already-finished one.
 pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), ProtocolError> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     std::thread::spawn(move || {
@@ -319,18 +505,11 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                     }
                 }
                 Ok(None) => return,
-                Err(error) => {
-                    let terminal =
-                        matches!(error, ProtocolError::RequestTooLarge | ProtocolError::Io(_));
-                    if sender
-                        .blocking_send(ReaderEvent::Failure(error.failure(), terminal))
-                        .is_err()
-                    {
+                Err(_) => {
+                    if sender.blocking_send(ReaderEvent::Malformed).is_err() {
                         return;
                     }
-                    if terminal {
-                        return;
-                    }
+                    return;
                 }
             }
         }
@@ -340,131 +519,106 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
     let mut writer = stdout.lock();
     let cancellation = CancellationState::default();
     let mut analyses = JoinSet::new();
-
     loop {
         tokio::select! {
             event = receiver.recv() => {
-                let Some(event) = event else {
-                    break;
-                };
+                let Some(event) = event else { break };
                 match event {
-                    ReaderEvent::Failure(failure, terminal) => {
-                        write_response(&mut writer, &WireResponse::failure(None, failure))?;
-                        if terminal {
-                            analyses.abort_all();
+                    ReaderEvent::Malformed => {
+                        cancellation.cancel_all();
+                        let _ = abort_analyses_and_shutdown(engine.as_ref(), &mut analyses).await;
+                        break;
+                    }
+                    ReaderEvent::Request(mut request) => {
+                        // Never let a queued models/auth/health operation wait
+                        // behind the engine's analysis gate: that would stall
+                        // the reader and prevent a later cancel or shutdown
+                        // frame from being processed.
+                        if !analyses.is_empty() && !is_control_operation(&request.operation) {
+                            write_response(&mut writer, &WireResponse::failure(&request, Failure::new(FailureCode::Busy, "Only one analysis may run at a time")))?;
+                            continue;
+                        }
+                        match &mut request.operation {
+                        RequestOperation::Analyze { input, model_id, deadline } => {
+                            if !analyses.is_empty() {
+                                write_response(&mut writer, &WireResponse::failure(&request, Failure::new(FailureCode::Busy, "Only one analysis may run at a time")))?;
+                                continue;
+                            }
+                            let input = input.clone();
+                            let model_id = model_id.clone();
+                            let deadline = *deadline;
+                            cancellation.begin(request.request_id, cancellation_scope(&request));
+                            let task_engine = Arc::clone(&engine);
+                            let cancellation_engine = Arc::clone(&engine);
+                            let task_cancellation = cancellation.clone();
+                            analyses.spawn(async move {
+                                let deadline = deadline.signed_duration_since(Utc::now());
+                                let analysis = if deadline <= chrono::Duration::zero() {
+                                    task_cancellation.cancel(request.request_id);
+                                    let _ = cancellation_engine.cancel(request.request_id).await;
+                                    Err(Failure::new(FailureCode::Cancelled, "Analysis deadline elapsed"))
+                                } else {
+                                    let analysis = task_engine.analyze(request.request_id, input.clone(), model_id, task_cancellation.clone());
+                                    tokio::pin!(analysis);
+                                    let deadline = tokio::time::sleep(std::time::Duration::from_millis(deadline.num_milliseconds() as u64));
+                                    tokio::pin!(deadline);
+                                    tokio::select! {
+                                        result = &mut analysis => result,
+                                        _ = &mut deadline => {
+                                            task_cancellation.cancel(request.request_id);
+                                            let _ = cancellation_engine.cancel(request.request_id).await;
+                                            Err(Failure::new(FailureCode::Cancelled, "Analysis deadline elapsed"))
+                                        }
+                                    }
+                                };
+                                let response = match analysis {
+                                    Ok(_) if task_cancellation.is_cancelled(request.request_id) => WireResponse::failure(&request, Failure::new(FailureCode::Cancelled, "Analysis was cancelled")),
+                                    Ok(analysis) => match analysis.validate_against(&input) {
+                                        Ok(()) => WireResponse::for_request(&request, ResponseResult::Analysis { analysis }),
+                                        Err(_) => WireResponse::failure(&request, Failure::new(FailureCode::ValidationFailed, "Analysis failed output validation")),
+                                    },
+                                    Err(failure) => WireResponse::failure(&request, failure),
+                                };
+                                task_cancellation.finish(request.request_id);
+                                response
+                            });
+                        }
+                        RequestOperation::Authenticate { credential } => {
+                            let credential = credential.take();
+                            write_engine_response(&mut writer, &request, engine.authenticate(credential).await.map(|authentication| ResponseResult::Authentication { authentication }))?;
+                        }
+                        RequestOperation::Health => write_engine_response(&mut writer, &request, engine.health().await.map(|health| ResponseResult::Health { health }))?,
+                        RequestOperation::Models => write_engine_response(&mut writer, &request, engine.models().await.map(|models| ResponseResult::Models { models }))?,
+                        RequestOperation::Cancel { target_request_id } => {
+                            let target_request_id = *target_request_id;
+                            let response = if cancellation.cancel_in_scope(target_request_id, &cancellation_scope(&request)) {
+                                match engine.cancel(target_request_id).await {
+                                    Ok(()) => WireResponse::for_request(&request, ResponseResult::Cancelled { cancelled_request_id: target_request_id }),
+                                    Err(failure) => WireResponse::failure(&request, failure),
+                                }
+                            } else {
+                                // The Swift response schema always requires the target ID. A non-active
+                                // target is idempotently acknowledged without affecting any newer work.
+                                WireResponse::for_request(&request, ResponseResult::Cancelled { cancelled_request_id: target_request_id })
+                            };
+                            write_response(&mut writer, &response)?;
+                        }
+                        RequestOperation::Shutdown => {
+                            cancellation.cancel_all();
+                            let response = match abort_analyses_and_shutdown(engine.as_ref(), &mut analyses).await {
+                                Ok(()) => WireResponse::for_request(&request, ResponseResult::Shutdown),
+                                Err(failure) => WireResponse::failure(&request, failure),
+                            };
+                            write_response(&mut writer, &response)?;
                             break;
                         }
                     }
-                    ReaderEvent::Request(request) => {
-                        match request.operation.clone() {
-                            RequestOperation::Analyze { candidate, model } => {
-                                if !analyses.is_empty() {
-                                    write_response(
-                                        &mut writer,
-                                        &WireResponse::failure(
-                                            Some(&request),
-                                            Failure::new(FailureCode::Busy, "Only one analysis may run at a time"),
-                                        ),
-                                    )?;
-                                    continue;
-                                }
-                                cancellation.begin(request.request_id);
-                                let task_engine = Arc::clone(&engine);
-                                let task_cancellation = cancellation.clone();
-                                analyses.spawn(async move {
-                                    let response = match task_engine
-                                        .analyze(
-                                            request.request_id,
-                                            candidate.clone(),
-                                            model,
-                                            task_cancellation.clone(),
-                                        )
-                                        .await
-                                    {
-                                        Ok(_analysis) if task_cancellation.is_cancelled(request.request_id) => {
-                                            WireResponse::failure(
-                                                Some(&request),
-                                                Failure::new(FailureCode::Cancelled, "Analysis was cancelled"),
-                                            )
-                                        }
-                                        Ok(analysis) => match analysis.validate_against(&candidate) {
-                                            Ok(()) => WireResponse::for_request(
-                                                &request,
-                                                ResponseResult::Analysis { analysis },
-                                            ),
-                                            Err(_) => WireResponse::failure(
-                                                Some(&request),
-                                                Failure::new(FailureCode::ValidationFailed, "Analysis failed output validation"),
-                                            ),
-                                        },
-                                        Err(failure) => WireResponse::failure(Some(&request), failure),
-                                    };
-                                    task_cancellation.finish(request.request_id);
-                                    response
-                                });
-                            }
-                            RequestOperation::Health => {
-                                write_engine_response(
-                                    &mut writer,
-                                    &request,
-                                    engine.health().await.map(|health| ResponseResult::Health { health }),
-                                )?;
-                            }
-                            RequestOperation::Models => {
-                                write_engine_response(
-                                    &mut writer,
-                                    &request,
-                                    engine.models().await.map(|models| ResponseResult::Models { models }),
-                                )?;
-                            }
-                            RequestOperation::Cancel { target_request_id } => {
-                                let cancelled = cancellation.cancel(target_request_id);
-                                let response = if cancelled {
-                                    match engine.cancel(target_request_id).await {
-                                        Ok(()) => WireResponse::for_request(
-                                            &request,
-                                            ResponseResult::Cancelled { cancelled: true },
-                                        ),
-                                        Err(failure) => WireResponse::failure(Some(&request), failure),
-                                    }
-                                } else {
-                                    WireResponse::for_request(
-                                        &request,
-                                        ResponseResult::Cancelled { cancelled: false },
-                                    )
-                                };
-                                write_response(&mut writer, &response)?;
-                            }
-                            RequestOperation::Shutdown => {
-                                cancellation.cancel_all();
-                                analyses.abort_all();
-                                let response = match engine.shutdown().await {
-                                    Ok(()) => WireResponse::for_request(
-                                        &request,
-                                        ResponseResult::Shutdown { accepted: true },
-                                    ),
-                                    Err(failure) => WireResponse::failure(Some(&request), failure),
-                                };
-                                write_response(&mut writer, &response)?;
-                                break;
-                            }
-                        }
                     }
                 }
             }
-            joined = analyses.join_next(), if !analyses.is_empty() => {
-                if let Some(Ok(response)) = joined {
-                    write_response(&mut writer, &response)?;
-                } else if joined.is_some() {
-                    write_response(
-                        &mut writer,
-                        &WireResponse::failure(
-                            None,
-                            Failure::new(FailureCode::Internal, "Analysis task terminated unexpectedly"),
-                        ),
-                    )?;
-                }
-            }
+            joined = analyses.join_next(), if !analyses.is_empty() => if let Some(Ok(response)) = joined {
+                write_response(&mut writer, &response)?;
+            },
         }
     }
     Ok(())
@@ -477,88 +631,182 @@ fn write_engine_response<W: Write>(
 ) -> Result<(), ProtocolError> {
     let response = match result {
         Ok(result) => WireResponse::for_request(request, result),
-        Err(failure) => WireResponse::failure(Some(request), failure),
+        Err(failure) => WireResponse::failure(request, failure),
     };
     write_response(writer, &response)
 }
 
 enum ReaderEvent {
     Request(WireRequest),
-    Failure(Failure, bool),
+    Malformed,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::tests::candidate;
+    use crate::engine::EphemeralCredential;
+    use crate::schema::tests::input;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     fn request(operation: RequestOperation) -> WireRequest {
         WireRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap(),
-            organization_id: "MDEyOk9yZ2FuaXphdGlvbjE=".to_owned(),
+            account_id: "account-1".to_owned(),
+            organization_id: "organization-1".to_owned(),
             operation,
         }
     }
 
     #[test]
-    fn length_framing_round_trips_strict_request() {
+    fn v2_frames_require_and_round_trip_account_identity() {
         let request = request(RequestOperation::Health);
-        let json = serde_json::to_vec(&request).unwrap();
         let mut framed = Vec::new();
-        write_frame(&mut framed, &json).unwrap();
-
+        write_frame(&mut framed, &serde_json::to_vec(&request).unwrap()).unwrap();
         let decoded = read_request(&mut framed.as_slice()).unwrap().unwrap();
-        assert_eq!(decoded.request_id, request.request_id);
-        assert!(matches!(decoded.operation, RequestOperation::Health));
+        assert_eq!(decoded.account_id, "account-1");
+        let response = WireResponse::for_request(
+            &decoded,
+            ResponseResult::Health {
+                health: HealthResponse {
+                    helper_version: "test".to_owned(),
+                    copilot_available: false,
+                    tool_policy: "deny_all".to_owned(),
+                },
+            },
+        );
+        let body = serde_json::to_value(response).unwrap();
+        assert_eq!(body["protocol_version"], 2);
+        assert_eq!(body["account_id"], "account-1");
+        assert_eq!(body["status"], "health");
     }
 
     #[test]
-    fn protocol_accepts_each_and_only_supported_operation() {
-        let operations = [
-            RequestOperation::Health,
-            RequestOperation::Models,
-            RequestOperation::Analyze {
-                candidate: candidate(),
-                model: None,
-            },
-            RequestOperation::Cancel {
-                target_request_id: Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap(),
-            },
-            RequestOperation::Shutdown,
-        ];
+    fn exact_swift_operation_fields_are_enforced() {
+        let analyze = request(RequestOperation::Analyze {
+            model_id: Some("model-a".to_owned()),
+            input: input(),
+            deadline: "2026-08-29T04:00:00Z".parse().unwrap(),
+        });
+        assert!(analyze.validate().is_ok());
+        let mut value = serde_json::to_value(analyze).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("candidate".to_owned(), serde_json::json!({}));
+        let mut framed = Vec::new();
+        write_frame(&mut framed, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            read_request(&mut framed.as_slice()),
+            Err(ProtocolError::InvalidRequest(_))
+        ));
+    }
 
-        for operation in operations {
-            let request = request(operation);
-            let payload = serde_json::to_vec(&request).unwrap();
-            let mut framed = Vec::new();
-            write_frame(&mut framed, &payload).unwrap();
-            assert!(read_request(&mut framed.as_slice()).unwrap().is_some());
+    #[test]
+    fn failures_and_cancel_responses_are_bound_to_the_request_account() {
+        let request = request(RequestOperation::Cancel {
+            target_request_id: Uuid::new_v4(),
+        });
+        let failure = serde_json::to_value(WireResponse::failure(
+            &request,
+            Failure::new(FailureCode::Busy, "busy"),
+        ))
+        .unwrap();
+        assert_eq!(failure["account_id"], "account-1");
+        assert_eq!(failure["organization_id"], "organization-1");
+        let response = serde_json::to_value(WireResponse::for_request(
+            &request,
+            ResponseResult::Cancelled {
+                cancelled_request_id: request.request_id,
+            },
+        ))
+        .unwrap();
+        assert_eq!(response["status"], "cancelled");
+        assert_eq!(
+            response["cancelled_request_id"],
+            request.request_id.to_string()
+        );
+    }
+
+    #[test]
+    fn active_analysis_only_admits_control_frames() {
+        assert!(!is_control_operation(&RequestOperation::Health));
+        assert!(!is_control_operation(&RequestOperation::Models));
+        assert!(!is_control_operation(&RequestOperation::Authenticate {
+            credential: EphemeralCredential::new("test-token".to_owned()),
+        }));
+        assert!(!is_control_operation(&RequestOperation::Analyze {
+            model_id: None,
+            input: input(),
+            deadline: "2026-08-29T04:00:00Z".parse().unwrap(),
+        }));
+        assert!(is_control_operation(&RequestOperation::Cancel {
+            target_request_id: Uuid::new_v4(),
+        }));
+        assert!(is_control_operation(&RequestOperation::Shutdown));
+    }
+
+    #[derive(Default)]
+    struct ShutdownProbe {
+        shutdowns: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CopilotEngine for ShutdownProbe {
+        async fn health(&self) -> Result<HealthResponse, Failure> {
+            Err(Failure::new(FailureCode::Internal, "not used"))
         }
 
-        let unsupported = br#"{"protocol_version":1,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","organization_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"other"}"#;
-        let mut framed = Vec::new();
-        write_frame(&mut framed, unsupported).unwrap();
-        assert!(matches!(
-            read_request(&mut framed.as_slice()),
-            Err(ProtocolError::InvalidRequest(_))
-        ));
+        async fn models(&self) -> Result<Vec<ModelDescriptor>, Failure> {
+            Err(Failure::new(FailureCode::Internal, "not used"))
+        }
+
+        async fn analyze(
+            &self,
+            _: Uuid,
+            _: AnalysisInput,
+            _: Option<String>,
+            _: CancellationState,
+        ) -> Result<AnalysisOutput, Failure> {
+            Err(Failure::new(FailureCode::Internal, "not used"))
+        }
+
+        async fn authenticate(
+            &self,
+            _: EphemeralCredential,
+        ) -> Result<AuthenticationResponse, Failure> {
+            Err(Failure::new(FailureCode::Internal, "not used"))
+        }
+
+        async fn cancel(&self, _: Uuid) -> Result<(), Failure> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), Failure> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_or_shutdown_interleaving_aborts_analysis_then_drains_engine() {
+        let engine = Arc::new(ShutdownProbe::default());
+        let mut analyses = JoinSet::new();
+        analyses.spawn(std::future::pending::<WireResponse>());
+
+        abort_analyses_and_shutdown(engine.as_ref(), &mut analyses)
+            .await
+            .unwrap();
+
+        assert!(analyses.is_empty());
+        assert_eq!(engine.shutdowns.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn unknown_request_fields_are_rejected() {
-        let body = br#"{"protocol_version":1,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","organization_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","operation":"health","extra":true}"#;
-        let mut framed = Vec::new();
-        write_frame(&mut framed, body).unwrap();
-
-        assert!(matches!(
-            read_request(&mut framed.as_slice()),
-            Err(ProtocolError::InvalidRequest(_))
-        ));
-    }
-
-    #[test]
-    fn oversized_frames_are_rejected_before_allocation() {
+    fn oversize_frames_are_rejected_before_allocation() {
         let mut framed = (MAX_REQUEST_BYTES as u32 + 1).to_be_bytes().to_vec();
         framed.extend_from_slice(b"ignored");
         assert!(matches!(
@@ -568,33 +816,43 @@ mod tests {
     }
 
     #[test]
-    fn analysis_request_validates_candidate_and_model() {
-        let valid = request(RequestOperation::Analyze {
-            candidate: candidate(),
-            model: Some("model-a".to_owned()),
-        });
-        assert!(valid.validate().is_ok());
-
-        let invalid = request(RequestOperation::Analyze {
-            candidate: candidate(),
-            model: Some("```model```".to_owned()),
-        });
-        assert!(invalid.validate().is_err());
+    fn authenticate_token_is_inbound_only_and_never_enters_debug_or_response() {
+        let token = "triage-test-secret";
+        let payload = format!(
+            r#"{{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"account-1","organization_id":"organization-1","operation":"authenticate","credential":"{token}"}}"#
+        );
+        let mut framed = Vec::new();
+        write_frame(&mut framed, payload.as_bytes()).unwrap();
+        let request = read_request(&mut framed.as_slice()).unwrap().unwrap();
+        assert!(request.validate().is_ok());
+        assert!(!format!("{request:?}").contains(token));
+        assert!(serde_json::to_value(&request).is_err());
+        let response = WireResponse::for_request(
+            &request,
+            ResponseResult::Authentication {
+                authentication: AuthenticationResponse {
+                    host: "https://github.com".to_owned(),
+                    login: "octocat".to_owned(),
+                    auth_type: "token".to_owned(),
+                    is_authenticated: true,
+                },
+            },
+        );
+        let response = serde_json::to_string(&response).unwrap();
+        assert!(!response.contains(token));
+        assert!(response.contains("authentication"));
     }
 
     #[test]
-    fn response_bound_is_enforced() {
-        let response = WireResponse {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: None,
-            organization_id: None,
-            result: ResponseResult::Failure {
-                failure: Failure::new(FailureCode::Internal, "x".repeat(MAX_RESPONSE_BYTES)),
-            },
-        };
-        assert!(matches!(
-            write_response(&mut Vec::new(), &response),
-            Err(ProtocolError::ResponseTooLarge)
-        ));
+    fn rejected_authentication_payload_never_echoes_its_secret() {
+        let token = "triage-rejected-secret";
+        let payload = format!(
+            r#"{{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"account-1","organization_id":"organization-1","operation":"authenticate","credential":"{token}","extra":"{token}"}}"#
+        );
+        let mut framed = Vec::new();
+        write_frame(&mut framed, payload.as_bytes()).unwrap();
+        let error = read_request(&mut framed.as_slice()).unwrap_err();
+        assert!(!format!("{error:?}").contains(token));
+        assert!(!error.to_string().contains(token));
     }
 }

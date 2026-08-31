@@ -23,6 +23,27 @@ actor WorkItemGroupingDecisionRepository {
         _ decisions: [WorkItemGroupingDecision],
         accountID: AccountID
     ) async throws {
+        try await replace(decisions, accountID: accountID, organizationID: nil)
+    }
+
+    /// Replaces the local decisions in one organization without touching a
+    /// different organization in the same encrypted account vault.
+    func replace(
+        _ decisions: [WorkItemGroupingDecision],
+        scope: SynchronizationScope
+    ) async throws {
+        try await replace(
+            decisions,
+            accountID: scope.accountID,
+            organizationID: scope.organizationID
+        )
+    }
+
+    private func replace(
+        _ decisions: [WorkItemGroupingDecision],
+        accountID: AccountID,
+        organizationID: OrganizationID?
+    ) async throws {
         try ensureAccountScope(accountID)
         guard Set(decisions.map {
             "\($0.sourceNodeID.rawValue)\u{0}\($0.destinationNodeID.rawValue)"
@@ -34,42 +55,35 @@ actor WorkItemGroupingDecisionRepository {
         }
 
         try await vault.write { database in
-            try Self.validateNodeScopes(
-                Set(decisions.flatMap { [$0.sourceNodeID, $0.destinationNodeID] }),
+            try Self.replace(
+                decisions,
                 accountID: accountID,
+                organizationID: organizationID,
                 in: database
             )
-            for decision in decisions {
-                try Self.validateDecision(decision, accountID: accountID, in: database)
-            }
-            try database.execute(
-                sql: """
-                    DELETE FROM grouping_decisions
-                    WHERE source_node_id IN (
-                        SELECT github_node_id FROM github_nodes WHERE account_id = ?
-                    )
-                    """,
-                arguments: [accountID.rawValue]
+        }
+    }
+
+    /// Atomically installs a scoped replacement only if the exact scoped state
+    /// still belongs to this operation. This fences both initial writes and
+    /// compensation so another window's newer local decision is never
+    /// overwritten.
+    func compareAndReplace(
+        _ replacement: [WorkItemGroupingDecision],
+        expectedCurrent: [WorkItemGroupingDecision],
+        scope: SynchronizationScope
+    ) async throws -> Bool {
+        try ensureAccountScope(scope.accountID)
+        return try await vault.write { database in
+            let current = try Self.decisions(for: scope, in: database)
+            guard Self.same(current, expectedCurrent) else { return false }
+            try Self.replace(
+                replacement,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                in: database
             )
-            for decision in decisions {
-                let evidence = try JSONEncoder().encode(decision.evidence)
-                try database.execute(
-                    sql: """
-                        INSERT INTO grouping_decisions (
-                            source_node_id, destination_node_id, relation, strength,
-                            evidence_json, decided_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                    arguments: [
-                        decision.sourceNodeID.rawValue,
-                        decision.destinationNodeID.rawValue,
-                        decision.relation.rawValue,
-                        decision.strength.rawValue,
-                        evidence,
-                        Self.milliseconds(decision.decidedAt)
-                    ]
-                )
-            }
+            return true
         }
     }
 
@@ -92,28 +106,142 @@ actor WorkItemGroupingDecisionRepository {
         }
     }
 
+    func decisions(for scope: SynchronizationScope) async throws -> [WorkItemGroupingDecision] {
+        try ensureAccountScope(scope.accountID)
+        return try await vault.read { database in
+            try Self.decisions(for: scope, in: database)
+        }
+    }
+
     private func ensureAccountScope(_ accountID: AccountID) throws {
         guard accountID == vault.accountID else {
             throw WorkItemGroupingDecisionRepositoryError.accountScopeMismatch
         }
     }
 
+    private nonisolated static func replace(
+        _ decisions: [WorkItemGroupingDecision],
+        accountID: AccountID,
+        organizationID: OrganizationID?,
+        in database: Database
+    ) throws {
+        guard Set(decisions.map { "\($0.sourceNodeID.rawValue)\u{0}\($0.destinationNodeID.rawValue)" }).count == decisions.count else {
+            throw WorkItemGroupingDecisionRepositoryError.duplicateDecision
+        }
+        guard decisions.allSatisfy({ $0.sourceNodeID != $0.destinationNodeID }) else {
+            throw WorkItemGroupingDecisionRepositoryError.invalidDecision
+        }
+        try validateNodeScopes(
+            Set(decisions.flatMap { [$0.sourceNodeID, $0.destinationNodeID] }),
+            accountID: accountID,
+            organizationID: organizationID,
+            in: database
+        )
+        for decision in decisions {
+            try validateDecision(decision, accountID: accountID, organizationID: organizationID, in: database)
+        }
+        if let organizationID {
+            try database.execute(
+                sql: """
+                    DELETE FROM grouping_decisions
+                    WHERE source_node_id IN (
+                        SELECT github_node_id FROM github_nodes
+                        WHERE account_id = ? AND organization_id = ?
+                    )
+                    """,
+                arguments: [accountID.rawValue, organizationID.rawValue]
+            )
+        } else {
+            try database.execute(
+                sql: """
+                    DELETE FROM grouping_decisions
+                    WHERE source_node_id IN (
+                        SELECT github_node_id FROM github_nodes WHERE account_id = ?
+                    )
+                    """,
+                arguments: [accountID.rawValue]
+            )
+        }
+        for decision in decisions {
+            try database.execute(
+                sql: """
+                    INSERT INTO grouping_decisions (
+                        source_node_id, destination_node_id, relation, strength,
+                        evidence_json, decided_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    decision.sourceNodeID.rawValue,
+                    decision.destinationNodeID.rawValue,
+                    decision.relation.rawValue,
+                    decision.strength.rawValue,
+                    try JSONEncoder().encode(decision.evidence),
+                    milliseconds(decision.decidedAt)
+                ]
+            )
+        }
+    }
+
+    private nonisolated static func decisions(
+        for scope: SynchronizationScope,
+        in database: Database
+    ) throws -> [WorkItemGroupingDecision] {
+        try Row.fetchAll(
+            database,
+            sql: """
+                SELECT grouping_decisions.source_node_id, grouping_decisions.destination_node_id,
+                       grouping_decisions.relation, grouping_decisions.strength,
+                       grouping_decisions.evidence_json, grouping_decisions.decided_at_ms
+                FROM grouping_decisions
+                JOIN github_nodes AS source ON source.github_node_id = grouping_decisions.source_node_id
+                JOIN github_nodes AS destination ON destination.github_node_id = grouping_decisions.destination_node_id
+                WHERE source.account_id = ? AND source.organization_id = ?
+                  AND destination.account_id = ? AND destination.organization_id = ?
+                ORDER BY grouping_decisions.source_node_id, grouping_decisions.destination_node_id
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.accountID.rawValue, scope.organizationID.rawValue
+            ]
+        ).map(decision(from:))
+    }
+
+    private nonisolated static func same(
+        _ lhs: [WorkItemGroupingDecision],
+        _ rhs: [WorkItemGroupingDecision]
+    ) -> Bool {
+        lhs.sorted(by: decisionSort) == rhs.sorted(by: decisionSort)
+    }
+
+    private nonisolated static func decisionSort(
+        _ lhs: WorkItemGroupingDecision,
+        _ rhs: WorkItemGroupingDecision
+    ) -> Bool {
+        "\(lhs.sourceNodeID.rawValue)\u{0}\(lhs.destinationNodeID.rawValue)"
+            < "\(rhs.sourceNodeID.rawValue)\u{0}\(rhs.destinationNodeID.rawValue)"
+    }
+
     private nonisolated static func validateNodeScopes(
         _ nodeIDs: Set<GitHubNodeID>,
         accountID: AccountID,
+        organizationID: OrganizationID?,
         in database: Database
     ) throws {
         guard !nodeIDs.isEmpty else { return }
         let placeholders = Array(repeating: "?", count: nodeIDs.count).joined(separator: ", ")
         let values = nodeIDs.map(\.rawValue).sorted()
+        let organizationClause = organizationID == nil ? "" : " AND organization_id = ?"
+        let arguments = [accountID.rawValue]
+            + (organizationID.map { [$0.rawValue] } ?? [])
+            + values
         let matchingCount = try Int.fetchOne(
             database,
             sql: """
                 SELECT COUNT(*)
                 FROM github_nodes
-                WHERE account_id = ? AND github_node_id IN (\(placeholders))
+                WHERE account_id = ?\(organizationClause) AND github_node_id IN (\(placeholders))
                 """,
-            arguments: StatementArguments([accountID.rawValue] + values)
+            arguments: StatementArguments(arguments)
         ) ?? 0
         guard matchingCount == nodeIDs.count else {
             throw WorkItemGroupingDecisionRepositoryError.nodeScopeMismatch
@@ -127,9 +255,10 @@ actor WorkItemGroupingDecisionRepository {
     private nonisolated static func validateDecision(
         _ decision: WorkItemGroupingDecision,
         accountID: AccountID,
+        organizationID: OrganizationID?,
         in database: Database
     ) throws {
-        guard decision.strength == .userConfirmed,
+        guard (decision.strength == .userConfirmed || decision.strength == .userSeparated),
               !decision.evidence.isEmpty,
               Set(decision.evidence.map(\.id)).count == decision.evidence.count
         else {
@@ -155,7 +284,8 @@ actor WorkItemGroupingDecisionRepository {
         ),
         let sourceOrganizationID = OrganizationID(rawValue: row["source_organization_id"]),
         let destinationOrganizationID = OrganizationID(rawValue: row["destination_organization_id"]),
-        sourceOrganizationID == destinationOrganizationID
+        sourceOrganizationID == destinationOrganizationID,
+        organizationID.map({ $0 == sourceOrganizationID }) ?? true
         else {
             throw WorkItemGroupingDecisionRepositoryError.nodeScopeMismatch
         }

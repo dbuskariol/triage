@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import Darwin
 
 enum VaultError: Error, Equatable, Sendable {
     case invalidIntegrityCheck
@@ -15,6 +16,7 @@ struct VaultPaths: Equatable, Sendable {
     let directory: URL
     let database: URL
     let migrationBackups: URL
+    let recoveryCopies: URL
 
     init(rootDirectory: URL, accountID: AccountID) {
         directory = rootDirectory
@@ -23,6 +25,8 @@ struct VaultPaths: Equatable, Sendable {
         database = directory.appendingPathComponent("triage.sqlite", isDirectory: false)
         migrationBackups = directory
             .appendingPathComponent("MigrationBackups", isDirectory: true)
+        recoveryCopies = directory
+            .appendingPathComponent("RecoveryCopies", isDirectory: true)
     }
 
     static func defaultRootDirectory() throws -> URL {
@@ -37,11 +41,568 @@ struct VaultPaths: Equatable, Sendable {
     }
 }
 
+/// Validates the only filesystem namespace used by account vaults before it is
+/// created or opened. Account identifiers are deliberately opaque UUIDs, not
+/// arbitrary strings supplied by persisted or external data.
+private enum VaultPathValidator {
+    static func paths(rootDirectory: URL, accountID: AccountID) throws -> VaultPaths {
+        guard isOpaqueAccountID(accountID) else {
+            throw VaultError.unsafeAccountIDPath
+        }
+
+        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
+        do {
+            try NoFollowFilesystem.assertExistingPath(
+                beneath: rootDirectory,
+                components: ["Vaults", accountID.rawValue]
+            )
+        } catch {
+            throw VaultError.unsafeAccountIDPath
+        }
+        return paths
+    }
+
+    static func ensureVaultDirectory(rootDirectory: URL, accountID: AccountID) throws {
+        _ = try paths(rootDirectory: rootDirectory, accountID: accountID)
+        do {
+            try NoFollowFilesystem.ensureDirectory(
+                at: rootDirectory,
+                components: ["Vaults", accountID.rawValue]
+            )
+        } catch {
+            throw VaultError.unsafeAccountIDPath
+        }
+    }
+
+    static func ensureMigrationBackups(rootDirectory: URL, accountID: AccountID) throws {
+        _ = try paths(rootDirectory: rootDirectory, accountID: accountID)
+        do {
+            try NoFollowFilesystem.ensureDirectory(
+                at: rootDirectory,
+                components: ["Vaults", accountID.rawValue, "MigrationBackups"]
+            )
+        } catch {
+            throw VaultError.unsafeAccountIDPath
+        }
+    }
+
+    static func assertDatabaseFileIsSafe(rootDirectory: URL, accountID: AccountID) throws {
+        do {
+            try NoFollowFilesystem.assertRegularFileIfPresent(
+                beneath: rootDirectory,
+                directoryComponents: ["Vaults", accountID.rawValue],
+                name: "triage.sqlite"
+            )
+        } catch {
+            throw VaultError.unsafeAccountIDPath
+        }
+    }
+
+    private static func isOpaqueAccountID(_ accountID: AccountID) -> Bool {
+        guard let value = UUID(uuidString: accountID.rawValue) else { return false }
+        return value.uuidString.lowercased() == accountID.rawValue
+    }
+
+}
+
+/// Small descriptor-relative filesystem primitive for account-owned data.
+/// `FileManager` path APIs resolve every component afresh, which makes a
+/// check-then-create/remove sequence vulnerable to an ancestor symlink swap.
+/// These helpers retain an opened directory descriptor while descending each
+/// component and use `O_NOFOLLOW` at every boundary.
+enum NoFollowFilesystem {
+    private static let directoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+
+    static func ensureDirectory(at root: URL, components: [String]) throws {
+        var descriptor = try openDirectory(at: root, create: true)
+        defer { _ = Darwin.close(descriptor) }
+        for component in components {
+            let next = try openDirectory(named: component, relativeTo: descriptor, create: true)
+            guard Darwin.fchmod(next, 0o700) == 0 else {
+                _ = Darwin.close(next)
+                throw posixError()
+            }
+            _ = Darwin.close(descriptor)
+            descriptor = next
+        }
+    }
+
+    /// Confirms the existing prefix only. Missing components are safe to
+    /// create later through `ensureDirectory`, which performs the same
+    /// descriptor-relative traversal.
+    static func assertExistingPath(beneath root: URL, components: [String]) throws {
+        var descriptor: Int32
+        do {
+            descriptor = try openDirectory(at: root, create: false)
+        } catch let error as NSError where error.code == Int(ENOENT) {
+            return
+        }
+        defer { _ = Darwin.close(descriptor) }
+        for component in components {
+            do {
+                let next = try openDirectory(named: component, relativeTo: descriptor, create: false)
+                _ = Darwin.close(descriptor)
+                descriptor = next
+            } catch let error as NSError where error.code == Int(ENOENT) {
+                return
+            }
+        }
+    }
+
+    static func assertRegularFileIfPresent(
+        beneath root: URL,
+        directoryComponents: [String],
+        name: String
+    ) throws {
+        let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
+        guard let directory else { return }
+        defer { _ = Darwin.close(directory) }
+
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if file == -1 {
+            guard errno == ENOENT else { throw posixError() }
+            return
+        }
+        defer { _ = Darwin.close(file) }
+        var status = stat()
+        guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
+        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
+    }
+
+    static func regularFileExists(
+        beneath root: URL,
+        directoryComponents: [String],
+        name: String
+    ) throws -> Bool {
+        let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
+        guard let directory else { return false }
+        defer { _ = Darwin.close(directory) }
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if file == -1 {
+            guard errno == ENOENT else { throw posixError() }
+            return false
+        }
+        defer { _ = Darwin.close(file) }
+        var status = stat()
+        guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
+        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
+        return true
+    }
+
+    /// Checks a file within an already-opened directory. Keeping the caller's
+    /// descriptor open lets SQLite use a `/dev/fd` path without reopening any
+    /// account-owned pathname after this no-follow check.
+    static func regularFileExists(relativeTo directory: Int32, name: String) throws -> Bool {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if file == -1 {
+            guard errno == ENOENT else { throw posixError() }
+            return false
+        }
+        defer { _ = Darwin.close(file) }
+        var status = stat()
+        guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
+        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
+        return true
+    }
+
+    static func readRegularFileIfPresent(
+        beneath root: URL,
+        directoryComponents: [String],
+        name: String,
+        maximumBytes: Int,
+        expectedPermissions: mode_t? = nil
+    ) throws -> Data? {
+        guard maximumBytes >= 0 else { throw posixError(code: EINVAL) }
+        let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
+        guard let directory else { return nil }
+        defer { _ = Darwin.close(directory) }
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if file == -1 {
+            guard errno == ENOENT else { throw posixError() }
+            return nil
+        }
+        defer { _ = Darwin.close(file) }
+        var status = stat()
+        guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
+        guard (status.st_mode & S_IFMT) == S_IFREG,
+              status.st_size >= 0,
+              status.st_size <= off_t(maximumBytes)
+        else { throw posixError(code: EINVAL) }
+        if let expectedPermissions,
+           (status.st_mode & 0o777) != expectedPermissions {
+            throw posixError(code: EACCES)
+        }
+        var data = Data(count: Int(status.st_size))
+        try data.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.read(file, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                guard count > 0 else { throw posixError() }
+                offset += count
+            }
+        }
+        return data
+    }
+
+    static func removeTreeIfPresent(beneath root: URL, components: [String]) throws {
+        guard let name = components.last else { return }
+        let parent = try openedDirectory(
+            beneath: root,
+            components: Array(components.dropLast()),
+            create: false
+        )
+        guard let parent else { return }
+        defer { _ = Darwin.close(parent) }
+        try removeEntry(named: name, relativeTo: parent)
+    }
+
+    static func withDirectory<Value>(
+        beneath root: URL,
+        components: [String],
+        create: Bool,
+        _ operation: (Int32) throws -> Value
+    ) throws -> Value {
+        guard let directory = try openedDirectory(
+            beneath: root,
+            components: components,
+            create: create
+        ) else { throw posixError(code: ENOENT) }
+        defer { _ = Darwin.close(directory) }
+        return try operation(directory)
+    }
+
+    static func setRegularFilePermissions(
+        relativeTo directory: Int32,
+        name: String,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        let file = Darwin.openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard file != -1 else { throw posixError() }
+        defer { _ = Darwin.close(file) }
+        var status = stat()
+        guard Darwin.fstat(file, &status) == 0,
+              (status.st_mode & S_IFMT) == S_IFREG,
+              Darwin.fchmod(file, permissions) == 0,
+              Darwin.fsync(file) == 0
+        else { throw posixError() }
+    }
+
+    static func copyRegularFileWithinDirectoryAtomically(
+        _ directory: Int32,
+        sourceName: String,
+        destinationName: String,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard isSafeComponent(sourceName), isSafeComponent(destinationName) else {
+            throw posixError(code: EINVAL)
+        }
+        let source = Darwin.openat(directory, sourceName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard source != -1 else { throw posixError() }
+        defer { _ = Darwin.close(source) }
+        var sourceStatus = stat()
+        guard Darwin.fstat(source, &sourceStatus) == 0,
+              (sourceStatus.st_mode & S_IFMT) == S_IFREG
+        else { throw posixError(code: EINVAL) }
+
+        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
+        let destination = Darwin.openat(
+            directory,
+            temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            permissions
+        )
+        guard destination != -1 else { throw posixError() }
+        defer {
+            _ = Darwin.close(destination)
+            _ = Darwin.unlinkat(directory, temporary, 0)
+        }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(source, $0.baseAddress, $0.count) }
+            guard count >= 0 else { throw posixError() }
+            guard count > 0 else { break }
+            try buffer.withUnsafeBytes { bytes in
+                var offset = 0
+                while offset < count {
+                    let written = Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
+                    guard written > 0 else { throw posixError() }
+                    offset += written
+                }
+            }
+        }
+        guard Darwin.fchmod(destination, permissions) == 0,
+              Darwin.fsync(destination) == 0,
+              Darwin.renameat(directory, temporary, directory, destinationName) == 0,
+              Darwin.fsync(directory) == 0
+        else { throw posixError() }
+    }
+
+    static func removeRegularFileIfPresent(relativeTo directory: Int32, name: String) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        var status = stat()
+        guard Darwin.fstatat(directory, name, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
+            guard errno == ENOENT else { throw posixError() }
+            return
+        }
+        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
+        guard Darwin.unlinkat(directory, name, 0) == 0 else { throw posixError() }
+    }
+
+    static func writeFileAtomically(
+        beneath root: URL,
+        directoryComponents: [String],
+        name: String,
+        data: Data,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        guard let directory = try openedDirectory(
+            beneath: root,
+            components: directoryComponents,
+            create: true
+        ) else { throw posixError(code: ENOENT) }
+        defer { _ = Darwin.close(directory) }
+        let temporary = ".\(name).\(UUID().uuidString.lowercased()).partial"
+        let file = Darwin.openat(
+            directory,
+            temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            permissions
+        )
+        guard file != -1 else { throw posixError() }
+        defer {
+            _ = Darwin.close(file)
+            _ = Darwin.unlinkat(directory, temporary, 0)
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let written = Darwin.write(file, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                guard written > 0 else { throw posixError() }
+                offset += written
+            }
+        }
+        guard Darwin.fchmod(file, permissions) == 0 else { throw posixError() }
+        // Commit content and final mode together before the name becomes
+        // visible. A crash must never publish a durable journal/backup with
+        // the temporary file's permissions.
+        guard Darwin.fsync(file) == 0 else { throw posixError() }
+        guard Darwin.renameat(directory, temporary, directory, name) == 0 else { throw posixError() }
+        guard Darwin.fsync(directory) == 0 else { throw posixError() }
+    }
+
+    /// Copies an already-opened regular-file namespace through descriptor
+    /// relative paths. The destination is replaced only after its complete
+    /// contents have been flushed, so recovery never truncates a live vault
+    /// before a verified backup is durable.
+    static func copyRegularFileAtomically(
+        beneath root: URL,
+        sourceDirectoryComponents: [String],
+        sourceName: String,
+        destinationDirectoryComponents: [String],
+        destinationName: String,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard isSafeComponent(sourceName), isSafeComponent(destinationName) else {
+            throw posixError(code: EINVAL)
+        }
+        guard let sourceDirectory = try openedDirectory(
+            beneath: root,
+            components: sourceDirectoryComponents,
+            create: false
+        ) else {
+            throw posixError(code: ENOENT)
+        }
+        defer { _ = Darwin.close(sourceDirectory) }
+        let source = Darwin.openat(sourceDirectory, sourceName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard source != -1 else { throw posixError() }
+        defer { _ = Darwin.close(source) }
+        var sourceStatus = stat()
+        guard Darwin.fstat(source, &sourceStatus) == 0,
+              (sourceStatus.st_mode & S_IFMT) == S_IFREG
+        else {
+            throw posixError(code: EINVAL)
+        }
+
+        guard let destinationDirectory = try openedDirectory(
+            beneath: root,
+            components: destinationDirectoryComponents,
+            create: true
+        ) else {
+            throw posixError(code: ENOENT)
+        }
+        defer { _ = Darwin.close(destinationDirectory) }
+        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
+        let destination = Darwin.openat(
+            destinationDirectory,
+            temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            permissions
+        )
+        guard destination != -1 else { throw posixError() }
+        defer {
+            _ = Darwin.close(destination)
+            _ = Darwin.unlinkat(destinationDirectory, temporary, 0)
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(source, $0.baseAddress, $0.count)
+            }
+            guard count >= 0 else { throw posixError() }
+            guard count > 0 else { break }
+            try buffer.withUnsafeBytes { bytes in
+                var offset = 0
+                while offset < count {
+                    let written = Darwin.write(
+                        destination,
+                        bytes.baseAddress!.advanced(by: offset),
+                        count - offset
+                    )
+                    guard written > 0 else { throw posixError() }
+                    offset += written
+                }
+            }
+        }
+        // Durably establish the final access mode before publishing the
+        // replacement name, then persist the parent directory entry.
+        guard Darwin.fchmod(destination, permissions) == 0,
+              Darwin.fsync(destination) == 0,
+              Darwin.renameat(destinationDirectory, temporary, destinationDirectory, destinationName) == 0,
+              Darwin.fsync(destinationDirectory) == 0
+        else {
+            throw posixError()
+        }
+    }
+
+    static func removeRegularFileIfPresent(
+        beneath root: URL,
+        directoryComponents: [String],
+        name: String
+    ) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        guard let directory = try openedDirectory(
+            beneath: root,
+            components: directoryComponents,
+            create: false
+        ) else {
+            return
+        }
+        defer { _ = Darwin.close(directory) }
+        var status = stat()
+        guard Darwin.fstatat(directory, name, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
+            guard errno == ENOENT else { throw posixError() }
+            return
+        }
+        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
+        guard Darwin.unlinkat(directory, name, 0) == 0,
+              Darwin.fsync(directory) == 0
+        else {
+            throw posixError()
+        }
+    }
+
+    private static func openedDirectory(
+        beneath root: URL,
+        components: [String],
+        create: Bool
+    ) throws -> Int32? {
+        var descriptor: Int32
+        do {
+            descriptor = try openDirectory(at: root, create: create)
+        } catch let error as NSError where !create && error.code == Int(ENOENT) {
+            return nil
+        }
+        for component in components {
+            do {
+                let next = try openDirectory(named: component, relativeTo: descriptor, create: create)
+                _ = Darwin.close(descriptor)
+                descriptor = next
+            } catch let error as NSError where !create && error.code == Int(ENOENT) {
+                _ = Darwin.close(descriptor)
+                return nil
+            }
+        }
+        return descriptor
+    }
+
+    private static func openDirectory(at url: URL, create: Bool) throws -> Int32 {
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix("/") else { throw posixError(code: EINVAL) }
+        var descriptor = Darwin.open("/", directoryFlags)
+        guard descriptor != -1 else { throw posixError() }
+        for component in path.split(separator: "/").map(String.init) {
+            do {
+                let next = try openDirectory(named: component, relativeTo: descriptor, create: create)
+                _ = Darwin.close(descriptor)
+                descriptor = next
+            } catch {
+                _ = Darwin.close(descriptor)
+                throw error
+            }
+        }
+        return descriptor
+    }
+
+    private static func openDirectory(named name: String, relativeTo parent: Int32, create: Bool) throws -> Int32 {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        var descriptor = Darwin.openat(parent, name, directoryFlags)
+        if descriptor == -1, create, errno == ENOENT {
+            guard Darwin.mkdirat(parent, name, 0o700) == 0 || errno == EEXIST else { throw posixError() }
+            descriptor = Darwin.openat(parent, name, directoryFlags)
+        }
+        guard descriptor != -1 else { throw posixError() }
+        return descriptor
+    }
+
+    private static func removeEntry(named name: String, relativeTo parent: Int32) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        var status = stat()
+        guard Darwin.fstatat(parent, name, &status, AT_SYMLINK_NOFOLLOW) == 0 else {
+            guard errno == ENOENT else { throw posixError() }
+            return
+        }
+        if (status.st_mode & S_IFMT) != S_IFDIR {
+            guard Darwin.unlinkat(parent, name, 0) == 0 else { throw posixError() }
+            return
+        }
+        let child = Darwin.openat(parent, name, directoryFlags)
+        guard child != -1 else { throw posixError() }
+        guard let stream = Darwin.fdopendir(child) else {
+            _ = Darwin.close(child)
+            throw posixError()
+        }
+        defer { _ = Darwin.closedir(stream) }
+        while let entry = Darwin.readdir(stream) {
+            let childName = withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) {
+                    String(cString: $0)
+                }
+            }
+            guard childName != ".", childName != ".." else { continue }
+            try removeEntry(named: childName, relativeTo: child)
+        }
+        guard Darwin.unlinkat(parent, name, AT_REMOVEDIR) == 0 else { throw posixError() }
+    }
+
+    private static func isSafeComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && !value.contains("/")
+    }
+
+    private static func posixError(code: Int32 = errno) -> NSError {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+    }
+}
+
 actor AccountVault {
     let accountID: AccountID
     let paths: VaultPaths
 
     private let databasePool: DatabasePool
+    private let rootDirectory: URL
     private let vaultKey: VaultKey
 
     init(
@@ -52,13 +613,14 @@ actor AccountVault {
         self.accountID = accountID
         self.vaultKey = vaultKey
         let root = try rootDirectory ?? VaultPaths.defaultRootDirectory()
-        paths = VaultPaths(rootDirectory: root, accountID: accountID)
+        self.rootDirectory = root
+        paths = try VaultPathValidator.paths(rootDirectory: root, accountID: accountID)
 
-        try FileManager.default.createDirectory(
-            at: paths.directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        // Each component is opened relative to a no-follow directory
+        // descriptor. This prevents a symlinked Vaults/account namespace from
+        // redirecting creation outside the app-owned root.
+        try VaultPathValidator.ensureVaultDirectory(rootDirectory: root, accountID: accountID)
+        try VaultPathValidator.assertDatabaseFileIsSafe(rootDirectory: root, accountID: accountID)
 
         databasePool = try DatabasePool(
             path: paths.database.path,
@@ -104,23 +666,35 @@ actor AccountVault {
     }
 
     func applyMigrations() throws {
+        try VaultPathValidator.ensureMigrationBackups(rootDirectory: rootDirectory, accountID: accountID)
         let databasePool = databasePool
         let vaultKey = vaultKey
-        let paths = paths
+        let rootDirectory = rootDirectory
+        let accountID = accountID
         try TriageDatabaseMigrator.migrate(
             databasePool,
             beforeDestructiveMigration: { migrationID in
+                try VaultPathValidator.ensureMigrationBackups(
+                    rootDirectory: rootDirectory,
+                    accountID: accountID
+                )
                 try Self.createVerifiedMigrationBackup(
                     for: migrationID,
                     from: databasePool,
                     vaultKey: vaultKey,
-                    paths: paths
+                    rootDirectory: rootDirectory,
+                    accountID: accountID
                 )
             }
         )
     }
 
-    private static func configuration(
+    static let destructiveMigrationBackupIDs = [
+        "033-role-search-page-replay-v2",
+        "034-role-search-page-replay-parser-identity"
+    ]
+
+    static func configuration(
         vaultKey: VaultKey,
         readonly: Bool = false
     ) -> Configuration {
@@ -146,12 +720,10 @@ actor AccountVault {
         for migrationID: String,
         from source: DatabasePool,
         vaultKey: VaultKey,
-        paths: VaultPaths
+        rootDirectory: URL,
+        accountID: AccountID
     ) throws {
-        guard [
-            "033-role-search-page-replay-v2",
-            "034-role-search-page-replay-parser-identity"
-        ].contains(migrationID) else {
+        guard destructiveMigrationBackupIDs.contains(migrationID) else {
             throw VaultError.unsupportedDestructiveMigration(migrationID)
         }
         let sourceReplayCount = try source.read { database in
@@ -170,80 +742,220 @@ actor AccountVault {
             ) ?? 0
         }
 
-        try FileManager.default.createDirectory(
-            at: paths.migrationBackups,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let backup = paths.migrationBackups
-            .appendingPathComponent("\(migrationID).sqlite", isDirectory: false)
-        let temporaryBackup = paths.migrationBackups
-            .appendingPathComponent(".\(migrationID).\(UUID().uuidString).partial", isDirectory: false)
-        let temporaryArtifacts = [
-            temporaryBackup,
-            URL(fileURLWithPath: temporaryBackup.path + "-journal"),
-            URL(fileURLWithPath: temporaryBackup.path + "-shm"),
-            URL(fileURLWithPath: temporaryBackup.path + "-wal")
-        ]
-        defer {
-            for artifact in temporaryArtifacts {
-                try? FileManager.default.removeItem(at: artifact)
+        let backupComponents = ["Vaults", accountID.rawValue, "MigrationBackups"]
+        try NoFollowFilesystem.withDirectory(
+            beneath: rootDirectory,
+            components: backupComponents,
+            create: true
+        ) { backupDirectory in
+            let temporaryName = ".\(migrationID).\(UUID().uuidString.lowercased()).partial"
+            let temporaryPath = "/dev/fd/\(backupDirectory)/\(temporaryName)"
+            defer {
+                try? NoFollowFilesystem.removeRegularFileIfPresent(
+                    relativeTo: backupDirectory,
+                    name: temporaryName
+                )
+                for suffix in ["-journal", "-shm", "-wal"] {
+                    try? NoFollowFilesystem.removeRegularFileIfPresent(
+                        relativeTo: backupDirectory,
+                        name: temporaryName + suffix
+                    )
+                }
             }
-        }
 
-        var backupConfiguration = configuration(vaultKey: vaultKey)
-        // A queue defaults to a rollback journal, avoiding durable WAL/SHM
-        // sidecars for a temporary migration backup.
-        backupConfiguration.journalMode = .default
-        let destination = try DatabaseQueue(
-            path: temporaryBackup.path,
-            configuration: backupConfiguration
-        )
-        try source.backup(to: destination)
-        try destination.close()
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: temporaryBackup.path
-        )
-
-        let verificationPool = try DatabasePool(
-            path: temporaryBackup.path,
-            configuration: configuration(vaultKey: vaultKey, readonly: true)
-        )
-        defer { try? verificationPool.close() }
-        try verify(verificationPool)
-        let verified = try verificationPool.read { database in
-            guard try database.tableExists("role_search_page_replays"),
-                  try String.fetchOne(
-                    database,
-                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                    arguments: [migrationID]
-                  ) == nil
-            else {
-                return false
-            }
-            return (try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM role_search_page_replays"
-            ) ?? 0) == sourceReplayCount
-        }
-        guard verified else {
-            throw VaultError.invalidMigrationBackup
-        }
-
-        if FileManager.default.fileExists(atPath: backup.path) {
-            _ = try FileManager.default.replaceItemAt(
-                backup,
-                withItemAt: temporaryBackup,
-                backupItemName: nil,
-                options: []
+            var backupConfiguration = configuration(vaultKey: vaultKey)
+            // `/dev/fd/<directory-fd>/…` resolves through the directory we
+            // keep open for the whole exchange. SQLite's pathname API still
+            // works normally, but an attacker cannot redirect this backup by
+            // swapping MigrationBackups or one of its ancestors.
+            backupConfiguration.journalMode = .default
+            let destination = try DatabaseQueue(
+                path: temporaryPath,
+                configuration: backupConfiguration
             )
-        } else {
-            try FileManager.default.moveItem(at: temporaryBackup, to: backup)
+            try source.backup(to: destination)
+            try destination.close()
+            try NoFollowFilesystem.setRegularFilePermissions(
+                relativeTo: backupDirectory,
+                name: temporaryName
+            )
+
+            let verificationPool = try DatabasePool(
+                path: temporaryPath,
+                configuration: configuration(vaultKey: vaultKey, readonly: true)
+            )
+            defer { try? verificationPool.close() }
+            try verify(verificationPool)
+            let verified = try verificationPool.read { database in
+                guard try database.tableExists("role_search_page_replays"),
+                      try String.fetchOne(
+                        database,
+                        sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                        arguments: [migrationID]
+                      ) == nil
+                else {
+                    return false
+                }
+                return (try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM role_search_page_replays"
+                ) ?? 0) == sourceReplayCount
+            }
+            guard verified else { throw VaultError.invalidMigrationBackup }
+
+            try NoFollowFilesystem.copyRegularFileWithinDirectoryAtomically(
+                backupDirectory,
+                sourceName: temporaryName,
+                destinationName: "\(migrationID).sqlite"
+            )
         }
     }
 
-    private static func verify(_ databasePool: DatabasePool) throws {
+    static func verifiedMigrationBackupIDs(
+        rootDirectory: URL,
+        accountID: AccountID,
+        vaultKey: VaultKey
+    ) throws -> [String] {
+        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
+        let backupComponents = ["Vaults", accountID.rawValue, "MigrationBackups"]
+        do {
+            return try NoFollowFilesystem.withDirectory(
+                beneath: rootDirectory,
+                components: backupComponents,
+                create: false
+            ) { backupDirectory in
+                var verifiedIDs: [String] = []
+                for migrationID in destructiveMigrationBackupIDs {
+                    let backupName = "\(migrationID).sqlite"
+                    guard try NoFollowFilesystem.regularFileExists(
+                        relativeTo: backupDirectory,
+                        name: backupName
+                    ) else { continue }
+                    do {
+                        let pool = try DatabasePool(
+                            path: "/dev/fd/\(backupDirectory)/\(backupName)",
+                            configuration: configuration(vaultKey: vaultKey, readonly: true)
+                        )
+                        defer { try? pool.close() }
+                        try verify(pool)
+                        let isExpectedPreMigrationBackup = try pool.read { database in
+                            let hasReplayTable = try database.tableExists("role_search_page_replays")
+                            let migrationChecksum = try String.fetchOne(
+                                database,
+                                sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                                arguments: [migrationID]
+                            )
+                            return hasReplayTable && migrationChecksum == nil
+                        }
+                        if isExpectedPreMigrationBackup { verifiedIDs.append(migrationID) }
+                    } catch {
+                        // A corrupt or replaced backup is never advertised as a
+                        // recovery option. The caller still reports the vault issue.
+                    }
+                }
+                return verifiedIDs
+            }
+        } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
+            // A vault without destructive migrations has no backup directory.
+            return []
+        }
+    }
+
+    /// Installs a previously discovered verified migration backup without
+    /// deleting the damaged vault. The current encrypted database and its WAL
+    /// sidecars are copied into an account-private recovery directory first;
+    /// subsequent deletion of the account still removes that directory as
+    /// part of its vault artifact tree.
+    static func restoreVerifiedMigrationBackup(
+        rootDirectory: URL,
+        accountID: AccountID,
+        vaultKey: VaultKey,
+        migrationID: String
+    ) throws {
+        guard try verifiedMigrationBackupIDs(
+            rootDirectory: rootDirectory,
+            accountID: accountID,
+            vaultKey: vaultKey
+        ).contains(migrationID) else {
+            throw VaultError.invalidMigrationBackup
+        }
+        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
+        let vaultComponents = ["Vaults", accountID.rawValue]
+        let archiveID = "before-\(migrationID)-\(UUID().uuidString.lowercased())"
+        let archiveComponents = vaultComponents + ["RecoveryCopies", archiveID]
+        try NoFollowFilesystem.ensureDirectory(at: rootDirectory, components: archiveComponents)
+
+        // Copy the entire encrypted SQLite set before touching the live
+        // database. A missing sidecar is normal; a symlink/non-regular file is
+        // never treated as a recoverable artifact.
+        for name in ["triage.sqlite", "triage.sqlite-wal", "triage.sqlite-shm"] {
+            guard try NoFollowFilesystem.regularFileExists(
+                beneath: rootDirectory,
+                directoryComponents: vaultComponents,
+                name: name
+            ) else { continue }
+            try NoFollowFilesystem.copyRegularFileAtomically(
+                beneath: rootDirectory,
+                sourceDirectoryComponents: vaultComponents,
+                sourceName: name,
+                destinationDirectoryComponents: archiveComponents,
+                destinationName: name
+            )
+        }
+
+        // Re-copy through a descriptor-relative source and verify the exact
+        // installed bytes before allowing callers to reopen/migrate it.
+        try NoFollowFilesystem.copyRegularFileAtomically(
+            beneath: rootDirectory,
+            sourceDirectoryComponents: vaultComponents + ["MigrationBackups"],
+            sourceName: "\(migrationID).sqlite",
+            destinationDirectoryComponents: vaultComponents,
+            destinationName: "triage.sqlite"
+        )
+        try NoFollowFilesystem.removeRegularFileIfPresent(
+            beneath: rootDirectory,
+            directoryComponents: vaultComponents,
+            name: "triage.sqlite-wal"
+        )
+        try NoFollowFilesystem.removeRegularFileIfPresent(
+            beneath: rootDirectory,
+            directoryComponents: vaultComponents,
+            name: "triage.sqlite-shm"
+        )
+
+        try NoFollowFilesystem.withDirectory(
+            beneath: rootDirectory,
+            components: vaultComponents,
+            create: false
+        ) { vaultDirectory in
+            guard try NoFollowFilesystem.regularFileExists(
+                relativeTo: vaultDirectory,
+                name: "triage.sqlite"
+            ) else {
+                throw VaultError.invalidMigrationBackup
+            }
+            let restored = try DatabasePool(
+                path: "/dev/fd/\(vaultDirectory)/triage.sqlite",
+                configuration: configuration(vaultKey: vaultKey, readonly: true)
+            )
+            defer { try? restored.close() }
+            try verify(restored)
+            let isExpectedPreMigrationBackup = try restored.read { database in
+                let hasReplayTable = try database.tableExists("role_search_page_replays")
+                let migrationChecksum = try String.fetchOne(
+                    database,
+                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                    arguments: [migrationID]
+                )
+                return hasReplayTable && migrationChecksum == nil
+            }
+            guard isExpectedPreMigrationBackup else {
+                throw VaultError.invalidMigrationBackup
+            }
+        }
+    }
+
+    static func verify(_ databasePool: DatabasePool) throws {
         try databasePool.read { database in
             guard !(try database.cipherVersion).isEmpty else {
                 throw VaultError.sqlCipherUnavailable
@@ -274,6 +986,9 @@ actor VaultRegistry {
         accountID: AccountID,
         vaultKey: VaultKey
     ) async throws -> AccountVault {
+        // Validate before consulting cached vaults so a malformed persisted ID
+        // can never become an accepted vault namespace.
+        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
         guard !accountsBeingRemoved.contains(accountID) else {
             throw VaultError.accountBeingRemoved
         }
@@ -309,16 +1024,17 @@ actor VaultRegistry {
     }
 
     func remove(accountID: AccountID) async throws {
-        guard Self.isOpaqueAccountID(accountID) else {
-            throw VaultError.unsafeAccountIDPath
-        }
-        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
-        try Self.assertRemovalPathIsSafe(paths.directory, beneath: rootDirectory)
+        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
         beginRemoval(accountID: accountID)
         defer { cancelRemoval(accountID: accountID) }
         try await close(accountID: accountID)
-        if FileManager.default.fileExists(atPath: paths.directory.path) {
-            try FileManager.default.removeItem(at: paths.directory)
+        do {
+            try NoFollowFilesystem.removeTreeIfPresent(
+                beneath: rootDirectory,
+                components: ["Vaults", accountID.rawValue]
+            )
+        } catch {
+            throw VaultError.unsafeAccountIDPath
         }
     }
 
@@ -340,35 +1056,35 @@ actor VaultRegistry {
         accountsBeingRemoved.contains(accountID)
     }
 
-    private static func isOpaqueAccountID(_ accountID: AccountID) -> Bool {
-        guard let value = UUID(uuidString: accountID.rawValue) else { return false }
-        return value.uuidString.lowercased() == accountID.rawValue
+    func verifiedMigrationBackupIDs(
+        accountID: AccountID,
+        vaultKey: VaultKey
+    ) throws -> [String] {
+        try AccountVault.verifiedMigrationBackupIDs(
+            rootDirectory: rootDirectory,
+            accountID: accountID,
+            vaultKey: vaultKey
+        )
     }
 
-    private static func assertRemovalPathIsSafe(_ path: URL, beneath root: URL) throws {
-        let standardizedRoot = root.standardizedFileURL
-        let standardizedPath = path.standardizedFileURL
-        let rootPath = standardizedRoot.path
-        let pathPath = standardizedPath.path
-        guard pathPath.hasPrefix(rootPath + "/") else {
-            throw VaultError.unsafeAccountIDPath
+    /// Restores only a verified encrypted migration backup. The current vault
+    /// is closed first and preserved as an encrypted recovery copy by the
+    /// vault layer; callers never receive a filesystem path or a destructive
+    /// replace/delete primitive.
+    func restoreVerifiedMigrationBackup(
+        accountID: AccountID,
+        vaultKey: VaultKey,
+        migrationID: String
+    ) async throws {
+        guard !accountsBeingRemoved.contains(accountID) else {
+            throw VaultError.accountBeingRemoved
         }
-
-        var current = standardizedRoot
-        guard !isSymbolicLink(current) else {
-            throw VaultError.unsafeAccountIDPath
-        }
-        let relativePath = String(pathPath.dropFirst(rootPath.count + 1))
-        for component in relativePath.split(separator: "/") {
-            current.appendPathComponent(String(component), isDirectory: true)
-            guard !isSymbolicLink(current) else {
-                throw VaultError.unsafeAccountIDPath
-            }
-        }
-    }
-
-    private static func isSymbolicLink(_ url: URL) -> Bool {
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType)
-            == .typeSymbolicLink
+        try await close(accountID: accountID)
+        try AccountVault.restoreVerifiedMigrationBackup(
+            rootDirectory: rootDirectory,
+            accountID: accountID,
+            vaultKey: vaultKey,
+            migrationID: migrationID
+        )
     }
 }

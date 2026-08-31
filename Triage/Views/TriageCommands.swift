@@ -15,6 +15,10 @@ private struct TriageSidebarVisibilityKey: FocusedValueKey {
     typealias Value = Binding<Bool>
 }
 
+private struct TriageWorkflowUndoCoordinatorKey: FocusedValueKey {
+    typealias Value = LocalWorkflowUndoCoordinator
+}
+
 extension FocusedValues {
     var triageSearchFocus: Binding<Bool>? {
         get { self[TriageSearchFocusKey.self] }
@@ -29,6 +33,10 @@ extension FocusedValues {
     var triageSidebarVisibility: Binding<Bool>? {
         get { self[TriageSidebarVisibilityKey.self] }
         set { self[TriageSidebarVisibilityKey.self] = newValue }
+    }
+    var triageWorkflowUndoCoordinator: LocalWorkflowUndoCoordinator? {
+        get { self[TriageWorkflowUndoCoordinatorKey.self] }
+        set { self[TriageWorkflowUndoCoordinatorKey.self] = newValue }
     }
 }
 
@@ -172,10 +180,13 @@ struct TriageWorkflowCommandAvailability: Equatable {
 struct TriageWorkspaceCommands: Commands {
     @ObservedObject var appModel: TriageAppModel
     @ObservedObject var navigation: AppNavigationModel
+    @ObservedObject var preferences: AppPreferences
     @ObservedObject var externalNavigation: ExternalNavigationConfirmationCoordinator
     @FocusedBinding(\.triageSearchFocus) private var searchFocus
     @FocusedBinding(\.triageInspectorVisibility) private var inspectorVisible
     @FocusedBinding(\.triageSidebarVisibility) private var sidebarVisible
+    @FocusedValue(\.triageWorkflowUndoCoordinator) private var workflowUndo
+    @Environment(\.undoManager) private var undoManager
 
     var body: some Commands {
         CommandGroup(replacing: .sidebar) {
@@ -268,19 +279,18 @@ struct TriageWorkspaceCommands: Commands {
             .accessibilityHint(localWorkflowHint)
 
             Menu("Snooze") {
-                Button("Snooze for One Hour") {
-                    apply(.snooze(until: Date().addingTimeInterval(3_600)))
+                ForEach(InboxSnoozeSlot.allCases) { slot in
+                    Button(preferences.inboxSnoozeDurations.title(for: slot)) {
+                        apply(
+                            .snooze(
+                                until: Date().addingTimeInterval(
+                                    TimeInterval(preferences.inboxSnoozeDurations.minutes(for: slot) * 60)
+                                )
+                            )
+                        )
+                    }
+                    .accessibilityHint(localWorkflowHint)
                 }
-                .keyboardShortcut("s", modifiers: [.control, .command])
-                .accessibilityHint(localWorkflowHint)
-                Button("Snooze Until Tomorrow") {
-                    apply(.snooze(until: Date().addingTimeInterval(86_400)))
-                }
-                .accessibilityHint(localWorkflowHint)
-                Button("Snooze Until Next Week") {
-                    apply(.snooze(until: Date().addingTimeInterval(7 * 86_400)))
-                }
-                .accessibilityHint(localWorkflowHint)
                 Divider()
                 Button("End Snooze") {
                     apply(.clearSnooze)
@@ -321,7 +331,7 @@ struct TriageWorkspaceCommands: Commands {
     }
 
     private var validWorkItemIDs: Set<WorkItemID> {
-        Set(appModel.workItems.map(\.id))
+        appModel.selectableWorkItemIDs
     }
 
     private var canNavigateSelectionBack: Bool {
@@ -378,8 +388,18 @@ struct TriageWorkspaceCommands: Commands {
 
     private func apply(_ action: WorkflowAction) {
         guard let item = selectedWorkItem else { return }
+        let targets = appModel.selectedWorkItems
         Task {
-            await appModel.applyWorkflowAction(action, to: item)
+            if let workflowUndo {
+                await workflowUndo.perform(
+                    action,
+                    to: targets.isEmpty ? [item] : targets,
+                    appModel: appModel,
+                    undoManager: undoManager
+                )
+            } else {
+                await appModel.applyWorkflowAction(action, to: targets.isEmpty ? [item] : targets)
+            }
         }
     }
 }

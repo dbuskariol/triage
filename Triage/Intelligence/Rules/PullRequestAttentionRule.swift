@@ -4,6 +4,8 @@ enum PullRequestAttentionRuleID: String, Codable, Sendable {
   case changesRequested
   case unresolvedReviewThreads
   case newReviewFeedback
+  case requiredCheckFailed
+  case mergeableWaitingOnUserAction
 }
 
 struct PullRequestRuleContext: Sendable {
@@ -26,11 +28,42 @@ struct PullRequestReviewThread: Sendable {
   let evidence: EvidenceReference
 }
 
+struct PullRequestStatusCheck: Sendable {
+  let context: String
+  let state: GitHubPullRequestStatusCheckState
+  let isRequired: Bool
+  let completedAt: Date?
+  let evidence: EvidenceReference
+}
+
 struct PullRequestRuleInput: Sendable {
   let isAuthoredByCurrentUser: Bool
   let latestCurrentUserResponseOrCommitAt: Date?
   let reviews: [PullRequestReviewFeedback]
   let reviewThreads: [PullRequestReviewThread]
+  let mergeableState: String?
+  let statusChecks: [PullRequestStatusCheck]
+  /// Local open actions are necessarily owned by the selected local user.
+  /// They never imply a GitHub mutation or an external actor assignment.
+  let openUserOwnedActionEvidence: [EvidenceReference]
+
+  init(
+    isAuthoredByCurrentUser: Bool,
+    latestCurrentUserResponseOrCommitAt: Date?,
+    reviews: [PullRequestReviewFeedback],
+    reviewThreads: [PullRequestReviewThread],
+    mergeableState: String? = nil,
+    statusChecks: [PullRequestStatusCheck] = [],
+    openUserOwnedActionEvidence: [EvidenceReference] = []
+  ) {
+    self.isAuthoredByCurrentUser = isAuthoredByCurrentUser
+    self.latestCurrentUserResponseOrCommitAt = latestCurrentUserResponseOrCommitAt
+    self.reviews = reviews
+    self.reviewThreads = reviewThreads
+    self.mergeableState = mergeableState
+    self.statusChecks = statusChecks
+    self.openUserOwnedActionEvidence = openUserOwnedActionEvidence
+  }
 }
 
 struct PullRequestAttentionRule: Sendable {
@@ -64,6 +97,14 @@ struct PullRequestAttentionRule: Sendable {
       actionableReviews
       .filter { $0.state == .changesRequested || $0.state == .commented }
       .map(\.evidence)
+    let requiredFailureEvidence = input.statusChecks
+      .filter {
+        guard $0.isRequired, $0.state == .failure else { return false }
+        return $0.completedAt.map { isAfterLatestResponseOrCommit($0, input: input) } ?? false
+      }
+      .map(\.evidence)
+    let mergeableUserActionEvidence: [EvidenceReference] =
+      input.mergeableState == "MERGEABLE" ? input.openUserOwnedActionEvidence : []
 
     let definitions: [(PullRequestAttentionRuleID, Int, String, String, [EvidenceReference])] = [
       (
@@ -81,11 +122,25 @@ struct PullRequestAttentionRule: Sendable {
         unresolvedThreadEvidence
       ),
       (
+        .requiredCheckFailed,
+        825,
+        "Required check failed",
+        "A required status check failed after your latest response or commit.",
+        requiredFailureEvidence
+      ),
+      (
         .newReviewFeedback,
         800,
         "New review feedback",
         "Your pull request has new review feedback after your latest response or commit.",
         newFeedbackEvidence
+      ),
+      (
+        .mergeableWaitingOnUserAction,
+        775,
+        "Mergeable pull request needs your action",
+        "This pull request is mergeable, but an open action owned by you remains.",
+        mergeableUserActionEvidence
       ),
     ]
 

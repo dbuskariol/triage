@@ -75,9 +75,14 @@ final class CoverageRequirementProfileTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(requirements.count, 37)
+        XCTAssertEqual(requirements.count, 38)
         XCTAssertTrue(AccountOrganizationCoverageManifest.missingFeatures(in: requirements).isEmpty)
         XCTAssertFalse(requirements.contains { $0.feature == .notifications })
+        XCTAssertTrue(requirements.contains {
+            $0.feature == .statusChecks
+                && $0.repositoryID == nil
+                && $0.streamID.rawValue == "pull-request-status-checks-profile-org"
+        })
         XCTAssertTrue(requirements.contains {
             $0.streamID.rawValue.contains(fixture.revokedRepositoryID.rawValue)
         })
@@ -144,6 +149,40 @@ final class CoverageRequirementProfileTests: XCTestCase {
             capabilityRevision: fixture.capabilityRevision
         )
         XCTAssertEqual(evaluation.missing, [missingDiscussion])
+        XCTAssertEqual(evaluation.freshness.status, .partial)
+    }
+
+    func testPartialStatusCheckRootPreventsFreshCoverage() async throws {
+        let fixture = try await CoverageProfileFixture()
+        defer { fixture.remove() }
+        try await fixture.installTopology()
+        let requirements = try await fixture.vault.read { database in
+            try CoverageRequirementProfile.build(
+                for: fixture.scope,
+                coverage: [],
+                in: database
+            )
+        }
+        let requirement = try XCTUnwrap(requirements.first {
+            $0.feature == .statusChecks
+                && $0.repositoryID == nil
+                && $0.streamID.rawValue == "pull-request-status-checks-profile-org"
+        })
+        let partial = fixture.record(
+            feature: .statusChecks,
+            stream: requirement.streamID.rawValue,
+            status: .partial
+        )
+
+        let evaluation = CoverageEvaluator().evaluate(
+            requirements: [requirement],
+            records: [partial],
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        XCTAssertEqual(evaluation.missing, [requirement])
         XCTAssertEqual(evaluation.freshness.status, .partial)
     }
 

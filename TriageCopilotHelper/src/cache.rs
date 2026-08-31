@@ -1,10 +1,10 @@
 use sha2::{Digest, Sha256};
 
-use crate::schema::{CandidateInput, ValidationError};
+use crate::schema::{AnalysisInput, ValidationError};
 
 /// Produces a stable, non-secret cache fingerprint for a validated candidate.
 pub fn analysis_cache_key(
-    candidate: &CandidateInput,
+    candidate: &AnalysisInput,
     selected_model: Option<&str>,
     prompt_version: &str,
 ) -> Result<String, ValidationError> {
@@ -35,11 +35,11 @@ fn add_part(hasher: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::analysis_cache_key;
-    use crate::schema::tests::candidate;
+    use crate::schema::tests::input;
 
     #[test]
     fn cache_key_is_stable_and_model_sensitive() {
-        let input = candidate();
+        let input = input();
         let first = analysis_cache_key(&input, None, "prompt-v1").unwrap();
         let second = analysis_cache_key(&input, None, "prompt-v1").unwrap();
         let changed = analysis_cache_key(&input, Some("model-a"), "prompt-v1").unwrap();

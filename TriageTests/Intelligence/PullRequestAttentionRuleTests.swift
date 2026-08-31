@@ -115,6 +115,41 @@ final class PullRequestAttentionRuleTests: XCTestCase {
     )
   }
 
+  func testRequiredCheckFailureAndMergeableUserActionNeedExactCurrentEvidence() {
+    let failure = PullRequestStatusCheck(
+      context: "CheckRun:CHECK_1",
+      state: .failure,
+      isRequired: true,
+      completedAt: evaluatedAt.addingTimeInterval(1),
+      evidence: evidence(id: "status-check")
+    )
+    let action = evidence(id: "local-action")
+    let result = PullRequestAttentionRule().evaluate(
+      input: PullRequestRuleInput(
+        isAuthoredByCurrentUser: true,
+        latestCurrentUserResponseOrCommitAt: evaluatedAt,
+        reviews: [],
+        reviewThreads: [],
+        mergeableState: "MERGEABLE",
+        statusChecks: [failure],
+        openUserOwnedActionEvidence: [action]
+      ),
+      context: context()
+    )
+    XCTAssertEqual(result.reasons.map(\.ruleID), [
+      PullRequestAttentionRuleID.requiredCheckFailed.rawValue,
+      PullRequestAttentionRuleID.mergeableWaitingOnUserAction.rawValue
+    ])
+    XCTAssertTrue(PullRequestAttentionRule().evaluate(
+      input: PullRequestRuleInput(
+        isAuthoredByCurrentUser: true,
+        latestCurrentUserResponseOrCommitAt: evaluatedAt.addingTimeInterval(2),
+        reviews: [], reviewThreads: [], mergeableState: "UNKNOWN",
+        statusChecks: [failure], openUserOwnedActionEvidence: [action]
+      ), context: context()
+    ).reasons.isEmpty)
+  }
+
   private func context() -> PullRequestRuleContext {
     PullRequestRuleContext(currentUserNodeID: currentUser, evaluatedAt: evaluatedAt)
   }

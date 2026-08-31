@@ -108,6 +108,54 @@ final class WorkRelationRepositoryTests: XCTestCase {
         XCTAssertTrue(crossOrganization.first?.relations.isEmpty ?? false)
     }
 
+    func testInboxPagePreservesExactScopedRelationEvidenceAuthority() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let workItemID = try await WorkItemRepository(vault: fixture.vault).ensureWorkItem(for: fixture.node)
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO attention_reasons (
+                        id, work_item_id, rule_id, rule_version, category, strength,
+                        title, explanation, evaluated_at_ms
+                    ) VALUES ('inbox-authority-reason', ?, 'direct', 1,
+                              'directResponsibility', 1, 'Direct', 'Direct', ?)
+                    """,
+                arguments: [workItemID.rawValue, Int64(fixture.date.timeIntervalSince1970 * 1_000)]
+            )
+        }
+        try await WorkRelationRepository(vault: fixture.vault).replace(
+            [fixture.relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+
+        let repository = WorkItemRepository(vault: fixture.vault)
+        let current = try await repository.fetchInboxPage(
+            scope: fixture.scope,
+            at: fixture.date,
+            freshness: FreshnessState(status: .fresh),
+            limit: 50
+        )
+        XCTAssertEqual(current.first?.relations, [fixture.relation])
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE relation_evidence SET authority_credential_revision = 'retired-credential'"
+            )
+        }
+        let retired = try await repository.fetchInboxPage(
+            scope: fixture.scope,
+            at: fixture.date,
+            freshness: FreshnessState(status: .partial, detail: "Credential changed."),
+            limit: 50
+        )
+        XCTAssertEqual(retired.count, 1)
+        XCTAssertTrue(retired[0].relations.isEmpty)
+        XCTAssertEqual(retired[0].freshness.status, .partial)
+    }
+
     func testRejectsRelationsForAnotherVaultAccount() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

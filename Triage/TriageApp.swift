@@ -141,7 +141,11 @@ struct TriageApp: App {
         rootDefaults = .standard
         let navigation = AppNavigationModel()
         _navigation = StateObject(wrappedValue: navigation)
-        _preferences = StateObject(wrappedValue: AppPreferences())
+        let businessDayPolicyPreferences = BusinessDayPolicyPreferences()
+        let appPreferences = AppPreferences(
+            businessDayPolicyPreferences: businessDayPolicyPreferences
+        )
+        _preferences = StateObject(wrappedValue: appPreferences)
         _notificationAuthorization = StateObject(wrappedValue: NotificationSystemAuthorization())
         _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController())
         notificationScheduler = UserNotificationCenterScheduler()
@@ -177,6 +181,8 @@ struct TriageApp: App {
             _appModel = StateObject(wrappedValue: TriageAppModel(
                 dependencies: composition.dependencies(
                     notificationSettings: notificationSettings,
+                    notificationDeliveryLeaseGate: notificationSettings.notificationDeliveryLeaseGate,
+                    businessDayPolicyProvider: { businessDayPolicyPreferences.policy() },
                     purgeAccountNavigationState: { accountID in
                         navigation.purgeSelectionState(for: accountID)
                     },
@@ -185,7 +191,8 @@ struct TriageApp: App {
                     }
                 ),
                 vaultRegistry: vaultRegistry,
-                workspaceAccessibility: workspaceAccessibility
+                workspaceAccessibility: workspaceAccessibility,
+                automaticRefreshEnabled: appPreferences.refreshBehavior == .automatic
             ))
         } catch {
             fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
@@ -193,7 +200,7 @@ struct TriageApp: App {
     }
 
     var body: some Scene {
-        Window("Triage", id: "main") {
+        Window("Triage", id: WorkspaceWindowRestoration.mainWindowFrameIdentifier) {
             ExternalNavigationConfirmationHost(coordinator: externalNavigation) {
                 RootView(defaults: rootDefaults)
                     .environmentObject(appModel)
@@ -218,9 +225,11 @@ struct TriageApp: App {
                             notificationActionHandler: notificationResponseAdapter
                         )
                         await appModel.restoreAccounts()
-                        await appModel.startAutomaticRefreshes()
-                        await appModel.refreshSelectedOrganizationAfterAccessCheck()
-                        await appModel.launchOrganizationRefreshLifecycle()
+                        if preferences.refreshBehavior == .automatic {
+                            await appModel.startAutomaticRefreshes()
+                            await appModel.refreshSelectedOrganizationAfterAccessCheck()
+                            await appModel.launchOrganizationRefreshLifecycle()
+                        }
                         await notificationScheduler.registerLocalActions()
                     }
             }
@@ -237,6 +246,7 @@ struct TriageApp: App {
             TriageWorkspaceCommands(
                 appModel: appModel,
                 navigation: navigation,
+                preferences: preferences,
                 externalNavigation: externalNavigation
             )
         }

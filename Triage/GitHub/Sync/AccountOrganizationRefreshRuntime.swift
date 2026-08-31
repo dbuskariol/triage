@@ -58,6 +58,7 @@ actor AccountOrganizationRefreshRuntime {
         secretStore: KeychainSecretStore,
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
         organizationAIController: OrganizationAIController? = nil,
+        businessDayPolicyProvider: @escaping @Sendable () -> BusinessDayPolicy = { .init() },
         activateCachedState: @escaping AccountOrganizationCoordinator.CachedStateActivation = { _, _ in }
     ) {
         self.accountID = accountID
@@ -78,7 +79,8 @@ actor AccountOrganizationRefreshRuntime {
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
                 rateLimitControllers: rateLimitControllers,
-                organizationAIController: organizationAIController
+                organizationAIController: organizationAIController,
+                businessDayPolicyProvider: businessDayPolicyProvider
             ),
             activateCachedState: activateCachedState
         )

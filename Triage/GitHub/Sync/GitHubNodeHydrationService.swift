@@ -585,6 +585,10 @@ actor GitHubNodeHydrationService {
             case .partialResponse: .partialGraphQL([.unknown])
             case .missingData: .missingData
             case .invalidResponse: .invalidResponse
+            // A response outside the committed GitHub API authority is an
+            // integrity failure. It must not become usable partial data or
+            // authorize a fallback source.
+            case .invalidResponseAuthority: .failed
             // A document that is not in the committed query inventory is a
             // local integrity boundary failure. Do not retry it with another
             // document or infer current fields from any fallback source.
@@ -721,7 +725,14 @@ actor GitHubNodeHydrationService {
     private nonisolated static func actors(in payload: GitHubNodeHydrationPayload) -> [ActorSummary] {
         var actors = [ActorID: ActorSummary]()
         let payloadActors = payload.nodes.compactMap(\.?).flatMap { node in
-            [node.author].compactMap(\.self) + node.assignees.nodes.compactMap(\.?)
+            [node.author].compactMap(\.self)
+                + node.assignees.nodes.compactMap(\.?)
+                + (node.reviewRequests?.nodes.compactMap(\.?)
+                    .compactMap(\.requestedReviewer)
+                    .compactMap { reviewer -> GitHubNodeHydrationPayload.Actor? in
+                        guard let id = reviewer.id else { return nil }
+                        return .init(id: id, login: reviewer.login, avatarUrl: reviewer.avatarUrl)
+                    } ?? [])
         }
         for actor in payloadActors {
             guard let id = ActorID(rawValue: actor.id),

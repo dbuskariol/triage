@@ -64,6 +64,7 @@ enum AccountOrganizationCoverageManifest {
         .pullRequests,
         .reviews,
         .reviewThreads,
+        .statusChecks,
         .timelines,
         .discussions,
         .discussionComments,
@@ -104,59 +105,11 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
     }
 
     var freshness: FreshnessState {
-        // Notifications and organization-metadata replay are durable source
-        // evidence, but neither is part of the work-list completeness
-        // contract. Their failure must not make an otherwise complete work
-        // refresh look failed or SSO-blocked. Keep the full collection for
-        // authority validation below; use only required features when
-        // classifying workspace freshness.
-        let requiredCoverage = coverage.filter {
-            AccountOrganizationCoverageManifest.requiredFeatures.contains($0.feature)
-        }
-        let latestSuccess = requiredCoverage.compactMap(\.lastSuccessfulAt).max()
-            ?? lastSuccessfulSyncAt
         guard !coverage.isEmpty else {
             return FreshnessState(
                 status: .stale,
-                lastSuccessfulSyncAt: latestSuccess,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
                 detail: "No cached synchronization coverage is available."
-            )
-        }
-        if let record = requiredCoverage.first(where: { $0.status == .requiresSSO }) {
-            return FreshnessState(
-                status: .ssoRequired,
-                lastSuccessfulSyncAt: latestSuccess,
-                detail: record.failureDetail
-            )
-        }
-        if let record = requiredCoverage.first(where: { $0.status == .requiresApproval }) {
-            return FreshnessState(
-                status: .approvalRequired,
-                lastSuccessfulSyncAt: latestSuccess,
-                detail: record.failureDetail
-            )
-        }
-        if let record = requiredCoverage.first(where: { $0.status == .failed }) {
-            return FreshnessState(
-                status: .failed,
-                lastSuccessfulSyncAt: latestSuccess,
-                detail: record.failureDetail
-            )
-        }
-        if let record = requiredCoverage.first(where: {
-            $0.status == .partial || $0.status == .unavailable
-        }) {
-            return FreshnessState(
-                status: .partial,
-                lastSuccessfulSyncAt: latestSuccess,
-                detail: record.failureDetail
-            )
-        }
-        if requiredCoverage.contains(where: { $0.status == .unknown }) {
-            return FreshnessState(
-                status: .stale,
-                lastSuccessfulSyncAt: latestSuccess,
-                detail: "Synchronization coverage is not yet known."
             )
         }
         guard let coverageRequirements,
@@ -164,7 +117,7 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
         else {
             return FreshnessState(
                 status: .partial,
-                lastSuccessfulSyncAt: latestSuccess,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
                 detail: "The required GitHub coverage manifest is not available yet."
             )
         }
@@ -173,7 +126,7 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
         ).isEmpty else {
             return FreshnessState(
                 status: .partial,
-                lastSuccessfulSyncAt: latestSuccess,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
                 detail: "Some required GitHub feature coverage is not available yet."
             )
         }
@@ -187,8 +140,65 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
         else {
             return FreshnessState(
                 status: .partial,
-                lastSuccessfulSyncAt: latestSuccess,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt,
                 detail: "Synchronization coverage spans more than one authority revision."
+            )
+        }
+
+        // Notifications and organization-metadata replay are durable source
+        // evidence, but neither is part of the work-list completeness
+        // contract. Resolve the current requirement topology before classifying
+        // coverage so an older interval failure cannot override a later record
+        // that authoritatively covers the requirement.
+        let selectedCoverage = coverageRequirements.compactMap { requirement in
+            coverage.filter {
+                $0.accountID == first.accountID
+                    && $0.organizationID == first.organizationID
+                    && $0.repositoryID == requirement.repositoryID
+                    && $0.feature == requirement.feature
+                    && $0.streamID == requirement.streamID
+                    && $0.credentialRevision == first.credentialRevision
+                    && $0.capabilityRevision == first.capabilityRevision
+                    && Self.covers($0, requirement: requirement)
+            }.max(by: Self.precedesForRequirementSelection)
+        }
+        let latestSuccess = selectedCoverage.compactMap(\.lastSuccessfulAt).max()
+            ?? lastSuccessfulSyncAt
+        if let record = selectedCoverage.first(where: { $0.status == .requiresSSO }) {
+            return FreshnessState(
+                status: .ssoRequired,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: record.failureDetail
+            )
+        }
+        if let record = selectedCoverage.first(where: { $0.status == .requiresApproval }) {
+            return FreshnessState(
+                status: .approvalRequired,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: record.failureDetail
+            )
+        }
+        if let record = selectedCoverage.first(where: { $0.status == .failed }) {
+            return FreshnessState(
+                status: .failed,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: record.failureDetail
+            )
+        }
+        if let record = selectedCoverage.first(where: {
+            $0.status == .partial || $0.status == .unavailable
+        }) {
+            return FreshnessState(
+                status: .partial,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: record.failureDetail
+            )
+        }
+        if selectedCoverage.contains(where: { $0.status == .unknown }) {
+            return FreshnessState(
+                status: .stale,
+                lastSuccessfulSyncAt: latestSuccess,
+                detail: "Synchronization coverage is not yet known."
             )
         }
         let evaluation = CoverageEvaluator().evaluate(
@@ -207,6 +217,50 @@ struct AccountOrganizationCachedState: Codable, Equatable, Sendable {
             )
         }
         return FreshnessState(status: .fresh, lastSuccessfulSyncAt: latestSuccess)
+    }
+
+    private static func covers(
+        _ record: CoverageRecord,
+        requirement: CoverageRequirement
+    ) -> Bool {
+        switch (
+            record.intervalStart,
+            record.intervalEnd,
+            requirement.intervalStart,
+            requirement.intervalEnd
+        ) {
+        case (nil, nil, nil, nil):
+            true
+        case let (recordStart?, recordEnd?, requirementStart?, requirementEnd?):
+            recordStart <= requirementStart && recordEnd >= requirementEnd
+        default:
+            false
+        }
+    }
+
+    /// Requirement topology selects the most recently ended interval, then
+    /// the narrowest/latest-starting interval when a server timestamp is
+    /// shared. `lastSuccessfulAt` deliberately cannot decide this: a failed
+    /// retry retains the prior successful watermark for its own coverage row.
+    /// In particular, GitHub's second-granular Date header permits a narrower
+    /// failed retry and an earlier complete interval to have the same end.
+    private static func precedesForRequirementSelection(
+        _ lhs: CoverageRecord,
+        _ rhs: CoverageRecord
+    ) -> Bool {
+        switch (lhs.intervalStart, lhs.intervalEnd, rhs.intervalStart, rhs.intervalEnd) {
+        case let (lhsStart?, lhsEnd?, rhsStart?, rhsEnd?):
+            if lhsEnd != rhsEnd { return lhsEnd < rhsEnd }
+            if lhsStart != rhsStart { return lhsStart < rhsStart }
+        case (nil, nil, nil, nil):
+            break
+        default:
+            // Mixed interval shapes cannot both satisfy one requirement, but
+            // retain a deterministic fail-closed order if malformed cached
+            // data reaches this defensive boundary.
+            return lhs.intervalEnd != nil && rhs.intervalEnd == nil
+        }
+        return (lhs.lastSuccessfulAt ?? .distantPast) < (rhs.lastSuccessfulAt ?? .distantPast)
     }
 }
 

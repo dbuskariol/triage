@@ -20,7 +20,22 @@ protocol AccountSessionServing: Sendable {
         _ token: PersonalAccessToken,
         replacing account: GitHubAccount
     ) async throws -> AccountSessionSnapshot
+    func restoreVerifiedMigrationBackup(
+        for accountID: AccountID,
+        migrationID: String
+    ) async throws -> AccountSessionSnapshot
     func removeAccount(_ accountID: AccountID) async throws
+}
+
+extension AccountSessionServing {
+    /// Test doubles that do not model vault files remain fail-closed for a
+    /// repair request instead of fabricating a restored account session.
+    func restoreVerifiedMigrationBackup(
+        for _: AccountID,
+        migrationID _: String
+    ) async throws -> AccountSessionSnapshot {
+        throw CancellationError()
+    }
 }
 
 /// Owns revision-safe runtime selection, synchronization, and shutdown. A
@@ -59,6 +74,49 @@ protocol WorkspaceObserving: Sendable {
     func snapshots(
         for scope: SynchronizationScope
     ) async throws -> AsyncThrowingStream<WorkspacePresentationSnapshot, Error>
+}
+
+/// A bounded, persisted-rank Inbox projection. It is intentionally separate
+/// from the complete workspace observer: Inbox can become interactive without
+/// waiting for the full graph needed by notifications, search, and other
+/// workspace sections.
+struct InboxPagePresentationSnapshot: Equatable, Sendable {
+    let scope: SynchronizationScope
+    let items: [WorkItem]
+    let nextCursor: InboxPageCursor?
+    let hasMore: Bool
+    /// One database-observation instant is held across every page in this
+    /// presentation, so snooze-boundary eligibility cannot change mid-scroll.
+    let evaluatedAt: Date
+    let freshness: FreshnessState
+    let revision: WorkspaceObservationRevision
+}
+
+/// Produces page-first Inbox snapshots and continues the exact observed page
+/// chain on demand. Implementations must revision-fence both operations and
+/// never use a second `Date()` while loading an additional page.
+protocol InboxPageObserving: Sendable {
+    func snapshots(
+        for scope: SynchronizationScope
+    ) async throws -> AsyncThrowingStream<InboxPagePresentationSnapshot, Error>
+
+    func loadNextPage(
+        for snapshot: InboxPagePresentationSnapshot
+    ) async throws -> InboxPage
+}
+
+struct NoopInboxPageObserver: InboxPageObserving {
+    func snapshots(
+        for _: SynchronizationScope
+    ) async throws -> AsyncThrowingStream<InboxPagePresentationSnapshot, Error> {
+        AsyncThrowingStream { continuation in continuation.finish() }
+    }
+
+    func loadNextPage(
+        for _: InboxPagePresentationSnapshot
+    ) async throws -> InboxPage {
+        throw CancellationError()
+    }
 }
 
 /// Releases observation-side state before an account vault is removed or the
@@ -139,6 +197,22 @@ protocol WorkspaceMutating: Sendable {
         to workItemID: WorkItemID,
         in scope: SynchronizationScope
     ) async throws
+    /// Applies one local workflow transition to every selected item as one
+    /// encrypted-vault transaction and one durable undo history group.
+    func apply(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws
+    func undoLatestWorkflow(in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction
+    func redoLatestWorkflow(in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction
+    func undoWorkflow(transactionID: String, in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction
+    func redoWorkflow(transactionID: String, in scope: SynchronizationScope) async throws -> WorkflowHistoryTransaction
+    func applyWorkflowHistory(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws -> WorkflowHistoryTransaction
     func completeActionItem(
         _ actionItemID: ActionItemID,
         in workItemID: WorkItemID,
@@ -159,9 +233,66 @@ protocol WorkspaceMutating: Sendable {
         in scope: SynchronizationScope,
         expectedAuthorization: NotificationActionAuthorization
     ) async throws
+    func applyGroupingMutation(
+        _ mutation: WorkItemGroupingMutation,
+        in scope: SynchronizationScope
+    ) async throws -> WorkItemGroupingMutationHistory
+    func restoreGroupingDecisions(
+        _ decisions: [WorkItemGroupingDecision],
+        expectedCurrent: [WorkItemGroupingDecision],
+        in scope: SynchronizationScope
+    ) async throws
+    func assignActionItem(
+        _ actionItemID: ActionItemID,
+        expectedOwnerWorkItemID: WorkItemID,
+        visibleWorkItemID: WorkItemID,
+        destinationNodeID: GitHubNodeID,
+        in scope: SynchronizationScope
+    ) async throws
 }
 
 extension WorkspaceMutating {
+    func apply(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws {
+        for workItemID in workItemIDs {
+            try Task.checkCancellation()
+            try await apply(action, to: workItemID, in: scope)
+        }
+    }
+
+    func undoLatestWorkflow(in _: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        throw WorkflowHistoryRepositoryError.noUndoAvailable
+    }
+
+    func redoLatestWorkflow(in _: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        throw WorkflowHistoryRepositoryError.noRedoAvailable
+    }
+
+    func undoWorkflow(transactionID _: String, in _: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        throw WorkflowHistoryRepositoryError.noUndoAvailable
+    }
+
+    func redoWorkflow(transactionID _: String, in _: SynchronizationScope) async throws -> WorkflowHistoryTransaction {
+        throw WorkflowHistoryRepositoryError.noRedoAvailable
+    }
+
+    func applyWorkflowHistory(
+        _ action: WorkflowAction,
+        to workItemIDs: [WorkItemID],
+        in scope: SynchronizationScope
+    ) async throws -> WorkflowHistoryTransaction {
+        try await apply(action, to: workItemIDs, in: scope)
+        return .init(
+            id: UUID().uuidString.lowercased(),
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            changes: []
+        )
+    }
+
     /// Non-production fixtures have no durable work-item transaction to
     /// revalidate. The production mutator overrides this boundary.
     func applyNotificationAction(
@@ -172,6 +303,27 @@ extension WorkspaceMutating {
     ) async throws {
         try await apply(action, to: workItemID, in: scope)
     }
+
+    func applyGroupingMutation(
+        _: WorkItemGroupingMutation,
+        in _: SynchronizationScope
+    ) async throws -> WorkItemGroupingMutationHistory {
+        throw CancellationError()
+    }
+
+    func restoreGroupingDecisions(
+        _: [WorkItemGroupingDecision],
+        expectedCurrent _: [WorkItemGroupingDecision],
+        in _: SynchronizationScope
+    ) async throws {}
+
+    func assignActionItem(
+        _: ActionItemID,
+        expectedOwnerWorkItemID _: WorkItemID,
+        visibleWorkItemID _: WorkItemID,
+        destinationNodeID _: GitHubNodeID,
+        in _: SynchronizationScope
+    ) async throws {}
 }
 
 /// A main-actor sink is intentionally separate from the Sendable services.
@@ -198,9 +350,11 @@ struct TriageApplicationDependencies: Sendable {
     let workspaceCoordinator: any WorkspaceCoordinating
     let refreshLifecycle: any OrganizationRefreshLifecycleHandling
     let workspaceObserver: any WorkspaceObserving
+    let inboxPageObserver: any InboxPageObserving
     let workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling
     let workspaceMutator: any WorkspaceMutating
     let organizationAIControllers: any OrganizationAIControllerProviding
+    let copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding
     let purgeAccountNavigationState: AccountNavigationStatePurging
     let purgeAccountNotificationPreferences: AccountNotificationPreferencePurging
 
@@ -209,9 +363,11 @@ struct TriageApplicationDependencies: Sendable {
         workspaceCoordinator: any WorkspaceCoordinating,
         refreshLifecycle: any OrganizationRefreshLifecycleHandling,
         workspaceObserver: any WorkspaceObserving,
+        inboxPageObserver: any InboxPageObserving = NoopInboxPageObserver(),
         workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle(),
         workspaceMutator: any WorkspaceMutating,
         organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry(),
+        copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding = NoopCopilotRuntimeAuthorizationProvider(),
         purgeAccountNavigationState: @escaping AccountNavigationStatePurging = { _ in },
         purgeAccountNotificationPreferences: @escaping AccountNotificationPreferencePurging = { _ in }
     ) {
@@ -219,9 +375,11 @@ struct TriageApplicationDependencies: Sendable {
         self.workspaceCoordinator = workspaceCoordinator
         self.refreshLifecycle = refreshLifecycle
         self.workspaceObserver = workspaceObserver
+        self.inboxPageObserver = inboxPageObserver
         self.workspaceObservationLifecycle = workspaceObservationLifecycle
         self.workspaceMutator = workspaceMutator
         self.organizationAIControllers = organizationAIControllers
+        self.copilotRuntimeAuthorization = copilotRuntimeAuthorization
         self.purgeAccountNavigationState = purgeAccountNavigationState
         self.purgeAccountNotificationPreferences = purgeAccountNotificationPreferences
     }

@@ -74,6 +74,69 @@ final class CoverageRepositoryTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testRevisionQualifiedStatusCheckCoverageCannotBeReplacedByAnotherPullRequest() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = CoverageRepository(vault: fixture.vault)
+        let scope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: fixture.credentialRevision,
+            capabilityRevision: fixture.capabilityRevision
+        )
+        let firstNodeID = GitHubNodeID(rawValue: "status-check-pr-a")!
+        let secondNodeID = GitHubNodeID(rawValue: "status-check-pr-b")!
+        let firstStream = PullRequestStatusCheckRefreshService.sourceStreamID(
+            organizationID: fixture.organizationID,
+            pullRequestNodeID: firstNodeID,
+            sourceRevision: String(repeating: "a", count: 64)
+        )
+        let secondStream = PullRequestStatusCheckRefreshService.sourceStreamID(
+            organizationID: fixture.organizationID,
+            pullRequestNodeID: secondNodeID,
+            sourceRevision: String(repeating: "b", count: 64)
+        )
+        let partial = CoverageRecord(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            repositoryID: nil,
+            feature: .statusChecks,
+            streamID: firstStream,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: scope.credentialRevision,
+            capabilityRevision: scope.capabilityRevision,
+            status: .partial,
+            lastSuccessfulAt: nil,
+            failureDetail: "First pull request could not be completed."
+        )
+        let complete = CoverageRecord(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            repositoryID: nil,
+            feature: .statusChecks,
+            streamID: secondStream,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: scope.credentialRevision,
+            capabilityRevision: scope.capabilityRevision,
+            status: .complete,
+            lastSuccessfulAt: fixture.date,
+            failureDetail: nil
+        )
+
+        try await repository.save(partial, attemptedAt: fixture.date)
+        try await repository.save(complete, attemptedAt: fixture.date)
+
+        let records = try await repository.records(
+            for: fixture.accountID,
+            organizationID: fixture.organizationID
+        )
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.contains(partial))
+        XCTAssertTrue(records.contains(complete))
+    }
+
     func testRemovingLegacyUnboundedRecordPreservesBoundedCoverageForTheStream() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

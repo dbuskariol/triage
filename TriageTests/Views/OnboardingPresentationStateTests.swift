@@ -52,6 +52,20 @@ final class OnboardingPresentationStateTests: XCTestCase {
         )
     }
 
+    func testPureRecoveryOnboardingRetainsItsRouteWhileSharedRestorationIsInFlight() {
+        let state = makeState(
+            accounts: [],
+            isRestoringAccounts: true,
+            localAccountRecovery: .encryptedLocalDataUnavailable
+        )
+
+        XCTAssertTrue(state.isRestoringAccounts)
+        XCTAssertEqual(
+            state.route(completedSteps: []),
+            .localAccountRecovery(.encryptedLocalDataUnavailable)
+        )
+    }
+
     func testGenericEncryptedLocalDataFailureKeepsRecoveryCopySanitized() {
         let recovery = LocalAccountRecoveryPresentation.encryptedLocalDataUnavailable
 
@@ -60,6 +74,16 @@ final class OnboardingPresentationStateTests: XCTestCase {
         XCTAssertTrue(recovery.detail.contains("Try again"))
         XCTAssertFalse(recovery.detail.localizedCaseInsensitiveContains("remove"))
         XCTAssertFalse(recovery.canOpenAccountSettings)
+    }
+
+    func testEncryptedVaultRepairDoesNotImplyAMissingKeyOrAutomaticDeletion() {
+        let recovery = LocalAccountRecoveryPresentation.encryptedVaultNeedsRepair
+
+        XCTAssertTrue(recovery.canOpenAccountSettings)
+        XCTAssertTrue(recovery.detail.localizedCaseInsensitiveContains("original encrypted data"))
+        XCTAssertFalse(recovery.detail.localizedCaseInsensitiveContains("vault key is unavailable"))
+        XCTAssertFalse(recovery.detail.localizedCaseInsensitiveContains("remove each unavailable"))
+        XCTAssertTrue(recovery.detail.localizedCaseInsensitiveContains("verified migration backup"))
     }
 
     func testUnavailableVaultRecoveryExposesTheReachableSettingsRemovalPath() {
@@ -190,6 +214,7 @@ final class OnboardingPresentationStateTests: XCTestCase {
         accounts: [GitHubAccount]? = nil,
         access: OrganizationAccess? = nil,
         isSynchronizing: Bool = false,
+        isRestoringAccounts: Bool = false,
         refreshError: String? = nil,
         localAccountRecovery: LocalAccountRecoveryPresentation? = nil
     ) -> OnboardingPresentationState {
@@ -202,6 +227,7 @@ final class OnboardingPresentationStateTests: XCTestCase {
             organizationAccess: access,
             isConnecting: false,
             isSynchronizing: isSynchronizing,
+            isRestoringAccounts: isRestoringAccounts,
             connectionError: nil,
             refreshError: refreshError,
             aiAccess: .unavailable("Copilot analysis has not been enabled for this organization."),

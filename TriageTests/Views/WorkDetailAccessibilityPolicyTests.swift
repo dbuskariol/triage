@@ -6,6 +6,7 @@ final class WorkDetailAccessibilityPolicyTests: XCTestCase {
         XCTAssertEqual(
             WorkDetailPresentation.detailSectionHeadings,
             [
+                "Source",
                 "Sync and coverage",
                 "Why this is here",
                 "Action items",
@@ -22,6 +23,13 @@ final class WorkDetailAccessibilityPolicyTests: XCTestCase {
         XCTAssertEqual(
             WorkDetailPresentation.localWorkflowAccessibilityHint,
             "Changes only Triage’s encrypted local workflow; does not modify GitHub."
+        )
+    }
+
+    func testManualGroupingControlsDeclareTheirEncryptedLocalOnlyScope() {
+        XCTAssertEqual(
+            WorkDetailPresentation.localGroupingAccessibilityHint,
+            "Saves only Triage’s encrypted local grouping decision; does not modify GitHub."
         )
     }
 

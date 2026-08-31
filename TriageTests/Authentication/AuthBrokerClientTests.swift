@@ -60,6 +60,33 @@ final class AuthBrokerClientTests: XCTestCase {
         }
     }
 
+    func testApplicationVersionComponentsMatchTheWorkerNumberContract() {
+        XCTAssertTrue(
+            AuthBrokerProtocol.isValidApplicationVersion("9007199254740991.0.0")
+        )
+        XCTAssertFalse(
+            AuthBrokerProtocol.isValidApplicationVersion("9007199254740992.0.0")
+        )
+    }
+
+    func testRuntimeConfigurationRejectsBrokerURLPartsTheClientWillNotUse() {
+        for brokerURL in [
+            "https://user:password@oauth.triage.example",
+            "https://oauth.triage.example?redirect=unexpected",
+            "https://oauth.triage.example#unexpected",
+        ] {
+            XCTAssertThrowsError(
+                try RuntimeOAuthConfiguration(
+                    clientID: "client-id",
+                    brokerURLString: brokerURL,
+                    applicationVersion: "0.1.0"
+                )
+            ) { error in
+                XCTAssertEqual(error as? RuntimeOAuthConfigurationError, .invalidBrokerURL)
+            }
+        }
+    }
+
     func testClientDecodesOnlyTypedBrokerFailures() async throws {
         let client = try AuthBrokerClient(
             baseURL: URL(string: "https://oauth.triage.example")!,

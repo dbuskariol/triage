@@ -112,14 +112,21 @@ enum GroupingStrength: String, Codable, Comparable, Sendable {
     case contextual
     case strong
     case userConfirmed
+    /// A durable local choice to leave a weak contextual relationship split.
+    /// It is intentionally not a negative assertion about a GitHub-derived
+    /// strong relationship.
+    case userSeparated
 
     static func < (lhs: GroupingStrength, rhs: GroupingStrength) -> Bool {
-        switch (lhs, rhs) {
-        case (.contextual, .strong), (.contextual, .userConfirmed), (.strong, .userConfirmed):
-            true
-        default:
-            false
+        func rank(_ strength: GroupingStrength) -> Int {
+            switch strength {
+            case .contextual: 0
+            case .strong: 1
+            case .userConfirmed: 2
+            case .userSeparated: 3
+            }
         }
+        return rank(lhs) < rank(rhs)
     }
 }
 

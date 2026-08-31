@@ -623,7 +623,8 @@ actor TimelineEventRepository {
                     candidate: candidate,
                     scope: scope,
                     pageProvenances: pageProvenances,
-                    eventPageProvenances: eventPageProvenances
+                    eventPageProvenances: eventPageProvenances,
+                    in: database
                 )
                 try WorkRelationRepository.replaceCompletePages(
                     replacements,
@@ -1380,7 +1381,8 @@ actor TimelineEventRepository {
         candidate: TimelineCandidate,
         scope: SynchronizationScope,
         pageProvenances: [TimelineRawPageProvenance],
-        eventPageProvenances: [GitHubEventID: TimelineRawPageProvenance]
+        eventPageProvenances: [GitHubEventID: TimelineRawPageProvenance],
+        in database: Database
     ) throws -> [PageBoundRelationReplacement] {
         typealias RelationDraft = (kind: WorkRelationKind, objectNodeID: GitHubNodeID, evidence: [EvidenceReference], observedAt: Date)
         var drafts = [RawAPISnapshotID: (provenance: TimelineRawPageProvenance, relations: [String: RelationDraft])]()
@@ -1396,24 +1398,41 @@ actor TimelineEventRepository {
         }
 
         for event in events {
-            let relationKind: WorkRelationKind
-            switch event.kind {
-            case .commented:
-                relationKind = .commented
-            case .reviewed:
-                relationKind = .reviewed
-            default:
-                // The timeline event actor is not necessarily an assignee,
-                // mentioned user, or requested reviewer. Do not infer those
-                // relationships from an event that does not name its target.
-                continue
-            }
-            guard let actor = event.actor,
-                  let provenance = eventPageProvenances[event.id],
+            guard let provenance = eventPageProvenances[event.id],
                   drafts[provenance.snapshotID] != nil
             else {
                 throw TimelineEventRepositoryError.invalidPersistedPage(nil)
             }
+            var eventRelations = [(kind: WorkRelationKind, objectNodeID: GitHubNodeID)]()
+            switch event.kind {
+            case .commented:
+                // The timeline event actor is not necessarily an assignee,
+                // mentioned user, or requested reviewer. Record only the
+                // explicit comment relationship.
+                if let actor = event.actor {
+                    eventRelations.append((.commented, actor.nodeID))
+                }
+            case .reviewed:
+                if let actor = event.actor {
+                    eventRelations.append((.reviewed, actor.nodeID))
+                }
+            case .crossReferenced:
+                // REST's `cross-referenced` event explicitly identifies the
+                // referring issue at `source.issue.node_id`. Do not scan a
+                // title, body, or arbitrary payload text for issue-like IDs.
+                if let sourceNodeID = Self.crossReferencedSourceNodeID(in: event.payload),
+                   sourceNodeID != candidate.nodeID,
+                   Self.isScopedContentNode(sourceNodeID, scope: scope, in: database) {
+                    eventRelations.append((.crossReferences, sourceNodeID))
+                }
+            default:
+                // REST timeline payloads currently have no typed, target-node
+                // contract for dependency or duplicate state. Keeping those
+                // relations absent is intentional: partial source coverage is
+                // unknown, never an inference from prose or labels.
+                break
+            }
+            guard !eventRelations.isEmpty else { continue }
             let evidence = EvidenceReference(
                 id: EvidenceID(rawValue: "timeline-\(event.id.rawValue)")!,
                 source: .restTimeline,
@@ -1427,14 +1446,21 @@ actor TimelineEventRepository {
                 confirmation: .confirmed,
                 observedAt: event.occurredAt
             )
-            let key = relationKind.rawValue + "\u{0}" + actor.nodeID.rawValue
             var pageDrafts = drafts[provenance.snapshotID] ?? (provenance, [:])
-            if var draft = pageDrafts.relations[key] {
-                draft.evidence.append(evidence)
-                draft.observedAt = max(draft.observedAt, event.occurredAt)
-                pageDrafts.relations[key] = draft
-            } else {
-                pageDrafts.relations[key] = (relationKind, actor.nodeID, [evidence], event.occurredAt)
+            for relation in eventRelations {
+                let key = relation.kind.rawValue + "\u{0}" + relation.objectNodeID.rawValue
+                if var draft = pageDrafts.relations[key] {
+                    draft.evidence.append(evidence)
+                    draft.observedAt = max(draft.observedAt, event.occurredAt)
+                    pageDrafts.relations[key] = draft
+                } else {
+                    pageDrafts.relations[key] = (
+                        relation.kind,
+                        relation.objectNodeID,
+                        [evidence],
+                        event.occurredAt
+                    )
+                }
             }
             drafts[provenance.snapshotID] = pageDrafts
         }
@@ -1474,6 +1500,35 @@ actor TimelineEventRepository {
                     )
                 )
             }
+    }
+
+    /// Extracts only GitHub's documented typed source object for a REST
+    /// `cross-referenced` timeline event. Any malformed or differently-shaped
+    /// payload stays unknown rather than becoming a best-effort content edge.
+    private nonisolated static func crossReferencedSourceNodeID(in payload: Data) -> GitHubNodeID? {
+        guard let root = try? JSONDecoder().decode(GitHubTimelineJSONValue.self, from: payload),
+              case let .object(rootObject) = root,
+              case let .object(source)? = rootObject["source"],
+              case let .object(issue)? = source["issue"],
+              case let .string(rawNodeID)? = issue["node_id"]
+        else { return nil }
+        return GitHubNodeID(rawValue: rawNodeID)
+    }
+
+    private nonisolated static func isScopedContentNode(
+        _ nodeID: GitHubNodeID,
+        scope: SynchronizationScope,
+        in database: Database
+    ) -> Bool {
+        (try? Int.fetchOne(
+            database,
+            sql: """
+                SELECT COUNT(*)
+                FROM github_nodes
+                WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
+                """,
+            arguments: [nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue]
+        )) == 1
     }
 
     private nonisolated static func validate(_ events: [NormalizedGitHubTimelineEvent]) throws {

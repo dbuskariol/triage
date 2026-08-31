@@ -13,6 +13,7 @@ enum WorkDetailPresentation {
     }
 
     static let detailSectionHeadings = [
+        "Source",
         "Sync and coverage",
         "Why this is here",
         "Action items",
@@ -26,12 +27,29 @@ enum WorkDetailPresentation {
     static let localWorkflowAccessibilityHint =
         "Changes only Triage’s encrypted local workflow; does not modify GitHub."
 
+    static let localGroupingAccessibilityHint =
+        "Saves only Triage’s encrypted local grouping decision; does not modify GitHub."
+
     static func inspectorFocusTarget(isPresented: Bool) -> AccessibilityFocusTarget {
         isPresented ? .inspectorFirstWorkflowAction : .inspectorToggle
     }
 
     static func inspectorIsAvailable(hasSelection: Bool) -> Bool {
         hasSelection
+    }
+
+    static func groupingCandidates(for item: WorkItem) -> [GroupingCandidate] {
+        item.contextLinks.map {
+            GroupingCandidate(
+                destinationNodeID: $0.id,
+                relation: $0.relation,
+                title: $0.content.title
+            )
+        }
+        .sorted {
+            ($0.title.localizedStandardCompare($1.title) == .orderedAscending)
+                || ($0.title == $1.title && $0.destinationNodeID.rawValue < $1.destinationNodeID.rawValue)
+        }
     }
 
     /// The inspector can supply an explicit follow-up date while the keyboard
@@ -288,6 +306,14 @@ enum WorkDetailPresentation {
         default: "Related content"
         }
     }
+}
+
+struct GroupingCandidate: Equatable, Identifiable, Sendable {
+    let destinationNodeID: GitHubNodeID
+    let relation: WorkRelationKind
+    let title: String
+
+    var id: String { "\(destinationNodeID.rawValue)\u{0}\(relation.rawValue)" }
 }
 
 struct ConciseSourceBody: Equatable, Sendable {

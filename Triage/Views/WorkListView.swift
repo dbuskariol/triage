@@ -3,7 +3,9 @@ import SwiftUI
 struct WorkListView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
+    @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
+    @Environment(\.undoManager) private var undoManager
     let workspaceStatus: WorkspacePresentationState.SynchronizationStatus
     let workspaceStatusDetail: String?
     @State private var searchText = ""
@@ -12,6 +14,7 @@ struct WorkListView: View {
     @State private var isSearching = false
     @State private var searchError: String?
     @State private var workListSelection = WorkListSelection()
+    @StateObject private var workflowUndo = LocalWorkflowUndoCoordinator()
     @FocusState private var searchFocus: Bool
 
     var body: some View {
@@ -24,7 +27,25 @@ struct WorkListView: View {
                 )
                     .tag(item.id)
             }
+            if showsLoadMoreInbox {
+                Section {
+                    Button {
+                        Task { await appModel.loadMoreInboxPage() }
+                    } label: {
+                        if appModel.isLoadingMoreInboxPage {
+                            ProgressView("Loading more Inbox work…")
+                        } else {
+                            Text("Load more Inbox work")
+                        }
+                    }
+                    .accessibilityIdentifier("Load more Inbox work")
+                    .disabled(appModel.isLoadingMoreInboxPage)
+                }
+            }
         }
+        .accessibilityIdentifier("work-list")
+        .accessibilityValue("\(filteredWorkItems.count) visible local work items")
+        .controlSize(preferences.appearanceDensity == .compact ? .small : .regular)
         .navigationTitle(navigation.section.title)
         .searchable(text: $searchText, prompt: "Search work")
         .focused($searchFocus)
@@ -35,6 +56,7 @@ struct WorkListView: View {
                 set: { searchFocus = $0 }
             )
         )
+        .focusedSceneValue(\.triageWorkflowUndoCoordinator, workflowUndo)
         .searchScopes(searchScope) {
             ForEach(WorkspaceSearchScope.allCases) { scope in
                 Text(scope.title).tag(scope)
@@ -57,6 +79,7 @@ struct WorkListView: View {
         }
         .onChange(of: appModel.selectedWorkItemID) { _, workItemID in
             workListSelection.synchronizePrimarySelection(workItemID)
+            appModel.setSelectedWorkItemIDs(workListSelection.selectedWorkItemIDs)
             persistSelectedWorkItem(workItemID)
         }
         .onChange(of: workspaceAccessibility.requestedFocus) { _, _ in
@@ -113,13 +136,23 @@ struct WorkListView: View {
     }
 
     private var filteredWorkItems: [WorkItem] {
-        let now = Date()
-        let currentViewItems = WorkListPresentation.items(
-            from: appModel.workItems,
-            section: navigation.section,
-            at: now
-        ).filter(matchesListFilter)
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceItems: [WorkItem]
+        if navigation.section == .inbox,
+           query.isEmpty,
+           usesUnfilteredInboxPage,
+           let inboxPage = appModel.inboxPage
+        {
+            sourceItems = inboxItemsEnsuringSelection(in: inboxPage)
+        } else {
+            sourceItems = appModel.workItems
+        }
+        let currentViewItems = WorkListPresentation.items(
+            from: sourceItems,
+            section: navigation.section,
+            at: inboxPageEvaluationDate,
+            inboxDefaultSort: preferences.inboxDefaultSort
+        ).filter(matchesListFilter)
         guard !query.isEmpty else {
             return currentViewItems
         }
@@ -161,6 +194,39 @@ struct WorkListView: View {
                 return $0.id.rawValue < $1.id.rawValue
             }
         }
+    }
+
+    private var showsLoadMoreInbox: Bool {
+        navigation.section == .inbox
+            && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && usesUnfilteredInboxPage
+            && appModel.inboxPageHasMore
+    }
+
+    private var inboxPageEvaluationDate: Date {
+        appModel.inboxPageEvaluatedAt ?? Date()
+    }
+
+    private var usesUnfilteredInboxPage: Bool {
+        if case .all = navigation.listFilter { return true }
+        return false
+    }
+
+    private func inboxItemsEnsuringSelection(in page: [WorkItem]) -> [WorkItem] {
+        guard let selectedID = appModel.selectedWorkItemID,
+              !page.contains(where: { $0.id == selectedID }),
+              let selected = appModel.workItems.first(where: { $0.id == selectedID }),
+              InboxEligibilityRule().disposition(for: selected, at: inboxPageEvaluationDate) == .inbox
+        else {
+            return page
+        }
+        // The full graph may already be cached when a restored selection lands
+        // beyond the first page. Keep that row visible until the user loads
+        // through to it, rather than silently clearing native selection.
+        return WorkListPresentation.sortedInbox(
+            page + [selected],
+            by: preferences.inboxDefaultSort
+        )
     }
 
     private var emptyDescription: String {
@@ -205,7 +271,7 @@ struct WorkListView: View {
         WorkListSelectionRestorationRequest(
             accountID: appModel.selectedAccountID,
             organizationID: appModel.selectedOrganizationID,
-            validWorkItemIDs: Set(appModel.workItems.map(\.id))
+            validWorkItemIDs: appModel.selectableWorkItemIDs
         )
     }
 
@@ -217,6 +283,7 @@ struct WorkListView: View {
                     selectedWorkItemIDs,
                     orderedWorkItemIDs: filteredWorkItems.map(\.id)
                 )
+                appModel.setSelectedWorkItemIDs(selectedWorkItemIDs)
                 guard appModel.selectedWorkItemID != primaryWorkItemID else { return }
                 appModel.selectedWorkItemID = primaryWorkItemID
             }
@@ -338,14 +405,19 @@ struct WorkListView: View {
         _ operation: WorkItemContextMenuOperation,
         to item: WorkItem
     ) {
-        // The contextual row, rather than an older list selection, is the
-        // action target. The List keeps that explicit selection after the
-        // local workflow update whenever the row remains visible.
         workListSelection.selectContextualWorkItem(item.id)
+        appModel.setSelectedWorkItemIDs(workListSelection.selectedWorkItemIDs)
         appModel.selectedWorkItemID = item.id
         let action = operation.workflowAction(now: Date())
+        let targets = workListSelection.selectedWorkItemIDs
+            .compactMap { id in filteredWorkItems.first(where: { $0.id == id }) }
         Task {
-            await appModel.applyWorkflowAction(action, to: item)
+            await workflowUndo.perform(
+                action,
+                to: targets.isEmpty ? [item] : targets,
+                appModel: appModel,
+                undoManager: undoManager
+            )
         }
     }
 }
@@ -588,11 +660,15 @@ private struct WorkItemRowMetadata: View {
 }
 
 private struct WorkItemContextMenu: View {
+    @EnvironmentObject private var preferences: AppPreferences
     let item: WorkItem
     let onOperation: (WorkItemContextMenuOperation, WorkItem) -> Void
 
     private var policy: WorkItemContextMenuPolicy {
-        WorkItemContextMenuPolicy(item: item)
+        WorkItemContextMenuPolicy(
+            item: item,
+            snoozeDurations: preferences.inboxSnoozeDurations
+        )
     }
 
     var body: some View {
@@ -621,12 +697,15 @@ private struct WorkItemContextMenu: View {
 
         if !policy.snoozeOperations.isEmpty || policy.clearSnoozeOperation != nil {
             Menu("Snooze") {
-                ForEach(policy.snoozeOperations.indices, id: \.self) { index in
-                    let operation = policy.snoozeOperations[index]
-                    Button(snoozeTitle(for: operation)) {
-                        apply(operation)
+                if !policy.snoozeOperations.isEmpty {
+                    ForEach(InboxSnoozeSlot.allCases) { slot in
+                        Button(preferences.inboxSnoozeDurations.title(for: slot)) {
+                            apply(.snoozeAfter(
+                                TimeInterval(preferences.inboxSnoozeDurations.minutes(for: slot) * 60)
+                            ))
+                        }
+                        .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
                     }
-                    .accessibilityHint(WorkItemContextMenuPolicy.localOnlyAccessibilityHint)
                 }
                 if let clearSnoozeOperation = policy.clearSnoozeOperation {
                     if !policy.snoozeOperations.isEmpty {
@@ -662,12 +741,4 @@ private struct WorkItemContextMenu: View {
         }
     }
 
-    private func snoozeTitle(for operation: WorkItemContextMenuOperation) -> String {
-        switch operation {
-        case .snooze(.oneHour): "Snooze for One Hour"
-        case .snooze(.tomorrow): "Snooze Until Tomorrow"
-        case .snooze(.nextWeek): "Snooze Until Next Week"
-        default: "Snooze"
-        }
-    }
 }

@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "054-project-item-raw-provenance-v1")
+        XCTAssertEqual(migrations.last?.id, "058-ai-action-confidence-threshold-v1")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
+            "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
         )
         let timelineMembershipSchema = try await vault.read { database in
             (
@@ -128,6 +128,16 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertTrue(derivedIntelligenceSchema.1)
         XCTAssertTrue(derivedIntelligenceSchema.2)
         XCTAssertTrue(derivedIntelligenceSchema.3)
+        let workflowHistoryColumns = try await vault.read { database in
+            try Row.fetchAll(database, sql: "PRAGMA table_info(workflow_history)").map { row in
+                let name: String = row["name"]
+                return name
+            }
+        }
+        XCTAssertTrue(workflowHistoryColumns.contains("transaction_id"))
+        XCTAssertTrue(workflowHistoryColumns.contains("account_id"))
+        XCTAssertTrue(workflowHistoryColumns.contains("organization_id"))
+        XCTAssertTrue(workflowHistoryColumns.contains("is_undone"))
         try await registry.closeAll()
     }
 
@@ -625,6 +635,104 @@ final class AccountVaultTests: XCTestCase {
         }
         XCTAssertEqual(replayCount, 1)
         try await reopened.close()
+    }
+
+    func testVerifiedMigrationBackupRestorePreservesOriginalEncryptedVaultBeforeRecovery() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let paths = try await makePre033LegacyRoleReplayVault(
+            directory: directory,
+            accountID: accountID,
+            key: key
+        )
+        let interrupted = try AccountVault(
+            accountID: accountID,
+            vaultKey: key,
+            rootDirectory: directory
+        )
+        try await interrupted.write { database in
+            try database.execute(sql: "CREATE TABLE migration_033_conflict (value TEXT NOT NULL)")
+            try database.execute(sql: """
+                CREATE INDEX role_search_page_replays_snapshot
+                ON migration_033_conflict (value)
+                """)
+        }
+        await XCTAssertThrowsErrorAsync {
+            try await interrupted.applyMigrations()
+        }
+        try await interrupted.close()
+
+        let originalBytes = try Data(contentsOf: paths.database)
+        let originalWALBytes = Data("test-only-live-wal".utf8)
+        let originalSHMBytes = Data("test-only-live-shm".utf8)
+        let liveWAL = URL(fileURLWithPath: paths.database.path + "-wal")
+        let liveSHM = URL(fileURLWithPath: paths.database.path + "-shm")
+        try originalWALBytes.write(to: liveWAL)
+        try originalSHMBytes.write(to: liveSHM)
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let candidates = try await registry.verifiedMigrationBackupIDs(
+            accountID: accountID,
+            vaultKey: key
+        )
+        XCTAssertEqual(candidates, ["033-role-search-page-replay-v2"])
+
+        try await registry.restoreVerifiedMigrationBackup(
+            accountID: accountID,
+            vaultKey: key,
+            migrationID: "033-role-search-page-replay-v2"
+        )
+
+        let recoveryCopies = try FileManager.default.contentsOfDirectory(
+            at: paths.recoveryCopies,
+            includingPropertiesForKeys: nil
+        )
+        let recoveryCopyDirectory = try XCTUnwrap(recoveryCopies.first)
+        let preservedCopy = recoveryCopyDirectory.appendingPathComponent("triage.sqlite")
+        XCTAssertEqual(try Data(contentsOf: preservedCopy), originalBytes)
+        XCTAssertEqual(
+            try Data(contentsOf: recoveryCopyDirectory.appendingPathComponent("triage.sqlite-wal")),
+            originalWALBytes
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: recoveryCopyDirectory.appendingPathComponent("triage.sqlite-shm")),
+            originalSHMBytes
+        )
+
+        let restored = try await registry.open(accountID: accountID, vaultKey: key)
+        let replayCount = try await restored.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays")
+        }
+        XCTAssertEqual(replayCount, 0)
+
+        // A subsequent recovery with no live sidecars must still preserve the
+        // database and must not manufacture WAL/SHM artifacts in the archive.
+        try await registry.closeAll()
+        let sidecarlessOriginalBytes = try Data(contentsOf: paths.database)
+        for sidecar in [liveWAL, liveSHM] where FileManager.default.fileExists(atPath: sidecar.path) {
+            try FileManager.default.removeItem(at: sidecar)
+        }
+        try await registry.restoreVerifiedMigrationBackup(
+            accountID: accountID,
+            vaultKey: key,
+            migrationID: "033-role-search-page-replay-v2"
+        )
+        let sidecarlessRecovery = try XCTUnwrap(
+            try FileManager.default.contentsOfDirectory(
+                at: paths.recoveryCopies,
+                includingPropertiesForKeys: nil
+            ).first(where: {
+                (try? Data(contentsOf: $0.appendingPathComponent("triage.sqlite"))) == sidecarlessOriginalBytes
+            })
+        )
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: sidecarlessRecovery.appendingPathComponent("triage.sqlite-wal").path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: sidecarlessRecovery.appendingPathComponent("triage.sqlite-shm").path
+        ))
     }
 
     func testMigration034PreservesMigration033RowsAndDistinguishesParserVersions() async throws {
@@ -1236,6 +1344,133 @@ final class AccountVaultTests: XCTestCase {
         )
     }
 
+    func testOpeningRejectsNonOpaqueAccountIDsBeforeCreatingOrOpeningAVault() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let unsafeAccountIDs = ["../outside", "not-a-uuid", UUID().uuidString.uppercased()]
+
+        for rawValue in unsafeAccountIDs {
+            let accountID = try XCTUnwrap(AccountID(rawValue: rawValue))
+            do {
+                _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+                XCTFail("Expected unsafe account path rejection for \(rawValue).")
+            } catch let error as VaultError {
+                XCTAssertEqual(error, .unsafeAccountIDPath)
+            }
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("Vaults", isDirectory: true).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.deletingLastPathComponent().appendingPathComponent("outside").path
+        ))
+    }
+
+    func testDirectVaultInitializationRejectsTraversalLikeAccountIDBeforeCreatingPaths() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = try XCTUnwrap(AccountID(rawValue: "../outside"))
+
+        XCTAssertThrowsError(
+            try AccountVault(
+                accountID: accountID,
+                vaultKey: try VaultKey.generate(),
+                rootDirectory: directory
+            )
+        ) { error in
+            XCTAssertEqual(error as? VaultError, .unsafeAccountIDPath)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("Vaults", isDirectory: true).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.deletingLastPathComponent().appendingPathComponent("outside").path
+        ))
+    }
+
+    func testOpeningRefusesSymlinkedVaultPathComponentsWithoutOpeningOutsideRoot() async throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+
+        let symlinkedRoot = directory.appendingPathComponent("symlinked-root", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: symlinkedRoot, withDestinationURL: external)
+        try await assertOpenRefusesUnsafePath(
+            root: symlinkedRoot,
+            accountID: accountID,
+            key: key,
+            externalDirectory: external
+        )
+
+        let vaultsRoot = directory.appendingPathComponent("vaults-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: vaultsRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: vaultsRoot.appendingPathComponent("Vaults", isDirectory: true),
+            withDestinationURL: external
+        )
+        try await assertOpenRefusesUnsafePath(
+            root: vaultsRoot,
+            accountID: accountID,
+            key: key,
+            externalDirectory: external
+        )
+
+        let accountRoot = directory.appendingPathComponent("account-root", isDirectory: true)
+        let vaults = accountRoot.appendingPathComponent("Vaults", isDirectory: true)
+        try FileManager.default.createDirectory(at: vaults, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: vaults.appendingPathComponent(accountID.rawValue, isDirectory: true),
+            withDestinationURL: external
+        )
+        try await assertOpenRefusesUnsafePath(
+            root: accountRoot,
+            accountID: accountID,
+            key: key,
+            externalDirectory: external
+        )
+    }
+
+    private func assertOpenRefusesUnsafePath(
+        root: URL,
+        accountID: AccountID,
+        key: VaultKey,
+        externalDirectory: URL
+    ) async throws {
+        let registry = try VaultRegistry(rootDirectory: root)
+
+        do {
+            _ = try await registry.open(accountID: accountID, vaultKey: key)
+            XCTFail("Expected a symlinked vault path component to be refused.")
+        } catch let error as VaultError {
+            XCTAssertEqual(error, .unsafeAccountIDPath)
+        }
+        let isOpen = await registry.isOpen(accountID: accountID)
+        XCTAssertFalse(isOpen)
+
+        XCTAssertThrowsError(
+            try AccountVault(accountID: accountID, vaultKey: key, rootDirectory: root)
+        ) { error in
+            XCTAssertEqual(error as? VaultError, .unsafeAccountIDPath)
+        }
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                at: externalDirectory,
+                includingPropertiesForKeys: nil
+            ),
+            []
+        )
+    }
+
     func testRemovalRefusesSymlinkedVaultRootWithoutDeletingItsTarget() async throws {
         let directory = try makeTemporaryDirectory()
         let external = try makeTemporaryDirectory()
@@ -1263,6 +1498,116 @@ final class AccountVaultTests: XCTestCase {
         }
 
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "outside")
+    }
+
+    func testHeldMigrationBackupsDescriptorResistsDirectorySwapAndSymlinkRedirection() throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let components = ["Vaults", accountID.rawValue, "MigrationBackups"]
+        let migrationBackups = directory
+            .appendingPathComponent("Vaults", isDirectory: true)
+            .appendingPathComponent(accountID.rawValue, isDirectory: true)
+            .appendingPathComponent("MigrationBackups", isDirectory: true)
+        let heldLocation = migrationBackups.deletingLastPathComponent()
+            .appendingPathComponent("MigrationBackups-held", isDirectory: true)
+        let source = migrationBackups.appendingPathComponent("source.sqlite")
+
+        try NoFollowFilesystem.ensureDirectory(at: directory, components: components)
+        try Data("encrypted-backup".utf8).write(to: source)
+
+        try NoFollowFilesystem.withDirectory(
+            beneath: directory,
+            components: components,
+            create: false
+        ) { descriptor in
+            // Model an attacker replacing the path after the backup creator
+            // has opened MigrationBackups but before it publishes the file.
+            try FileManager.default.moveItem(at: migrationBackups, to: heldLocation)
+            try FileManager.default.createSymbolicLink(at: migrationBackups, withDestinationURL: external)
+
+            try NoFollowFilesystem.copyRegularFileWithinDirectoryAtomically(
+                descriptor,
+                sourceName: "source.sqlite",
+                destinationName: "033-role-search-page-replay-v2.sqlite"
+            )
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: external.appendingPathComponent("033-role-search-page-replay-v2.sqlite").path
+        ))
+        XCTAssertEqual(
+            try Data(contentsOf: heldLocation.appendingPathComponent("033-role-search-page-replay-v2.sqlite")),
+            Data("encrypted-backup".utf8)
+        )
+    }
+
+    func testHeldDirectorySQLCipherVerificationPathsResistCandidateAndInstalledDatabaseSwaps() throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let key = try VaultKey.generate()
+        for (accountID, leafDirectory, databaseName) in [
+            (AccountID.make(), "MigrationBackups", "033-role-search-page-replay-v2.sqlite"),
+            (AccountID.make(), "", "triage.sqlite")
+        ] {
+            var components = ["Vaults", accountID.rawValue]
+            if !leafDirectory.isEmpty { components.append(leafDirectory) }
+            try NoFollowFilesystem.ensureDirectory(at: directory, components: components)
+            let targetDirectory = components.reduce(directory) { partial, component in
+                partial.appendingPathComponent(component, isDirectory: true)
+            }
+            let database = targetDirectory.appendingPathComponent(databaseName)
+            var configuration = AccountVault.configuration(vaultKey: key)
+            configuration.journalMode = .default
+            let queue = try DatabaseQueue(
+                path: database.path,
+                configuration: configuration
+            )
+            try queue.write { database in
+                try database.execute(sql: "CREATE TABLE held_descriptor_values (value INTEGER NOT NULL)")
+                try database.execute(sql: "INSERT INTO held_descriptor_values (value) VALUES (1)")
+            }
+            try queue.close()
+
+            let heldDirectory = targetDirectory.deletingLastPathComponent()
+                .appendingPathComponent("\(targetDirectory.lastPathComponent)-held", isDirectory: true)
+            try NoFollowFilesystem.withDirectory(
+                beneath: directory,
+                components: components,
+                create: false
+            ) { descriptor in
+                // Both backup-candidate and post-install verification must keep
+                // reading the opened account directory after its pathname has
+                // been replaced by an attacker-controlled symlink.
+                try FileManager.default.moveItem(at: targetDirectory, to: heldDirectory)
+                try FileManager.default.createSymbolicLink(at: targetDirectory, withDestinationURL: external)
+
+                let pool = try DatabasePool(
+                    path: "/dev/fd/\(descriptor)/\(databaseName)",
+                    configuration: AccountVault.configuration(vaultKey: key, readonly: true)
+                )
+                defer { try? pool.close() }
+                try AccountVault.verify(pool)
+                let value = try pool.read { database in
+                    try Int.fetchOne(database, sql: "SELECT value FROM held_descriptor_values")
+                }
+                XCTAssertEqual(value, 1)
+            }
+
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: external.appendingPathComponent(databaseName).path
+            ))
+        }
     }
 
     private func makePre033LegacyRoleReplayVault(

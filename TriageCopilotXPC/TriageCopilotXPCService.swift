@@ -37,12 +37,25 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked S
       return
     }
 
-    Self.queue.async {
+    // `frame` is NSXPC-owned and therefore immutable. Do not capture that
+    // credential-bearing value into the asynchronous queue. Instead make one
+    // forced deep copy with exclusive ownership; the queue captures only the
+    // box, which clears its bytes on every completion path.
+    let ownedRequestFrame = CopilotOwnedRequestFrame(copying: frame)
+    Self.queue.async { [ownedRequestFrame] in
       do {
-        try CopilotXPCFrame.validate(frame, maximumPayloadBytes: 1_048_576)
-        let response = try self.helperProcess.exchange(frame: frame)
-        try CopilotXPCFrame.validate(response, maximumPayloadBytes: 262_144)
-        reply(response, nil)
+        try ownedRequestFrame.withWipedFrame { requestFrame in
+          let request = try CopilotXPCFrame.validatedRequestHeader(requestFrame)
+          var response = try self.helperProcess.exchangeAndWipe(frame: &requestFrame)
+          defer { CopilotXPCFrame.wipe(&response) }
+          switch try CopilotXPCFrame.responseForForwarding(response, matches: request) {
+          case .original:
+            reply(response, nil)
+          case var .fixedAuthenticationFailure(safeResponse):
+            defer { CopilotXPCFrame.wipe(&safeResponse) }
+            reply(safeResponse, nil)
+          }
+        }
       } catch let error as CopilotXPCServiceError {
         reply(nil, error.nsError)
       } catch {
@@ -53,6 +66,31 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked S
 
   func cancelActiveProcess() {
     helperProcess.cancel()
+  }
+}
+
+/// Owns a deep copy of a sensitive XPC frame during the queue handoff. The
+/// input `Data` belongs to NSXPC and cannot be mutated by this service; this
+/// class ensures no immutable app-owned alias is retained after enqueueing.
+final class CopilotOwnedRequestFrame: @unchecked Sendable {
+  private var storage: Data
+
+  init(copying source: Data) {
+    storage = source.withUnsafeBytes { bytes in
+      guard let baseAddress = bytes.baseAddress else { return Data() }
+      return Data(bytes: baseAddress, count: bytes.count)
+    }
+  }
+
+  func withWipedFrame<Result>(
+    _ body: (inout Data) throws -> Result
+  ) rethrows -> Result {
+    defer { CopilotXPCFrame.wipe(&storage) }
+    return try body(&storage)
+  }
+
+  var isWipedForTesting: Bool {
+    storage.isEmpty
   }
 }
 
@@ -68,6 +106,11 @@ enum CopilotXPCServiceError: Int, Error {
   case processExited
   case operationCancelled
   case operationTimedOut
+  case invalidAccountID
+  case accountDeletionInProgress
+  case runtimeUnavailable
+  case runtimeCorrupt
+  case responseIdentityMismatch
 
   var nsError: NSError {
     NSError(

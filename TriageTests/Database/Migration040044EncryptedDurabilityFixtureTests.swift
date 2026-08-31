@@ -105,7 +105,7 @@ final class Migration040046EncryptedDurabilityFixtureTests: XCTestCase {
         defer { fixture.remove() }
         try await fixture.persistMatrix()
 
-        let isolatedAccountID = AccountID(rawValue: "migration-matrix-isolated-account")!
+        let isolatedAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000205")!
         let isolatedKey = try VaultKey.generate()
         let isolatedVault = try await fixture.registry.open(
             accountID: isolatedAccountID,
@@ -158,7 +158,7 @@ final class Migration040046EncryptedDurabilityFixtureTests: XCTestCase {
 
 private final class Migration040046EncryptedFixture: @unchecked Sendable {
     let rootDirectory: URL
-    let accountID = AccountID(rawValue: "migration-matrix-account")!
+    let accountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000206")!
     let organizationID = OrganizationID(rawValue: "migration-matrix-organization")!
     let reviewStreamID = SyncStreamID(rawValue: "migration-matrix-reviews")!
     let notificationStreamID = SyncStreamID(rawValue: "migration-matrix-notifications")!

@@ -5,6 +5,9 @@ enum AuthBrokerProtocol {
     static let maximumRequestBodyBytes = 16 * 1_024
     static let maximumResponseBodyBytes = 32 * 1_024
     static let requestLifetimeMilliseconds: Int64 = 60_000
+    /// JavaScript transports protocol versions as `Number`, so components
+    /// must remain exactly representable by the Cloudflare Worker.
+    static let maximumApplicationVersionComponent: UInt64 = 9_007_199_254_740_991
 
     static func isValidApplicationVersion(_ value: String) -> Bool {
         let components = value.split(separator: ".", omittingEmptySubsequences: false)
@@ -12,11 +15,12 @@ enum AuthBrokerProtocol {
         return components.allSatisfy { component in
             guard !component.isEmpty,
                   component.allSatisfy(\.isNumber),
-                  let number = Int(component)
+                  let number = UInt64(component)
             else {
                 return false
             }
-            return number >= 0 && (component == "0" || !component.hasPrefix("0"))
+            return number <= maximumApplicationVersionComponent
+                && (component == "0" || !component.hasPrefix("0"))
         }
     }
 }

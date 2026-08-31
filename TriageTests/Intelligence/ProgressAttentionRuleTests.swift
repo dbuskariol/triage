@@ -34,6 +34,22 @@ final class ProgressAttentionRuleTests: XCTestCase {
         context: context(policy: policy, evaluatedAt: due)
       ).reasons.isEmpty
     )
+    let issueAtStart = now
+    let linkedPullRequest = LinkedPullRequestProgressEvidence(
+      startedAt: issueAtStart,
+      evidence: evidence(id: "unproven-pull-request")
+    )
+    XCTAssertTrue(
+      ProgressAttentionRule().evaluate(
+        input: input(
+          sourceIssueLastUpdatedAt: issueAtStart,
+          sourceIssueEvidence: nil,
+          linkedPullRequests: [linkedPullRequest]
+        ),
+        context: context()
+      ).reasons.isEmpty,
+      "A linked pull request cannot prove the current issue has not changed without current issue evidence."
+    )
   }
 
   func testLinkedPullRequestRequiresNoLaterIssueUpdate() {

@@ -17,7 +17,12 @@ enum AIAnalysisRepositoryError: Error, Equatable, Sendable {
 struct AIAnalysisCacheKey: Equatable, Sendable {
     let workItemID: WorkItemID
     let fingerprint: String
+    /// The persisted user preference; `nil` remains Auto.
     let selectedModelID: String?
+    /// The exact authenticated runtime model used to produce this analysis.
+    /// This is intentionally distinct from the Auto preference so a changed
+    /// runtime default cannot match an earlier cache row.
+    let effectiveModelID: String
     let promptVersion: Int
     let outputSchemaVersion: Int
 }
@@ -137,30 +142,21 @@ actor AIAnalysisRepository {
         return try await vault.read { database in
             try Self.validateCurrentScope(scope, in: database)
             try Self.validateWorkItem(key.workItemID, scope: scope, in: database)
-            let modelClause: String
-            let arguments: StatementArguments
-            if let selectedModelID = key.selectedModelID {
-                modelClause = "AND ai_analyses.model_id = ?"
-                arguments = [
-                    key.workItemID.rawValue, key.fingerprint, selectedModelID,
-                    key.promptVersion, key.outputSchemaVersion
-                ]
-            } else {
-                modelClause = ""
-                arguments = [key.workItemID.rawValue, key.fingerprint, key.promptVersion, key.outputSchemaVersion]
-            }
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
                     SELECT id, fingerprint, model_id, prompt_version, output_schema_version, result_json, created_at_ms
                     FROM ai_analyses
                     WHERE work_item_id = ? AND fingerprint = ?
-                      \(modelClause)
+                      AND model_id = ?
                       AND prompt_version = ? AND output_schema_version = ?
                     ORDER BY created_at_ms DESC, id DESC
                     LIMIT 1
                     """,
-                arguments: arguments
+                arguments: [
+                    key.workItemID.rawValue, key.fingerprint, key.effectiveModelID,
+                    key.promptVersion, key.outputSchemaVersion
+                ]
             ) else { return nil }
             return try Self.analysis(row, expectedKey: key)
         }
@@ -178,7 +174,9 @@ actor AIAnalysisRepository {
               analysis.resultJSON.count <= Self.maximumAnalysisJSONBytes,
               (try? JSONSerialization.jsonObject(with: analysis.resultJSON)) != nil,
               analysis.createdAt.timeIntervalSinceReferenceDate.isFinite,
-              analysis.key.selectedModelID == nil || analysis.key.selectedModelID == analysis.modelID
+              analysis.key.selectedModelID == nil
+                || analysis.key.selectedModelID == analysis.key.effectiveModelID,
+              analysis.key.effectiveModelID == analysis.modelID
         else { throw AIAnalysisRepositoryError.invalidPayload }
         try await vault.writeTransaction { database in
             try Self.validateCurrentScope(scope, in: database)
@@ -209,18 +207,26 @@ actor AIAnalysisRepository {
     func saveAuthorized(
         _ analysis: StoredAIAnalysis,
         for scope: SynchronizationScope,
-        selectedModelID: String?
+        selectedModelID: String?,
+        effectiveModelID: String,
+        actionItems: [ActionItem] = []
     ) async throws {
         try validateScope(scope)
         try Self.validate(analysis.key)
         guard analysis.key.selectedModelID == selectedModelID,
+              analysis.key.effectiveModelID == effectiveModelID,
               Self.isValidModelID(analysis.modelID),
               !analysis.id.isEmpty,
               analysis.id.utf8.count <= 512,
               analysis.resultJSON.count <= Self.maximumAnalysisJSONBytes,
               (try? JSONSerialization.jsonObject(with: analysis.resultJSON)) != nil,
               analysis.createdAt.timeIntervalSinceReferenceDate.isFinite,
-              analysis.key.selectedModelID == nil || analysis.key.selectedModelID == analysis.modelID
+              analysis.key.selectedModelID == nil
+                || analysis.key.selectedModelID == analysis.key.effectiveModelID,
+              analysis.key.effectiveModelID == analysis.modelID,
+              actionItems.allSatisfy({
+                  Self.isValidAuthorizedAction($0, analysis: analysis)
+              })
         else { throw AIAnalysisRepositoryError.invalidPayload }
         try await vault.writeTransaction { database in
             try Self.validateCurrentScope(scope, in: database)
@@ -246,6 +252,158 @@ actor AIAnalysisRepository {
                     analysis.modelID, analysis.key.promptVersion, analysis.key.outputSchemaVersion,
                     analysis.resultJSON, Self.milliseconds(analysis.createdAt)
                 ]
+            )
+            for actionItem in actionItems {
+                // A stable source-fingerprint-derived ID means a user
+                // dismissal or correction wins over a late/retried helper
+                // response. Never upsert an existing Copilot action.
+                try database.execute(
+                    sql: """
+                        INSERT INTO action_items (
+                            id, work_item_id, title, detail, origin, state, priority, due_at_ms,
+                            source_fingerprint, created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO NOTHING
+                        """,
+                    arguments: [
+                        actionItem.id.rawValue,
+                        actionItem.workItemID.rawValue,
+                        actionItem.title,
+                        actionItem.detail,
+                        actionItem.origin.rawValue,
+                        actionItem.state.rawValue,
+                        actionItem.priority.rawValue,
+                        actionItem.dueAt.map(Self.milliseconds),
+                        actionItem.sourceFingerprint,
+                        Self.milliseconds(actionItem.createdAt),
+                        Self.milliseconds(actionItem.updatedAt),
+                        actionItem.completedAt.map(Self.milliseconds),
+                        actionItem.dismissedAt.map(Self.milliseconds)
+                    ]
+                )
+                for evidenceID in actionItem.evidenceIDs {
+                    try database.execute(
+                        sql: """
+                            INSERT OR IGNORE INTO action_item_evidence (action_item_id, evidence_id)
+                            VALUES (?, ?)
+                            """,
+                        arguments: [actionItem.id.rawValue, evidenceID.rawValue]
+                    )
+                }
+            }
+        }
+    }
+
+    /// Returns whether the person has already rejected a Copilot action for
+    /// this exact content fingerprint. A changed bounded input produces a new
+    /// fingerprint and can be considered again; unchanged content cannot.
+    func hasDismissedCopilotAction(
+        for scope: SynchronizationScope,
+        workItemID: WorkItemID,
+        sourceFingerprint: String
+    ) async throws -> Bool {
+        try validateScope(scope)
+        guard Self.isFingerprint(sourceFingerprint) else {
+            throw AIAnalysisRepositoryError.invalidFingerprint
+        }
+        return try await vault.read { database in
+            try Self.validateCurrentScope(scope, in: database)
+            try Self.validateWorkItem(workItemID, scope: scope, in: database)
+            return (try Int.fetchOne(
+                database,
+                sql: """
+                    SELECT COUNT(*) FROM action_items
+                    WHERE work_item_id = ? AND origin = 'copilot'
+                      AND source_fingerprint = ? AND state = 'dismissed'
+                    """,
+                arguments: [workItemID.rawValue, sourceFingerprint]
+            ) ?? 0) > 0
+        }
+    }
+
+    /// A dismissal is retained with its exact source fingerprint. It is a
+    /// local user decision, not a GitHub mutation, and blocks only a replay of
+    /// unchanged candidate content.
+    func dismissCopilotAction(
+        _ actionItemID: ActionItemID,
+        for scope: SynchronizationScope,
+        at date: Date = .now
+    ) async throws {
+        try validateScope(scope)
+        guard date.timeIntervalSinceReferenceDate.isFinite else {
+            throw AIAnalysisRepositoryError.invalidDate
+        }
+        try await vault.writeTransaction { database in
+            try Self.validateCurrentScope(scope, in: database)
+            let sourceFingerprint = try Self.copilotActionFingerprint(
+                actionItemID,
+                scope: scope,
+                in: database
+            )
+            try database.execute(
+                sql: """
+                    UPDATE action_items
+                    SET state = 'dismissed', dismissed_at_ms = ?, updated_at_ms = ?
+                    WHERE id = ?
+                    """,
+                arguments: [Self.milliseconds(date), Self.milliseconds(date), actionItemID.rawValue]
+            )
+            try Self.insertUserCorrection(
+                workItemID: try Self.copilotActionWorkItemID(actionItemID, in: database),
+                actionItemID: actionItemID,
+                sourceFingerprint: sourceFingerprint,
+                kind: "dismissed",
+                detail: nil,
+                at: date,
+                in: database
+            )
+        }
+    }
+
+    /// Corrections remain local and preserve source/evidence provenance. A
+    /// corrected action still carries the old fingerprint, so it does not
+    /// retrigger unless normalized input changes materially.
+    func correctCopilotAction(
+        _ actionItemID: ActionItemID,
+        edit: LocalActionItemEdit,
+        for scope: SynchronizationScope,
+        at date: Date = .now
+    ) async throws {
+        try validateScope(scope)
+        guard date.timeIntervalSinceReferenceDate.isFinite else {
+            throw AIAnalysisRepositoryError.invalidDate
+        }
+        try await vault.writeTransaction { database in
+            try Self.validateCurrentScope(scope, in: database)
+            let sourceFingerprint = try Self.copilotActionFingerprint(
+                actionItemID,
+                scope: scope,
+                in: database
+            )
+            let workItemID = try Self.copilotActionWorkItemID(actionItemID, in: database)
+            try database.execute(
+                sql: """
+                    UPDATE action_items
+                    SET title = ?, detail = ?, priority = ?, due_at_ms = ?, updated_at_ms = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    edit.title,
+                    edit.detail,
+                    edit.priority.rawValue,
+                    edit.dueAt.map(Self.milliseconds),
+                    Self.milliseconds(date),
+                    actionItemID.rawValue
+                ]
+            )
+            try Self.insertUserCorrection(
+                workItemID: workItemID,
+                actionItemID: actionItemID,
+                sourceFingerprint: sourceFingerprint,
+                kind: "corrected",
+                detail: edit.detail,
+                at: date,
+                in: database
             )
         }
     }
@@ -291,7 +449,63 @@ actor AIAnalysisRepository {
         }
     }
 
+    /// A model choice changes analysis authority but not the authenticated
+    /// runtime's bounded, encrypted model inventory. Keep that inventory so a
+    /// user can select another currently available model without silently
+    /// falling back to an ambient or uncached value.
+    func eraseOrganizationAIOutputs(
+        for accountID: AccountID,
+        organizationID: OrganizationID,
+        at date: Date = .now
+    ) async throws {
+        try validateVaultAccount(accountID)
+        guard date.timeIntervalSinceReferenceDate.isFinite else { throw AIAnalysisRepositoryError.invalidDate }
+        try await vault.writeTransaction { database in
+            try AIConsentRepository.validateConnectedOrganization(accountID, organizationID, in: database)
+            try Self.eraseOutputs(accountID: accountID, organizationID: organizationID, in: database)
+        }
+    }
+
+    func invalidateModelCache(
+        for accountID: AccountID,
+        organizationID: OrganizationID
+    ) async throws {
+        try validateVaultAccount(accountID)
+        try await vault.writeTransaction { database in
+            try AIConsentRepository.validateConnectedOrganization(accountID, organizationID, in: database)
+            try database.execute(
+                sql: "DELETE FROM ai_model_cache WHERE account_id = ? AND organization_id = ?",
+                arguments: [accountID.rawValue, organizationID.rawValue]
+            )
+        }
+    }
+
+    /// Runtime and credential authority are account-wide.  A transition at
+    /// either boundary must not leave a different organization's encrypted
+    /// 24-hour model inventory available for reuse.
+    func invalidateModelCaches(for accountID: AccountID) async throws {
+        try validateVaultAccount(accountID)
+        try await vault.writeTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM ai_model_cache WHERE account_id = ?",
+                arguments: [accountID.rawValue]
+            )
+        }
+    }
+
     private static func eraseArtifacts(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        in database: Database
+    ) throws {
+        try eraseOutputs(accountID: accountID, organizationID: organizationID, in: database)
+        try database.execute(
+            sql: "DELETE FROM ai_model_cache WHERE account_id = ? AND organization_id = ?",
+            arguments: [accountID.rawValue, organizationID.rawValue]
+        )
+    }
+
+    private static func eraseOutputs(
         accountID: AccountID,
         organizationID: OrganizationID,
         in database: Database
@@ -303,10 +517,6 @@ actor AIAnalysisRepository {
                         SELECT id FROM work_items WHERE account_id = ? AND organization_id = ?
                     )
                 """,
-                arguments: [accountID.rawValue, organizationID.rawValue]
-            )
-        try database.execute(
-                sql: "DELETE FROM ai_model_cache WHERE account_id = ? AND organization_id = ?",
                 arguments: [accountID.rawValue, organizationID.rawValue]
             )
         try database.execute(
@@ -372,18 +582,100 @@ actor AIAnalysisRepository {
         guard count == 1 else { throw AIAnalysisRepositoryError.workItemScopeMismatch }
     }
 
+    private static func copilotActionFingerprint(
+        _ actionItemID: ActionItemID,
+        scope: SynchronizationScope,
+        in database: Database
+    ) throws -> String {
+        guard let fingerprint: String = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT action_items.source_fingerprint
+                FROM action_items
+                JOIN work_items ON work_items.id = action_items.work_item_id
+                WHERE action_items.id = ? AND action_items.origin = 'copilot'
+                  AND work_items.account_id = ? AND work_items.organization_id = ?
+                """,
+            arguments: [actionItemID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue]
+        )?["source_fingerprint"], isFingerprint(fingerprint)
+        else { throw AIAnalysisRepositoryError.invalidPayload }
+        return fingerprint
+    }
+
+    private static func copilotActionWorkItemID(
+        _ actionItemID: ActionItemID,
+        in database: Database
+    ) throws -> WorkItemID {
+        guard let rawValue: String = try Row.fetchOne(
+            database,
+            sql: "SELECT work_item_id FROM action_items WHERE id = ?",
+            arguments: [actionItemID.rawValue]
+        )?["work_item_id"], let workItemID = WorkItemID(rawValue: rawValue)
+        else { throw AIAnalysisRepositoryError.invalidPayload }
+        return workItemID
+    }
+
+    private static func insertUserCorrection(
+        workItemID: WorkItemID,
+        actionItemID: ActionItemID,
+        sourceFingerprint: String,
+        kind: String,
+        detail: String?,
+        at date: Date,
+        in database: Database
+    ) throws {
+        try database.execute(
+            sql: """
+                INSERT INTO user_corrections (
+                    id, work_item_id, action_item_id, source_fingerprint,
+                    correction_kind, detail, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+            arguments: [
+                "copilot-correction-\(UUID().uuidString.lowercased())",
+                workItemID.rawValue,
+                actionItemID.rawValue,
+                sourceFingerprint,
+                kind,
+                detail,
+                milliseconds(date)
+            ]
+        )
+    }
+
     private static func validate(_ key: AIAnalysisCacheKey) throws {
         guard isFingerprint(key.fingerprint) else { throw AIAnalysisRepositoryError.invalidFingerprint }
         guard key.selectedModelID.map(isValidModelID) ?? true else { throw AIAnalysisRepositoryError.invalidModelID }
+        guard isValidModelID(key.effectiveModelID) else { throw AIAnalysisRepositoryError.invalidModelID }
         guard key.promptVersion > 0, key.outputSchemaVersion > 0 else {
             throw AIAnalysisRepositoryError.invalidVersion
         }
     }
 
+    private static func isValidAuthorizedAction(
+        _ action: ActionItem,
+        analysis: StoredAIAnalysis
+    ) -> Bool {
+        action.workItemID == analysis.key.workItemID
+            && action.origin == .copilot
+            && action.state == .open
+            && action.sourceFingerprint == analysis.key.fingerprint
+            && !action.id.rawValue.isEmpty
+            && action.id.rawValue.utf8.count <= 512
+            && !action.title.isEmpty
+            && action.title.utf8.count <= 500
+            && action.detail?.utf8.count ?? 0 <= 10_000
+            && !action.evidenceIDs.isEmpty
+            && Set(action.evidenceIDs).count == action.evidenceIDs.count
+            && (action.dueAt?.timeIntervalSinceReferenceDate.isFinite ?? true)
+            && action.createdAt.timeIntervalSinceReferenceDate.isFinite
+            && action.updatedAt.timeIntervalSinceReferenceDate.isFinite
+    }
+
     private static func analysis(_ row: Row, expectedKey: AIAnalysisCacheKey) throws -> StoredAIAnalysis {
         guard let id: String = row["id"], !id.isEmpty,
               let fingerprint: String = row["fingerprint"], fingerprint == expectedKey.fingerprint,
-              let modelID: String = row["model_id"], isValidModelID(modelID),
+              let modelID: String = row["model_id"], modelID == expectedKey.effectiveModelID,
               let promptVersion: Int = row["prompt_version"], promptVersion == expectedKey.promptVersion,
               let outputSchemaVersion: Int = row["output_schema_version"], outputSchemaVersion == expectedKey.outputSchemaVersion,
               let resultJSON: Data = row["result_json"], resultJSON.count <= Self.maximumAnalysisJSONBytes,

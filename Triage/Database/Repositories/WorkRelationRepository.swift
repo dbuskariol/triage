@@ -89,9 +89,14 @@ actor WorkRelationRepository {
         try validate(authority)
         try validateCurrentScope(authority.scope, in: database)
         try validateSubjectNodeScope(subjectNodeID, scope: authority.scope, in: database)
-        try validateCoverage(authority, in: database)
-        try validateRawSnapshot(authority, subjectNodeID: subjectNodeID, in: database)
         try validate(relations, subjectNodeID: subjectNodeID, authority: authority, in: database)
+        try validateCoverage(authority, in: database)
+        try validateRawSnapshot(
+            authority,
+            subjectNodeID: subjectNodeID,
+            evidenceNodeIDs: Set(relations.flatMap { $0.evidence.compactMap(\.nodeID) }),
+            in: database
+        )
 
         if authority.mode == .completeReconciliation {
             try database.execute(
@@ -314,7 +319,12 @@ actor WorkRelationRepository {
                 authority: authority,
                 in: database
             )
-            try validateRawSnapshot(authority, subjectNodeID: subjectNodeID, in: database)
+            try validateRawSnapshot(
+                authority,
+                subjectNodeID: subjectNodeID,
+                evidenceNodeIDs: Set(replacement.relations.flatMap { $0.evidence.compactMap(\.nodeID) }),
+                in: database
+            )
         }
 
         try database.execute(
@@ -477,6 +487,7 @@ actor WorkRelationRepository {
     private nonisolated static func validateRawSnapshot(
         _ authority: RelationReplacementAuthority,
         subjectNodeID: GitHubNodeID,
+        evidenceNodeIDs: Set<GitHubNodeID>,
         in database: Database
     ) throws {
         guard let rawSnapshotID = authority.rawSnapshotID else { return }
@@ -492,6 +503,9 @@ actor WorkRelationRepository {
         case .localWorkflow, .legacyUnverified:
             throw WorkRelationRepositoryError.invalidSourceAuthority
         }
+        let sourceNodeIDs = Array(evidenceNodeIDs.union([subjectNodeID]))
+            .sorted { $0.rawValue < $1.rawValue }
+        let sourceNodePlaceholders = sourceNodeIDs.map { _ in "?" }.joined(separator: ", ")
         var arguments: [DatabaseValueConvertible?] = [
             rawSnapshotID.rawValue, authority.scope.accountID.rawValue,
             authority.scope.organizationID.rawValue, authority.feature.rawValue,
@@ -510,6 +524,7 @@ actor WorkRelationRepository {
                   AND \(locatorClause)
                   AND (
                       github_node_id IS NULL OR github_node_id = ?
+                      OR github_node_id IN (\(sourceNodePlaceholders))
                       OR EXISTS (
                           SELECT 1 FROM project_item_raw_provenance
                           WHERE project_item_raw_provenance.project_item_node_id = ?
@@ -522,7 +537,9 @@ actor WorkRelationRepository {
                   )
             """,
             arguments: StatementArguments(arguments + [
-                subjectNodeID.rawValue, subjectNodeID.rawValue,
+                subjectNodeID.rawValue
+            ] + sourceNodeIDs.map(\.rawValue) + [
+                subjectNodeID.rawValue,
                 authority.scope.accountID.rawValue, authority.scope.organizationID.rawValue,
                 authority.scope.credentialRevision.rawValue, authority.scope.capabilityRevision.rawValue
             ])

@@ -94,6 +94,7 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
     struct RequestedReviewer: Codable, Sendable {
         let id: String?
         let login: String?
+        let slug: String?
         let avatarUrl: URL?
     }
     struct NodeReference: Codable, Sendable {

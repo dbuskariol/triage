@@ -105,7 +105,8 @@ struct PullRequestReviewReplacementProof: Sendable {
         let records = reviews.map { review in
             [
                 "review", review.nodeID, String(review.id), review.state,
-                review.body ?? "", review.submittedAt.map { String($0.timeIntervalSince1970) } ?? ""
+                review.body ?? "", review.submittedAt.map { String($0.timeIntervalSince1970) } ?? "",
+                review.user?.nodeID ?? "", review.user?.login ?? ""
             ]
         }.sorted(by: { $0.lexicographicallyPrecedes($1) })
         return digest(records)
@@ -344,6 +345,18 @@ actor PullRequestReviewRepository {
     ) throws {
         let submittedAtMilliseconds = review.submittedAt.map(milliseconds)
         let reviewTimestamp = submittedAtMilliseconds ?? observedAtMilliseconds
+        let author: ActorSummary?
+        if let user = review.user,
+           let rawNodeID = user.nodeID,
+           let nodeID = GitHubNodeID(rawValue: rawNodeID),
+           let login = user.login,
+           !login.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let actorID = ActorID(rawValue: rawNodeID) {
+            author = ActorSummary(id: actorID, nodeID: nodeID, login: login, displayName: nil, avatarURL: nil)
+            try ActorRepository.save(author!, observedAtMilliseconds: observedAtMilliseconds, in: database)
+        } else {
+            author = nil
+        }
         try database.execute(
             sql: """
                 INSERT INTO github_nodes (
@@ -354,7 +367,7 @@ actor PullRequestReviewRepository {
                 )
                 SELECT
                     ?, account_id, organization_id, repository_id, ?,
-                    ?, NULL, 'Pull request review', 'unknown', html_url, ?, NULL,
+                    ?, NULL, 'Pull request review', 'unknown', html_url, ?, ?,
                     ?, ?, NULL, NULL, ?, ?, 'accessible'
                 FROM github_nodes
                 WHERE github_node_id = ? AND account_id = ? AND kind = ?
@@ -366,6 +379,7 @@ actor PullRequestReviewRepository {
                     state = excluded.state,
                     html_url = excluded.html_url,
                     body_markdown = excluded.body_markdown,
+                    author_id = excluded.author_id,
                     updated_at_ms = excluded.updated_at_ms,
                     source_revision = excluded.source_revision,
                     last_observed_at_ms = excluded.last_observed_at_ms,
@@ -376,6 +390,7 @@ actor PullRequestReviewRepository {
                 GitHubContentKind.pullRequestReview.rawValue,
                 String(review.id),
                 review.body,
+                author?.id.rawValue,
                 reviewTimestamp,
                 reviewTimestamp,
                 "\(review.id):\(review.nodeID):\(review.state):\(reviewTimestamp)",
@@ -390,9 +405,10 @@ actor PullRequestReviewRepository {
                 INSERT INTO reviews (
                     github_node_id, pull_request_node_id, author_id, state, body_markdown,
                     submitted_at_ms, html_url, updated_at_ms
-                ) VALUES (?, ?, NULL, ?, ?, ?, NULL, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
                 ON CONFLICT(github_node_id) DO UPDATE SET
                     pull_request_node_id = excluded.pull_request_node_id,
+                    author_id = excluded.author_id,
                     state = excluded.state,
                     body_markdown = excluded.body_markdown,
                     submitted_at_ms = excluded.submitted_at_ms,
@@ -401,6 +417,7 @@ actor PullRequestReviewRepository {
             arguments: [
                 reviewNodeID.rawValue,
                 pullRequestNodeID.rawValue,
+                author?.id.rawValue,
                 review.state,
                 review.body,
                 submittedAtMilliseconds,

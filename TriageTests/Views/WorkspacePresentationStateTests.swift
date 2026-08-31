@@ -412,14 +412,17 @@ final class WorkspacePresentationStateTests: XCTestCase {
 
         XCTAssertEqual(splitState.visibility, .detailOnly)
         XCTAssertFalse(splitState.isSidebarPresented)
+        XCTAssertTrue(splitState.shouldShowPrincipalOrganizationTitle)
 
         splitState.applyExplicitSidebarPreference(false)
         XCTAssertEqual(splitState.visibility, .doubleColumn)
         XCTAssertFalse(splitState.isSidebarPresented)
+        XCTAssertTrue(splitState.shouldShowPrincipalOrganizationTitle)
 
         splitState.applyExplicitSidebarPreference(true)
         XCTAssertEqual(splitState.visibility, .all)
         XCTAssertTrue(splitState.isSidebarPresented)
+        XCTAssertFalse(splitState.shouldShowPrincipalOrganizationTitle)
     }
 
     private func makeState(

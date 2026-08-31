@@ -8,6 +8,7 @@ actor OrganizationWorkRefreshService {
     private let rateLimitControllers: GitHubRateLimitControllerRegistry
     private let requestPriority: GitHubRequestPriority
     private let organizationAIController: OrganizationAIController?
+    private let businessDayPolicyProvider: @Sendable () -> BusinessDayPolicy
 
     init(
         credentialReader: AccountCredentialReader,
@@ -15,7 +16,8 @@ actor OrganizationWorkRefreshService {
         secretStore: KeychainSecretStore,
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
         requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
-        organizationAIController: OrganizationAIController? = nil
+        organizationAIController: OrganizationAIController? = nil,
+        businessDayPolicyProvider: @escaping @Sendable () -> BusinessDayPolicy = { .init() }
     ) {
         self.credentialReader = credentialReader
         self.vaultRegistry = vaultRegistry
@@ -23,6 +25,7 @@ actor OrganizationWorkRefreshService {
         self.rateLimitControllers = rateLimitControllers
         self.requestPriority = requestPriority
         self.organizationAIController = organizationAIController
+        self.businessDayPolicyProvider = businessDayPolicyProvider
     }
 
     func refresh(
@@ -207,7 +210,7 @@ actor OrganizationWorkRefreshService {
                 now: serverObservedAt
             )
             let roleStreamRecords = plan.streams.map { stream in
-                let isUnavailableTeamStream = stream.kind == .openTeamReviewRequested
+                let isUnavailableTeamStream = [.openTeamMentions, .openTeamReviewRequested].contains(stream.kind)
                     && teamDiscoveryStatus != .complete
                 return roleDiscoveryCoverageRecord(
                     scope: synchronizationScope,
@@ -226,7 +229,7 @@ actor OrganizationWorkRefreshService {
                 scope: synchronizationScope
             )
             let executableStreams = plan.streams.filter {
-                $0.kind != .openTeamReviewRequested || teamDiscoveryStatus == .complete
+                ![.openTeamMentions, .openTeamReviewRequested].contains($0.kind) || teamDiscoveryStatus == .complete
             }
             try await validateCurrentScope(synchronizationScope, vault: vault)
             let discoveryResult = try await RoleDiscoverySynchronizer(
@@ -332,6 +335,14 @@ actor OrganizationWorkRefreshService {
             try await validateCurrentScope(synchronizationScope, vault: vault)
             try await refreshPullRequestReviews(
                 restClient: restClient,
+                vault: vault,
+                scope: synchronizationScope,
+                organization: organization,
+                attemptedAt: attemptedAt
+            )
+            try await validateCurrentScope(synchronizationScope, vault: vault)
+            try await refreshPullRequestStatusChecks(
+                graphqlClient: graphqlClient,
                 vault: vault,
                 scope: synchronizationScope,
                 organization: organization,
@@ -456,6 +467,7 @@ actor OrganizationWorkRefreshService {
         let aiController = organizationAIController ?? OrganizationAIController(vault: vault)
         let derivedOutcome = try await OrganizationRefreshCompletionCoordinator(
             vault: vault,
+            businessDayPolicy: businessDayPolicyProvider(),
             resolveAIPolicy: { scope, account, evaluatedAt in
                 try await aiController.policy(for: scope, account: account, at: evaluatedAt).derivedPolicy
             }
@@ -467,7 +479,38 @@ actor OrganizationWorkRefreshService {
             )
         try await validateCurrentScope(synchronizationScope, vault: vault)
         switch derivedOutcome {
-        case .published, .partial:
+        case .published:
+            // AI is an optional, read-only enhancement of a durable trusted
+            // projection. Its failure must never alter or fail the completed
+            // GitHub refresh; cancellation still belongs to the caller.
+            do {
+                var hasActiveRemoteRateLimit = contextRecovery.rateLimited
+                if !hasActiveRemoteRateLimit {
+                    for resource in GitHubRateLimitResource.allCases {
+                        if await rateLimitController.pauseUntil(for: resource) != nil {
+                            hasActiveRemoteRateLimit = true
+                            break
+                        }
+                    }
+                }
+                try await OrganizationCopilotExecutionService(
+                    vault: vault,
+                    controller: aiController
+                ).executePersistedCandidates(
+                    for: synchronizationScope,
+                    account: account,
+                    environment: OrganizationCopilotCandidateBudgetEnvironment(
+                        isOnline: !contextRecovery.offline,
+                        isRemoteRateLimited: hasActiveRemoteRateLimit
+                    ),
+                    at: attemptedAt
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                break
+            }
+        case .partial:
             break
         case let .failed(failure):
             throw OrganizationRefreshCompletionCoordinatorError.derivedProjectionFailed(failure)
@@ -1181,6 +1224,85 @@ actor OrganizationWorkRefreshService {
                     lastSuccessfulAt: nil,
                     failureDetail: "Pull request review refresh did not complete.",
                     feature: .reviews
+                ),
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
+            )
+        }
+    }
+
+    private func refreshPullRequestStatusChecks(
+        graphqlClient: GitHubGraphQLClient,
+        vault: AccountVault,
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        attemptedAt: Date
+    ) async throws {
+        let streamID = SyncStreamID(rawValue: "pull-request-status-checks-\(organization.id.rawValue)")!
+        do {
+            // Establish the organization-wide scheduling/completeness stream
+            // before selecting candidates. Each candidate subsequently writes
+            // its own revision-qualified source stream; this root remains the
+            // only record used for overall freshness.
+            try await saveCoverage(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: .partial,
+                    lastSuccessfulAt: nil,
+                    failureDetail: "Pull request status-check coverage is refreshing.",
+                    feature: .statusChecks
+                ),
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
+            )
+            let result = try await PullRequestStatusCheckRefreshService(
+                client: GitHubPullRequestStatusCheckClient(client: graphqlClient),
+                candidates: PullRequestReviewCandidateRepository(vault: vault),
+                statusChecks: StatusCheckRepository(vault: vault),
+                coverage: CoverageRepository(vault: vault)
+            ).refresh(scope: scope, streamID: streamID, observedAt: attemptedAt)
+            // Candidate coverage is stored per repository by the source
+            // transaction. This organization-level record prevents a source
+            // scheduling failure from disappearing from freshness topology.
+            try await saveCoverage(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: result.hadFailure || result.hasRemainingCandidates || result.hasBlockedKnownCandidates
+                        ? .partial : .complete,
+                    lastSuccessfulAt: result.hadFailure || result.hasRemainingCandidates || result.hasBlockedKnownCandidates
+                        ? nil : attemptedAt,
+                    failureDetail: result.hadFailure
+                        ? "One or more pull request status-check rollups could not be completed."
+                        : result.hasBlockedKnownCandidates
+                            ? "Known pull requests are inaccessible; status-check coverage is incomplete."
+                            : result.hasRemainingCandidates
+                                ? "Additional pull request status-check candidates remain."
+                                : nil,
+                    feature: .statusChecks
+                ),
+                attemptedAt: attemptedAt,
+                vault: vault,
+                scope: scope
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try await validateCurrentScope(scope, vault: vault)
+            try await saveCoverage(
+                coverageRecord(
+                    scope: scope,
+                    streamID: streamID,
+                    interval: nil,
+                    status: .failed,
+                    lastSuccessfulAt: nil,
+                    failureDetail: "Pull request status-check refresh did not complete.",
+                    feature: .statusChecks
                 ),
                 attemptedAt: attemptedAt,
                 vault: vault,

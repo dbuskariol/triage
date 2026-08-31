@@ -38,6 +38,7 @@ enum DerivedIntelligenceSourceRevision {
     ) throws -> [DerivedIntelligenceSupplementalSource] {
         var result = try reviewSources(for: scope, in: database)
         result += try reviewThreadSources(for: scope, in: database)
+        result += try statusCheckSources(for: scope, in: database)
         result += try projectFieldSources(for: scope, in: database)
         return result.sorted(by: sourceOrder)
     }
@@ -161,6 +162,117 @@ enum DerivedIntelligenceSourceRevision {
                 revision: canonical(fields)
             )
         }
+    }
+
+    /// A status rollup can change without changing the pull request's own
+    /// hydrated body revision. Include both the current coverage record and
+    /// each revision-fenced normalized context so a derived projection cannot
+    /// retain an old all-green result after a check changes or coverage drops.
+    private nonisolated static func statusCheckSources(
+        for scope: SynchronizationScope,
+        in database: Database
+    ) throws -> [DerivedIntelligenceSupplementalSource] {
+        var sources = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT id, repository_id, stream_id, status, last_successful_at_ms, failure_detail
+                FROM coverage_records
+                WHERE account_id = ? AND organization_id = ?
+                  AND credential_revision = ? AND capability_revision = ?
+                  AND feature = ?
+                ORDER BY id
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                CoverageFeature.statusChecks.rawValue
+            ]
+        ).map { row -> DerivedIntelligenceSupplementalSource in
+            guard let id: String = row["id"], let status: String = row["status"] else {
+                throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+            }
+            return .init(
+                kind: "status-check-coverage",
+                identity: id,
+                revision: canonical([
+                    row["repository_id"] as String?, row["stream_id"] as String?, status,
+                    (row["last_successful_at_ms"] as Int64?).map(String.init),
+                    row["failure_detail"] as String?
+                ])
+            )
+        }
+        sources += try Row.fetchAll(
+            database,
+            sql: """
+                SELECT work_items.id AS work_item_id, status_check_rollup_markers.mergeable_state,
+                       status_check_rollup_markers.source_revision,
+                       status_check_rollup_markers.observed_at_ms
+                FROM work_items
+                JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                JOIN status_check_rollup_markers
+                  ON status_check_rollup_markers.github_node_id = work_items.primary_node_id
+                WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                  AND github_nodes.kind = 'pullRequest'
+                  AND status_check_rollup_markers.account_id = ? AND status_check_rollup_markers.organization_id = ?
+                  AND status_check_rollup_markers.credential_revision = ?
+                  AND status_check_rollup_markers.capability_revision = ?
+                  AND status_check_rollup_markers.source_revision = github_nodes.source_revision
+                ORDER BY work_items.id
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue
+            ]
+        ).map { row -> DerivedIntelligenceSupplementalSource in
+            guard let workItemID: String = row["work_item_id"],
+                  let mergeable: String = row["mergeable_state"],
+                  let sourceRevision: String = row["source_revision"], !sourceRevision.isEmpty,
+                  let observedAt: Int64 = row["observed_at_ms"]
+            else { throw DerivedIntelligenceInputAdapterError.invalidPersistedData }
+            return .init(
+                kind: "status-check-rollup",
+                identity: workItemID,
+                revision: canonical([sourceRevision, mergeable, String(observedAt)])
+            )
+        }
+        sources += try Row.fetchAll(
+            database,
+            sql: """
+                SELECT work_items.id AS work_item_id, status_checks.context, status_checks.state,
+                       status_checks.is_required, status_checks.completed_at_ms,
+                       status_checks.source_revision, status_checks.observed_at_ms
+                FROM work_items
+                JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                JOIN status_checks ON status_checks.github_node_id = work_items.primary_node_id
+                WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                  AND github_nodes.kind = 'pullRequest'
+                  AND status_checks.account_id = ? AND status_checks.organization_id = ?
+                  AND status_checks.credential_revision = ? AND status_checks.capability_revision = ?
+                  AND status_checks.source_revision = github_nodes.source_revision
+                ORDER BY work_items.id, status_checks.context
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue
+            ]
+        ).map { row -> DerivedIntelligenceSupplementalSource in
+            guard let workItemID: String = row["work_item_id"],
+                  let context: String = row["context"], let state: String = row["state"],
+                  let sourceRevision: String = row["source_revision"], !sourceRevision.isEmpty,
+                  let observedAt: Int64 = row["observed_at_ms"]
+            else { throw DerivedIntelligenceInputAdapterError.invalidPersistedData }
+            return .init(
+                kind: "status-check",
+                identity: "\(workItemID)\u{0}\(context)",
+                revision: canonical([
+                    sourceRevision, state, (row["is_required"] as Bool?).map { $0 ? "1" : "0" },
+                    (row["completed_at_ms"] as Int64?).map(String.init), String(observedAt)
+                ])
+            )
+        }
+        return sources
     }
 
     private nonisolated static func canonical(_ fields: [String?]) -> String {

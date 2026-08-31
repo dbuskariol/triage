@@ -7,19 +7,42 @@ enum AIConsentRepositoryError: Error, Equatable, Sendable {
     case invalidModelID
     case invalidUpdatedAt
     case invalidPersistedData
+    case invalidAutomaticActionConfidenceThreshold
 }
 
 /// The explicit, local authorization to send bounded organization content to
 /// the Copilot boundary. A missing record is intentionally indistinguishable
 /// from a disabled record to callers that only need an effective policy.
 struct OrganizationAIConsent: Equatable, Sendable {
+    static let minimumAutomaticActionConfidenceThreshold = 0.92
+    static let maximumAutomaticActionConfidenceThreshold = 1.0
+
     let accountID: AccountID
     let organizationID: OrganizationID
     let isEnabled: Bool
     /// `nil` represents Copilot's explicit Auto selection, never an inferred
     /// model chosen by Triage.
     let selectedModelID: String?
+    /// Organization-local safety floor for automatic Inbox actions.  This is
+    /// not a helper instruction and never lowers the product-wide minimum.
+    let automaticActionConfidenceThreshold: Double
     let updatedAt: Date?
+
+    init(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        isEnabled: Bool,
+        selectedModelID: String?,
+        automaticActionConfidenceThreshold: Double = Self.minimumAutomaticActionConfidenceThreshold,
+        updatedAt: Date?
+    ) {
+        self.accountID = accountID
+        self.organizationID = organizationID
+        self.isEnabled = isEnabled
+        self.selectedModelID = selectedModelID
+        self.automaticActionConfidenceThreshold = automaticActionConfidenceThreshold
+        self.updatedAt = updatedAt
+    }
 
     static func disabled(accountID: AccountID, organizationID: OrganizationID) -> Self {
         .init(
@@ -27,6 +50,7 @@ struct OrganizationAIConsent: Equatable, Sendable {
             organizationID: organizationID,
             isEnabled: false,
             selectedModelID: nil,
+            automaticActionConfidenceThreshold: minimumAutomaticActionConfidenceThreshold,
             updatedAt: nil
         )
     }
@@ -51,7 +75,7 @@ actor AIConsentRepository {
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
-                    SELECT enabled, selected_model, updated_at_ms
+                    SELECT enabled, selected_model, automatic_action_confidence_threshold, updated_at_ms
                     FROM ai_consents
                     WHERE account_id = ? AND organization_id = ?
                     """,
@@ -64,9 +88,11 @@ actor AIConsentRepository {
             // not optional-bound by the validation guard.
             let selectedModelID: String? = row["selected_model"]
             guard let enabled: Bool = row["enabled"],
+                  let automaticActionConfidenceThreshold: Double = row["automatic_action_confidence_threshold"],
                   let milliseconds: Int64 = row["updated_at_ms"],
                   let updatedAt = Self.date(milliseconds: milliseconds),
-                  Self.isValidModelID(selectedModelID)
+                  Self.isValidModelID(selectedModelID),
+                  Self.isValidAutomaticActionConfidenceThreshold(automaticActionConfidenceThreshold)
             else {
                 throw AIConsentRepositoryError.invalidPersistedData
             }
@@ -75,6 +101,7 @@ actor AIConsentRepository {
                 organizationID: organizationID,
                 isEnabled: enabled,
                 selectedModelID: enabled ? selectedModelID : nil,
+                automaticActionConfidenceThreshold: automaticActionConfidenceThreshold,
                 updatedAt: updatedAt
             )
         }
@@ -89,15 +116,19 @@ actor AIConsentRepository {
         guard Self.isValidModelID(selectedModelID) else {
             throw AIConsentRepositoryError.invalidModelID
         }
+        guard Self.isValidAutomaticActionConfidenceThreshold(consent.automaticActionConfidenceThreshold) else {
+            throw AIConsentRepositoryError.invalidAutomaticActionConfidenceThreshold
+        }
         try await vault.writeTransaction { database in
             try Self.validateConnectedOrganization(consent.accountID, consent.organizationID, in: database)
             try database.execute(
                 sql: """
-                    INSERT INTO ai_consents (account_id, organization_id, enabled, selected_model, updated_at_ms)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO ai_consents (account_id, organization_id, enabled, selected_model, automatic_action_confidence_threshold, updated_at_ms)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_id, organization_id) DO UPDATE SET
                         enabled = excluded.enabled,
                         selected_model = excluded.selected_model,
+                        automatic_action_confidence_threshold = excluded.automatic_action_confidence_threshold,
                         updated_at_ms = excluded.updated_at_ms
                     """,
                 arguments: [
@@ -105,6 +136,7 @@ actor AIConsentRepository {
                     consent.organizationID.rawValue,
                     consent.isEnabled,
                     selectedModelID,
+                    consent.automaticActionConfidenceThreshold,
                     Self.milliseconds(updatedAt)
                 ]
             )
@@ -122,6 +154,7 @@ actor AIConsentRepository {
                 organizationID: organizationID,
                 isEnabled: false,
                 selectedModelID: nil,
+                automaticActionConfidenceThreshold: OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
                 updatedAt: updatedAt
             ),
             at: updatedAt
@@ -163,6 +196,12 @@ actor AIConsentRepository {
             && value.unicodeScalars.allSatisfy {
                 !$0.properties.isWhitespace && $0.properties.generalCategory != .control
             }
+    }
+
+    nonisolated static func isValidAutomaticActionConfidenceThreshold(_ value: Double) -> Bool {
+        value.isFinite
+            && value >= OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold
+            && value <= OrganizationAIConsent.maximumAutomaticActionConfidenceThreshold
     }
 
     private static func milliseconds(_ date: Date) -> Int64 {

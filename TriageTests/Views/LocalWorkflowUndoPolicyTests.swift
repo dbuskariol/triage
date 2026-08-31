@@ -43,6 +43,21 @@ final class LocalWorkflowUndoPolicyTests: XCTestCase {
         XCTAssertNil(LocalWorkflowUndoPolicy.inverse(for: .markWaiting(followUpAt: nil), previous: state(status: .archived)))
     }
 
+    func testMixedBatchRemainsReversibleWhenItsFirstItemIsAlreadyAtTargetState() {
+        XCTAssertTrue(
+            LocalWorkflowUndoPolicy.hasReversibleChange(
+                for: .setPriority(.high),
+                in: [state(priority: .high), state(priority: .normal)]
+            )
+        )
+        XCTAssertFalse(
+            LocalWorkflowUndoPolicy.hasReversibleChange(
+                for: .setPriority(.high),
+                in: [state(priority: .high), state(priority: .high)]
+            )
+        )
+    }
+
     func testUndoActionNamesDescribeOnlyLocalTriageHistory() {
         let names = [
             LocalWorkflowUndoPolicy.actionName(for: .archive),

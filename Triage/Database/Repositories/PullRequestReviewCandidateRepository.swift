@@ -129,7 +129,7 @@ actor PullRequestReviewCandidateRepository {
         guard scope.accountID == vault.accountID else {
             throw PullRequestReviewCandidateRepositoryError.accountScopeMismatch
         }
-        guard Self.isReviewFeature(feature), limit > 0, limit < .max else {
+        guard Self.isPullRequestContextFeature(feature), limit > 0, limit < .max else {
             throw PullRequestReviewCandidateRepositoryError.invalidLimit
         }
         return try await vault.writeTransaction { database in
@@ -192,6 +192,28 @@ actor PullRequestReviewCandidateRepository {
         }
     }
 
+    func advanceFairSchedule(
+        after candidate: PullRequestReviewCandidate,
+        scope: SynchronizationScope,
+        streamID: SyncStreamID,
+        feature: CoverageFeature,
+        at attemptedAt: Date
+    ) async throws {
+        guard scope.accountID == vault.accountID else {
+            throw PullRequestReviewCandidateRepositoryError.accountScopeMismatch
+        }
+        try await vault.writeTransaction { database in
+            try Self.advanceFairSchedule(
+                after: candidate,
+                scope: scope,
+                streamID: streamID,
+                feature: feature,
+                at: attemptedAt,
+                in: database
+            )
+        }
+    }
+
     /// Advances the durable fair-scheduling pointers. Call this inside the
     /// same transaction as a successful source write or a classified failed
     /// attempt; never call it for cancellation or obsolete authority.
@@ -203,7 +225,7 @@ actor PullRequestReviewCandidateRepository {
         at attemptedAt: Date,
         in database: Database
     ) throws {
-        guard isReviewFeature(feature) else {
+        guard isPullRequestContextFeature(feature) else {
             throw PullRequestReviewCandidateRepositoryError.invalidScheduleScope
         }
         try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
@@ -547,8 +569,8 @@ actor PullRequestReviewCandidateRepository {
         }
     }
 
-    private nonisolated static func isReviewFeature(_ feature: CoverageFeature) -> Bool {
-        feature == .reviews || feature == .reviewThreads
+    private nonisolated static func isPullRequestContextFeature(_ feature: CoverageFeature) -> Bool {
+        feature == .reviews || feature == .reviewThreads || feature == .statusChecks
     }
 
     private nonisolated static func rootShardID(

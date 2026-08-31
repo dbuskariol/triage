@@ -94,7 +94,10 @@ struct GitHubRESTRequest: Sendable {
         validators: GitHubHTTPValidators? = nil,
         maximumResponseBodyBytes: Int = GitHubRESTTransport.maximumResponseBodyBytes
     ) throws {
-        guard nextPageURL.scheme == "https", nextPageURL.host == "api.github.com" else {
+        // Link headers are remote input. Reject every non-exact authority
+        // before this URL can reach URLRequest and receive an Authorization
+        // header in the transport.
+        guard GitHubAPIResponseAuthority.isValid(nextPageURL) else {
             throw GitHubTransportError.invalidBaseURL
         }
         self.method = method
@@ -156,10 +159,30 @@ enum GitHubTransportError: Error, Equatable, Sendable {
     case invalidBaseURL
     case invalidPath
     case invalidURL
+    case invalidResponseAuthority
     case unexpectedResponse
     case responseTooLarge
     case invalidResponseBodyLimit
     case conditionalHeadersRequireTypedValidator
+}
+
+/// Responses must remain on the same HTTPS GitHub API authority as the
+/// request. This is checked after every request as a fail-closed backstop for
+/// injected sessions and for any redirect behavior outside our session delegate.
+enum GitHubAPIResponseAuthority {
+    static func isValid(_ url: URL?) -> Bool {
+        guard let url,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.caseInsensitiveCompare("https") == .orderedSame,
+              components.host?.caseInsensitiveCompare("api.github.com") == .orderedSame,
+              components.port == nil,
+              components.user == nil,
+              components.password == nil
+        else {
+            return false
+        }
+        return true
+    }
 }
 
 protocol HTTPSession: Sendable {
@@ -189,7 +212,31 @@ enum TriageHTTPSessionFactory {
     }
 
     static func makeSession() -> URLSession {
-        URLSession(configuration: makeConfiguration())
+        URLSession(
+            configuration: makeConfiguration(),
+            delegate: GitHubRedirectAuthorityDelegate(),
+            delegateQueue: nil
+        )
+    }
+}
+
+private final class GitHubRedirectAuthorityDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        // The session factory is also used for GitHub OAuth requests, which do
+        // not start at the REST API authority. Restrict only redirects for API
+        // requests; the final-response checks remain the injected-session
+        // backstop for REST and GraphQL.
+        guard GitHubAPIResponseAuthority.isValid(task.originalRequest?.url) else {
+            completionHandler(request)
+            return
+        }
+        completionHandler(GitHubAPIResponseAuthority.isValid(request.url) ? request : nil)
     }
 }
 
@@ -231,6 +278,7 @@ struct URLSessionHTTPSession: BoundedHTTPSession {
 
 actor GitHubRESTTransport {
     static let apiVersion = "2026-03-10"
+    static let defaultUserAgent = "Triage/0.1.0"
     static let defaultBaseURL = URL(string: "https://api.github.com")!
     static let maximumResponseBodyBytes = 2 * 1_024 * 1_024
 
@@ -241,9 +289,12 @@ actor GitHubRESTTransport {
     init(
         session: any HTTPSession = URLSessionHTTPSession(),
         baseURL: URL = GitHubRESTTransport.defaultBaseURL,
-        userAgent: String = "Triage/0.1.0"
+        userAgent: String = GitHubRESTTransport.defaultUserAgent
     ) throws {
-        guard baseURL.scheme == "https", baseURL.host == "api.github.com" else {
+        // Keep the configured base authority subject to the identical policy
+        // as response and pagination URLs. A post-response check is too late
+        // because the request has already carried the caller's credential.
+        guard GitHubAPIResponseAuthority.isValid(baseURL) else {
             throw GitHubTransportError.invalidBaseURL
         }
         self.session = session
@@ -277,6 +328,9 @@ actor GitHubRESTTransport {
             for: urlRequest,
             maximumResponseBodyBytes: request.maximumResponseBodyBytes
         )
+        guard GitHubAPIResponseAuthority.isValid(response.url) else {
+            throw GitHubTransportError.invalidResponseAuthority
+        }
         guard body.count <= request.maximumResponseBodyBytes else {
             throw GitHubTransportError.responseTooLarge
         }

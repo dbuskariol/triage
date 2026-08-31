@@ -318,14 +318,14 @@ final class WorkListPresentationTests: XCTestCase {
         XCTAssertEqual(selection.primaryWorkItemID, itemB)
     }
 
-    func testContextualSelectionTargetsOnlyThatRowAndExternalHistorySelectionStaysSingle() {
+    func testContextualSelectionPreservesItsExistingMultiSelectionAndExternalHistoryStaysSingle() {
         let itemA = WorkItemID(rawValue: "work-a")!
         let itemB = WorkItemID(rawValue: "work-b")!
         var selection = WorkListSelection()
 
         _ = selection.applyNativeSelection([itemA, itemB], orderedWorkItemIDs: [itemA, itemB])
         selection.selectContextualWorkItem(itemB)
-        XCTAssertEqual(selection.selectedWorkItemIDs, [itemB])
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemA, itemB])
         XCTAssertEqual(selection.primaryWorkItemID, itemB)
 
         selection.synchronizePrimarySelection(itemA)
@@ -345,10 +345,26 @@ final class WorkListPresentationTests: XCTestCase {
         XCTAssertEqual(policy.archiveOperation, .archive)
         XCTAssertEqual(policy.pinOperation, .setPinned(true))
         XCTAssertEqual(policy.priorityOperations, [.setPriority(.low), .setPriority(.normal), .setPriority(.high)])
-        XCTAssertEqual(policy.snoozeOperations, [.snooze(.oneHour), .snooze(.tomorrow), .snooze(.nextWeek)])
+        XCTAssertEqual(
+            policy.snoozeOperations,
+            [.snoozeAfter(3_600), .snoozeAfter(86_400), .snoozeAfter(7 * 86_400)]
+        )
         XCTAssertNil(policy.clearSnoozeOperation)
         XCTAssertEqual(policy.waitingOperation, .markWaiting)
         XCTAssertTrue(WorkItemContextMenuPolicy.localOnlyAccessibilityHint.contains("does not modify GitHub"))
+
+        let configured = WorkItemContextMenuPolicy(
+            item: item,
+            snoozeDurations: InboxSnoozeDurations(
+                firstMinutes: 30,
+                secondMinutes: 180,
+                thirdMinutes: 1_440
+            )!
+        )
+        XCTAssertEqual(
+            configured.snoozeOperations,
+            [.snoozeAfter(1_800), .snoozeAfter(10_800), .snoozeAfter(86_400)]
+        )
     }
 
     func testContextMenuPolicyRestoresArchivedAndClearsExistingWorkflowStates() {
@@ -385,13 +401,57 @@ final class WorkListPresentationTests: XCTestCase {
     func testContextMenuOperationsMapOnlyToExistingLocalWorkflowActions() {
         let original = WorkflowState(status: .active, updatedAt: now)
         let archive = WorkItemContextMenuOperation.archive.workflowAction(now: now)
-        let snooze = WorkItemContextMenuOperation.snooze(.oneHour).workflowAction(now: now)
+        let snooze = WorkItemContextMenuOperation.snoozeAfter(3_600).workflowAction(now: now)
+        let configuredSnooze = WorkItemContextMenuOperation.snoozeAfter(1_800).workflowAction(now: now)
 
         XCTAssertEqual(WorkflowTransitionEngine.apply(archive, to: original, at: now).next.status, .archived)
         guard case let .snooze(until: snoozedUntil) = snooze else {
-            return XCTFail("The one-hour context menu action must use the local snooze workflow action.")
+            return XCTFail("The configured context-menu action must use the local snooze workflow action.")
         }
         XCTAssertEqual(snoozedUntil, now.addingTimeInterval(3_600))
+        guard case let .snooze(until: configuredSnoozedUntil) = configuredSnooze else {
+            return XCTFail("A configured duration must map to the same local snooze workflow action.")
+        }
+        XCTAssertEqual(configuredSnoozedUntil, now.addingTimeInterval(1_800))
+    }
+
+    func testInboxDefaultSortCanPreferRecentActivityWithoutChangingOtherViews() {
+        let older = makeWorkItem(
+            id: "older",
+            workflow: WorkflowState(status: .active, updatedAt: now),
+            freshness: .fresh,
+            actions: [],
+            score: 20
+        )
+        let newer = WorkItem(
+            id: WorkItemID(rawValue: "newer")!,
+            accountID: older.accountID,
+            organizationID: older.organizationID,
+            primaryNodeID: GitHubNodeID(rawValue: "node-newer")!,
+            title: "newer",
+            state: .active,
+            sourceKind: .issue,
+            sourceURL: nil,
+            repository: nil,
+            members: [],
+            contextLinks: [],
+            relations: older.relations,
+            attentionReasons: older.attentionReasons,
+            actionItems: [],
+            workflow: WorkflowState(status: .active, updatedAt: now),
+            freshness: FreshnessState(status: .fresh),
+            lastRelevantActivityAt: older.lastRelevantActivityAt.addingTimeInterval(60),
+            score: AttentionScore(value: 1, breakdown: [:])
+        )
+
+        let items = WorkListPresentation.items(
+            from: [older, newer],
+            section: .inbox,
+            at: now,
+            inboxDefaultSort: .recentActivity
+        )
+
+        XCTAssertEqual(items.map(\.id), [newer.id, older.id])
     }
 
     private func makeWorkItem(

@@ -79,6 +79,26 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         XCTAssertFalse(result.isComplete)
     }
 
+    func testResponseAuthorityRejectionFailsAndCannotProduceCompleteCoverage() {
+        let status = GitHubNodeHydrationService.status(
+            for: .invalidResponseAuthority,
+            githubOrganizationID: nil,
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        XCTAssertEqual(status, .failed)
+
+        let candidate = GitHubHydrationCandidate(
+            nodeID: GitHubNodeID(rawValue: "I_1")!,
+            repositoryID: RepositoryID(rawValue: "repo-1")!,
+            kind: .issue
+        )
+        let result = GitHubNodeHydrationRefreshResult(outcomes: [
+            .init(candidate: candidate, status: status)
+        ])
+        XCTAssertEqual(result.coverageAssessment(kind: .issue).status, .failed)
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testUndecodableHydrationPreservesRawAndClassifiesTypedGraphQLError() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".hydration-undecodable-\(UUID().uuidString)", isDirectory: true)
@@ -610,7 +630,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
     func testNestedConnectionsRejectMoreThanFiftyDecodedObjects() throws {
         let actors = (1 ... 51).map { GitHubNodeHydrationPayload.Actor(id: "U_\($0)", login: "user\($0)", avatarUrl: nil) as GitHubNodeHydrationPayload.Actor? }
         let labels = (1 ... 51).map { GitHubNodeHydrationPayload.Label(id: "L_\($0)", name: "label-\($0)", color: "000000") as GitHubNodeHydrationPayload.Label? }
-        let reviewRequests = (1 ... 51).map { GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_\($0)", login: "reviewer\($0)", avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest? }
+        let reviewRequests = (1 ... 51).map { GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_\($0)", login: "reviewer\($0)", slug: nil, avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest? }
         let closingReferences = (1 ... 51).map { GitHubNodeHydrationPayload.NodeReference(id: "I_CLOSE_\($0)") as GitHubNodeHydrationPayload.NodeReference? }
         let nodes = [
             pullRequest(assigneeNodes: actors),
@@ -637,7 +657,7 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
     func testNestedConnectionsRejectDuplicateDecodedObjects() throws {
         let duplicateActor = GitHubNodeHydrationPayload.Actor(id: "U_1", login: "user", avatarUrl: nil) as GitHubNodeHydrationPayload.Actor?
         let duplicateLabel = GitHubNodeHydrationPayload.Label(id: "L_1", name: "label", color: "000000") as GitHubNodeHydrationPayload.Label?
-        let duplicateRequest = GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_1", login: "reviewer", avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest?
+        let duplicateRequest = GitHubNodeHydrationPayload.ReviewRequest(requestedReviewer: .init(id: "RR_1", login: "reviewer", slug: nil, avatarUrl: nil)) as GitHubNodeHydrationPayload.ReviewRequest?
         let duplicateReference = GitHubNodeHydrationPayload.NodeReference(id: "I_CLOSE_1") as GitHubNodeHydrationPayload.NodeReference?
         let nodes = [
             pullRequest(assigneeNodes: [duplicateActor, duplicateActor]),

@@ -73,6 +73,24 @@ final class WorkspaceAccessibilityCoordinatorTests: XCTestCase {
         )
     }
 
+    func testAccountRestorationRetryAnnouncementsAreActionableAndPrivate() {
+        let recorder = AnnouncementRecorder()
+        let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
+
+        coordinator.accountRestorationRetryStarted()
+        coordinator.accountRestorationRetrySucceeded()
+        coordinator.accountRestorationRetryFailed()
+
+        XCTAssertEqual(
+            recorder.announcements,
+            [
+                "Retrying encrypted local account data.",
+                "Encrypted local account restoration finished.",
+                "Triage could not restore encrypted local account data. Try Again remains available."
+            ]
+        )
+    }
+
     func testWorkflowCompletionAndActionCompletionRemainLocalOnly() {
         let recorder = AnnouncementRecorder()
         let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)

@@ -41,11 +41,22 @@ struct GitHubPullRequestReviewDTO: Codable, Sendable {
     let state: String
     let body: String?
     let submittedAt: Date?
+    let user: Author? = nil
+
+    struct Author: Codable, Sendable {
+        let nodeID: String?
+        let login: String?
+
+        enum CodingKeys: String, CodingKey {
+            case nodeID = "node_id"
+            case login
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
         case nodeID = "node_id"
-        case state, body
+        case state, body, user
         case submittedAt = "submitted_at"
     }
 }

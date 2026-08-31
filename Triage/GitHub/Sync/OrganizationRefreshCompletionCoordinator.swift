@@ -20,6 +20,7 @@ struct OrganizationRefreshCompletionCoordinator: Sendable {
 
     init(
         vault: AccountVault,
+        businessDayPolicy: BusinessDayPolicy = .init(),
         resolveAIPolicy: @escaping AIPolicyResolution = { _, _, _ in
             DerivedAIPolicy(
                 isOrganizationConsentActive: false,
@@ -54,7 +55,8 @@ struct OrganizationRefreshCompletionCoordinator: Sendable {
                 try await projectionService.recomputeAfterNormalizedCommit(
                     for: scope,
                     aiPolicy: aiPolicy,
-                    evaluatedAt: evaluatedAt
+                    evaluatedAt: evaluatedAt,
+                    businessDayPolicy: businessDayPolicy
                 )
             },
             resolveAIPolicy: resolveAIPolicy

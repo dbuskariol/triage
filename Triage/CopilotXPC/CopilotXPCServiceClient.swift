@@ -74,10 +74,24 @@ actor CopilotXPCServiceClient: CopilotXPCFrameService {
 
 actor CopilotXPCFrameTransport: CopilotFrameTransport {
   private let service: any CopilotXPCFrameService
+  private let pendingFrameWiper: @Sendable (inout Data) -> Void
   private var pendingRequestFrame: Data?
 
   init(service: any CopilotXPCFrameService) {
     self.service = service
+    pendingFrameWiper = { frame in
+      guard !frame.isEmpty else { return }
+      frame.resetBytes(in: frame.startIndex..<frame.endIndex)
+      frame.removeAll(keepingCapacity: false)
+    }
+  }
+
+  init(
+    service: any CopilotXPCFrameService,
+    pendingFrameWiper: @escaping @Sendable (inout Data) -> Void
+  ) {
+    self.service = service
+    self.pendingFrameWiper = pendingFrameWiper
   }
 
   func writeFrame(_ payload: Data) async throws {
@@ -93,10 +107,11 @@ actor CopilotXPCFrameTransport: CopilotFrameTransport {
   }
 
   func readFrame(maximumBytes: Int) async throws -> Data {
-    guard let requestFrame = pendingRequestFrame else {
+    guard var requestFrame = pendingRequestFrame else {
       throw CopilotXPCError.invalidResponse
     }
     pendingRequestFrame = nil
+    defer { requestFrame.resetBytes(in: 0..<requestFrame.count) }
     let responseFrame = try await service.exchange(frame: requestFrame)
     do {
       return try CopilotFrameCodec.decode(responseFrame, maximumBytes: maximumBytes)
@@ -106,9 +121,15 @@ actor CopilotXPCFrameTransport: CopilotFrameTransport {
   }
 
   func terminate() async {
-    pendingRequestFrame = nil
+    // A cancellation can happen after framing but before the frame was sent
+    // over XPC. Clear that credential-bearing buffer before releasing it.
+    if var pendingRequestFrame {
+      self.pendingRequestFrame = nil
+      pendingFrameWiper(&pendingRequestFrame)
+    }
     await service.invalidate()
   }
+
 }
 
 private final class CopilotXPCReplyOnce: @unchecked Sendable {

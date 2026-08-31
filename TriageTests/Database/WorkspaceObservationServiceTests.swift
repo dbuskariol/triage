@@ -107,6 +107,175 @@ final class WorkspaceObservationServiceTests: XCTestCase {
         )
     }
 
+    func testInboxPageObservationRefreshesImmediatelyForLocalEligibilityAndRankWrites() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspace()
+        let service = WorkspaceDatabaseObservationService(
+            bridge: WorkspaceDatabaseObservationService.bridge(
+                in: fixture.pool,
+                accountID: fixture.accountID
+            )
+        )
+        var iterator = service.inboxPageValues(for: fixture.scope).makeAsyncIterator()
+        let initialValue = try await iterator.next()
+        let initial = try XCTUnwrap(initialValue)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE workflow_states SET status = 'archived', updated_at_ms = 3_000 WHERE work_item_id = ?",
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+        let archivedValue = try await iterator.next()
+        let archived = try XCTUnwrap(archivedValue)
+        XCTAssertNotEqual(archived.revision, initial.revision)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE workflow_states SET status = 'active', snoozed_until_ms = 9_999_999, updated_at_ms = 4_000 WHERE work_item_id = ?",
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+        let snoozedValue = try await iterator.next()
+        let snoozed = try XCTUnwrap(snoozedValue)
+        XCTAssertNotEqual(snoozed.revision, archived.revision)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE workflow_states SET snoozed_until_ms = NULL, pinned = 1, priority = 3, updated_at_ms = 5_000 WHERE work_item_id = ?",
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+        let rankedValue = try await iterator.next()
+        let ranked = try XCTUnwrap(rankedValue)
+        XCTAssertNotEqual(ranked.revision, snoozed.revision)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "INSERT INTO action_items (id, work_item_id, title, detail, origin, state, priority, due_at_ms, source_fingerprint, created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms) VALUES ('page-action', ?, 'Follow up', NULL, 'manual', 'open', 2, NULL, NULL, 6_000, 6_000, NULL, NULL)",
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+        let actionOpenedValue = try await iterator.next()
+        let actionOpened = try XCTUnwrap(actionOpenedValue)
+        XCTAssertNotEqual(actionOpened.revision, ranked.revision)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE action_items SET state = 'completed', completed_at_ms = 7_000, updated_at_ms = 7_000 WHERE id = 'page-action'"
+            )
+        }
+        let actionCompletedValue = try await iterator.next()
+        let actionCompleted = try XCTUnwrap(actionCompletedValue)
+        XCTAssertNotEqual(actionCompleted.revision, actionOpened.revision)
+
+        // An in-place source-authority edit leaves rule count/evaluation time
+        // untouched, but must still re-query the page because the Inbox SQL
+        // accepts only the current derived source revision.
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE rule_evaluations SET source_revision = ? WHERE id = 'reason-1'",
+                arguments: [String(repeating: "b", count: 64)]
+            )
+        }
+        let ruleAuthorityChangedValue = try await iterator.next()
+        let ruleAuthorityChanged = try XCTUnwrap(ruleAuthorityChangedValue)
+        XCTAssertNotEqual(ruleAuthorityChanged.revision, actionCompleted.revision)
+
+        // Evidence authority is consulted by the page's current-rule CTE.
+        // Changing it in place preserves the evidence row count.
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE rule_evaluation_evidence SET authority_organization_id = 'retired-organization' WHERE rule_evaluation_id = 'reason-1'"
+            )
+        }
+        let evidenceAuthorityChangedValue = try await iterator.next()
+        let evidenceAuthorityChanged = try XCTUnwrap(evidenceAuthorityChangedValue)
+        XCTAssertNotEqual(evidenceAuthorityChanged.revision, ruleAuthorityChanged.revision)
+
+        // Canonical group replacement changes visible roots and the action
+        // aggregate used to rank them. Its own projection run is likewise a
+        // lightweight page dependency.
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO work_item_group_memberships (
+                        account_id, organization_id, constituent_work_item_id,
+                        canonical_work_item_id, credential_revision, capability_revision,
+                        source_revision, projected_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 8_000)
+                    """,
+                arguments: [
+                    fixture.accountID.rawValue,
+                    fixture.organizationID.rawValue,
+                    fixture.waitingWorkItemID.rawValue,
+                    fixture.inboxWorkItemID.rawValue,
+                    fixture.credentialRevision.rawValue,
+                    fixture.capabilityRevision.rawValue,
+                    String(repeating: "a", count: 64)
+                ]
+            )
+        }
+        let groupingChangedValue = try await iterator.next()
+        let groupingChanged = try XCTUnwrap(groupingChangedValue)
+        XCTAssertNotEqual(groupingChanged.revision, evidenceAuthorityChanged.revision)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO work_item_graph_runs (
+                        account_id, organization_id, credential_revision, capability_revision,
+                        source_revision, projected_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, 9_000)
+                    """,
+                arguments: [
+                    fixture.accountID.rawValue,
+                    fixture.organizationID.rawValue,
+                    fixture.credentialRevision.rawValue,
+                    fixture.capabilityRevision.rawValue,
+                    String(repeating: "a", count: 64)
+                ]
+            )
+        }
+        let graphRunChangedValue = try await iterator.next()
+        let graphRunChanged = try XCTUnwrap(graphRunChangedValue)
+        XCTAssertNotEqual(graphRunChanged.revision, groupingChanged.revision)
+    }
+
+    func testMenuCountsExcludeRuleEvaluationsOutsideTheActiveSourceRevision() throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspace()
+
+        let currentSnapshot = try fixture.pool.read { database in
+            try WorkspaceDatabaseObservationService.snapshot(
+                in: database,
+                scope: fixture.scope,
+                selectedWorkItemID: nil
+            )
+        }
+        XCTAssertEqual(currentSnapshot.menuCounts.inbox, 1)
+        XCTAssertEqual(currentSnapshot.workItems.first?.attentionReasonCount, 1)
+
+        try fixture.pool.write { database in
+            try database.execute(
+                sql: "UPDATE rule_evaluations SET source_revision = ? WHERE id = 'reason-1'",
+                arguments: [String(repeating: "b", count: 64)]
+            )
+        }
+
+        let staleSnapshot = try fixture.pool.read { database in
+            try WorkspaceDatabaseObservationService.snapshot(
+                in: database,
+                scope: fixture.scope,
+                selectedWorkItemID: nil
+            )
+        }
+        XCTAssertEqual(staleSnapshot.menuCounts.inbox, 0)
+        XCTAssertEqual(staleSnapshot.workItems.first?.attentionReasonCount, 0)
+    }
+
     func testGRDBObservationPublishesCoverageChangeWhenFreshnessIsUnchanged() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
@@ -247,9 +416,14 @@ final class WorkspaceObservationServiceTests: XCTestCase {
 
     func testTerminationCancelsTheVaultOwnedSubscription() async throws {
         let cancellation = expectation(description: "subscription cancelled")
-        let bridge = WorkspaceDatabaseObservationBridge { _, _, _, _ in
-            AnyDatabaseCancellable { cancellation.fulfill() }
-        }
+        let bridge = WorkspaceDatabaseObservationBridge(
+            start: { _, _, _, _ in
+                AnyDatabaseCancellable { cancellation.fulfill() }
+            },
+            startInbox: { _, _, _ in
+                AnyDatabaseCancellable {}
+            }
+        )
         let service = WorkspaceDatabaseObservationService(bridge: bridge)
         let scope = SynchronizationScope(
             accountID: AccountID(rawValue: "account")!,
@@ -399,6 +573,61 @@ private final class Fixture: @unchecked Sendable {
                               'Assigned', 'Assigned to you.', 3_000)
                     """,
                 arguments: [inboxWorkItemID.rawValue]
+            )
+            let sourceRevision = String(repeating: "a", count: 64)
+            try database.execute(
+                sql: """
+                    INSERT INTO derived_intelligence_runs (
+                        account_id, organization_id, credential_revision, capability_revision,
+                        source_revision, evaluated_at_ms, coverage_state, freshness_status,
+                        is_provisional, freshness_last_successful_at_ms,
+                        freshness_next_retry_at_ms, freshness_detail, missing_coverage_json
+                    ) VALUES (?, ?, ?, ?, ?, 3_000, 'trusted', 'fresh', 0, 3_000, NULL, NULL, ?)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    organizationID.rawValue,
+                    credentialRevision.rawValue,
+                    capabilityRevision.rawValue,
+                    sourceRevision,
+                    Data("[]".utf8)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO rule_evaluations (
+                        id, account_id, organization_id, work_item_id,
+                        credential_revision, capability_revision, source_revision,
+                        rule_id, rule_version, category, strength, title, explanation,
+                        evaluated_at_ms
+                    ) VALUES ('reason-1', ?, ?, ?, ?, ?, ?, 'direct', 1,
+                              'directResponsibility', 100, 'Assigned', 'Assigned to you.', 3_000)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    organizationID.rawValue,
+                    inboxWorkItemID.rawValue,
+                    credentialRevision.rawValue,
+                    capabilityRevision.rawValue,
+                    sourceRevision
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO rule_evaluation_evidence (
+                        rule_evaluation_id, evidence_id, source, source_locator_kind,
+                        source_locator, authority_kind, authority_account_id,
+                        authority_organization_id, authority_feature,
+                        authority_stream_id, authority_credential_revision,
+                        authority_capability_revision, source_node_id, source_event_id,
+                        source_revision, raw_snapshot_id, confidence, confirmation,
+                        observed_at_ms, excerpt
+                    ) VALUES ('reason-1', 'reason-1-evidence', 'localWorkflow', 'localWorkflow',
+                              'workflow://assigned', 'localWorkflow', ?, ?, NULL, NULL, NULL,
+                              NULL, 'node-inbox', NULL, 'local', NULL, 'confirmed', 'confirmed',
+                              3_000, 'Assigned locally.')
+                    """,
+                arguments: [accountID.rawValue, organizationID.rawValue]
             )
             try database.execute(
                 sql: """

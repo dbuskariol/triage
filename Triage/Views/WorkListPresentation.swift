@@ -45,7 +45,8 @@ enum WorkListPresentation {
     static func items(
         from workItems: [WorkItem],
         section: AppSection,
-        at now: Date
+        at now: Date,
+        inboxDefaultSort: InboxDefaultSort = .attention
     ) -> [WorkItem] {
         let matching = workItems.filter { item in
             switch section {
@@ -65,7 +66,27 @@ enum WorkListPresentation {
                 true
             }
         }
+        if section == .inbox {
+            return sortedInbox(matching, by: inboxDefaultSort)
+        }
         return rankedPersisted(matching)
+    }
+
+    static func sortedInbox(
+        _ workItems: [WorkItem],
+        by sort: InboxDefaultSort
+    ) -> [WorkItem] {
+        switch sort {
+        case .attention:
+            rankedPersisted(workItems)
+        case .recentActivity:
+            workItems.sorted {
+                if $0.lastRelevantActivityAt != $1.lastRelevantActivityAt {
+                    return $0.lastRelevantActivityAt > $1.lastRelevantActivityAt
+                }
+                return $0.id.rawValue < $1.id.rawValue
+            }
+        }
     }
 
     static func rankedPersisted(_ workItems: [WorkItem]) -> [WorkItem] {
@@ -379,10 +400,12 @@ struct WorkListSelection: Equatable {
         }
     }
 
-    /// Contextual commands deliberately target one row. This maintains the
-    /// existing action contract and avoids introducing implicit bulk actions.
+    /// A contextual action on an already-selected row preserves the native
+    /// multi-selection; otherwise it makes the contextual row the one target.
     mutating func selectContextualWorkItem(_ workItemID: WorkItemID) {
-        selectedWorkItemIDs = [workItemID]
+        if !selectedWorkItemIDs.contains(workItemID) {
+            selectedWorkItemIDs = [workItemID]
+        }
         primaryWorkItemID = workItemID
     }
 
@@ -402,26 +425,10 @@ enum WorkItemContextMenuOperation: Equatable {
     case unarchive
     case setPinned(Bool)
     case setPriority(WorkPriority)
-    case snooze(SnoozePreset)
+    case snoozeAfter(TimeInterval)
     case clearSnooze
     case markWaiting
     case clearWaiting
-
-    enum SnoozePreset: Equatable {
-        case oneHour
-        case tomorrow
-        case nextWeek
-
-        func action(now: Date) -> WorkflowAction {
-            let interval: TimeInterval
-            switch self {
-            case .oneHour: interval = 3_600
-            case .tomorrow: interval = 86_400
-            case .nextWeek: interval = 7 * 86_400
-            }
-            return .snooze(until: now.addingTimeInterval(interval))
-        }
-    }
 
     func workflowAction(now: Date) -> WorkflowAction {
         switch self {
@@ -429,7 +436,7 @@ enum WorkItemContextMenuOperation: Equatable {
         case .unarchive: .unarchive
         case let .setPinned(isPinned): .setPinned(isPinned)
         case let .setPriority(priority): .setPriority(priority)
-        case let .snooze(preset): preset.action(now: now)
+        case let .snoozeAfter(interval): .snooze(until: now.addingTimeInterval(interval))
         case .clearSnooze: .clearSnooze
         case .markWaiting: .markWaiting(followUpAt: nil)
         case .clearWaiting: .clearWaiting
@@ -451,7 +458,10 @@ struct WorkItemContextMenuPolicy: Equatable {
     let clearSnoozeOperation: WorkItemContextMenuOperation?
     let waitingOperation: WorkItemContextMenuOperation?
 
-    init(item: WorkItem) {
+    init(
+        item: WorkItem,
+        snoozeDurations: InboxSnoozeDurations = .default
+    ) {
         let availability = TriageWorkflowCommandAvailability(item: item)
         archiveOperation = availability.canArchive
             ? .archive
@@ -459,7 +469,11 @@ struct WorkItemContextMenuPolicy: Equatable {
         pinOperation = .setPinned(!item.workflow.isPinned)
         priorityOperations = WorkPriority.allCases.map(WorkItemContextMenuOperation.setPriority)
         snoozeOperations = availability.canSnooze
-            ? [.snooze(.oneHour), .snooze(.tomorrow), .snooze(.nextWeek)]
+            ? InboxSnoozeSlot.allCases.map {
+                WorkItemContextMenuOperation.snoozeAfter(
+                    TimeInterval(snoozeDurations.minutes(for: $0) * 60)
+                )
+            }
             : []
         clearSnoozeOperation = availability.canClearSnooze ? .clearSnooze : nil
         waitingOperation = availability.canMarkWaiting

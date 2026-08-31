@@ -6,8 +6,8 @@ final class DatabaseWorkspaceObserverTests: XCTestCase {
     func testSnapshotsRejectsAVaultResolvedForAnotherAccount() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let expectedAccountID = AccountID(rawValue: "expected-account")!
-        let resolvedAccountID = AccountID(rawValue: "resolved-account")!
+        let expectedAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000101")!
+        let resolvedAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000102")!
         let vault = try AccountVault(
             accountID: resolvedAccountID,
             vaultKey: VaultKey.generate(),
@@ -33,6 +33,39 @@ final class DatabaseWorkspaceObserverTests: XCTestCase {
 
         try await vault.close()
         try FileManager.default.removeItem(at: directory)
+    }
+
+    func testInboxPageSnapshotsRejectAVaultResolvedForAnotherAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let expectedAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000111")!
+        let resolvedAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000112")!
+        let vault = try AccountVault(
+            accountID: resolvedAccountID,
+            vaultKey: VaultKey.generate(),
+            rootDirectory: directory
+        )
+        let observer = DatabaseInboxPageObserver(resolveVault: { _ in vault })
+        let scope = SynchronizationScope(
+            accountID: expectedAccountID,
+            organizationID: OrganizationID(rawValue: "organization")!,
+            credentialRevision: CredentialRevision(rawValue: "credential")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+        )
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        do {
+            _ = try await observer.snapshots(for: scope)
+            XCTFail("Expected a mismatched account vault to be rejected.")
+        } catch {
+            XCTAssertEqual(
+                error as? DatabaseWorkspaceObserverError,
+                .resolvedVaultAccountMismatch
+            )
+        }
+        try await vault.close()
     }
 
     func testMenuCountsPreserveObservedSectionsAndFillRemainingDispositions() throws {
@@ -94,6 +127,41 @@ final class DatabaseWorkspaceObserverTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? DatabaseWorkspaceObserverError, .inconsistentMenuCounts)
+        }
+    }
+
+    func testWorkspaceSnapshotRejectsInboxPageFromAnotherScope() {
+        let accountID = AccountID(rawValue: "account")!
+        let organizationID = OrganizationID(rawValue: "organization")!
+        let scope = SynchronizationScope(
+            accountID: accountID,
+            organizationID: organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability")!
+        )
+        let foreignOrganizationID = OrganizationID(rawValue: "foreign-organization")!
+
+        XCTAssertThrowsError(
+            try WorkspacePresentationSnapshot(
+                scope: scope,
+                workItems: [],
+                inboxPage: [
+                    workItem(
+                        id: "foreign-inbox",
+                        accountID: accountID,
+                        organizationID: foreignOrganizationID,
+                        now: .now
+                    )
+                ],
+                durableState: AccountOrganizationDurableState(cachedState: nil),
+                coverageRequirements: [],
+                coverageRecords: [],
+                menuCounts: nil,
+                derivedEvaluatedAt: nil,
+                origin: .observed
+            )
+        ) { error in
+            XCTAssertEqual(error as? WorkspacePresentationSnapshotError, .workItemScopeMismatch)
         }
     }
 
