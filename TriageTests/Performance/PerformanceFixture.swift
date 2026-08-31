@@ -31,7 +31,7 @@ enum PerformanceFixtureQueryShape {
     static let commentPageLimit = 32
 }
 
-enum PerformanceFixtureRecordKind: CaseIterable, Hashable {
+enum PerformanceFixtureRecordKind: CaseIterable, Hashable, Sendable {
     case repository
     case workItem
     case timelineEvent
@@ -71,7 +71,7 @@ enum PerformanceFixtureRecordKind: CaseIterable, Hashable {
     }
 }
 
-struct PerformanceFixtureRecord: Equatable {
+struct PerformanceFixtureRecord: Equatable, Sendable {
     let kind: PerformanceFixtureRecordKind
     let ordinal: Int
 
@@ -81,7 +81,13 @@ struct PerformanceFixtureRecord: Equatable {
 /// Streams fixture records in bounded batches. It intentionally never builds a
 /// 100k-event array, so fixture generation exercises the memory discipline the
 /// benchmark is meant to protect.
-struct PerformanceFixtureGenerator {
+struct PerformanceFixtureGenerator: Sendable {
+    private let counts: [PerformanceFixtureRecordKind: Int]
+
+    init(counts: [PerformanceFixtureRecordKind: Int] = [:]) {
+        self.counts = counts
+    }
+
     func batches(
         maximumBatchSize: Int = PerformanceFixtureScale.batchSize
     ) -> AnySequence<[PerformanceFixtureRecord]> {
@@ -93,12 +99,13 @@ struct PerformanceFixtureGenerator {
             return AnyIterator {
                 while kindIndex < PerformanceFixtureRecordKind.allCases.count {
                     let kind = PerformanceFixtureRecordKind.allCases[kindIndex]
-                    guard ordinal < kind.count else {
+                    let count = counts[kind] ?? kind.count
+                    guard ordinal < count else {
                         kindIndex += 1
                         ordinal = 0
                         continue
                     }
-                    let upperBound = min(ordinal + maximumBatchSize, kind.count)
+                    let upperBound = min(ordinal + maximumBatchSize, count)
                     let batch = (ordinal..<upperBound).map { index in
                         PerformanceFixtureRecord(kind: kind, ordinal: index)
                     }
@@ -141,6 +148,46 @@ struct PerformanceFixtureGenerator {
     }
 }
 
+struct PerformanceFixtureSeedMetrics: Equatable, Sendable {
+    let batchCount: Int
+    let largestBatchSize: Int
+    let streamedRecordCount: Int
+}
+
+/// Privacy-safe provenance carried with every benchmark report. It identifies
+/// only the source-controlled fixture shape and bounded seeding behavior; it
+/// deliberately excludes vault paths, account identifiers, credentials, and
+/// seeded GitHub-like content.
+struct PerformanceFixtureReportMetadata: Codable, Equatable, Sendable {
+    let shapeChecksum: UInt64
+    let capacities: [String: Int]
+    let batchSize: Int
+    let streamedRecordCount: Int?
+    let seedBatchCount: Int?
+    let largestSeedBatchSize: Int?
+
+    static func expected(seedMetrics: PerformanceFixtureSeedMetrics? = nil) -> Self {
+        Self(
+            shapeChecksum: PerformanceFixtureGenerator().shapeChecksum(),
+            capacities: [
+                "actionableItems": PerformanceFixtureScale.actionableItems,
+                "discussionReplies": PerformanceFixtureScale.discussionReplies,
+                "discussions": PerformanceFixtureScale.discussions,
+                "projectItems": PerformanceFixtureScale.projectItems,
+                "projects": PerformanceFixtureScale.projects,
+                "repositories": PerformanceFixtureScale.repositories,
+                "searchableComments": PerformanceFixtureScale.searchableComments,
+                "timelineEvents": PerformanceFixtureScale.timelineEvents,
+                "workItems": PerformanceFixtureScale.workItems
+            ],
+            batchSize: PerformanceFixtureScale.batchSize,
+            streamedRecordCount: seedMetrics?.streamedRecordCount,
+            seedBatchCount: seedMetrics?.batchCount,
+            largestSeedBatchSize: seedMetrics?.largestBatchSize
+        )
+    }
+}
+
 /// A disposable encrypted-vault fixture used only by the opt-in benchmark. It
 /// keeps each insert bounded and uses the same SQLCipher configuration,
 /// migrations, and query surfaces as the app without adding benchmark code to
@@ -148,24 +195,29 @@ struct PerformanceFixtureGenerator {
 final class PerformanceFixtureStore: @unchecked Sendable {
     let directory: URL
     let vault: AccountVault
+    private let generator: PerformanceFixtureGenerator
+    private var selectedDetailWorkItem: WorkItem?
 
-    let accountID = "performance-account"
+    let accountID = "00000000-0000-4000-8000-000000000501"
     let organizationID = "performance-organization"
     private let scope = SynchronizationScope(
-        accountID: AccountID(rawValue: "performance-account")!,
+        accountID: AccountID(rawValue: "00000000-0000-4000-8000-000000000501")!,
         organizationID: OrganizationID(rawValue: "performance-organization")!,
         credentialRevision: CredentialRevision(rawValue: "performance-revision")!,
         capabilityRevision: CapabilityRevision(rawValue: "performance-capability")!
     )
 
-    init() async throws {
+    var synchronizationScope: SynchronizationScope { scope }
+
+    init(generator: PerformanceFixtureGenerator = .init()) async throws {
+        self.generator = generator
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("triage-performance-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         // This fixed value is a fixture input, not a persisted credential. The
         // enclosing temporary directory is removed after every benchmark run.
         let fixtureKey = try VaultKey(data: Data((0..<VaultKey.byteCount).map(UInt8.init)))
-        let fixtureAccountID = AccountID(rawValue: "00000000-0000-4000-8000-000000000024")!
+        let fixtureAccountID = AccountID(rawValue: accountID)!
         vault = try AccountVault(
             accountID: fixtureAccountID,
             vaultKey: fixtureKey,
@@ -180,16 +232,49 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func seed() async throws {
-        try await vault.write { database in
-            try seedRepositories(database)
-            try seedWorkItems(database)
-            try seedProjects(database)
-            try seedDiscussions(database)
-            try seedComments(database)
-            try seedTimeline(database)
-            try seedSearchDocuments(database)
+    @discardableResult
+    func seed(
+        maximumBatchSize: Int = PerformanceFixtureScale.batchSize
+    ) async throws -> PerformanceFixtureSeedMetrics {
+        precondition(maximumBatchSize > 0)
+
+        var batchCount = 0
+        var largestBatchSize = 0
+        var streamedRecordCount = 0
+        for batch in generator.batches(maximumBatchSize: maximumBatchSize) {
+            // Keep the explicit guard next to the production vault write. The
+            // generator also enforces this, but the seeder is the last line of
+            // defense against an accidental unbounded fixture source.
+            guard batch.count <= maximumBatchSize else {
+                throw PerformanceFixtureError.batchExceedsLimit(
+                    actual: batch.count,
+                    limit: maximumBatchSize
+                )
+            }
+            guard let kind = batch.first?.kind,
+                  batch.allSatisfy({ $0.kind == kind })
+            else {
+                throw PerformanceFixtureError.invalidBatch
+            }
+
+            batchCount += 1
+            largestBatchSize = max(largestBatchSize, batch.count)
+            streamedRecordCount += batch.count
+            try await vault.write { database in
+                try self.seed(batch, kind: kind, into: database)
+            }
         }
+        // A selection arrives from the cached production workspace graph. Load
+        // it once outside the timed detail samples so this benchmark measures
+        // selection-to-detail data, not a fresh 10k-item graph decode.
+        selectedDetailWorkItem = try await workItems().first {
+            $0.id.rawValue == workItemID(0)
+        }
+        return PerformanceFixtureSeedMetrics(
+            batchCount: batchCount,
+            largestBatchSize: largestBatchSize,
+            streamedRecordCount: streamedRecordCount
+        )
     }
 
     func recordCounts() async throws -> [String: Int] {
@@ -211,29 +296,28 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    /// Exercises the production compact workspace-observation pipeline. This
-    /// is the read that gives a cached account/organization switch its first
-    /// coherent presentation, rather than a benchmark-only SQL approximation.
+    /// Exercises the page-first production Inbox observation used by a cached
+    /// account/organization switch. The complete graph remains an independent
+    /// notification/search projection, so it cannot block this first page.
     func cachedWorkspaceSnapshot() async throws -> Int {
-        let service = WorkspaceDatabaseObservationService(
-            bridge: await vault.workspaceObservationBridge()
-        )
-        let values = service.values(for: scope, selectedWorkItemID: nil)
-        for try await snapshot in values {
-            return snapshot.workItems.count
+        let observer = DatabaseInboxPageObserver(resolveVault: { [vault] _ in vault })
+        let snapshots = try await observer.snapshots(for: scope)
+        for try await snapshot in snapshots {
+            return snapshot.items.count
         }
         throw CancellationError()
     }
 
-    /// The native Inbox is derived from the full production work-item graph.
-    /// There is no paged Inbox repository yet, so retain the production graph
-    /// contract and its local eligibility rule instead of issuing private SQL.
+    /// Exercises the production Inbox page query and decodes only the first
+    /// 50 authoritative graphs. This deliberately avoids materializing the
+    /// remaining fixture work items before applying the page boundary.
     func inboxFirstPage() async throws -> Int {
-        let workItems = try await workItems()
-        return workItems.lazy
-            .filter { InboxEligibilityRule().disposition(for: $0, at: .now) == .inbox }
-            .prefix(PerformanceFixtureQueryShape.inboxPageLimit)
-            .count
+        try await WorkItemRepository(vault: vault).fetchInboxPage(
+            scope: scope,
+            at: .now,
+            freshness: FreshnessState(status: .fresh),
+            limit: PerformanceFixtureQueryShape.inboxPageLimit
+        ).count
     }
 
     func searchFirstPage() async throws -> Int {
@@ -248,8 +332,7 @@ final class PerformanceFixtureStore: @unchecked Sendable {
     /// Detail views load the selected item's authoritative local source and a
     /// bounded timeline page through the production detail repository.
     func detailInitialPresentation() async throws -> Int {
-        let workItems = try await workItems()
-        guard let item = workItems.first(where: { $0.id.rawValue == workItemID(0) }) else {
+        guard let item = selectedDetailWorkItem else {
             throw PerformanceFixtureError.missingSelectedWorkItem
         }
         let repository = WorkDetailRepository(vault: vault)
@@ -302,8 +385,38 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         )
     }
 
-    private func seedRepositories(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.repositories {
+    private func seed(
+        _ batch: [PerformanceFixtureRecord],
+        kind: PerformanceFixtureRecordKind,
+        into database: Database
+    ) throws {
+        let indexes = batch.map(\.ordinal)
+        switch kind {
+        case .repository:
+            try seedRepositories(indexes, into: database)
+        case .workItem:
+            try seedWorkItems(indexes, into: database)
+            try seedSearchDocuments(indexes, into: database)
+        case .timelineEvent:
+            try seedTimeline(indexes, into: database)
+        case .project:
+            try seedProjects(indexes, into: database)
+        case .projectItem:
+            try seedProjectItems(indexes, into: database)
+        case .discussion:
+            try seedDiscussions(indexes, into: database)
+        case .searchableComment:
+            try seedComments(indexes, into: database)
+        case .discussionReply, .actionableItem:
+            // These are documented subsets of comments and work items. Their
+            // rows are inserted with their owning streamed records so the
+            // production-scale counts stay identical to the benchmark fixture.
+            break
+        }
+    }
+
+    private func seedRepositories(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let id = repositoryID(index)
             try database.execute(
                 sql: """
@@ -327,8 +440,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedWorkItems(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.workItems {
+    private func seedWorkItems(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let nodeID = workNodeID(index)
             let workID = workItemID(index)
             try insertNode(
@@ -392,8 +505,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedProjects(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.projects {
+    private func seedProjects(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let nodeID = "project-node-\(index)"
             try insertNode(
                 id: nodeID,
@@ -412,7 +525,10 @@ final class PerformanceFixtureStore: @unchecked Sendable {
                 arguments: [nodeID, organizationID, index + 1, "Benchmark project \(index)", Int64(index)]
             )
         }
-        for index in 0..<PerformanceFixtureScale.projectItems {
+    }
+
+    private func seedProjectItems(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let nodeID = "project-item-node-\(index)"
             try insertNode(
                 id: nodeID,
@@ -437,8 +553,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedDiscussions(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.discussions {
+    private func seedDiscussions(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let nodeID = discussionNodeID(index)
             try insertNode(
                 id: nodeID,
@@ -460,8 +576,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedComments(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.searchableComments {
+    private func seedComments(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let isReply = index < PerformanceFixtureScale.discussionReplies
             let nodeID = "comment-node-\(index)"
             let parentID = isReply
@@ -492,8 +608,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedTimeline(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.timelineEvents {
+    private func seedTimeline(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             let subjectNodeID = workNodeID(index % PerformanceFixtureScale.workItems)
             let occurredAt = Date(timeIntervalSince1970: TimeInterval(index) / 1_000)
             let event = TimelineEventSummary(
@@ -518,8 +634,8 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         }
     }
 
-    private func seedSearchDocuments(_ database: Database) throws {
-        for index in 0..<PerformanceFixtureScale.workItems {
+    private func seedSearchDocuments(_ indexes: [Int], into database: Database) throws {
+        for index in indexes {
             try database.execute(
                 sql: """
                     INSERT INTO search_documents (
@@ -577,4 +693,6 @@ final class PerformanceFixtureStore: @unchecked Sendable {
 
 private enum PerformanceFixtureError: Error {
     case missingSelectedWorkItem
+    case batchExceedsLimit(actual: Int, limit: Int)
+    case invalidBatch
 }

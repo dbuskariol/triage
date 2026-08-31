@@ -23,9 +23,13 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
         GitHubRequestPriority,
         SynchronizationReconciliationIntent
     ) async throws -> Void
+    /// Creates the per-request work-refresh pipeline. Production uses the
+    /// default factory below; deterministic acceptance tests may substitute a
+    /// bounded local source without changing the source pipeline itself.
+    typealias RefreshPipelineFactory = @Sendable (GitHubRequestPriority) -> RefreshPipeline
 
     private let vault: AccountVault
-    private let refreshPipeline: RefreshPipeline
+    private let refreshPipelineFactory: RefreshPipelineFactory
 
     init(
         vault: AccountVault,
@@ -33,32 +37,45 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
-        organizationAIController: OrganizationAIController? = nil
+        organizationAIController: OrganizationAIController? = nil,
+        businessDayPolicyProvider: @escaping @Sendable () -> BusinessDayPolicy = { .init() }
     ) {
-        self.vault = vault
-        refreshPipeline = { account, organization, synchronizationScope, requestPriority, reconciliationIntent in
-            _ = try await OrganizationWorkRefreshService(
-                credentialReader: credentialReader,
-                vaultRegistry: vaultRegistry,
-                secretStore: secretStore,
-                rateLimitControllers: rateLimitControllers,
-                requestPriority: requestPriority,
-                organizationAIController: organizationAIController
-            ).refresh(
-                account: account,
-                organization: organization,
-                synchronizationScope: synchronizationScope,
-                reconciliationIntent: reconciliationIntent
-            )
-        }
+        self.init(
+            vault: vault,
+            refreshPipelineFactory: { requestPriority in
+                { account, organization, synchronizationScope, _, reconciliationIntent in
+                    _ = try await OrganizationWorkRefreshService(
+                        credentialReader: credentialReader,
+                        vaultRegistry: vaultRegistry,
+                        secretStore: secretStore,
+                        rateLimitControllers: rateLimitControllers,
+                        requestPriority: requestPriority,
+                        organizationAIController: organizationAIController,
+                        businessDayPolicyProvider: businessDayPolicyProvider
+                    ).refresh(
+                        account: account,
+                        organization: organization,
+                        synchronizationScope: synchronizationScope,
+                        reconciliationIntent: reconciliationIntent
+                    )
+                }
+            }
+        )
     }
 
     init(
         vault: AccountVault,
         refreshPipeline: @escaping RefreshPipeline
     ) {
+        self.init(vault: vault, refreshPipelineFactory: { _ in refreshPipeline })
+    }
+
+    init(
+        vault: AccountVault,
+        refreshPipelineFactory: @escaping RefreshPipelineFactory
+    ) {
         self.vault = vault
-        self.refreshPipeline = refreshPipeline
+        self.refreshPipelineFactory = refreshPipelineFactory
     }
 
     func refresh(
@@ -75,6 +92,7 @@ struct AccountOrganizationRefreshOperation: AccountOrganizationRefreshOperating 
             for: request.synchronizationScope
         )
         try Task.checkCancellation()
+        let refreshPipeline = refreshPipelineFactory(request.requestPriority)
         try await refreshPipeline(
             account,
             organization,

@@ -8,6 +8,7 @@ import Foundation
 final class TriageUITestFixture {
     enum Scenario: String {
         case workspace
+        case performanceWorkspace = "performance-workspace"
         case onboarding
         case notificationRoute = "notification-route"
     }
@@ -77,7 +78,7 @@ final class TriageUITestFixture {
             )
         }
 
-        let data = try FixtureData.make()
+        let data = try FixtureData.make(scenario: scenario)
         return TriageUITestFixture(
             defaults: defaults,
             vaultRegistry: vaultRegistry,
@@ -192,12 +193,17 @@ private actor FixtureOrganizationAIControllers: OrganizationAIControllerProvidin
     }
 
     func evict(accountID _: AccountID) async {}
+
+    func evictAll() async {}
 }
 
 private enum FixtureData {
     static let date = Date(timeIntervalSince1970: 1_735_689_600)
+    static let performanceWorkspaceItemCount = 10_000
 
-    static func make() throws -> (snapshot: AccountSessionSnapshot, workByScope: [SynchronizationScope: [WorkItem]]) {
+    static func make(
+        scenario: TriageUITestFixture.Scenario
+    ) throws -> (snapshot: AccountSessionSnapshot, workByScope: [SynchronizationScope: [WorkItem]]) {
         let primaryAccount = account("00000000-0000-4000-8000-000000000001", login: "fixture-primary", name: "Fixture Primary")
         let secondaryAccount = account("00000000-0000-4000-8000-000000000002", login: "fixture-secondary", name: "Fixture Secondary")
         let acme = organization("fixture-org-acme", login: "fixture-acme", name: "Fixture Acme")
@@ -217,10 +223,22 @@ private enum FixtureData {
             ],
             accountCapabilitiesByAccount: [primaryAccount.id: primaryCapability, secondaryAccount.id: secondaryCapability]
         )
+        let acmeWork: [WorkItem]
+        if scenario == .performanceWorkspace {
+            acmeWork = performanceWorkItems(scope: acmeScope)
+        } else {
+            acmeWork = [
+                workItem(
+                    scope: acmeScope,
+                    key: "acme-1",
+                    title: "Fixture Acme keyboard accessibility smoke"
+                )
+            ]
+        }
         return (
             snapshot,
             [
-                acmeScope: [workItem(scope: acmeScope, key: "acme-1", title: "Fixture Acme keyboard accessibility smoke")],
+                acmeScope: acmeWork,
                 betaScope: [workItem(scope: betaScope, key: "beta-1", title: "Fixture Beta notification route work")],
                 studioScope: [workItem(scope: studioScope, key: "studio-1", title: "Fixture Studio account switch work")]
             ]
@@ -351,6 +369,58 @@ private enum FixtureData {
             lastRelevantActivityAt: date,
             score: .init(value: 100, breakdown: ["fixture": 100])
         )
+    }
+
+    /// A DEBUG-only in-memory workload for UI scrolling acceptance. Its titles,
+    /// identifiers, and scores are deterministic fixture values rather than
+    /// user content; it creates no network, Keychain, or production-vault data.
+    private static func performanceWorkItems(scope: SynchronizationScope) -> [WorkItem] {
+        let repository = RepositorySummary(
+            id: RepositoryID(rawValue: "fixture-performance-repository")!,
+            nodeID: GitHubNodeID(rawValue: "fixture-performance-repository-node")!,
+            ownerLogin: "fixture",
+            name: "performance",
+            isPrivate: true,
+            isArchived: false,
+            hasDiscussions: false,
+            url: URL(string: "https://github.example.invalid/fixture/performance")!
+        )
+        return (0..<performanceWorkspaceItemCount).map { index in
+            let ordinal = String(format: "%05d", index + 1)
+            let workItemID = WorkItemID(rawValue: "fixture-performance-work-\(ordinal)")!
+            return WorkItem(
+                id: workItemID,
+                accountID: scope.accountID,
+                organizationID: scope.organizationID,
+                primaryNodeID: GitHubNodeID(rawValue: "fixture-performance-node-\(ordinal)")!,
+                title: "Performance fixture work \(ordinal)",
+                state: .active,
+                sourceKind: .issue,
+                sourceURL: nil,
+                repository: repository,
+                members: [],
+                contextLinks: [],
+                relations: [],
+                attentionReasons: [
+                    .init(
+                        id: "fixture-performance-attention-\(ordinal)",
+                        category: .directResponsibility,
+                        ruleID: "fixture.performance",
+                        ruleVersion: 1,
+                        strength: 100,
+                        title: "Fixture performance attention",
+                        explanation: "Deterministic local performance fixture evidence.",
+                        evidence: [],
+                        evaluatedAt: date
+                    )
+                ],
+                actionItems: [],
+                workflow: .init(updatedAt: date),
+                freshness: .init(status: .fresh, lastSuccessfulSyncAt: date),
+                lastRelevantActivityAt: date.addingTimeInterval(TimeInterval(-index)),
+                score: .init(value: performanceWorkspaceItemCount - index, breakdown: ["fixture": 100])
+            )
+        }
     }
 }
 #endif
