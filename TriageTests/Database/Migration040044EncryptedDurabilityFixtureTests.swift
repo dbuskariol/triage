@@ -7,9 +7,9 @@ import XCTest
 /// individual repositories validate their domain semantics elsewhere; this
 /// fixture verifies that their durable evidence keeps its guarantees after an
 /// encrypted-vault restart.
-final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
-    func testMigration040Through045EvidenceAndReceiptsSurviveEncryptedRestartAndCompaction() async throws {
-        let fixture = try await Migration040045EncryptedFixture()
+final class Migration040046EncryptedDurabilityFixtureTests: XCTestCase {
+    func testMigration040Through046EvidenceAndReceiptsSurviveEncryptedRestartAndCompaction() async throws {
+        let fixture = try await Migration040046EncryptedFixture()
         defer { fixture.remove() }
         try await fixture.persistMatrix()
         try await fixture.registry.closeAll()
@@ -20,7 +20,7 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
         let vault = try await reopenedRegistry.open(accountID: fixture.accountID, vaultKey: fixture.vaultKey)
         defer { Task { try? await reopenedRegistry.closeAll() } }
 
-        let durableState = try await vault.read { database -> ([String: String], Int, Int, Int, Int, Data?) in
+        let durableState = try await vault.read { database -> ([String: String], [String: Int], Data?) in
             let migrations = Dictionary(uniqueKeysWithValues: try Row.fetchAll(
                 database,
                 sql: """
@@ -31,7 +31,8 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
                         '042-derived-intelligence-revision-evidence-v1',
                         '043-review-candidate-complete-traversal-receipts-v1',
                         '044-workspace-query-performance-indexes-v1',
-                        '045-review-candidate-receipt-append-only-v1'
+                        '045-review-candidate-receipt-append-only-v1',
+                        '046-post-account-identity-replay-receipts-v1'
                     ) ORDER BY id
                     """
             ).map { row in
@@ -39,10 +40,15 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
             })
             return (
                 migrations,
-                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_envelopes") ?? 0,
-                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM notification_replay_receipts") ?? 0,
-                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM rule_evaluation_evidence") ?? 0,
-                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts") ?? 0,
+                [
+                    "failureEnvelopes": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_envelopes") ?? 0,
+                    "notificationReceipts": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM notification_replay_receipts") ?? 0,
+                    "derivedEvidence": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM rule_evaluation_evidence") ?? 0,
+                    "reviewReceipts": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts") ?? 0,
+                    "accountInventoryReceipts": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM account_organization_inventory_replay_receipts") ?? 0,
+                    "accountInventoryPages": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM account_organization_inventory_replay_receipt_pages") ?? 0,
+                    "organizationMetadataReceipts": try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM organization_metadata_replay_receipts") ?? 0
+                ],
                 try Data.fetchOne(
                     database,
                     sql: "SELECT payload FROM raw_api_snapshots WHERE id = ?",
@@ -57,13 +63,19 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
             "042-derived-intelligence-revision-evidence-v1": "aee0510ac9a74c252acf9cf2d8227ebd7da278fa879d9fa64efa5a2370a0285f",
             "043-review-candidate-complete-traversal-receipts-v1": "1e339b7fbdaa9acafb7463f213ab27828b8d5e0a1d74cbb6d51a79c2620d8802",
             "044-workspace-query-performance-indexes-v1": "8b9e0ec0885167e950ef210c8d3a8697559ca1e1c897c41069830417afb90188",
-            "045-review-candidate-receipt-append-only-v1": "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95"
+            "045-review-candidate-receipt-append-only-v1": "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95",
+            "046-post-account-identity-replay-receipts-v1": "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
         ])
-        XCTAssertEqual(durableState.1, 1, "040 failure envelope must survive restart")
-        XCTAssertEqual(durableState.2, 1, "041 notification receipt must survive restart")
-        XCTAssertEqual(durableState.3, 1, "042 evidence binding must survive restart")
-        XCTAssertEqual(durableState.4, 1, "043 review completion receipt must survive restart")
-        XCTAssertEqual(durableState.5, Data("\(fixture.plaintextMarker)::discussion".utf8))
+        XCTAssertEqual(durableState.1, [
+            "failureEnvelopes": 1,
+            "notificationReceipts": 1,
+            "derivedEvidence": 1,
+            "reviewReceipts": 1,
+            "accountInventoryReceipts": 1,
+            "accountInventoryPages": 1,
+            "organizationMetadataReceipts": 1
+        ])
+        XCTAssertEqual(durableState.2, Data("\(fixture.plaintextMarker)::discussion".utf8))
 
         let removed = try await RawAPISnapshotRepository(vault: vault).compact(
             accountID: fixture.accountID,
@@ -80,6 +92,8 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
             fixture.notificationSnapshotID.rawValue,
             fixture.derivedEvidenceSnapshotID.rawValue,
             fixture.reviewReceiptSnapshotID.rawValue,
+            fixture.accountInventorySnapshotID.rawValue,
+            fixture.organizationMetadataSnapshotID.rawValue,
             fixture.newestSnapshotID.rawValue
         ])))
         XCTAssertFalse(retained.contains(fixture.discussionSnapshotID.rawValue))
@@ -87,7 +101,7 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
     }
 
     func testEncryptedFixtureAccountIsolationDoesNotLeakRawEvidenceAcrossVaults() async throws {
-        let fixture = try await Migration040045EncryptedFixture()
+        let fixture = try await Migration040046EncryptedFixture()
         defer { fixture.remove() }
         try await fixture.persistMatrix()
 
@@ -142,24 +156,27 @@ final class Migration040045EncryptedDurabilityFixtureTests: XCTestCase {
     }
 }
 
-private final class Migration040045EncryptedFixture: @unchecked Sendable {
+private final class Migration040046EncryptedFixture: @unchecked Sendable {
     let rootDirectory: URL
     let accountID = AccountID(rawValue: "migration-matrix-account")!
     let organizationID = OrganizationID(rawValue: "migration-matrix-organization")!
     let reviewStreamID = SyncStreamID(rawValue: "migration-matrix-reviews")!
     let notificationStreamID = SyncStreamID(rawValue: "migration-matrix-notifications")!
+    let organizationMetadataStreamID = SyncStreamID(rawValue: "migration-matrix-organization-metadata")!
     let credentialRevision = CredentialRevision(rawValue: "migration-matrix-credential")!
     let capabilityRevision = CapabilityRevision(rawValue: "migration-matrix-capability")!
     let vaultKey: VaultKey
     let registry: VaultRegistry
     let vault: AccountVault
     let date = Date(timeIntervalSinceReferenceDate: 50_000)
-    let plaintextMarker = "migration-040-044-secret-marker"
+    let plaintextMarker = "migration-040-046-secret-marker"
 
     let failureSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-failure")!
     let notificationSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-notification")!
     let derivedEvidenceSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-derived")!
     let reviewReceiptSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-review-receipt")!
+    let accountInventorySnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-account-inventory")!
+    let organizationMetadataSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-organization-metadata")!
     let discussionSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-discussion")!
     let unprotectedSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-unprotected")!
     let newestSnapshotID = RawAPISnapshotID(rawValue: "migration-matrix-newest")!
@@ -171,7 +188,7 @@ private final class Migration040045EncryptedFixture: @unchecked Sendable {
 
     init() async throws {
         rootDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            ".migration-040-044-encrypted-fixtures-\(UUID().uuidString)",
+            ".migration-040-046-encrypted-fixtures-\(UUID().uuidString)",
             isDirectory: true
         )
         vaultKey = try VaultKey.generate()
@@ -247,6 +264,21 @@ private final class Migration040045EncryptedFixture: @unchecked Sendable {
         )
         try await GitHubNodeRepository(vault: vault).save(node)
         workItemID = try await WorkItemRepository(vault: vault).ensureWorkItem(for: node)
+        try await vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO sync_streams (
+                        id, account_id, organization_id, feature, high_water_ms,
+                        last_successful_at_ms, last_attempt_at_ms, state, failure_detail
+                    ) VALUES (?, ?, ?, 'organizationMetadata', NULL, NULL, NULL, 'complete', NULL)
+                    """,
+                arguments: [
+                    organizationMetadataStreamID.rawValue,
+                    accountID.rawValue,
+                    organizationID.rawValue
+                ]
+            )
+        }
     }
 
     func persistMatrix() async throws {
@@ -256,8 +288,10 @@ private final class Migration040045EncryptedFixture: @unchecked Sendable {
             (notificationSnapshotID, 1),
             (derivedEvidenceSnapshotID, 2),
             (reviewReceiptSnapshotID, 3),
-            (discussionSnapshotID, 4),
-            (unprotectedSnapshotID, 5),
+            (accountInventorySnapshotID, 4),
+            (organizationMetadataSnapshotID, 5),
+            (discussionSnapshotID, 6),
+            (unprotectedSnapshotID, 7),
             (newestSnapshotID, 120)
         ]
         for (id, offset) in snapshots {
@@ -405,6 +439,64 @@ private final class Migration040045EncryptedFixture: @unchecked Sendable {
                               'GET /repos/matrix-org/matrix/pulls/4044/reviews', 1)
                     """,
                 arguments: [reviewReceiptSnapshotID.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organization_inventory_replay_receipts (
+                        id, account_id, credential_revision, request_key, etag, last_modified,
+                        parser_version, source_revision, normalized_digest, page_count,
+                        organization_count, observed_at_ms, committed_at_ms, validated_at_ms, receipt_version
+                    ) VALUES ('migration-matrix-account-inventory', ?, ?,
+                              'GET /user/orgs?per_page=100', 'fixture-account-inventory', NULL,
+                              1, 'migration-matrix-account-source', ?, 1, 1, ?, ?, ?, 1)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    credentialRevision.rawValue,
+                    Data(repeating: 0x51, count: 32),
+                    milliseconds,
+                    milliseconds,
+                    milliseconds
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organization_inventory_replay_receipt_pages (
+                        receipt_id, page_ordinal, raw_snapshot_id, request_key, raw_payload_digest,
+                        organization_ids_digest, is_terminal
+                    ) VALUES ('migration-matrix-account-inventory', 1, ?,
+                              'GET /user/orgs?per_page=100', ?, ?, 1)
+                    """,
+                arguments: [
+                    accountInventorySnapshotID.rawValue,
+                    Data(repeating: 0x52, count: 32),
+                    Data(repeating: 0x53, count: 32)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO organization_metadata_replay_receipts (
+                        id, account_id, organization_id, feature, stream_id, credential_revision,
+                        capability_revision, request_key, etag, last_modified, raw_snapshot_id,
+                        raw_payload_digest, normalized_digest, parser_version, source_revision,
+                        observed_at_ms, committed_at_ms, validated_at_ms, receipt_version
+                    ) VALUES ('migration-matrix-organization-metadata', ?, ?, 'organizationMetadata', ?, ?, ?,
+                              'GET /orgs/matrix-org', 'fixture-organization-metadata', NULL, ?, ?, ?, 1,
+                              'migration-matrix-organization-source', ?, ?, ?, 1)
+                    """,
+                arguments: [
+                    accountID.rawValue,
+                    organizationID.rawValue,
+                    organizationMetadataStreamID.rawValue,
+                    credentialRevision.rawValue,
+                    capabilityRevision.rawValue,
+                    organizationMetadataSnapshotID.rawValue,
+                    Data(repeating: 0x54, count: 32),
+                    Data(repeating: 0x55, count: 32),
+                    milliseconds,
+                    milliseconds,
+                    milliseconds
+                ]
             )
         }
     }

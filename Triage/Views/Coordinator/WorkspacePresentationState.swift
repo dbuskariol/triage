@@ -60,6 +60,10 @@ struct WorkspacePresentationState: Equatable {
     let synchronizationStatus: SynchronizationStatus
     let synchronizationDetail: String?
     let lastSuccessfulSyncAt: Date?
+    /// True only when no local rows could be loaded after a cache/vault
+    /// restoration failure. The root uses this to avoid presenting an empty
+    /// queue as a successful result.
+    let shouldPresentUnavailableQueue: Bool
 
     init(
         workItems: [WorkItem],
@@ -70,6 +74,7 @@ struct WorkspacePresentationState: Equatable {
         isRefreshing: Bool,
         refreshError: String?,
         workspaceFreshness: FreshnessState? = nil,
+        restorationError: String? = nil,
         now: Date
     ) {
         self.selectedAccountID = selectedAccountID
@@ -91,10 +96,12 @@ struct WorkspacePresentationState: Equatable {
             hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
             isRefreshing: isRefreshing,
             refreshError: refreshError,
-            workspaceFreshness: workspaceFreshness
+            workspaceFreshness: workspaceFreshness,
+            hasRestorationFailure: restorationError != nil
         )
         synchronizationStatus = status.status
         synchronizationDetail = status.detail
+        shouldPresentUnavailableQueue = restorationError != nil && workItems.isEmpty
         lastSuccessfulSyncAt = workspaceFreshness?.lastSuccessfulSyncAt
             ?? workItems.compactMap(\.freshness.lastSuccessfulSyncAt).max()
     }
@@ -134,7 +141,8 @@ struct WorkspacePresentationState: Equatable {
         hasSSOAuthorizationHeader: Bool,
         isRefreshing: Bool,
         refreshError: String?,
-        workspaceFreshness: FreshnessState?
+        workspaceFreshness: FreshnessState?,
+        hasRestorationFailure: Bool
     ) -> (status: SynchronizationStatus, detail: String?) {
         guard selectedAccountID != nil else {
             return (.noAccount, "Connect a GitHub account to view work.")
@@ -142,6 +150,10 @@ struct WorkspacePresentationState: Equatable {
 
         guard selectedOrganizationID != nil else {
             return (.noOrganization, "Choose an organization to view its local work queue.")
+        }
+
+        if hasRestorationFailure, workItems.isEmpty {
+            return (.unavailable, "Triage could not load local work for this organization.")
         }
 
         if isRefreshing {
@@ -167,6 +179,10 @@ struct WorkspacePresentationState: Equatable {
 
         if hasSSOAuthorizationHeader {
             return (.ssoRequired, "Authorize this account with your organization to refresh its work.")
+        }
+
+        if hasRestorationFailure {
+            return (.partial, "Triage could not load all local work for this organization. Showing available local work.")
         }
 
         if let workspaceFreshness {

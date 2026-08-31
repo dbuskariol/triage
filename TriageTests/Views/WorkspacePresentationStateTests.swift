@@ -228,6 +228,46 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationDetail, "GitHub did not complete the first synchronization.")
     }
 
+    func testCacheRestorationFailureWithoutRowsIsExplicitlyUnavailable() {
+        let state = WorkspacePresentationState(
+            workItems: [],
+            selectedAccountID: accountID,
+            selectedOrganizationID: organizationID,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: true,
+            refreshError: nil,
+            restorationError: "/private/path/to/vault could not be read",
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .unavailable)
+        XCTAssertEqual(state.synchronizationDetail, "Triage could not load local work for this organization.")
+        XCTAssertTrue(state.shouldPresentUnavailableQueue)
+        XCTAssertFalse(state.synchronizationDetail?.contains("/private/path") ?? true)
+    }
+
+    func testCacheRestorationFailureKeepsAvailableRowsVisibleAsPartial() {
+        let state = WorkspacePresentationState(
+            workItems: [makeWorkItem(id: "cached", freshness: .fresh)],
+            selectedAccountID: accountID,
+            selectedOrganizationID: organizationID,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: false,
+            refreshError: nil,
+            restorationError: "Database error",
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(
+            state.synchronizationDetail,
+            "Triage could not load all local work for this organization. Showing available local work."
+        )
+        XCTAssertFalse(state.shouldPresentUnavailableQueue)
+    }
+
     func testAuthoritativeFreshEmptyCoverageRemainsAnEmptyQueue() {
         let state = makeState(
             workItems: [],

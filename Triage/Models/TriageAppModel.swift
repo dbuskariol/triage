@@ -90,6 +90,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     @Published private(set) var isRefreshing = false
     @Published private(set) var isConnecting = false
     @Published private(set) var restorationError: String?
+    /// Scoped to the currently selected workspace. Account-session recovery
+    /// notices remain in `restorationError` and must not make a later,
+    /// successfully loaded organization appear unavailable.
+    @Published private(set) var workspaceRestorationError: String?
     @Published private(set) var ssoAuthorizationHeader: GitHubSSOHeader?
     @Published private(set) var selectedOrganizationFreshness: FreshnessState?
     @Published private(set) var selectedWorkspaceCoverage: CoverageEvaluation?
@@ -176,6 +180,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         await cancelWorkspaceObservationAndWait()
         cachedWorkItems = WorkspacePresentationCache()
         cachedWorkspaceScopes = [:]
+        workspaceRestorationError = nil
         accounts = session.accounts
         organizationsByAccount = session.organizationsByAccount
         organizationAccessesByAccount = session.organizationAccessesByAccount
@@ -195,6 +200,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     ) {
         cachedWorkItems[scope] = workItems
         cachedWorkspaceScopes[scope.accountID, default: [:]][scope.organizationID] = scope
+        if selectedAccountID == scope.accountID, selectedOrganizationID == scope.organizationID {
+            workspaceRestorationError = nil
+        }
         present(workItems: workItems)
     }
 
@@ -318,6 +326,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             workspaceActivation.cancel()
         }
         invalidateWorkspaceObservation()
+        workspaceRestorationError = nil
         selectedAccountID = accountID
         selectedOrganizationID = organizationsByAccount[accountID]?.first?.id
         presentCachedWorkItems()
@@ -331,6 +340,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         invalidateBackgroundRefreshScheduling()
         invalidateRefreshState()
         invalidateWorkspaceObservation()
+        workspaceRestorationError = nil
         selectedOrganizationID = organizationID
         presentCachedWorkItems()
         activateSelectedOrganization()
@@ -543,8 +553,93 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await self?.refreshInactiveOrganizations()
         }
         await capabilityRefreshScheduler.start(cadence: .dailyCapabilityProbe) { [weak self] in
+            await self?.refreshDailyActiveAccountIdentityAndInventory()
             await self?.refreshSelectedOrganizationAfterAccessCheck()
         }
+    }
+
+    /// The daily active-account check owns `/user` and post-account
+    /// `/user/orgs` validation. It runs before the existing selected-org
+    /// capability check, so `/orgs/{org}` continues to receive its exact
+    /// persisted synchronization scope. First connection stays on its
+    /// unconditional AccountConnectionService path.
+    private func refreshDailyActiveAccountIdentityAndInventory() async {
+        guard !isShuttingDown,
+              !isCredentialMutationInProgress,
+              let account = accounts.first(where: { $0.id == selectedAccountID }),
+              account.credentialStatus == .active,
+              !accountsBeingRemoved.contains(account.id)
+        else {
+            return
+        }
+        do {
+            let secretStore = KeychainSecretStore()
+            let vaultRegistry = try requiredVaultRegistry()
+            let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
+            let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
+            let rateLimitController = try await GitHubRateLimitControllerRegistry.shared.controller(
+                for: account.id,
+                vault: vault
+            )
+            let client = GitHubRESTClient(
+                transport: try GitHubRESTTransport(),
+                credential: try await AccountCredentialReader(secretStore: secretStore)
+                    .accessToken(for: account),
+                rateLimitController: rateLimitController,
+                requestPriority: .selectedOrganizationRefresh
+            )
+            let identityClient = GitHubIdentityClient(client: client)
+            let inventoryReplay = PostAccountOrganizationInventoryReplayService(
+                client: identityClient,
+                receipts: PostAccountIdentityReplayReceiptRepository(vault: vault)
+            )
+            let result = try await DailyActiveAccountIdentityRefreshService(
+                vault: vault,
+                loadAuthenticatedUser: {
+                    try await identityClient.authenticatedUser().value
+                },
+                loadOrganizationInventory: { accountID, credentialRevision in
+                    try await inventoryReplay.organizations(
+                        accountID: accountID,
+                        credentialRevision: credentialRevision
+                    )
+                }
+            ).refreshIfDue(for: account)
+            guard selectedAccountID == account.id,
+                  !accountsBeingRemoved.contains(account.id)
+            else {
+                return
+            }
+            switch result {
+            case .notDue:
+                return
+            case let .refreshed(snapshot), let .inventoryUnavailable(snapshot):
+                replaceDailyIdentitySnapshot(snapshot)
+            case let .credentialRevoked(revoked):
+                if let index = accounts.firstIndex(where: { $0.id == revoked.id }) {
+                    accounts[index] = revoked
+                }
+                refreshError = "GitHub credentials need to be reconnected. Cached work remains available."
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            // A transport, receipt, or vault failure must leave the current
+            // account and organization presentation unchanged. The subsequent
+            // scoped refresh will retain its own incomplete freshness state.
+            return
+        }
+    }
+
+    private func replaceDailyIdentitySnapshot(
+        _ snapshot: DailyActiveAccountIdentityRefreshSnapshot
+    ) {
+        guard let accountIndex = accounts.firstIndex(where: { $0.id == snapshot.account.id }) else {
+            return
+        }
+        accounts[accountIndex] = snapshot.account
+        organizationsByAccount[snapshot.account.id] = snapshot.organizations
+        organizationAccessesByAccount[snapshot.account.id] = snapshot.organizationAccesses
     }
 
     /// Enters the durable due-refresh path after the ordinary selected-workspace
@@ -793,6 +888,17 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             let vaultRegistry = try requiredVaultRegistry()
             let vaultKey = try await requiredVaultKey(for: initialAccount, secretStore: secretStore)
             let vault = try await vaultRegistry.open(accountID: initialAccount.id, vaultKey: vaultKey)
+            let scope = try await AccountRepository(vault: vault).synchronizationScope(
+                for: initialAccount.id,
+                organizationID: organization.id
+            )
+            try Task.checkCancellation()
+            guard refreshGeneration == generation,
+                  selectedAccountID == initialAccount.id,
+                  selectedOrganizationID == organization.id
+            else {
+                return .completed
+            }
             let rateLimitController = try await GitHubRateLimitControllerRegistry.shared.controller(
                 for: initialAccount.id,
                 vault: vault
@@ -805,7 +911,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             )
             let probe = GitHubCapabilityProbe(
                 identityClient: GitHubIdentityClient(client: client),
-                restClient: client
+                restClient: client,
+                metadataReplayService: PostAccountOrganizationMetadataReplayService(
+                    client: GitHubIdentityClient(client: client),
+                    receipts: PostAccountIdentityReplayReceiptRepository(vault: vault)
+                )
             )
             let probedAccountCapabilities = try await probe.probeAccountCapabilities()
             let accountCapabilities = AccountCapabilitySnapshot(
@@ -815,13 +925,19 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             )
             let result = try await probe.probe(
                 organization: organization,
-                accountLogin: initialAccount.login
+                accountLogin: initialAccount.login,
+                synchronizationScope: scope
             )
             try Task.checkCancellation()
+            let confirmedScope = try await AccountRepository(vault: vault).synchronizationScope(
+                for: initialAccount.id,
+                organizationID: organization.id
+            )
             guard
                 refreshGeneration == generation,
                 selectedAccountID == initialAccount.id,
-                selectedOrganizationID == organization.id
+                selectedOrganizationID == organization.id,
+                confirmedScope == scope
             else {
                 return .completed
             }
@@ -1303,7 +1419,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                   selectedAccountID == accountID,
                   selectedOrganizationID == organizationID
             else { return }
-            restorationError = "Triage could not load cached work for the selected organization."
+            workspaceRestorationError = "Triage could not load cached work for the selected organization."
         }
     }
 

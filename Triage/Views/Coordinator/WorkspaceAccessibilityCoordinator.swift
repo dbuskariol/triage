@@ -58,6 +58,22 @@ final class WorkspaceAccessibilityCoordinator: ObservableObject {
         post("Triage could not refresh local work. Cached work remains available.")
     }
 
+    func workspaceRestorationUnavailable() {
+        post("Triage could not load local work. Try Again is available.")
+    }
+
+    func workspaceRestorationRetryStarted() {
+        post("Retrying local work.")
+    }
+
+    func workspaceRestorationRetrySucceeded() {
+        post("Local work is available again.")
+    }
+
+    func workspaceRestorationRetryFailed() {
+        post("Triage could not load local work. Try Again remains available.")
+    }
+
     func workflowCompleted(_ action: WorkflowAction) {
         post(Self.workflowAnnouncement(for: action))
     }

@@ -89,6 +89,43 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         }
     }
 
+    func testPartialPrimaryHydrationFromLabelOverflowIsProvisionalAndExcludesAI() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        // A labels connection that exceeds its allowed cardinality fails the
+        // primary hydration batch, which is recorded as partial PR coverage.
+        try await fixture.saveCoverage(feature: .pullRequests, status: .partial)
+        let eligibleAIPolicy = DerivedAIPolicy(
+            isOrganizationConsentActive: true,
+            isAuthenticationValid: true,
+            isEntitled: true,
+            hasAvailableBudget: true
+        )
+
+        let snapshot = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: eligibleAIPolicy,
+            evaluatedAt: fixture.now
+        )
+
+        XCTAssertTrue(snapshot.input.isProvisional)
+        XCTAssertEqual(snapshot.input.items[0].workItem.freshness.status, .partial)
+        XCTAssertEqual(
+            snapshot.sourceStates.first {
+                $0.workItemID == fixture.workItemID && $0.feature == .pullRequests
+            }?.availability,
+            .provisional
+        )
+        XCTAssertEqual(snapshot.input.items[0].searchDocument.labels, "")
+
+        let output = try DerivedIntelligenceCoordinator().recompute(snapshot.input)
+        XCTAssertEqual(output.coverageState, .incomplete)
+        XCTAssertTrue(output.aiCandidates.isEmpty)
+        // This fixture has no actionable attention reason, so it is not an AI
+        // candidate even under complete coverage. The critical regression is
+        // that incomplete label authority stays provisional and never queues AI.
+    }
+
     func testOldTimelinePageMembershipDoesNotAppearAsCurrentEmptyOrFreshTimeline() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

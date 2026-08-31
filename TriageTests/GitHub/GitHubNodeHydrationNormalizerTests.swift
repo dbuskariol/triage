@@ -495,6 +495,47 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         }
     }
 
+    func testIncompleteLabelsFailNormalizationAndCannotProduceCompleteCoverage() throws {
+        XCTAssertThrowsError(
+            try GitHubNodeHydrationNormalizer.normalize(
+                payload(node: pullRequest(labelsHasNextPage: true)),
+                requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                accountID: AccountID(rawValue: "account")!,
+                organizationID: OrganizationID(rawValue: "organization")!,
+                repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                observedAt: Date()
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .incompleteConnection)
+        }
+
+        let candidate = GitHubHydrationCandidate(
+            nodeID: GitHubNodeID(rawValue: "PR_1")!,
+            repositoryID: RepositoryID(rawValue: "repository")!,
+            kind: .pullRequest
+        )
+        let result = GitHubNodeHydrationRefreshResult(outcomes: [
+            .init(candidate: candidate, status: .normalizationFailed)
+        ])
+        XCTAssertEqual(result.coverageAssessment(kind: .pullRequest).status, .partial)
+        XCTAssertFalse(result.isComplete)
+    }
+
+    func testNullLabelNodeFailsNormalizationInsteadOfBeingOmitted() throws {
+        XCTAssertThrowsError(
+            try GitHubNodeHydrationNormalizer.normalize(
+                payload(node: pullRequest(containsNilLabel: true)),
+                requestedNodeIDs: [GitHubNodeID(rawValue: "PR_1")!],
+                accountID: AccountID(rawValue: "account")!,
+                organizationID: OrganizationID(rawValue: "organization")!,
+                repositoryID: { _ in RepositoryID(rawValue: "repository")! },
+                observedAt: Date()
+            )
+        ) { error in
+            XCTAssertEqual(error as? GitHubNodeHydrationNormalizationError, .incompleteConnection)
+        }
+    }
+
     private func payload(node: GitHubNodeHydrationPayload.Node) -> GitHubNodeHydrationPayload {
         GitHubNodeHydrationPayload(
             nodes: [node],
@@ -504,7 +545,9 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
 
     private func pullRequest(
         createdAt: Date = Date(timeIntervalSince1970: 1_000),
-        updatedAt: Date = Date(timeIntervalSince1970: 2_000)
+        updatedAt: Date = Date(timeIntervalSince1970: 2_000),
+        labelsHasNextPage: Bool = false,
+        containsNilLabel: Bool = false
     ) -> GitHubNodeHydrationPayload.Node {
         .init(
             typeName: "PullRequest",
@@ -536,7 +579,10 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
                 url: URL(string: "https://github.com/octo/triage")!
             ),
             assignees: .init(nodes: [], pageInfo: .init(hasNextPage: false)),
-            labels: .init(nodes: [], pageInfo: .init(hasNextPage: false)),
+            labels: .init(
+                nodes: containsNilLabel ? [nil] : [],
+                pageInfo: .init(hasNextPage: labelsHasNextPage)
+            ),
             reviewRequests: nil,
             closingIssuesReferences: nil
         )

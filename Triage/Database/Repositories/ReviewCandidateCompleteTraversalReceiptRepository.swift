@@ -23,6 +23,26 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     static let normalizedDigestLength = 32
     static let maximumEndpointLength = 2_048
     static let maximumSourceRevisionLength = 500
+    /// Mirrors the independently bounded review sources. REST review history
+    /// is capped at 100 pages. A review-thread traversal spends at least one
+    /// of its 500 GraphQL points per raw page, so it can retain at most 500
+    /// pages total. With 50 threads per root page that admits at most 490
+    /// comment connections plus the root connection.
+    static let maximumPagesPerSegment = 100
+    static let maximumGraphQLNodesPerConnectionPage = 50
+    static let maximumGraphQLPages = 500
+    static let maximumGraphQLThreadSegments = maximumGraphQLPages
+        * maximumGraphQLNodesPerConnectionPage
+        / (maximumGraphQLNodesPerConnectionPage + 1)
+    static let maximumGraphQLSegments = 1 + maximumGraphQLThreadSegments
+    static let maximumReviewPages = maximumPagesPerSegment + 1
+    static let maximumRESTReviewPayloadBytes = 2 * 1_024 * 1_024
+    static let maximumRESTRequestedReviewerPayloadBytes = 256 * 1_024
+    /// Review-thread traversal budgets aggregate GraphQL evidence at 4 MiB.
+    /// REST pages have their own source-specific limits and must not share
+    /// this aggregate cap.
+    static let maximumAggregateRawPayloadBytes = 4 * 1_024 * 1_024
+    private static let cancellationCheckInterval = 32
 
     private let vault: AccountVault
 
@@ -33,12 +53,14 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     func persist(
         _ traversal: ReviewCandidateCompleteTraversal
     ) async throws -> ReviewCandidateCompleteTraversalReceiptToken {
+        try Task.checkCancellation()
         guard traversal.scope.accountID == vault.accountID else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.accountScopeMismatch
         }
-        return try await vault.writeTransaction { database in
+        let token = try await vault.writeTransaction { database in
             try Self.persist(traversal, in: database)
         }
+        return token
     }
 
     /// Use this within the caller's publication transaction. Any raw snapshot
@@ -48,6 +70,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         _ traversal: ReviewCandidateCompleteTraversal,
         in database: Database
     ) throws -> ReviewCandidateCompleteTraversalReceiptToken {
+        try Task.checkCancellation()
         try validate(traversal, in: database)
         let token = token(for: traversal)
         let receiptID = token.id.uuidString.lowercased()
@@ -62,8 +85,15 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             return token
         }
 
-        for segment in traversal.segments {
+        var checkedPageCount = 0
+        for (segmentOffset, segment) in traversal.segments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             for page in segment.pages {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 try RawAPISnapshotRepository.save(
                     RawAPISnapshot(
                         id: page.rawSnapshotID,
@@ -79,6 +109,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                     ),
                     in: database
                 )
+                checkedPageCount += 1
             }
         }
 
@@ -101,7 +132,11 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 traversal.segments.count, traversal.segments.reduce(0) { $0 + $1.pages.count }
             ]
         )
-        for segment in traversal.segments {
+        checkedPageCount = 0
+        for (segmentOffset, segment) in traversal.segments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             let key = segmentKey(segment)
             try database.execute(
                 sql: """
@@ -116,6 +151,9 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 ]
             )
             for page in segment.pages {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 try database.execute(
                     sql: """
                         INSERT INTO review_candidate_complete_traversal_pages (
@@ -127,8 +165,10 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                         page.requestIdentity.requestKey, page.isTerminal ? 1 : 0
                     ]
                 )
+                checkedPageCount += 1
             }
         }
+        try Task.checkCancellation()
         return token
     }
 
@@ -139,6 +179,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         _ token: ReviewCandidateCompleteTraversalReceiptToken,
         in database: Database
     ) throws {
+        try Task.checkCancellation()
         do {
             try OrganizationSchedulerStateRepository.validateCurrentScope(token.scope, in: database)
         } catch OrganizationSchedulerStateRepositoryError.staleSynchronizationScope,
@@ -220,7 +261,13 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 """,
             arguments: [token.id.uuidString.lowercased()]
         )
-        guard !segments.isEmpty, segments.allSatisfy({ row in
+        guard !segments.isEmpty else {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+        }
+        for (segmentOffset, row) in segments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             let expected: Int? = row["page_count"]
             let terminalExpected: Int? = row["terminal_page_ordinal"]
             let actual: Int? = row["actual_count"]
@@ -228,13 +275,13 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             let last: Int? = row["last_ordinal"]
             let terminalCount: Int? = row["terminal_count"]
             let terminalOrdinal: Int? = row["terminal_ordinal"]
-            return expected != nil && expected! > 0 && terminalExpected == expected
+            guard expected != nil && expected! > 0 && terminalExpected == expected
                 && actual == expected && first == 1 && last == expected
                 && terminalCount == 1 && terminalOrdinal == expected
-        }) else {
-            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+            else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
         }
         try validatePersistedTopology(token, in: database)
+        try Task.checkCancellation()
     }
 
     /// Rebuilds the persisted receipt from its immutable raw bindings before
@@ -245,6 +292,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         _ token: ReviewCandidateCompleteTraversalReceiptToken,
         in database: Database
     ) throws {
+        try Task.checkCancellation()
         guard let candidateRow = try Row.fetchOne(
             database,
             sql: """
@@ -284,12 +332,19 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 """,
             arguments: [token.id.uuidString.lowercased()]
         )
+        try Task.checkCancellation()
         let grouped = Dictionary(grouping: rows) { (row: Row) -> String? in row["segment_key"] }
         guard !grouped.isEmpty, !grouped.keys.contains(nil) else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
         }
         let scope = token.scope
-        let reconstructed = try grouped.values.map { rows -> ReviewCandidateTraversalSegment in
+        var reconstructed = [ReviewCandidateTraversalSegment]()
+        reconstructed.reserveCapacity(grouped.count)
+        var checkedPageCount = 0
+        for (segmentOffset, rows) in grouped.values.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             guard let first = rows.first,
                   let key: String = first["segment_key"],
                   let kindValue: String = first["segment_kind"],
@@ -300,7 +355,12 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             guard (parentValue == nil) == (parent == nil), key == segmentKey(kind: kind, parentThreadNodeID: parent) else {
                 throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
             }
-            let pages = try rows.map { row -> ReviewCandidateTraversalPage in
+            var pages = [ReviewCandidateTraversalPage]()
+            pages.reserveCapacity(rows.count)
+            for row in rows {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 guard let ordinal: Int = row["page_ordinal"],
                       let rawValue: String = row["raw_snapshot_id"], let rawSnapshotID = RawAPISnapshotID(rawValue: rawValue),
                       let requestKey: String = row["request_key"],
@@ -310,14 +370,15 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
                 let eTag: String? = row["etag"]
                 let lastModified: String? = row["last_modified"]
-                return .init(
+                pages.append(.init(
                     ordinal: ordinal, rawSnapshotID: rawSnapshotID,
                     requestIdentity: .init(scope: scope, feature: token.feature, streamID: token.streamID, requestKey: requestKey),
                     endpoint: endpoint, eTag: eTag, lastModified: lastModified, payload: payload,
                     isTerminal: terminal == 1
-                )
+                ))
+                checkedPageCount += 1
             }
-            return .init(kind: kind, parentThreadNodeID: parent, pages: pages)
+            reconstructed.append(.init(kind: kind, parentThreadNodeID: parent, pages: pages))
         }
         let candidate = PullRequestReviewCandidate(
             nodeID: token.candidateNodeID, repositoryID: token.repositoryID,
@@ -325,18 +386,25 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         )
         var discoveredCommentNodeIDsByThread = [GitHubNodeID: [GitHubNodeID]]()
         if token.feature == .reviewThreads {
-            for segment in reconstructed where segment.kind == .threadComments {
+            for (segmentOffset, segment) in reconstructed.enumerated() where segment.kind == .threadComments {
+                if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 guard let threadNodeID = segment.parentThreadNodeID,
                       discoveredCommentNodeIDsByThread[threadNodeID] == nil
                 else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
-                let commentNodeIDs = try segment.pages.flatMap { page -> [GitHubNodeID] in
+                var commentNodeIDs = [GitHubNodeID]()
+                for (pageOffset, page) in segment.pages.enumerated() {
+                    if pageOffset.isMultiple(of: cancellationCheckInterval) {
+                        try Task.checkCancellation()
+                    }
                     guard let evidence = graphQLCommentEvidence(
                         page.payload,
                         threadNodeID: threadNodeID
                     ) else {
                         throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
                     }
-                    return evidence.commentNodeIDs
+                    commentNodeIDs.append(contentsOf: evidence.commentNodeIDs)
                 }
                 discoveredCommentNodeIDsByThread[threadNodeID] = commentNodeIDs
             }
@@ -364,6 +432,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         _ traversal: ReviewCandidateCompleteTraversal,
         in database: Database
     ) throws {
+        try Task.checkCancellation()
         guard traversal.feature == .reviews || traversal.feature == .reviewThreads else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidFeature
         }
@@ -392,6 +461,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             candidate: traversal.candidate, in: database
         )
         try validateTopology(traversal)
+        try Task.checkCancellation()
     }
 
     private nonisolated static func validateCandidate(
@@ -435,13 +505,19 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     }
 
     private nonisolated static func validateTopology(_ traversal: ReviewCandidateCompleteTraversal) throws {
+        try Task.checkCancellation()
+        try validateResourceBounds(traversal)
         guard Set(traversal.discoveredThreadNodeIDs).count == traversal.discoveredThreadNodeIDs.count,
               Set(traversal.segments.map(segmentKey)).count == traversal.segments.count,
               Set(traversal.segments.flatMap(\.pages).map(\.rawSnapshotID)).count
                 == traversal.segments.reduce(0, { $0 + $1.pages.count })
         else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
 
-        for segment in traversal.segments {
+        var checkedPageCount = 0
+        for (segmentOffset, segment) in traversal.segments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             let requiresParent = segment.kind == .threadComments
             guard requiresParent == (segment.parentThreadNodeID != nil),
                   !segment.pages.isEmpty,
@@ -451,6 +527,9 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                   })
             else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
             for page in segment.pages {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 guard page.requestIdentity.scope == traversal.scope,
                       page.requestIdentity.feature == traversal.feature,
                       page.requestIdentity.streamID == traversal.streamID,
@@ -460,6 +539,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                       !page.endpoint.contains("\r"), !page.endpoint.contains("\n"),
                       page.payload.count <= RawAPISnapshotRepository.maximumPayloadBytes
                 else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage }
+                checkedPageCount += 1
             }
         }
         switch traversal.feature {
@@ -502,6 +582,68 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         default:
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidFeature
         }
+        try Task.checkCancellation()
+    }
+
+    private nonisolated static func validateResourceBounds(
+        _ traversal: ReviewCandidateCompleteTraversal
+    ) throws {
+        let maximumSegments: Int
+        let maximumPages: Int
+        switch traversal.feature {
+        case .reviews:
+            maximumSegments = 2
+            maximumPages = maximumReviewPages
+        case .reviewThreads:
+            maximumSegments = maximumGraphQLSegments
+            maximumPages = maximumGraphQLPages
+        default:
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidFeature
+        }
+        guard traversal.segments.count <= maximumSegments else {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
+        }
+
+        var totalPages = 0
+        var totalPayloadBytes = 0
+        var checkedPageCount = 0
+        for (segmentOffset, segment) in traversal.segments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
+            guard segment.pages.count <= maximumPagesPerSegment,
+                  totalPages <= maximumPages - segment.pages.count
+            else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
+            totalPages += segment.pages.count
+            for page in segment.pages {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
+                switch traversal.feature {
+                case .reviews:
+                    let maximumPayloadBytes: Int
+                    switch segment.kind {
+                    case .reviewHistory:
+                        maximumPayloadBytes = maximumRESTReviewPayloadBytes
+                    case .requestedReviewers:
+                        maximumPayloadBytes = maximumRESTRequestedReviewerPayloadBytes
+                    default:
+                        throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
+                    }
+                    guard page.payload.count <= maximumPayloadBytes else {
+                        throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
+                    }
+                case .reviewThreads:
+                    guard page.payload.count <= maximumAggregateRawPayloadBytes - totalPayloadBytes else {
+                        throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
+                    }
+                    totalPayloadBytes += page.payload.count
+                default:
+                    throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidFeature
+                }
+                checkedPageCount += 1
+            }
+        }
     }
 
     private nonisolated static func validateRESTReviewPages(
@@ -509,7 +651,10 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         candidate: PullRequestReviewCandidate
     ) throws {
         let path = "\(candidate.repository.path)/pulls/\(candidate.number)/reviews"
-        for page in pages {
+        for (pageOffset, page) in pages.enumerated() {
+            if pageOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             guard page.endpoint == page.requestIdentity.requestKey else {
                 throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
             }
@@ -547,12 +692,19 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     ) throws {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let reviews: [GitHubPullRequestReviewDTO]
+        var reviews = [GitHubPullRequestReviewDTO]()
         let requestedReviewers: GitHubRequestedReviewersDTO
-        do {
-            reviews = try reviewPages.flatMap { page in
-                try decoder.decode([GitHubPullRequestReviewDTO].self, from: page.payload)
+        for (pageOffset, page) in reviewPages.enumerated() {
+            if pageOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
             }
+            do {
+                reviews.append(contentsOf: try decoder.decode([GitHubPullRequestReviewDTO].self, from: page.payload))
+            } catch {
+                throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
+            }
+        }
+        do {
             requestedReviewers = try decoder.decode(
                 GitHubRequestedReviewersDTO.self,
                 from: requestedReviewerPage.payload
@@ -585,7 +737,11 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         }
         var payloadThreadIDs = Set<GitHubNodeID>()
         var expectedRootCursor: String? = ""
+        var checkedPageCount = 0
         for page in rootPages {
+            if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             let expectedEndpoint = "graphql:TriagePullRequestReviewThreads/page=\(page.ordinal)"
             guard page.endpoint == expectedEndpoint,
                   graphQLCursorRequest(
@@ -593,15 +749,20 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                     prefix: "graphql:TriagePullRequestReviewThreads/pull-request=\(candidateNodeID.rawValue)/after="
                   ) == expectedRootCursor,
                   let evidence = graphQLRootEvidence(page.payload, candidateNodeID: candidateNodeID),
+                  payloadThreadIDs.isDisjoint(with: evidence.threadIDs),
                   evidence.pageInfo.isTerminal == page.isTerminal
             else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage }
             payloadThreadIDs.formUnion(evidence.threadIDs)
             expectedRootCursor = evidence.pageInfo.endCursor
+            checkedPageCount += 1
         }
         guard payloadThreadIDs == Set(discoveredThreadNodeIDs) else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
         }
-        for segment in commentSegments {
+        for (segmentOffset, segment) in commentSegments.enumerated() {
+            if segmentOffset.isMultiple(of: cancellationCheckInterval) {
+                try Task.checkCancellation()
+            }
             guard let threadNodeID = segment.parentThreadNodeID,
                   let expectedCommentNodeIDs = discoveredCommentNodeIDsByThread[threadNodeID],
                   Set(segment.pages.map(\.requestIdentity.requestKey)).count == segment.pages.count
@@ -609,6 +770,9 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             var expectedCommentCursor: String? = ""
             var payloadCommentNodeIDs = [GitHubNodeID]()
             for page in segment.pages {
+                if checkedPageCount.isMultiple(of: cancellationCheckInterval) {
+                    try Task.checkCancellation()
+                }
                 let expectedEndpoint = "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/page=\(page.ordinal)"
                 guard page.endpoint == expectedEndpoint,
                       graphQLCursorRequest(
@@ -620,6 +784,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                 else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage }
                 payloadCommentNodeIDs.append(contentsOf: evidence.commentNodeIDs)
                 expectedCommentCursor = evidence.pageInfo.endCursor
+                checkedPageCount += 1
             }
             guard payloadCommentNodeIDs.count == expectedCommentNodeIDs.count,
                   Set(payloadCommentNodeIDs) == Set(expectedCommentNodeIDs)
@@ -648,7 +813,10 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
               let pageInfo = graphQLPageInfo(connection["pageInfo"])
         else { return nil }
         let identifiers = nodes.compactMap { $0["id"] as? String }.compactMap(GitHubNodeID.init(rawValue:))
-        guard identifiers.count == nodes.count else { return nil }
+        guard identifiers.count == nodes.count,
+              identifiers.count <= maximumGraphQLNodesPerConnectionPage,
+              Set(identifiers).count == identifiers.count
+        else { return nil }
         return .init(threadIDs: Set(identifiers), pageInfo: pageInfo)
     }
 
@@ -663,7 +831,10 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
               let pageInfo = graphQLPageInfo(comments["pageInfo"])
         else { return nil }
         let identifiers = nodes.compactMap { $0["id"] as? String }.compactMap(GitHubNodeID.init(rawValue:))
-        guard identifiers.count == nodes.count else { return nil }
+        guard identifiers.count == nodes.count,
+              identifiers.count <= maximumGraphQLNodesPerConnectionPage,
+              Set(identifiers).count == identifiers.count
+        else { return nil }
         return .init(commentNodeIDs: identifiers, pageInfo: pageInfo)
     }
 

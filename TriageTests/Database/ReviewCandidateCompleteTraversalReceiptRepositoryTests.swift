@@ -210,6 +210,294 @@ final class ReviewCandidateCompleteTraversalReceiptRepositoryTests: XCTestCase {
         }
     }
 
+    func testAllowsRESTReviewTraversalWhoseAggregatePayloadExceedsGraphQLBudget() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let source = fixture.reviewTraversal()
+        let pagePayload = validJSONPayload(
+            bytes: ReviewCandidateCompleteTraversalReceiptRepository.maximumRESTReviewPayloadBytes * 3 / 4
+        )
+        let traversal = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: source.normalizedDigest,
+            segments: [
+                .init(kind: .reviewHistory, pages: [
+                    fixture.page(
+                        ordinal: 1,
+                        requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100",
+                        terminal: false,
+                        payload: pagePayload
+                    ),
+                    fixture.page(
+                        ordinal: 2,
+                        requestKey: "GET /repos/acme/repo/pulls/7/reviews?page=2&per_page=100",
+                        terminal: false,
+                        payload: pagePayload
+                    ),
+                    fixture.page(
+                        ordinal: 3,
+                        requestKey: "GET /repos/acme/repo/pulls/7/reviews?page=3&per_page=100",
+                        terminal: true,
+                        payload: pagePayload
+                    )
+                ]),
+                source.segments[1]
+            ]
+        )
+
+        _ = try await fixture.repository.persist(traversal)
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 4)
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts"), 1)
+        }
+    }
+
+    func testRejectsRESTPagesThatExceedTheirFeatureSpecificPayloadBudgets() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let source = fixture.reviewTraversal()
+        let overlargeReview = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: source.normalizedDigest,
+            segments: [
+                .init(kind: .reviewHistory, pages: [
+                    fixture.page(
+                        ordinal: 1,
+                        requestKey: "GET /repos/acme/repo/pulls/7/reviews?per_page=100",
+                        terminal: true,
+                        payload: validJSONPayload(
+                            bytes: ReviewCandidateCompleteTraversalReceiptRepository.maximumRESTReviewPayloadBytes + 1
+                        )
+                    )
+                ]),
+                source.segments[1]
+            ]
+        )
+        let overlargeRequestedReviewers = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: source.normalizedDigest,
+            segments: [
+                source.segments[0],
+                .init(kind: .requestedReviewers, pages: [
+                    fixture.page(
+                        ordinal: 1,
+                        requestKey: "GET /repos/acme/repo/pulls/7/requested_reviewers",
+                        terminal: true,
+                        payload: validJSONObjectPayload(
+                            prefix: "{\"users\":[],\"teams\":[]}",
+                            bytes: ReviewCandidateCompleteTraversalReceiptRepository.maximumRESTRequestedReviewerPayloadBytes + 1
+                        )
+                    )
+                ])
+            ]
+        )
+
+        for traversal in [overlargeReview, overlargeRequestedReviewers] {
+            await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+                XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidRawPage)
+            }
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+        }
+    }
+
+    func testRejectsGraphQLTraversalWhoseAggregatePayloadExceedsBudgetBeforeWriting() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let payload = validJSONPayload(
+            bytes: ReviewCandidateCompleteTraversalReceiptRepository.maximumAggregateRawPayloadBytes / 2 + 1
+        )
+        let traversal = ReviewCandidateCompleteTraversal(
+            scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID,
+            candidate: fixture.candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
+            observedAt: fixture.date, normalizedDigest: Data(repeating: 3, count: 32),
+            segments: [
+                .init(kind: .reviewThreads, pages: [
+                    .init(
+                        ordinal: 1, rawSnapshotID: .make(),
+                        requestIdentity: .init(scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID, requestKey: "over-budget-root-1"),
+                        endpoint: "graphql:over-budget-root-1", payload: payload, isTerminal: false
+                    ),
+                    .init(
+                        ordinal: 2, rawSnapshotID: .make(),
+                        requestIdentity: .init(scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID, requestKey: "over-budget-root-2"),
+                        endpoint: "graphql:over-budget-root-2", payload: payload, isTerminal: true
+                    )
+                ])
+            ]
+        )
+
+        await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+            XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidRawPage)
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+        }
+    }
+
+    func testRejectsSegmentWithMorePagesThanUpstreamTraversalAllowsBeforeWriting() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let source = fixture.reviewTraversal()
+        let pages = (1 ... ReviewCandidateCompleteTraversalReceiptRepository.maximumPagesPerSegment + 1).map { ordinal in
+            fixture.page(
+                ordinal: ordinal,
+                requestKey: "GET /invalid/over-page-budget/\(ordinal)",
+                terminal: ordinal == ReviewCandidateCompleteTraversalReceiptRepository.maximumPagesPerSegment + 1
+            )
+        }
+        let traversal = ReviewCandidateCompleteTraversal(
+            scope: source.scope, feature: source.feature, streamID: source.streamID,
+            candidate: source.candidate, candidateSourceRevision: source.candidateSourceRevision,
+            parserVersion: source.parserVersion, observedAt: source.observedAt,
+            normalizedDigest: source.normalizedDigest,
+            segments: [
+                .init(kind: .reviewHistory, pages: pages),
+                source.segments[1]
+            ]
+        )
+
+        await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+            XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidTraversal)
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+        }
+    }
+
+    func testRejectsGraphQLTraversalBeyondAggregatePageOrSegmentBudgetBeforeWriting() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let pageBudgetTraversal = ReviewCandidateCompleteTraversal(
+            scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID,
+            candidate: fixture.candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
+            observedAt: fixture.date, normalizedDigest: Data(repeating: 1, count: 32),
+            segments: [
+                .init(kind: .reviewThreads, pages: (1 ... 100).map { fixture.threadPage(ordinal: $0, key: "root-\($0)", terminal: $0 == 100) }),
+                .init(kind: .threadComments, parentThreadNodeID: GitHubNodeID(rawValue: "THREAD_A")!, pages: (1 ... 100).map { fixture.threadPage(ordinal: $0, key: "a-\($0)", terminal: $0 == 100) }),
+                .init(kind: .threadComments, parentThreadNodeID: GitHubNodeID(rawValue: "THREAD_B")!, pages: (1 ... 100).map { fixture.threadPage(ordinal: $0, key: "b-\($0)", terminal: $0 == 100) }),
+                .init(kind: .threadComments, parentThreadNodeID: GitHubNodeID(rawValue: "THREAD_C")!, pages: (1 ... 100).map { fixture.threadPage(ordinal: $0, key: "c-\($0)", terminal: $0 == 100) }),
+                .init(kind: .threadComments, parentThreadNodeID: GitHubNodeID(rawValue: "THREAD_D")!, pages: (1 ... 100).map { fixture.threadPage(ordinal: $0, key: "d-\($0)", terminal: $0 == 100) }),
+                .init(kind: .threadComments, parentThreadNodeID: GitHubNodeID(rawValue: "THREAD_E")!, pages: [fixture.threadPage(ordinal: 1, key: "e-1", terminal: true)])
+            ]
+        )
+        let root = fixture.graphQLRootPage(threadIDs: [])
+        let segmentBudgetTraversal = ReviewCandidateCompleteTraversal(
+            scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID,
+            candidate: fixture.candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
+            observedAt: fixture.date, normalizedDigest: Data(repeating: 2, count: 32),
+            segments: [
+                .init(kind: .reviewThreads, pages: [root])
+            ] + (1 ... ReviewCandidateCompleteTraversalReceiptRepository.maximumGraphQLSegments).map { ordinal in
+                .init(
+                    kind: .threadComments,
+                    parentThreadNodeID: GitHubNodeID(rawValue: "OVER_BUDGET_THREAD_\(ordinal)")!,
+                    pages: [fixture.threadPage(ordinal: 1, key: "over-budget-\(ordinal)", terminal: true)]
+                )
+            }
+        )
+
+        for traversal in [pageBudgetTraversal, segmentBudgetTraversal] {
+            await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+                XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidTraversal)
+            }
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+        }
+    }
+
+    func testRejectsGraphQLPagesWithMoreThanFiftyNodesOrDuplicateRootThreadIDs() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let threadIDs = (1 ... 51).map { GitHubNodeID(rawValue: "THREAD_\($0)")! }
+        let tooManyRootNodes = fixture.graphQLTraversal(
+            rootThreadIDs: threadIDs,
+            commentNodeIDsByThread: Dictionary(uniqueKeysWithValues: threadIDs.map { ($0, []) })
+        )
+        let duplicateRootThread = GitHubNodeID(rawValue: "DUPLICATE_THREAD")!
+        let duplicateRootIDs = fixture.graphQLTraversal(
+            rootThreadIDs: [duplicateRootThread],
+            rootPayloadThreadIDs: [duplicateRootThread, duplicateRootThread],
+            commentNodeIDsByThread: [duplicateRootThread: []]
+        )
+        let repeatedAcrossRootPages = ReviewCandidateCompleteTraversal(
+            scope: fixture.scope, feature: .reviewThreads, streamID: fixture.threadStreamID,
+            candidate: fixture.candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
+            observedAt: fixture.date, normalizedDigest: Data(repeating: 8, count: 32),
+            discoveredThreadNodeIDs: [duplicateRootThread],
+            discoveredCommentNodeIDsByThread: [duplicateRootThread: []],
+            segments: [
+                .init(kind: .reviewThreads, pages: [
+                    fixture.graphQLRootPage(
+                        threadIDs: [duplicateRootThread],
+                        ordinal: 1,
+                        after: "none",
+                        hasNextPage: true,
+                        endCursor: "root-cursor",
+                        terminal: false
+                    ),
+                    fixture.graphQLRootPage(
+                        threadIDs: [duplicateRootThread],
+                        ordinal: 2,
+                        after: Data("root-cursor".utf8).base64EncodedString(),
+                        hasNextPage: false,
+                        endCursor: nil,
+                        terminal: true
+                    )
+                ]),
+                .init(kind: .threadComments, parentThreadNodeID: duplicateRootThread, pages: [
+                    fixture.graphQLCommentPage(threadNodeID: duplicateRootThread, commentNodeIDs: [])
+                ])
+            ]
+        )
+        let commentThread = GitHubNodeID(rawValue: "COMMENT_THREAD")!
+        let tooManyCommentNodes = fixture.graphQLTraversal(
+            rootThreadIDs: [commentThread],
+            commentNodeIDsByThread: [
+                commentThread: (1 ... 51).map { GitHubNodeID(rawValue: "COMMENT_\($0)")! }
+            ]
+        )
+
+        for traversal in [tooManyRootNodes, duplicateRootIDs, repeatedAcrossRootPages, tooManyCommentNodes] {
+            await XCTAssertThrowsErrorAsync({ try await fixture.repository.persist(traversal) }) { error in
+                XCTAssertEqual(error as? ReviewCandidateCompleteTraversalReceiptRepositoryError, .invalidRawPage)
+            }
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+        }
+    }
+
+    func testCancelledPersistStopsBeforeOpeningReceiptTransaction() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let gate = ReceiptCancellationGate()
+        let traversal = fixture.reviewTraversal()
+        let task = Task {
+            await gate.waitUntilReleased()
+            return try await fixture.repository.persist(traversal)
+        }
+        await gate.waitUntilTaskIsWaiting()
+        task.cancel()
+        await gate.release()
+
+        await XCTAssertThrowsErrorAsync({ try await task.value }) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        try await fixture.vault.read { database in
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots"), 0)
+            XCTAssertEqual(try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts"), 0)
+        }
+    }
+
     func testTokenStopsAuthorizingAfterCandidateSourceRevisionChanges() async throws {
         let fixture = try await ReviewTraversalReceiptFixture()
         defer { fixture.remove() }
@@ -480,8 +768,121 @@ private final class ReviewTraversalReceiptFixture: @unchecked Sendable {
         .init(ordinal: ordinal, rawSnapshotID: .make(), requestIdentity: .init(scope: scope, feature: .reviewThreads, streamID: threadStreamID, requestKey: key), endpoint: "graphql/\(key)", payload: Data("{}".utf8), isTerminal: terminal)
     }
 
+    func graphQLTraversal(
+        rootThreadIDs: [GitHubNodeID],
+        rootPayloadThreadIDs: [GitHubNodeID]? = nil,
+        commentNodeIDsByThread: [GitHubNodeID: [GitHubNodeID]]
+    ) -> ReviewCandidateCompleteTraversal {
+        .init(
+            scope: scope, feature: .reviewThreads, streamID: threadStreamID,
+            candidate: candidate, candidateSourceRevision: "rev-1", parserVersion: 1,
+            observedAt: date, normalizedDigest: Data(repeating: 7, count: 32),
+            discoveredThreadNodeIDs: rootThreadIDs,
+            discoveredCommentNodeIDsByThread: commentNodeIDsByThread,
+            segments: [
+                .init(kind: .reviewThreads, pages: [
+                    graphQLRootPage(threadIDs: rootPayloadThreadIDs ?? rootThreadIDs)
+                ])
+            ] + rootThreadIDs.map { threadNodeID in
+                .init(kind: .threadComments, parentThreadNodeID: threadNodeID, pages: [
+                    graphQLCommentPage(
+                        threadNodeID: threadNodeID,
+                        commentNodeIDs: commentNodeIDsByThread[threadNodeID] ?? []
+                    )
+                ])
+            }
+        )
+    }
+
+    func graphQLRootPage(
+        threadIDs: [GitHubNodeID],
+        ordinal: Int = 1,
+        after: String = "none",
+        hasNextPage: Bool = false,
+        endCursor: String? = nil,
+        terminal: Bool = true
+    ) -> ReviewCandidateTraversalPage {
+        let nodes = threadIDs.map { "{\"id\":\"\($0.rawValue)\"}" }.joined(separator: ",")
+        let endCursorJSON = endCursor.map { "\"\($0)\"" } ?? "null"
+        return .init(
+            ordinal: ordinal,
+            rawSnapshotID: .make(),
+            requestIdentity: .init(
+                scope: scope,
+                feature: .reviewThreads,
+                streamID: threadStreamID,
+                requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=\(candidate.nodeID.rawValue)/after=\(after)"
+            ),
+            endpoint: "graphql:TriagePullRequestReviewThreads/page=\(ordinal)",
+            payload: Data("{\"data\":{\"node\":{\"id\":\"\(candidate.nodeID.rawValue)\",\"reviewThreads\":{\"nodes\":[\(nodes)],\"pageInfo\":{\"hasNextPage\":\(hasNextPage),\"endCursor\":\(endCursorJSON)}}}}}".utf8),
+            isTerminal: terminal
+        )
+    }
+
+    func graphQLCommentPage(
+        threadNodeID: GitHubNodeID,
+        commentNodeIDs: [GitHubNodeID]
+    ) -> ReviewCandidateTraversalPage {
+        let nodes = commentNodeIDs.map { "{\"id\":\"\($0.rawValue)\"}" }.joined(separator: ",")
+        return .init(
+            ordinal: 1,
+            rawSnapshotID: .make(),
+            requestIdentity: .init(
+                scope: scope,
+                feature: .reviewThreads,
+                streamID: threadStreamID,
+                requestKey: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/after=none"
+            ),
+            endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/page=1",
+            payload: Data("{\"data\":{\"node\":{\"id\":\"\(threadNodeID.rawValue)\",\"comments\":{\"nodes\":[\(nodes)],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}".utf8),
+            isTerminal: true
+        )
+    }
+
     func remove() { try? FileManager.default.removeItem(at: directory) }
     private static func milliseconds(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1_000).rounded()) }
+}
+
+private func validJSONPayload(bytes: Int) -> Data {
+    precondition(bytes >= 2)
+    var payload = Data(repeating: 0x20, count: bytes)
+    payload.replaceSubrange(0 ..< 2, with: Data("[]".utf8))
+    return payload
+}
+
+private func validJSONObjectPayload(prefix: String, bytes: Int) -> Data {
+    let prefixData = Data(prefix.utf8)
+    precondition(bytes >= prefixData.count)
+    var payload = prefixData
+    payload.append(Data(repeating: 0x20, count: bytes - prefixData.count))
+    return payload
+}
+
+private actor ReceiptCancellationGate {
+    private var taskIsWaiting = false
+    private var taskWaitingContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func waitUntilReleased() async {
+        taskIsWaiting = true
+        taskWaitingContinuation?.resume()
+        taskWaitingContinuation = nil
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilTaskIsWaiting() async {
+        guard !taskIsWaiting else { return }
+        await withCheckedContinuation { continuation in
+            taskWaitingContinuation = continuation
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

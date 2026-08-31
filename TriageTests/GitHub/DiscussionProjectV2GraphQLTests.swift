@@ -160,6 +160,37 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertFalse(normalized.first!.isAuthoritative)
     }
 
+    func testProjectNestedNullNodesRemainProvisionalAndCannotCompleteFieldValues() throws {
+        let field = GitHubProjectV2FieldValuePayload.Field(id: "F_1", name: "Collection", dataType: "USER")
+        let pageInfo = GitHubProjectV2FieldValuePayload.NestedPageInfo(hasNextPage: false)
+        let values = [
+            GitHubProjectV2FieldValuePayload.Value(
+                typeName: "ProjectV2ItemFieldUserValue", field: field, text: nil, number: nil, date: nil,
+                name: nil, title: nil,
+                users: .init(nodes: [nil], pageInfo: pageInfo), labels: nil,
+                milestone: nil, repository: nil, pullRequests: nil, issue: nil
+            ),
+            GitHubProjectV2FieldValuePayload.Value(
+                typeName: "ProjectV2ItemFieldLabelValue",
+                field: .init(id: "F_2", name: "Labels", dataType: "LABEL"), text: nil, number: nil,
+                date: nil, name: nil, title: nil, users: nil,
+                labels: .init(nodes: [nil], pageInfo: pageInfo), milestone: nil, repository: nil,
+                pullRequests: nil, issue: nil
+            ),
+            GitHubProjectV2FieldValuePayload.Value(
+                typeName: "ProjectV2ItemFieldPullRequestValue",
+                field: .init(id: "F_3", name: "Pull requests", dataType: "PULL_REQUEST"), text: nil,
+                number: nil, date: nil, name: nil, title: nil, users: nil, labels: nil,
+                milestone: nil, repository: nil,
+                pullRequests: .init(nodes: [nil], pageInfo: pageInfo), issue: nil
+            )
+        ]
+
+        let normalized = try GitHubProjectV2Normalizer.fields(values)
+        XCTAssertTrue(normalized.allSatisfy { !$0.isAuthoritative })
+        XCTAssertTrue(normalized.allSatisfy { $0.context == "nested connection incomplete" })
+    }
+
     func testProjectDateFieldsUseStrictUTCDates() throws {
         let valid = projectDateField("2026-08-30")
         let validNormalized = try GitHubProjectV2Normalizer.fields([valid])

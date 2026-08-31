@@ -22,6 +22,26 @@ final class WorkspaceAccessibilityCoordinatorTests: XCTestCase {
         XCTAssertFalse(recorder.announcements.joined(separator: " ").contains("Private issue body"))
     }
 
+    func testWorkspaceRestorationAnnouncementsAreActionableAndPrivate() {
+        let recorder = AnnouncementRecorder()
+        let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)
+
+        coordinator.workspaceRestorationUnavailable()
+        coordinator.workspaceRestorationRetryStarted()
+        coordinator.workspaceRestorationRetrySucceeded()
+        coordinator.workspaceRestorationRetryFailed()
+
+        XCTAssertEqual(
+            recorder.announcements,
+            [
+                "Triage could not load local work. Try Again is available.",
+                "Retrying local work.",
+                "Local work is available again.",
+                "Triage could not load local work. Try Again remains available."
+            ]
+        )
+    }
+
     func testWorkflowCompletionAndActionCompletionRemainLocalOnly() {
         let recorder = AnnouncementRecorder()
         let coordinator = WorkspaceAccessibilityCoordinator(poster: recorder)

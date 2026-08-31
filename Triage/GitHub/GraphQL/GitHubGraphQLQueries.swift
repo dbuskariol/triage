@@ -51,10 +51,28 @@ enum GitHubGraphQLQueries {
             query.document.range(
                 of: #"\brateLimit\s*\{\s*cost\s+remaining\s+resetAt\s*\}"#,
                 options: [.regularExpression, .caseInsensitive]
-            ) != nil
+            ) != nil,
+            try allExplicitConnectionLimits(in: query.document).allSatisfy({ $0 <= 50 })
             else {
                 throw GitHubGraphQLError.invalidQuery
             }
+        }
+    }
+
+    /// Connections that are not independently traversed must still be small
+    /// enough to fail closed through their `hasNextPage` normalizer guards.
+    /// Do not increase this without adding a separately cursor-paginated
+    /// source contract.
+    private static func allExplicitConnectionLimits(in document: String) throws -> [Int] {
+        let expression = try NSRegularExpression(pattern: #"\bfirst\s*:\s*([0-9]+)\b"#)
+        let range = NSRange(document.startIndex..., in: document)
+        return try expression.matches(in: document, range: range).map { match in
+            guard let valueRange = Range(match.range(at: 1), in: document),
+                  let value = Int(document[valueRange])
+            else {
+                throw GitHubGraphQLError.invalidQuery
+            }
+            return value
         }
     }
 
@@ -104,7 +122,7 @@ enum GitHubGraphQLQueries {
               author { ...ActorFields }
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }
-              labels(first: 100) { nodes { id name color } pageInfo { hasNextPage } }
+              labels(first: 50) { nodes { id name color } pageInfo { hasNextPage } }
               comments { totalCount }
             }
             ... on PullRequest {
@@ -113,7 +131,7 @@ enum GitHubGraphQLQueries {
               author { ...ActorFields }
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }
-              labels(first: 100) { nodes { id name color } pageInfo { hasNextPage } }
+              labels(first: 50) { nodes { id name color } pageInfo { hasNextPage } }
               reviewRequests(first: 50) {
                 nodes {
                   requestedReviewer {

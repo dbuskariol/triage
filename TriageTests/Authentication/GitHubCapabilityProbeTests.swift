@@ -185,6 +185,76 @@ final class GitHubCapabilityProbeTests: XCTestCase {
         XCTAssertEqual(result.capabilities.status(for: .privateRepositories), .requiresApproval)
     }
 
+    func testPostAccountProbePassesItsExactScopeToMetadataReplay() async throws {
+        let accountID = AccountID.make()
+        let organization = organization()
+        let scope = SynchronizationScope(
+            accountID: accountID,
+            organizationID: organization.id,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-revision")!
+        )
+        let replay = MetadataReplaySpy(response: organizationResponse())
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: SequencedProbeSession(responses: [response("[]")])
+            ),
+            credential: SecretValue("token")
+        )
+
+        _ = try await GitHubCapabilityProbe(
+            identityClient: GitHubIdentityClient(client: client),
+            metadataReplayService: replay
+        ).probe(organization: organization, synchronizationScope: scope)
+
+        let receivedScopes = await replay.scopes()
+        XCTAssertEqual(receivedScopes, [scope])
+    }
+
+    func testPostAccountProbeRequiresExactScopeWhenMetadataReplayIsConfigured() async throws {
+        let replay = MetadataReplaySpy(response: organizationResponse())
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: SequencedProbeSession(responses: [])),
+            credential: SecretValue("token")
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubCapabilityProbe(
+                identityClient: GitHubIdentityClient(client: client),
+                metadataReplayService: replay
+            ).probe(organization: self.organization())
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubCapabilityProbeError, .missingMetadataReplayScope)
+        }
+    }
+
+    func testPostAccountProbeDoesNotDowngradeMetadataReplaySSOFailure() async throws {
+        let organization = organization()
+        let scope = SynchronizationScope(
+            accountID: AccountID.make(),
+            organizationID: organization.id,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision")!,
+            capabilityRevision: CapabilityRevision(rawValue: "capability-revision")!
+        )
+        let replay = MetadataReplaySpy(error: .ssoEvidencePreventsReplay)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: SequencedProbeSession(responses: [])),
+            credential: SecretValue("token")
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubCapabilityProbe(
+                identityClient: GitHubIdentityClient(client: client),
+                metadataReplayService: replay
+            ).probe(organization: organization, synchronizationScope: scope)
+        } verify: { error in
+            XCTAssertEqual(
+                error as? PostAccountIdentityReplayReceiptRepositoryError,
+                .ssoEvidencePreventsReplay
+            )
+        }
+    }
+
     private func organization() -> GitHubOrganization {
         GitHubOrganization(
             id: OrganizationID(rawValue: "O_1")!,
@@ -200,6 +270,40 @@ final class GitHubCapabilityProbeTests: XCTestCase {
     ) -> (Data, [String: String]) {
         (Data(body.utf8), headers)
     }
+
+    private func organizationResponse() -> GitHubResponse<GitHubOrganizationDTO> {
+        let payload = Data(#"{"id":1,"node_id":"O_1","login":"acme"}"#.utf8)
+        return GitHubResponse(
+            value: GitHubOrganizationDTO(id: 1, nodeID: "O_1", login: "acme", avatarURL: nil),
+            payload: payload,
+            etag: "\"organization\"",
+            lastModified: nil,
+            ssoHeader: nil
+        )
+    }
+}
+
+private actor MetadataReplaySpy: OrganizationMetadataReplaying {
+    private let result: Result<GitHubResponse<GitHubOrganizationDTO>, PostAccountIdentityReplayReceiptRepositoryError>
+    private var receivedScopes = [SynchronizationScope]()
+
+    init(response: GitHubResponse<GitHubOrganizationDTO>) {
+        result = .success(response)
+    }
+
+    init(error: PostAccountIdentityReplayReceiptRepositoryError) {
+        result = .failure(error)
+    }
+
+    func organization(
+        _: GitHubOrganization,
+        scope: SynchronizationScope
+    ) async throws -> GitHubResponse<GitHubOrganizationDTO> {
+        receivedScopes.append(scope)
+        return try result.get()
+    }
+
+    func scopes() -> [SynchronizationScope] { receivedScopes }
 }
 
 private extension Array where Element == CapabilityAvailability {

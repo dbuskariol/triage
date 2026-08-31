@@ -13,6 +13,10 @@ private enum CredentialSecretRemovalError: Error, Sendable {
 
 struct AccountCredentialReplacementResult: Sendable {
     let account: GitHubAccount
+    /// Exact durable authority written with the replacement credential. A
+    /// post-replacement conditional replay must use this revision rather than
+    /// deriving authority from a stale in-memory account snapshot.
+    let credentialRevision: CredentialRevision
     let retiredCredentialCleanupFailed: Bool
 }
 
@@ -139,6 +143,7 @@ actor AccountCredentialReplacementService {
         let accessTokenKind: TriageSecretKind = account.authenticationKind == .oauth
             ? .oauthAccessToken
             : .personalAccessToken
+        let credentialRevision = CredentialRevision(rawValue: UUID().uuidString.lowercased())!
 
         do {
             try await secretStore.write(
@@ -158,7 +163,7 @@ actor AccountCredentialReplacementService {
             try Task.checkCancellation()
             try await AccountRepository(vault: vault).save(
                 updatedAccount,
-                credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
+                credentialRevision: credentialRevision
             )
         } catch {
             do {
@@ -171,6 +176,18 @@ actor AccountCredentialReplacementService {
             }
             throw error
         }
+        return await finishReplacement(
+            for: account,
+            updatedAccount: updatedAccount,
+            credentialRevision: credentialRevision
+        )
+    }
+
+    private func finishReplacement(
+        for account: GitHubAccount,
+        updatedAccount: GitHubAccount,
+        credentialRevision: CredentialRevision
+    ) async -> AccountCredentialReplacementResult {
         let retiredCredentialCleanupFailed: Bool
         do {
             try await removeCredentials(for: account, credentialID: account.credentialID)
@@ -180,6 +197,7 @@ actor AccountCredentialReplacementService {
         }
         return AccountCredentialReplacementResult(
             account: updatedAccount,
+            credentialRevision: credentialRevision,
             retiredCredentialCleanupFailed: retiredCredentialCleanupFailed
         )
     }

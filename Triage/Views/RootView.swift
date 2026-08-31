@@ -8,6 +8,7 @@ struct RootView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
+    @State private var isRetryingUnavailableWorkspace = false
 
     var body: some View {
         Group {
@@ -40,6 +41,10 @@ struct RootView: View {
         .onChange(of: appModel.refreshError) { previousError, error in
             guard error != nil, error != previousError else { return }
             workspaceAccessibility.refreshFailed()
+        }
+        .onChange(of: appModel.workspaceRestorationError) { previousError, error in
+            guard error != nil, error != previousError else { return }
+            workspaceAccessibility.workspaceRestorationUnavailable()
         }
         .onChange(of: scenePhase) { _, phase in
             Task {
@@ -177,6 +182,16 @@ struct RootView: View {
 
     @ViewBuilder
     private var workspaceQueue: some View {
+        if presentation.shouldPresentUnavailableQueue {
+            WorkspaceQueueUnavailableView(
+                title: "Local work is unavailable",
+                systemImage: "externaldrive.badge.exclamationmark",
+                description: "Triage could not load local work for this organization. Try synchronizing again.",
+                actionTitle: "Try Again",
+                isPerformingAction: isRetryingUnavailableWorkspace || appModel.isRefreshing,
+                action: retryUnavailableWorkspace
+            )
+        } else {
         switch presentation.synchronizationStatus {
         case .noOrganization:
             WorkspaceQueueUnavailableView(
@@ -195,11 +210,35 @@ struct RootView: View {
         default:
             WorkListView()
         }
+        }
     }
 
     private func refreshSelectedOrganization() {
         Task {
             await appModel.refreshSelectedOrganizationAfterAccessCheck()
+        }
+    }
+
+    private func retryUnavailableWorkspace() {
+        guard !isRetryingUnavailableWorkspace, !appModel.isRefreshing else { return }
+        let accountID = appModel.selectedAccountID
+        let organizationID = appModel.selectedOrganizationID
+        isRetryingUnavailableWorkspace = true
+        workspaceAccessibility.workspaceRestorationRetryStarted()
+        Task {
+            await appModel.refreshSelectedOrganizationAfterAccessCheck()
+            guard appModel.selectedAccountID == accountID,
+                  appModel.selectedOrganizationID == organizationID
+            else {
+                isRetryingUnavailableWorkspace = false
+                return
+            }
+            if appModel.workspaceRestorationError == nil {
+                workspaceAccessibility.workspaceRestorationRetrySucceeded()
+            } else {
+                workspaceAccessibility.workspaceRestorationRetryFailed()
+            }
+            isRetryingUnavailableWorkspace = false
         }
     }
 
@@ -213,6 +252,7 @@ struct RootView: View {
             isRefreshing: appModel.isRefreshing,
             refreshError: appModel.refreshError,
             workspaceFreshness: appModel.selectedOrganizationFreshness,
+            restorationError: appModel.workspaceRestorationError,
             now: Date()
         )
     }
@@ -275,6 +315,7 @@ private struct WorkspaceQueueUnavailableView: View {
     let systemImage: String
     let description: String
     var actionTitle: String?
+    var isPerformingAction = false
     var action: (() -> Void)?
 
     var body: some View {
@@ -284,9 +325,15 @@ private struct WorkspaceQueueUnavailableView: View {
             Text(description)
         } actions: {
             if let actionTitle, let action {
-                Button(actionTitle, action: action)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityHint("Creates or updates the local work queue for this organization.")
+                if isPerformingAction {
+                    ProgressView("Retrying local work…")
+                        .controlSize(.small)
+                        .accessibilityLabel("Retrying local work")
+                } else {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityHint("Creates or updates the local work queue for this organization.")
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -303,6 +350,7 @@ struct PersonalAccessTokenSheet: View {
     let onCancel: @MainActor () -> Void
     @State private var tokenInput = ""
     @State private var resourceOwnerOrganization = ""
+    @State private var hasSubmitted = false
 
     init(
         account: GitHubAccount? = nil,
@@ -353,7 +401,9 @@ struct PersonalAccessTokenSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let error {
+            // Do not surface a prior OAuth/reconnect error in this independent
+            // PAT flow. Once submitted, the shared model error belongs here.
+            if hasSubmitted, let error {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -368,6 +418,7 @@ struct PersonalAccessTokenSheet: View {
                 Button(account == nil ? "Connect" : "Replace") {
                     let token = tokenInput
                     let organization = needsResourceOwner ? resourceOwnerOrganization : nil
+                    hasSubmitted = true
                     tokenInput = ""
                     Task {
                         if await onSubmit(token, organization) {

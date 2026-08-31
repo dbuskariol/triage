@@ -195,6 +195,103 @@ struct WorkListSelectionRestorationRequest: Equatable, Hashable {
     let validWorkItemIDs: Set<WorkItemID>
 }
 
+/// Coordinates the native list's possibly-many selected rows with the one
+/// work item that drives the detail column, local workflow commands, and
+/// selection history. It intentionally owns no persistence: only the primary
+/// item is a durable workspace choice.
+struct WorkListSelection: Equatable {
+    private(set) var selectedWorkItemIDs = Set<WorkItemID>()
+    private(set) var primaryWorkItemID: WorkItemID?
+    private var accountID: AccountID?
+    private var organizationID: OrganizationID?
+
+    /// Applies the selection emitted by SwiftUI's native `List`. Additive
+    /// selection retains the current primary detail item while it remains
+    /// selected. When it does not, choose a deterministic visible row so the
+    /// detail column, commands, and history always have one clear target.
+    mutating func applyNativeSelection(
+        _ workItemIDs: Set<WorkItemID>,
+        orderedWorkItemIDs: [WorkItemID]
+    ) -> WorkItemID? {
+        let newlySelectedIDs = workItemIDs.subtracting(selectedWorkItemIDs)
+        selectedWorkItemIDs = workItemIDs
+
+        if let primaryWorkItemID, workItemIDs.contains(primaryWorkItemID) {
+            return primaryWorkItemID
+        }
+
+        let primaryWorkItemID = firstID(
+            in: newlySelectedIDs,
+            orderedWorkItemIDs: orderedWorkItemIDs
+        ) ?? firstID(in: workItemIDs, orderedWorkItemIDs: orderedWorkItemIDs)
+        self.primaryWorkItemID = primaryWorkItemID
+        return primaryWorkItemID
+    }
+
+    /// Mirrors an externally selected primary item, such as selection history
+    /// navigation. An existing multi-selection remains intact when it already
+    /// includes that item; otherwise the external single selection becomes the
+    /// native list selection.
+    mutating func synchronizePrimarySelection(_ workItemID: WorkItemID?) {
+        primaryWorkItemID = workItemID
+        guard let workItemID else {
+            selectedWorkItemIDs = []
+            return
+        }
+        guard !selectedWorkItemIDs.contains(workItemID) else { return }
+        selectedWorkItemIDs = [workItemID]
+    }
+
+    /// Restores the persisted primary selection only in its exact workspace.
+    /// A workspace transition must never carry a multiple selection into a
+    /// different account or organization, even if opaque IDs overlap.
+    mutating func restore(
+        primaryWorkItemID: WorkItemID?,
+        request: WorkListSelectionRestorationRequest
+    ) {
+        let didChangeWorkspace = accountID != request.accountID
+            || organizationID != request.organizationID
+        accountID = request.accountID
+        organizationID = request.organizationID
+
+        if didChangeWorkspace {
+            selectedWorkItemIDs = []
+        } else {
+            selectedWorkItemIDs.formIntersection(request.validWorkItemIDs)
+        }
+
+        guard let primaryWorkItemID,
+              request.validWorkItemIDs.contains(primaryWorkItemID)
+        else {
+            self.primaryWorkItemID = nil
+            selectedWorkItemIDs = []
+            return
+        }
+
+        self.primaryWorkItemID = primaryWorkItemID
+        if !selectedWorkItemIDs.contains(primaryWorkItemID) {
+            selectedWorkItemIDs = [primaryWorkItemID]
+        }
+    }
+
+    /// Contextual commands deliberately target one row. This maintains the
+    /// existing action contract and avoids introducing implicit bulk actions.
+    mutating func selectContextualWorkItem(_ workItemID: WorkItemID) {
+        selectedWorkItemIDs = [workItemID]
+        primaryWorkItemID = workItemID
+    }
+
+    private func firstID(
+        in candidates: Set<WorkItemID>,
+        orderedWorkItemIDs: [WorkItemID]
+    ) -> WorkItemID? {
+        if let visibleID = orderedWorkItemIDs.first(where: candidates.contains) {
+            return visibleID
+        }
+        return candidates.min { $0.rawValue < $1.rawValue }
+    }
+}
+
 enum WorkItemContextMenuOperation: Equatable {
     case archive
     case unarchive

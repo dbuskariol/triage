@@ -129,6 +129,7 @@ actor TriageAccountSessionService: AccountSessionServing {
             secretStore: secretStore,
             vaultRegistry: vaultRegistry
         ).replace(oauthTokenResponse: response, for: account)
+        await replayOrganizationInventory(after: replacement)
         return try await restoredSnapshot(
             credentialActionNotice: replacement.retiredCredentialCleanupFailed
                 ? "The new credential is active, but Triage could not erase the retired Keychain entry."
@@ -144,6 +145,7 @@ actor TriageAccountSessionService: AccountSessionServing {
             secretStore: secretStore,
             vaultRegistry: vaultRegistry
         ).replace(personalAccessToken: token, for: account)
+        await replayOrganizationInventory(after: replacement)
         return try await restoredSnapshot(
             credentialActionNotice: replacement.retiredCredentialCleanupFailed
                 ? "The new credential is active, but Triage could not erase the retired Keychain entry."
@@ -175,6 +177,86 @@ actor TriageAccountSessionService: AccountSessionServing {
             credentialActionNotice: credentialActionNotice
         )
     }
+
+    /// A credential rotation has already committed a new credential revision
+    /// when this runs. The replay service persists and validates its bounded
+    /// raw receipt before returning a complete inventory; only then do we
+    /// upsert safely decoded identities. Any replay failure preserves prior
+    /// membership and access rows rather than manufacturing an empty session.
+    private func replayOrganizationInventory(
+        after replacement: AccountCredentialReplacementResult
+    ) async {
+        do {
+            try Task.checkCancellation()
+            guard let vaultKey = try await secretStore.readVaultKey(for: replacement.account.id) else {
+                return
+            }
+            let vault = try await vaultRegistry.open(accountID: replacement.account.id, vaultKey: vaultKey)
+            let rateLimitController = try await GitHubRateLimitControllerRegistry.shared.controller(
+                for: replacement.account.id,
+                vault: vault
+            )
+            let token = try await AccountCredentialReader(secretStore: secretStore)
+                .accessToken(for: replacement.account)
+            try Task.checkCancellation()
+            let client = GitHubRESTClient(
+                transport: try GitHubRESTTransport(),
+                credential: token,
+                rateLimitController: rateLimitController,
+                requestPriority: .selectedOrganizationRefresh
+            )
+            let receipts = PostAccountIdentityReplayReceiptRepository(vault: vault)
+            let inventory = try await PostAccountOrganizationInventoryReplayService(
+                client: GitHubIdentityClient(client: client),
+                receipts: receipts
+            ).organizations(
+                accountID: replacement.account.id,
+                credentialRevision: replacement.credentialRevision
+            )
+            try Task.checkCancellation()
+            // Recheck exact account authority after the final network/receipt
+            // boundary, before touching any account-organization row.
+            _ = try await receipts.inventoryValidators(
+                for: AccountOrganizationInventoryReplayIdentity(
+                    accountID: replacement.account.id,
+                    credentialRevision: replacement.credentialRevision
+                )
+            )
+            let organizations = try inventory.organizations.map(Self.organizationForInventoryReplay)
+            let repository = AccountRepository(vault: vault)
+            try await repository.reconcilePostCredentialOrganizationInventory(
+                organizations,
+                accountID: replacement.account.id,
+                expectedCredentialRevision: replacement.credentialRevision,
+                observedAt: Date()
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            // The credential replacement remains valid. Receipt, transport,
+            // or identity failures intentionally leave prior memberships in
+            // place and are surfaced by subsequent scoped refresh coverage.
+            return
+        }
+    }
+
+    static func organizationForInventoryReplay(
+        _ value: GitHubOrganizationDTO
+    ) throws -> GitHubOrganization {
+        guard let nodeID = GitHubNodeID(rawValue: value.nodeID),
+              let organizationID = OrganizationID(rawValue: value.nodeID)
+        else {
+            throw AccountConnectionError.invalidGitHubIdentity
+        }
+        return GitHubOrganization(
+            id: organizationID,
+            githubOrganizationID: value.id,
+            nodeID: nodeID,
+            login: value.login,
+            avatarURL: value.avatarURL
+        )
+    }
+
 }
 
 private actor OrganizationRefreshLifecycleInputs {

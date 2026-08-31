@@ -1095,7 +1095,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(coverage.status, .partial)
     }
 
-    func testTeamNotModifiedUsesOnlyItsScopedValidatorAndPreservesMembership() async throws {
+    func testTeamNotModifiedRetriesUnconditionallyBeforeCompletingScopedCoverage() async throws {
         let fixture = try await OrganizationInventoryFixture()
         defer { fixture.remove() }
         let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -1109,6 +1109,11 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
             .http(statusCode: 200, body: fixture.activeMembershipPayload()),
             .http(statusCode: 200, body: Data("[]".utf8)),
             .http(statusCode: 304, body: Data()),
+            .http(
+                statusCode: 200,
+                body: fixture.changedTeamPayload(),
+                headers: ["ETag": "\"teams-v2\""]
+            ),
             .http(statusCode: 200, body: fixture.activeMembershipPayload())
         ])
         let service = try fixture.service(session: session)
@@ -1123,18 +1128,325 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         )
 
         guard case let .success(teams, coverage) = second.teams else {
-            return XCTFail("A scoped team 304 should reuse committed normalized inventory.")
+            return XCTFail("A scoped team 304 must complete only after its unconditional retry.")
         }
-        XCTAssertEqual(teams.map(\.id), [TeamID(rawValue: "T_1")!])
+        XCTAssertEqual(teams.map(\.id), [TeamID(rawValue: "T_2")!])
         XCTAssertEqual(teams.first?.membershipState, "active")
         XCTAssertEqual(coverage.status, .complete)
         let sentValidators = await session.validators()
         let sentLastModified = await session.lastModifiedValidators()
-        XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
-        XCTAssertEqual(sentLastModified, [nil, nil, nil, nil, nil, nil])
+        XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil, nil])
+        XCTAssertEqual(sentLastModified, [nil, nil, nil, nil, nil, nil, nil])
         let persisted = try await fixture.conditionalValidator(feature: .teams)
-        XCTAssertEqual(persisted?.eTag, "\"teams-v1\"")
-        XCTAssertEqual(persisted?.lastModified, lastModified)
+        XCTAssertEqual(persisted?.eTag, "\"teams-v2\"")
+        XCTAssertNil(persisted?.lastModified)
+    }
+
+    func testTeamNotModifiedDoesNotTrustCorruptCachedTeams() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(statusCode: 304, body: Data()),
+            .http(
+                statusCode: 200,
+                body: fixture.changedTeamPayload(),
+                headers: ["ETag": "\"teams-v2\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload())
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        try await fixture.corruptTeamCache()
+
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .success(teams, coverage) = second.teams else {
+            return XCTFail("A conditional team 304 must recover through a fresh traversal.")
+        }
+        XCTAssertEqual(teams.map(\.id), [TeamID(rawValue: "T_2")!])
+        XCTAssertEqual(coverage.status, .complete)
+        let sentValidators = await session.validators()
+        XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil, nil])
+    }
+
+    func testTeamNotModifiedRetryFailurePreservesTeamsAndWritesNonCompleteCoverage() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(statusCode: 304, body: Data()),
+            .http(statusCode: 500, body: Data(#"{"message":"unavailable"}"#.utf8))
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let firstTeams = try await fixture.teams()
+        let firstSnapshots = try await fixture.rawSnapshots()
+        let firstCoverage = try await fixture.coverage(feature: .teams)
+        let firstValidator = try await fixture.conditionalValidator(feature: .teams)
+
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(.failed, coverage) = second.teams else {
+            return XCTFail("A failed unconditional team retry must remain non-complete.")
+        }
+        XCTAssertEqual(coverage.status, .failed)
+        let preservedTeams = try await fixture.teams()
+        let preservedSnapshots = try await fixture.rawSnapshots()
+        let preservedValidator = try await fixture.conditionalValidator(feature: .teams)
+        let sentValidators = await session.validators()
+        XCTAssertEqual(preservedTeams, firstTeams)
+        XCTAssertEqual(preservedSnapshots, firstSnapshots)
+        XCTAssertEqual(coverage.lastSuccessfulAt, firstCoverage.lastSuccessfulAt)
+        XCTAssertEqual(preservedValidator, firstValidator)
+        XCTAssertEqual(sentValidators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
+    }
+
+    func testTeamNotModifiedAuthorizationRequiredSSOPrecedesUnconditionalRetry() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let recoveryURL = URL(string: "https://github.com/orgs/acme/team-replay-sso")!
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "required; url=\(recoveryURL.absoluteString)"]
+            )
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let firstTeams = try await fixture.teams()
+        let firstSnapshots = try await fixture.rawSnapshots()
+        let firstCoverage = try await fixture.coverage(feature: .teams)
+        let firstValidator = try await fixture.conditionalValidator(feature: .teams)
+
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(.ssoRequired(header), coverage) = second.teams else {
+            return XCTFail("An SSO-bearing conditional team 304 must stop before retrying.")
+        }
+        XCTAssertEqual(header, .authorizationRequired(recoveryURL))
+        XCTAssertEqual(coverage.status, .requiresSSO)
+        XCTAssertEqual(coverage.lastSuccessfulAt, firstCoverage.lastSuccessfulAt)
+        let preservedTeams = try await fixture.teams()
+        let preservedSnapshots = try await fixture.rawSnapshots()
+        let preservedValidator = try await fixture.conditionalValidator(feature: .teams)
+        let paths = await session.paths()
+        let validators = await session.validators()
+        let lastModifiedValidators = await session.lastModifiedValidators()
+        XCTAssertEqual(preservedTeams, firstTeams)
+        XCTAssertEqual(preservedSnapshots, firstSnapshots)
+        XCTAssertEqual(preservedValidator, firstValidator)
+        XCTAssertEqual(
+            paths,
+            [
+                "/orgs/acme/repos",
+                "/orgs/acme/teams",
+                "/orgs/acme/teams/triage/memberships/octocat",
+                "/orgs/acme/repos",
+                "/orgs/acme/teams"
+            ]
+        )
+        XCTAssertEqual(validators, [nil, nil, nil, nil, "\"teams-v1\""])
+        XCTAssertEqual(lastModifiedValidators, [nil, nil, nil, nil, nil])
+    }
+
+    func testTeamNotModifiedRetryAuthorizationRequiredSSOPreservesAuthorityAndFailsClosed() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let recoveryURL = URL(string: "https://github.com/orgs/acme/team-retry-sso")!
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(statusCode: 304, body: Data()),
+            .http(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "required; url=\(recoveryURL.absoluteString)"]
+            )
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let firstTeams = try await fixture.teams()
+        let firstSnapshots = try await fixture.rawSnapshots()
+        let firstCoverage = try await fixture.coverage(feature: .teams)
+        let firstValidator = try await fixture.conditionalValidator(feature: .teams)
+
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(.ssoRequired(header), coverage) = second.teams else {
+            return XCTFail("An SSO-bearing unconditional team retry must retain its recovery evidence.")
+        }
+        XCTAssertEqual(header, .authorizationRequired(recoveryURL))
+        XCTAssertEqual(coverage.status, .requiresSSO)
+        XCTAssertEqual(coverage.lastSuccessfulAt, firstCoverage.lastSuccessfulAt)
+        let preservedTeams = try await fixture.teams()
+        let preservedSnapshots = try await fixture.rawSnapshots()
+        let preservedValidator = try await fixture.conditionalValidator(feature: .teams)
+        let paths = await session.paths()
+        let validators = await session.validators()
+        let lastModifiedValidators = await session.lastModifiedValidators()
+        XCTAssertEqual(preservedTeams, firstTeams)
+        XCTAssertEqual(preservedSnapshots, firstSnapshots)
+        XCTAssertEqual(preservedValidator, firstValidator)
+        XCTAssertEqual(
+            paths,
+            [
+                "/orgs/acme/repos",
+                "/orgs/acme/teams",
+                "/orgs/acme/teams/triage/memberships/octocat",
+                "/orgs/acme/repos",
+                "/orgs/acme/teams",
+                "/orgs/acme/teams"
+            ]
+        )
+        XCTAssertEqual(validators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
+        XCTAssertEqual(lastModifiedValidators, [nil, nil, nil, nil, nil, nil])
+    }
+
+    func testTeamNotModifiedRetryRateLimitPreservesAuthorityAndWritesPartialCoverage() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let retryAfter: TimeInterval = 60
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(
+                statusCode: 200,
+                body: fixture.teamPayload(),
+                headers: ["ETag": "\"teams-v1\""]
+            ),
+            .http(statusCode: 200, body: fixture.activeMembershipPayload()),
+            .http(statusCode: 200, body: Data("[]".utf8)),
+            .http(statusCode: 304, body: Data()),
+            .http(
+                statusCode: 429,
+                body: Data(#"{"message":"rate limited"}"#.utf8),
+                headers: ["Retry-After": "60"]
+            )
+        ])
+        let service = try fixture.service(session: session)
+
+        _ = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+        let firstTeams = try await fixture.teams()
+        let firstSnapshots = try await fixture.rawSnapshots()
+        let firstCoverage = try await fixture.coverage(feature: .teams)
+        let firstValidator = try await fixture.conditionalValidator(feature: .teams)
+
+        let second = try await service.refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(.rateLimited(retryAt), coverage) = second.teams else {
+            return XCTFail("A rate-limited unconditional team retry must remain partial.")
+        }
+        XCTAssertEqual(retryAt, fixture.observedAt.addingTimeInterval(retryAfter))
+        XCTAssertEqual(coverage.status, .partial)
+        XCTAssertEqual(coverage.lastSuccessfulAt, firstCoverage.lastSuccessfulAt)
+        let persistedCoverage = try await fixture.coverage(feature: .teams)
+        let preservedTeams = try await fixture.teams()
+        let preservedSnapshots = try await fixture.rawSnapshots()
+        let preservedValidator = try await fixture.conditionalValidator(feature: .teams)
+        let paths = await session.paths()
+        let validators = await session.validators()
+        let lastModifiedValidators = await session.lastModifiedValidators()
+        XCTAssertEqual(persistedCoverage, coverage)
+        XCTAssertEqual(preservedTeams, firstTeams)
+        XCTAssertEqual(preservedSnapshots, firstSnapshots)
+        XCTAssertEqual(preservedValidator, firstValidator)
+        XCTAssertEqual(
+            paths,
+            [
+                "/orgs/acme/repos",
+                "/orgs/acme/teams",
+                "/orgs/acme/teams/triage/memberships/octocat",
+                "/orgs/acme/repos",
+                "/orgs/acme/teams",
+                "/orgs/acme/teams"
+            ]
+        )
+        XCTAssertEqual(validators, [nil, nil, nil, nil, "\"teams-v1\"", nil])
+        XCTAssertEqual(lastModifiedValidators, [nil, nil, nil, nil, nil, nil])
+    }
+
+    func testRateLimitedRepositoryInventoryWritesPartialScopedCoverage() async throws {
+        let fixture = try await OrganizationInventoryFixture()
+        defer { fixture.remove() }
+        let session = ScriptedInventorySession(responses: [
+            .http(statusCode: 429, body: Data(#"{"message":"rate limited"}"#.utf8)),
+            .http(statusCode: 200, body: Data("[]".utf8))
+        ])
+
+        let result = try await fixture.service(session: session).refreshInventory(
+            account: fixture.account,
+            organization: fixture.organization
+        )
+
+        guard case let .failure(.rateLimited, coverage) = result.repositories else {
+            return XCTFail("A 429 repository response must classify as rate limited.")
+        }
+        XCTAssertEqual(coverage.status, .partial)
+        let persistedCoverage = try await fixture.coverage(feature: .repositories)
+        XCTAssertEqual(persistedCoverage.status, .partial)
     }
 
     func testRepositorySuccessSurvivesIndependentTeamFailure() async throws {
@@ -1210,6 +1522,7 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         defer { fixture.remove() }
         let session = ScriptedInventorySession(responses: [
             .http(statusCode: 200, body: fixture.repositoryPayload()),
+            .http(statusCode: 304, body: Data()),
             .http(statusCode: 304, body: Data())
         ])
 
@@ -1224,7 +1537,9 @@ final class OrganizationInventoryRefreshServiceTests: XCTestCase {
         XCTAssertEqual(classification, .failed)
         XCTAssertEqual(coverage.status, .failed)
         let teams = try await fixture.teams()
+        let sentValidators = await session.validators()
         XCTAssertTrue(teams.isEmpty)
+        XCTAssertEqual(sentValidators, [nil, nil, nil])
         let snapshotEndpoints = try await fixture.rawSnapshots().map(\.endpoint)
         XCTAssertFalse(snapshotEndpoints.contains("/orgs/acme/teams?per_page=100"))
     }
@@ -1724,6 +2039,19 @@ private final class OrganizationInventoryFixture: @unchecked Sendable {
             organization: organization,
             observedAt: observedAt
         )
+    }
+
+    func corruptTeamCache() async throws {
+        try await vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM team_memberships WHERE account_id = ?",
+                arguments: [account.id.rawValue]
+            )
+            try database.execute(
+                sql: "DELETE FROM teams WHERE organization_id = ?",
+                arguments: [organization.id.rawValue]
+            )
+        }
     }
 
     func replaceCredentialRevision(with rawValue: String) async throws {

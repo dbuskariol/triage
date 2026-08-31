@@ -2664,6 +2664,138 @@ enum TriageDatabaseMigrator {
                 BEFORE DELETE ON review_candidate_complete_traversal_pages
                 BEGIN SELECT RAISE(ABORT, 'review complete traversal page is append-only'); END
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "046-post-account-identity-replay-receipts-v1",
+            checksum: "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
+        ) { database in
+            // Account organization discovery is deliberately account-scoped:
+            // it must never borrow a sentinel organization to satisfy the
+            // organization-scoped conditional-request schema.
+            try database.execute(sql: """
+                CREATE TABLE account_organization_inventory_replay_receipts (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 512),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (request_key = 'GET /user/orgs?per_page=100'),
+                    etag TEXT, last_modified TEXT,
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 512),
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    page_count INTEGER NOT NULL CHECK (page_count > 0),
+                    organization_count INTEGER NOT NULL CHECK (organization_count >= 0),
+                    observed_at_ms INTEGER NOT NULL, committed_at_ms INTEGER NOT NULL,
+                    validated_at_ms INTEGER NOT NULL, receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL),
+                    UNIQUE (account_id, credential_revision, request_key)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE account_organization_inventory_replay_receipt_pages (
+                    receipt_id TEXT NOT NULL REFERENCES account_organization_inventory_replay_receipts(id) ON DELETE CASCADE,
+                    page_ordinal INTEGER NOT NULL CHECK (page_ordinal > 0),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    raw_payload_digest BLOB NOT NULL CHECK (length(raw_payload_digest) = 32),
+                    organization_ids_digest BLOB NOT NULL CHECK (length(organization_ids_digest) = 32),
+                    is_terminal INTEGER NOT NULL CHECK (is_terminal IN (0, 1)),
+                    PRIMARY KEY (receipt_id, page_ordinal), UNIQUE (receipt_id, raw_snapshot_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE organization_metadata_replay_receipts (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 512),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature = 'organizationMetadata'),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (request_key LIKE 'GET /orgs/%'),
+                    etag TEXT, last_modified TEXT,
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    raw_payload_digest BLOB NOT NULL CHECK (length(raw_payload_digest) = 32),
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 512),
+                    observed_at_ms INTEGER NOT NULL, committed_at_ms INTEGER NOT NULL,
+                    validated_at_ms INTEGER NOT NULL, receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE,
+                    UNIQUE (account_id, organization_id, credential_revision, capability_revision, feature, stream_id, request_key)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX account_organization_inventory_replay_receipts_scope
+                ON account_organization_inventory_replay_receipts (account_id, credential_revision, request_key, validated_at_ms DESC)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX account_organization_inventory_replay_pages_snapshot
+                ON account_organization_inventory_replay_receipt_pages (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX organization_metadata_replay_receipts_scope
+                ON organization_metadata_replay_receipts (account_id, organization_id, credential_revision, capability_revision, feature, stream_id, request_key, validated_at_ms DESC)
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER account_organization_inventory_replay_protect_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots WHEN EXISTS (
+                    SELECT 1 FROM account_organization_inventory_replay_receipt_pages WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'account organization replay provenance is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER account_organization_inventory_replay_protect_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM account_organization_inventory_replay_receipt_pages
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'account organization replay provenance is immutable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER organization_metadata_replay_protect_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots WHEN EXISTS (
+                    SELECT 1 FROM organization_metadata_replay_receipts WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'organization metadata replay provenance is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER organization_metadata_replay_protect_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM organization_metadata_replay_receipts
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'organization metadata replay provenance is immutable'); END
+                """)
         }
     ]
 }

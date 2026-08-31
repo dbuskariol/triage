@@ -2,6 +2,7 @@ import Foundation
 
 enum GitHubCapabilityProbeError: Error, Equatable, Sendable {
     case organizationIdentityMismatch
+    case missingMetadataReplayScope
 }
 
 struct OrganizationProbeResult: Sendable {
@@ -12,28 +13,55 @@ struct OrganizationProbeResult: Sendable {
     let capabilities: [CapabilityAvailability]
 }
 
+/// Narrows post-account metadata replay to the one selected-organization
+/// operation the capability probe needs. It keeps first-connect probes free of
+/// vault receipt dependencies while allowing deterministic scope tests.
+protocol OrganizationMetadataReplaying: Sendable {
+    func organization(
+        _ organization: GitHubOrganization,
+        scope: SynchronizationScope
+    ) async throws -> GitHubResponse<GitHubOrganizationDTO>
+}
+
+extension PostAccountOrganizationMetadataReplayService: OrganizationMetadataReplaying {}
+
 actor GitHubCapabilityProbe {
     private let identityClient: GitHubIdentityClient
     private let restClient: GitHubRESTClient?
+    private let metadataReplayService: (any OrganizationMetadataReplaying)?
     private let clock: @Sendable () -> Date
 
     init(
         identityClient: GitHubIdentityClient,
         restClient: GitHubRESTClient? = nil,
+        metadataReplayService: (any OrganizationMetadataReplaying)? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.identityClient = identityClient
         self.restClient = restClient
+        self.metadataReplayService = metadataReplayService
         self.clock = clock
     }
 
     func probe(
         organization: GitHubOrganization,
-        accountLogin: String? = nil
+        accountLogin: String? = nil,
+        synchronizationScope: SynchronizationScope? = nil
     ) async throws -> OrganizationProbeResult {
         let checkedAt = clock()
         do {
-            let organizationResponse = try await identityClient.organization(named: organization.login)
+            let organizationResponse: GitHubResponse<GitHubOrganizationDTO>
+            if let metadataReplayService {
+                guard let synchronizationScope else {
+                    throw GitHubCapabilityProbeError.missingMetadataReplayScope
+                }
+                organizationResponse = try await metadataReplayService.organization(
+                    organization,
+                    scope: synchronizationScope
+                )
+            } else {
+                organizationResponse = try await identityClient.organization(named: organization.login)
+            }
             guard organizationResponse.value.id == organization.githubOrganizationID,
                   organizationResponse.value.nodeID == organization.nodeID.rawValue
             else {

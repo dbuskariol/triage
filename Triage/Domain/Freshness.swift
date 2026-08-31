@@ -15,6 +15,9 @@ enum CoverageFeature: String, CaseIterable, Codable, Sendable {
     case projects
     case projectItems
     case roleDiscovery
+    /// The selected organization's REST metadata is source authority for the
+    /// capability/access probe; it deliberately has its own replay stream.
+    case organizationMetadata
 }
 
 enum CoverageStatus: String, Codable, Sendable {

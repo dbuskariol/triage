@@ -325,7 +325,7 @@ final class CoverageRepositoryTests: XCTestCase {
                 ),
                 .requiresApproval
             ),
-            ("rate", GitHubFailure(kind: .rateLimited, statusCode: 429), .failed),
+            ("rate", GitHubFailure(kind: .rateLimited, statusCode: 429), .partial),
             ("malformed", GitHubRepositoryTeamClientError.invalidRepository, .failed),
             ("incomplete", GitHubRepositoryTeamClientError.partialResults, .partial)
         ]

@@ -35,6 +35,45 @@ final class GitHubGraphQLClientTests: XCTestCase {
         })
     }
 
+    func testEveryConnectionUsesAtMostFiftyNodesAndIndependentConnectionsExposeCursors() throws {
+        let documents = Dictionary(
+            uniqueKeysWithValues: try GitHubGraphQLQueries.registeredQueries().map {
+                ($0.operationName, $0.document)
+            }
+        )
+        let limitExpression = try NSRegularExpression(pattern: #"\bfirst\s*:\s*([0-9]+)\b"#)
+        for (operation, document) in documents {
+            let range = NSRange(document.startIndex..., in: document)
+            for match in limitExpression.matches(in: document, range: range) {
+                let valueRange = try XCTUnwrap(Range(match.range(at: 1), in: document))
+                XCTAssertLessThanOrEqual(
+                    try XCTUnwrap(Int(document[valueRange])),
+                    50,
+                    "\(operation) requests an unsupported connection page size."
+                )
+            }
+        }
+
+        let independentlyPaginatedConnections = [
+            ("TriagePullRequestReviewThreads", "reviewThreads(first: 50, after: $after)"),
+            ("TriagePullRequestReviewThreadComments", "comments(first: 50, after: $after)"),
+            ("TriageRepositoryDiscussions", "discussions(first: 50, after: $after,"),
+            ("TriageDiscussionComments", "comments(first: 50, after: $after)"),
+            ("TriageDiscussionCommentReplies", "replies(first: 50, after: $after)"),
+            ("TriageOrganizationProjectsV2", "projectsV2(first: 50, after: $after)"),
+            ("TriageProjectV2Items", "items(first: 50, after: $after)"),
+            ("TriageProjectV2ItemFieldValues", "fieldValues(first: 50, after: $after)")
+        ]
+        for (operation, connection) in independentlyPaginatedConnections {
+            let document = try XCTUnwrap(documents[operation])
+            XCTAssertTrue(document.contains(connection), "\(operation) must cursor-paginate \(connection).")
+            XCTAssertTrue(
+                document.contains("pageInfo { hasNextPage endCursor }"),
+                "\(operation) must expose cursor continuation metadata."
+            )
+        }
+    }
+
     func testRegistryValidationRejectsMismatchedOperationAndMissingRateLimit() throws {
         let registered = try GitHubGraphQLQueries.registeredQueries()
         var mismatchedName = registered
