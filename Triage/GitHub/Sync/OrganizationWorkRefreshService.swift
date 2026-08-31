@@ -62,6 +62,16 @@ actor OrganizationWorkRefreshService {
             rateLimitController: rateLimitController,
             requestPriority: requestPriority
         )
+        // Post-account only: bind selected-organization metadata to the
+        // persisted scope before any work source can treat it as current. The
+        // first account connection remains unconditional in
+        // AccountConnectionService; this path has an exact vault scope.
+        let identityClient = GitHubIdentityClient(client: restClient)
+        _ = try await PostAccountOrganizationMetadataReplayService(
+            client: identityClient,
+            receipts: PostAccountIdentityReplayReceiptRepository(vault: vault)
+        ).organization(organization, scope: synchronizationScope)
+        try await validateCurrentScope(synchronizationScope, vault: vault)
         let searchClient = GitHubIssueSearchClient(client: restClient)
         var searchRange: SearchTimeRange?
         var deferredSSORequirement: GitHubSSOHeader?

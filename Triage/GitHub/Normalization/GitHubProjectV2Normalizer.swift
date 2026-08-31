@@ -210,8 +210,16 @@ enum GitHubProjectV2Normalizer {
             guard names.insert(name).inserted else {
                 throw GitHubProjectV2NormalizationError.duplicateFieldName(name)
             }
-            let nestedComplete = [value.users?.pageInfo.hasNextPage, value.labels?.pageInfo.hasNextPage,
-                                  value.pullRequests?.pageInfo.hasNextPage].allSatisfy { $0 != true }
+            let usersComplete = value.users.map {
+                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
+            } ?? true
+            let labelsComplete = value.labels.map {
+                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
+            } ?? true
+            let pullRequestsComplete = value.pullRequests.map {
+                !$0.pageInfo.hasNextPage && !$0.nodes.contains(where: { $0 == nil })
+            } ?? true
+            let nestedComplete = usersComplete && labelsComplete && pullRequestsComplete
             let date = value.date.flatMap(parseProjectDate)
             let validDate = value.date == nil || date != nil
             let display: String?

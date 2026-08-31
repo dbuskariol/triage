@@ -112,10 +112,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
 
         XCTAssertEqual(firstMigrations, reopenedMigrations)
         XCTAssertEqual(reopenedMigrations.count, TriageDatabaseMigrator.migrationCount)
-        XCTAssertEqual(reopenedMigrations.last?.id, "045-review-candidate-receipt-append-only-v1")
+        XCTAssertEqual(reopenedMigrations.last?.id, "046-post-account-identity-replay-receipts-v1")
         XCTAssertEqual(
             reopenedMigrations.last?.checksum,
-            "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95"
+            "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
         )
         XCTAssertTrue(reopenedMigrations.allSatisfy { migration in
             migration.checksum.range(
@@ -126,7 +126,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         try await reopenedRegistry.closeAll()
     }
 
-    func testPersistedSchema039EncryptedVaultUpgradesThrough045WithStableChecksums() async throws {
+    func testPersistedSchema039EncryptedVaultUpgradesThrough046WithStableChecksums() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -145,7 +145,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
         let registry = try VaultRegistry(rootDirectory: root)
         let upgradedVault = try await registry.open(accountID: accountID, vaultKey: key)
         let upgradedMigrations = try await migrationRows(in: upgradedVault)
-        XCTAssertEqual(Array(upgradedMigrations.suffix(6)), [
+        XCTAssertEqual(Array(upgradedMigrations.suffix(7)), [
             MigrationRow(
                 id: "040-review-candidate-failure-envelopes",
                 checksum: "9241fecb2d6cffcfc87a91e553b8599f0913dc2e16b705fcd2b038cad30c5a81"
@@ -169,26 +169,48 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             MigrationRow(
                 id: "045-review-candidate-receipt-append-only-v1",
                 checksum: "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95"
+            ),
+            MigrationRow(
+                id: "046-post-account-identity-replay-receipts-v1",
+                checksum: "a45a35a571e3d543645d24e8dcdf86ca11eeb76c1a51391c2513cdce71fd3771"
             )
         ])
-        let upgradedSchema = try await upgradedVault.read { database in
-            (
-                try database.tableExists("review_candidate_failure_envelopes"),
-                try database.tableExists("notification_replay_receipts"),
-                try database.tableExists("derived_intelligence_runs"),
-                try database.tableExists("review_candidate_complete_traversal_receipts"),
-                (try Int.fetchOne(
-                    database,
-                    sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
-                    arguments: ["workspace_work_items_scope_activity"]
-                ) ?? 0) == 1
-            )
+        let upgradedSchema = try await upgradedVault.read { database -> (tables: Set<String>, indexes: Set<String>, triggers: Set<String>) in
+            let tables = Set(try String.fetchAll(
+                database,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ))
+            let indexes = Set(try String.fetchAll(
+                database,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ))
+            let triggers = Set(try String.fetchAll(
+                database,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ))
+            return (tables, indexes, triggers)
         }
-        XCTAssertEqual(upgradedSchema.0, true)
-        XCTAssertEqual(upgradedSchema.1, true)
-        XCTAssertEqual(upgradedSchema.2, true)
-        XCTAssertEqual(upgradedSchema.3, true)
-        XCTAssertEqual(upgradedSchema.4, true)
+        XCTAssertTrue(upgradedSchema.tables.isSuperset(of: Set([
+            "review_candidate_failure_envelopes",
+            "notification_replay_receipts",
+            "derived_intelligence_runs",
+            "review_candidate_complete_traversal_receipts",
+            "account_organization_inventory_replay_receipts",
+            "account_organization_inventory_replay_receipt_pages",
+            "organization_metadata_replay_receipts"
+        ])))
+        XCTAssertTrue(upgradedSchema.indexes.isSuperset(of: Set([
+            "workspace_work_items_scope_activity",
+            "account_organization_inventory_replay_receipts_scope",
+            "account_organization_inventory_replay_pages_snapshot",
+            "organization_metadata_replay_receipts_scope"
+        ])))
+        XCTAssertTrue(upgradedSchema.triggers.isSuperset(of: Set([
+            "account_organization_inventory_replay_protect_snapshot_delete",
+            "account_organization_inventory_replay_protect_snapshot_update",
+            "organization_metadata_replay_protect_snapshot_delete",
+            "organization_metadata_replay_protect_snapshot_update"
+        ])))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.database.path))
         try await registry.closeAll()
     }
@@ -519,7 +541,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                 "notification_failure_envelopes_scope",
                 "notification_failure_pages_raw_snapshot",
                 "review_candidate_failure_envelopes_scope_candidate_terminal",
-                "review_candidate_failure_pages_raw_snapshot"
+                "review_candidate_failure_pages_raw_snapshot",
+                "account_organization_inventory_replay_receipts_scope",
+                "account_organization_inventory_replay_pages_snapshot",
+                "organization_metadata_replay_receipts_scope"
             ] {
                 try database.execute(sql: "DROP INDEX IF EXISTS \(index)")
             }
@@ -535,7 +560,11 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                 "derived_intelligence_protect_evidence_snapshot_delete",
                 "derived_intelligence_protect_evidence_snapshot_update",
                 "notification_protect_provenance_snapshot_delete",
-                "notification_protect_provenance_snapshot_update"
+                "notification_protect_provenance_snapshot_update",
+                "account_organization_inventory_replay_protect_snapshot_delete",
+                "account_organization_inventory_replay_protect_snapshot_update",
+                "organization_metadata_replay_protect_snapshot_delete",
+                "organization_metadata_replay_protect_snapshot_update"
             ] {
                 try database.execute(sql: "DROP TRIGGER IF EXISTS \(trigger)")
             }
@@ -553,7 +582,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                 "notification_current_pages",
                 "notification_threads",
                 "review_candidate_failure_pages",
-                "review_candidate_failure_envelopes"
+                "review_candidate_failure_envelopes",
+                "account_organization_inventory_replay_receipt_pages",
+                "account_organization_inventory_replay_receipts",
+                "organization_metadata_replay_receipts"
             ] {
                 try database.execute(sql: "DROP TABLE IF EXISTS \(table)")
             }
@@ -566,7 +598,8 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                         '042-derived-intelligence-revision-evidence-v1',
                         '043-review-candidate-complete-traversal-receipts-v1',
                         '044-workspace-query-performance-indexes-v1',
-                        '045-review-candidate-receipt-append-only-v1'
+                        '045-review-candidate-receipt-append-only-v1',
+                        '046-post-account-identity-replay-receipts-v1'
                     )
                     """
             )

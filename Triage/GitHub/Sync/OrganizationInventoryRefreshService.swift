@@ -533,12 +533,37 @@ actor OrganizationInventoryRefreshService {
         let validator = try await context.conditionalRequests.validator(for: conditionalIdentity)
         try await validateCurrentScope(context)
         let requestValidators = try currentHTTPValidators(from: validator, observedAt: observedAt)
-        let fetched = try await client.fetchTeams(
+        var fetched = try await client.fetchTeams(
             in: context.organization.login,
             validators: requestValidators
         )
         try await validateCurrentScope(context)
         try Task.checkCancellation()
+
+        // Team inventory does not yet have a durable replay receipt binding the
+        // cached normalized teams to this exact conditional response. A 304 is
+        // therefore only transport evidence, never authority to reuse cached
+        // teams or replace their memberships. Retry the same traversal once
+        // without validators; only a modified response can complete coverage.
+        if case let .notModified(ssoHeader) = fetched {
+            try throwForSSORequirement(
+                in: ssoHeader,
+                githubOrganizationID: context.organization.githubOrganizationID
+            )
+            fetched = try await client.fetchTeams(
+                in: context.organization.login,
+                validators: nil
+            )
+            try await validateCurrentScope(context)
+            try Task.checkCancellation()
+            if case let .notModified(retrySSOHeader) = fetched {
+                try throwForSSORequirement(
+                    in: retrySSOHeader,
+                    githubOrganizationID: context.organization.githubOrganizationID
+                )
+                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
+            }
+        }
         let updatedTeams: [GitHubTeamDTO]?
         let teamPages: [GitHubRepositoryTeamPage<GitHubTeamDTO>]
         let membershipTargets: [TeamMembershipTarget]
@@ -556,22 +581,10 @@ actor OrganizationInventoryRefreshService {
                 }
                 return TeamMembershipTarget(id: teamID, slug: team.slug)
             }
-        case let .notModified(ssoHeader):
-            try throwForSSORequirement(
-                in: ssoHeader,
-                githubOrganizationID: context.organization.githubOrganizationID
-            )
-            guard requestValidators != nil else {
-                throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
-            }
-            updatedTeams = nil
-            teamPages = []
-            let cachedTeams = try await context.teamInventory.teams(
-                accountID: context.account.id,
-                organization: context.organization
-            )
-            try await validateCurrentScope(context)
-            membershipTargets = cachedTeams.map { TeamMembershipTarget(id: $0.id, slug: $0.slug) }
+        case .notModified:
+            // The unconditional retry above makes this unreachable. Keep the
+            // explicit failure if a future client changes its response model.
+            throw GitHubRepositoryTeamClientError.notModifiedWithoutCachedState
         }
         var memberships = [TeamMembershipObservation]()
         var membershipSnapshots = [RawAPISnapshot]()
@@ -1323,7 +1336,9 @@ actor OrganizationInventoryRefreshService {
         switch failure.kind {
         case .forbidden, .notFound:
             return .unavailable
-        case .unauthorized, .rateLimited, .secondaryRateLimited, .serverFailure, .unexpectedResponse:
+        case .rateLimited, .secondaryRateLimited:
+            return .partial
+        case .unauthorized, .serverFailure, .unexpectedResponse:
             return .failed
         }
     }

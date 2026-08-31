@@ -41,6 +41,24 @@ final class TriageApplicationDependenciesTests: XCTestCase {
         XCTAssertTrue(dependencies.workspaceMutator is TriageWorkspaceMutator)
     }
 
+    func testPostCredentialReplayMapsOnlyValidOrganizationIdentities() throws {
+        let mapped = try TriageAccountSessionService.organizationForInventoryReplay(
+            GitHubOrganizationDTO(id: 1, nodeID: "O_1", login: "acme", avatarURL: nil)
+        )
+        XCTAssertEqual(mapped.id.rawValue, "O_1")
+        XCTAssertEqual(mapped.nodeID.rawValue, "O_1")
+        XCTAssertEqual(mapped.githubOrganizationID, 1)
+        XCTAssertEqual(mapped.login, "acme")
+
+        XCTAssertThrowsError(
+            try TriageAccountSessionService.organizationForInventoryReplay(
+                GitHubOrganizationDTO(id: 1, nodeID: "", login: "acme", avatarURL: nil)
+            )
+        ) { error in
+            XCTAssertEqual(error as? AccountConnectionError, .invalidGitHubIdentity)
+        }
+    }
+
     func testDependenciesRequireExplicitServicesAndRouteCallsToThem() async throws {
         let session = SessionSpy()
         let coordinator = CoordinatorSpy()

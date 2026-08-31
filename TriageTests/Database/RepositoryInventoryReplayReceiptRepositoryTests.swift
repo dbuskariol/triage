@@ -186,6 +186,143 @@ final class RepositoryInventoryReplayReceiptRepositoryTests: XCTestCase {
         XCTAssertTrue(boundSnapshotIDs.isSubset(of: remainingIDs))
     }
 
+    func testRetiringOnePostAccountReceiptReleasesOnlyItsRawPageForCompaction() async throws {
+        let fixture = try await RepositoryReplayFixture()
+        defer { fixture.remove() }
+        let rawRepository = RawAPISnapshotRepository(vault: fixture.vault)
+        let oldAccount = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "post-account-receipt-old")!,
+            accountID: fixture.account.id,
+            githubNodeID: nil,
+            endpoint: "/user/orgs?per_page=100",
+            eTag: "\"account-old\"",
+            parserVersion: 1,
+            observedAt: fixture.observedAt.addingTimeInterval(-120),
+            payload: Data("[]".utf8)
+        )
+        let newAccount = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "post-account-receipt-new")!,
+            accountID: fixture.account.id,
+            githubNodeID: nil,
+            endpoint: oldAccount.endpoint,
+            eTag: "\"account-new\"",
+            parserVersion: 1,
+            observedAt: fixture.observedAt.addingTimeInterval(-60),
+            payload: Data("[]".utf8)
+        )
+        let oldMetadata = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "organization-metadata-receipt-old")!,
+            accountID: fixture.account.id,
+            githubNodeID: nil,
+            endpoint: "/orgs/acme",
+            eTag: "\"metadata-old\"",
+            parserVersion: 1,
+            observedAt: fixture.observedAt.addingTimeInterval(-120),
+            payload: Data("{}".utf8)
+        )
+        let newMetadata = RawAPISnapshot(
+            id: RawAPISnapshotID(rawValue: "organization-metadata-receipt-new")!,
+            accountID: fixture.account.id,
+            githubNodeID: nil,
+            endpoint: oldMetadata.endpoint,
+            eTag: "\"metadata-new\"",
+            parserVersion: 1,
+            observedAt: fixture.observedAt.addingTimeInterval(-60),
+            payload: Data("{}".utf8)
+        )
+        for snapshot in [oldAccount, newAccount, oldMetadata, newMetadata] {
+            try await rawRepository.save(snapshot)
+        }
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organization_inventory_replay_receipts (
+                        id, account_id, credential_revision, request_key, etag, last_modified,
+                        parser_version, source_revision, normalized_digest, page_count,
+                        organization_count, observed_at_ms, committed_at_ms, validated_at_ms, receipt_version
+                    ) VALUES ('account-receipt', ?, ?, 'GET /user/orgs?per_page=100', '"account-old"', NULL,
+                              1, 'account-source', ?, 1, 0, 9_880_000, 9_880_000, 9_880_000, 1)
+                    """,
+                arguments: [
+                    fixture.account.id.rawValue,
+                    fixture.credentialRevision.rawValue,
+                    Data(repeating: 0xA1, count: 32)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organization_inventory_replay_receipt_pages (
+                        receipt_id, page_ordinal, raw_snapshot_id, request_key, raw_payload_digest,
+                        organization_ids_digest, is_terminal
+                    ) VALUES ('account-receipt', 1, ?, 'GET /user/orgs?per_page=100', ?, ?, 1)
+                    """,
+                arguments: [
+                    oldAccount.id.rawValue,
+                    Data(repeating: 0xA2, count: 32),
+                    Data(repeating: 0xA3, count: 32)
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO sync_streams (
+                        id, account_id, organization_id, feature, high_water_ms,
+                        last_successful_at_ms, last_attempt_at_ms, state, failure_detail
+                    ) VALUES ('organization-metadata-receipt-stream', ?, ?, 'organizationMetadata',
+                              NULL, NULL, NULL, 'idle', NULL)
+                    """,
+                arguments: [fixture.account.id.rawValue, fixture.organization.id.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO organization_metadata_replay_receipts (
+                        id, account_id, organization_id, feature, stream_id, credential_revision,
+                        capability_revision, request_key, etag, last_modified, raw_snapshot_id,
+                        raw_payload_digest, normalized_digest, parser_version, source_revision,
+                        observed_at_ms, committed_at_ms, validated_at_ms, receipt_version
+                    ) VALUES ('metadata-receipt', ?, ?, 'organizationMetadata',
+                              'organization-metadata-receipt-stream', ?, ?, 'GET /orgs/acme',
+                              '"metadata-old"', NULL, ?, ?, ?, 1, 'metadata-source',
+                              9_880_000, 9_880_000, 9_880_000, 1)
+                    """,
+                arguments: [
+                    fixture.account.id.rawValue,
+                    fixture.organization.id.rawValue,
+                    fixture.credentialRevision.rawValue,
+                    fixture.capabilityRevision.rawValue,
+                    oldMetadata.id.rawValue,
+                    Data(repeating: 0xB1, count: 32),
+                    Data(repeating: 0xB2, count: 32)
+                ]
+            )
+        }
+
+        let compactedWhilePinned = try await rawRepository.compact(
+            accountID: fixture.account.id,
+            retainingMostRecentPerSource: 1,
+            before: fixture.observedAt
+        )
+        XCTAssertEqual(compactedWhilePinned, 0)
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "DELETE FROM account_organization_inventory_replay_receipts WHERE id = 'account-receipt'"
+            )
+        }
+        let compactedAfterRetirement = try await rawRepository.compact(
+            accountID: fixture.account.id,
+            retainingMostRecentPerSource: 1,
+            before: fixture.observedAt
+        )
+        XCTAssertEqual(compactedAfterRetirement, 1)
+        let remaining = try await rawRepository.snapshots(for: fixture.account.id)
+        let remainingIDs = Set(remaining.map(\.id))
+        XCTAssertFalse(remainingIDs.contains(oldAccount.id))
+        XCTAssertTrue(remainingIDs.contains(newAccount.id))
+        XCTAssertTrue(remainingIDs.contains(oldMetadata.id))
+        XCTAssertTrue(remainingIDs.contains(newMetadata.id))
+    }
+
     func testGapDuplicateAndCrossScopePageInputsFailBeforeReceiptMutation() async throws {
         let fixture = try await RepositoryReplayFixture()
         defer { fixture.remove() }

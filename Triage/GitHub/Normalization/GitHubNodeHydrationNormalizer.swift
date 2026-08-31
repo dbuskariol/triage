@@ -246,7 +246,11 @@ enum GitHubNodeHydrationNormalizer {
     private static func validateCompleteCommonConnections(
         _ node: GitHubNodeHydrationPayload.Node
     ) throws {
-        guard !node.assignees.pageInfo.hasNextPage, !node.labels.pageInfo.hasNextPage else {
+        guard !node.assignees.pageInfo.hasNextPage,
+              !node.labels.pageInfo.hasNextPage,
+              !node.assignees.nodes.contains(where: { $0 == nil }),
+              !node.labels.nodes.contains(where: { $0 == nil })
+        else {
             throw GitHubNodeHydrationNormalizationError.incompleteConnection
         }
     }

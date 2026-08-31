@@ -493,6 +493,7 @@ private struct OnboardingPersonalAccessTokenSheet: View {
     let onSubmit: @MainActor (_ token: String, _ resourceOwnerOrganization: String?) async -> Bool
     @State private var token = ""
     @State private var resourceOwnerOrganization = ""
+    @State private var hasSubmitted = false
 
     private var form: OnboardingPersonalAccessTokenForm {
         OnboardingPersonalAccessTokenForm(
@@ -521,7 +522,10 @@ private struct OnboardingPersonalAccessTokenSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let error {
+            // The parent connection page can retain a prior OAuth setup error.
+            // It is unrelated to PAT authentication, so this sheet only shows
+            // errors produced after its own submission attempt.
+            if hasSubmitted, let error {
                 OnboardingErrorLabel(error)
             }
             HStack {
@@ -533,6 +537,7 @@ private struct OnboardingPersonalAccessTokenSheet: View {
                 Button("Connect") {
                     let submittedToken = token
                     let organization = form.needsResourceOwnerOrganization ? resourceOwnerOrganization : nil
+                    hasSubmitted = true
                     token = ""
                     Task {
                         if await onSubmit(submittedToken, organization) {

@@ -132,8 +132,28 @@ final class GitHubIdentityClientTests: XCTestCase {
         XCTAssertEqual(organizationETag, "\"identity-v1\"")
     }
 
-    func testOrganizationInventoryPaginatesDeduplicatesAndAggregatesSSOHeaders() async throws {
-        let secondPage = URL(string: "https://api.github.com/user/orgs?page=2")!
+    func testConditionalOrganization304PreservesScopedSSOEvidenceForReplayOwner() async throws {
+        let validators = try GitHubHTTPValidators(eTag: "\"org-v1\"", lastModified: nil)
+        let session = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(
+                statusCode: 304,
+                body: Data(),
+                headers: ["X-GitHub-SSO": "required; url=https://github.com/orgs/acme/sso"]
+            )
+        ])
+        let result = try await GitHubIdentityClient(client: try identityClient(session: session))
+            .fetchOrganization(named: "acme", validators: validators)
+        guard case let .notModified(ssoHeader) = result else {
+            return XCTFail("A 304 SSO header must remain scoped transport evidence.")
+        }
+        XCTAssertEqual(
+            ssoHeader,
+            .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso")!)
+        )
+    }
+
+    func testOrganizationInventoryPaginatesAndAggregatesSSOHeaders() async throws {
+        let secondPage = URL(string: "https://api.github.com/user/orgs?page=2&per_page=100")!
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(
                 session: PagingSession(responses: [
@@ -144,8 +164,8 @@ final class GitHubIdentityClientTests: XCTestCase {
                             "X-GitHub-SSO": "partial-results; organizations=1"
                         ]
                     ),
-                    "/user/orgs?page=2": (
-                        Data(#"[{"id":1,"node_id":"O_1","login":"first-renamed"},{"id":2,"node_id":"O_2","login":"second"}]"#.utf8),
+                    "/user/orgs?page=2&per_page=100": (
+                        Data(#"[{"id":2,"node_id":"O_2","login":"second"}]"#.utf8),
                         ["X-GitHub-SSO": "partial-results; organizations=2"]
                     )
                 ])
@@ -157,11 +177,161 @@ final class GitHubIdentityClientTests: XCTestCase {
 
         XCTAssertEqual(inventory.organizations.map(\.id), [1, 2])
         XCTAssertEqual(inventory.organizations.map(\.login), ["first", "second"])
+        XCTAssertEqual(inventory.pages.count, 2)
         XCTAssertEqual(inventory.ssoHeader, .partialResults(Set([1, 2])))
     }
 
+    func testOrganizationInventoryAcceptsExactAggregateResponseBudgetAcrossPages() async throws {
+        let secondPage = URL(string: "https://api.github.com/user/orgs?page=2&per_page=100")!
+        let firstPayload = organizationPayload(
+            id: 1,
+            nodeID: "O_BUDGET_1",
+            login: "first",
+            totalBytes: 512 * 1_024
+        )
+        let secondPayload = organizationPayload(
+            id: 2,
+            nodeID: "O_BUDGET_2",
+            login: "second",
+            totalBytes: 512 * 1_024
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/user/orgs?per_page=100": (
+                        firstPayload,
+                        ["Link": "<\(secondPage.absoluteString)>; rel=\"next\""]
+                    ),
+                    "/user/orgs?page=2&per_page=100": (secondPayload, [:])
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let inventory = try await GitHubIdentityClient(client: client).allOrganizations()
+
+        XCTAssertEqual(inventory.organizations.map(\.id), [1, 2])
+        XCTAssertEqual(inventory.pages.map { $0.page.payload.count }, [512 * 1_024, 512 * 1_024])
+    }
+
+    func testOrganizationInventoryRejectsPageThatExceedsAggregateResponseBudget() async throws {
+        let secondPage = URL(string: "https://api.github.com/user/orgs?page=2&per_page=100")!
+        let firstPayload = organizationPayload(
+            id: 1,
+            nodeID: "O_BUDGET_1",
+            login: "first",
+            totalBytes: 512 * 1_024
+        )
+        let secondPayload = organizationPayload(
+            id: 2,
+            nodeID: "O_BUDGET_2",
+            login: "second",
+            totalBytes: 512 * 1_024 + 1
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/user/orgs?per_page=100": (
+                        firstPayload,
+                        ["Link": "<\(secondPage.absoluteString)>; rel=\"next\""]
+                    ),
+                    "/user/orgs?page=2&per_page=100": (secondPayload, [:])
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: client).allOrganizations()
+        } verify: { error in
+            XCTAssertEqual(
+                error as? GitHubIdentityClientError,
+                .organizationInventoryResponseTooLarge
+            )
+        }
+    }
+
+    func testSelectedOrganizationEnforcesEndpointSpecificResponseBudget() async throws {
+        let boundarySession = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(
+                statusCode: 200,
+                body: organizationPayload(
+                    id: 1,
+                    nodeID: "O_SELECTED",
+                    login: "acme",
+                    totalBytes: 256 * 1_024,
+                    asArray: false
+                )
+            )
+        ])
+        let boundary = try await GitHubIdentityClient(client: try identityClient(session: boundarySession))
+            .organization(named: "acme")
+        XCTAssertEqual(boundary.value.login, "acme")
+        XCTAssertEqual(boundary.payload.count, 256 * 1_024)
+
+        let overflowSession = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(
+                statusCode: 200,
+                body: organizationPayload(
+                    id: 1,
+                    nodeID: "O_SELECTED",
+                    login: "acme",
+                    totalBytes: 256 * 1_024 + 1,
+                    asArray: false
+                )
+            )
+        ])
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: overflowSession))
+                .organization(named: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .organizationResponseTooLarge)
+        }
+    }
+
+    func testOrganizationInventoryRejectsDuplicateOrMalformedPaginationBeforeCompleteReceiptCanExist() async throws {
+        let secondPage = URL(string: "https://api.github.com/user/orgs?page=2&per_page=100")!
+        let duplicateClient = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/user/orgs?per_page=100": (
+                        Data(#"[{"id":1,"node_id":"O_1","login":"first"}]"#.utf8),
+                        ["Link": "<\(secondPage.absoluteString)>; rel=\"next\""]
+                    ),
+                    "/user/orgs?page=2&per_page=100": (
+                        Data(#"[{"id":1,"node_id":"O_1","login":"first"}]"#.utf8), [:]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: duplicateClient).allOrganizations()
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .duplicateOrganization)
+        }
+
+        let malformedClient = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PagingSession(responses: [
+                    "/user/orgs?per_page=100": (
+                        Data(#"[]"#.utf8),
+                        ["Link": "this is not a GitHub Link header"]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: malformedClient).allOrganizations()
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .invalidPaginationLink)
+        }
+    }
+
     func testOrganizationInventoryRejectsPaginationLoops() async throws {
-        let loopURL = URL(string: "https://api.github.com/user/orgs?page=2")!
+        let loopURL = URL(string: "https://api.github.com/user/orgs?page=2&per_page=100")!
         let client = GitHubRESTClient(
             transport: try GitHubRESTTransport(
                 session: PagingSession(responses: [
@@ -169,7 +339,7 @@ final class GitHubIdentityClientTests: XCTestCase {
                         Data(#"[{"id":1,"node_id":"O_1","login":"first"}]"#.utf8),
                         ["Link": "<\(loopURL.absoluteString)>; rel=\"next\""]
                     ),
-                    "/user/orgs?page=2": (
+                    "/user/orgs?page=2&per_page=100": (
                         Data(#"[{"id":2,"node_id":"O_2","login":"second"}]"#.utf8),
                         ["Link": "<\(loopURL.absoluteString)>; rel=\"next\""]
                     )
@@ -181,7 +351,7 @@ final class GitHubIdentityClientTests: XCTestCase {
         await XCTAssertThrowsErrorAsync {
             _ = try await GitHubIdentityClient(client: client).allOrganizations()
         } verify: { error in
-            XCTAssertEqual(error as? GitHubIdentityClientError, .paginationLoop)
+            XCTAssertEqual(error as? GitHubIdentityClientError, .invalidPaginationLink)
         }
     }
 
@@ -243,6 +413,24 @@ final class GitHubIdentityClientTests: XCTestCase {
             transport: try GitHubRESTTransport(session: session),
             credential: SecretValue("token")
         )
+    }
+
+    private func organizationPayload(
+        id: UInt64,
+        nodeID: String,
+        login: String,
+        totalBytes: Int,
+        asArray: Bool = true
+    ) -> Data {
+        let prefix = asArray
+            ? "[{\"id\":\(id),\"node_id\":\"\(nodeID)\",\"login\":\"\(login)\",\"padding\":\""
+            : "{\"id\":\(id),\"node_id\":\"\(nodeID)\",\"login\":\"\(login)\",\"padding\":\""
+        let suffix = asArray ? "\"}]" : "\"}"
+        let paddingLength = totalBytes - Data((prefix + suffix).utf8).count
+        precondition(paddingLength >= 0)
+        let payload = Data((prefix + String(repeating: "x", count: paddingLength) + suffix).utf8)
+        precondition(payload.count == totalBytes)
+        return payload
     }
 }
 

@@ -132,6 +132,78 @@ final class WorkListPresentationTests: XCTestCase {
         )
     }
 
+    func testMultipleSelectionRetainsThePrimaryDetailItemUntilItIsDeselected() {
+        let itemA = WorkItemID(rawValue: "work-a")!
+        let itemB = WorkItemID(rawValue: "work-b")!
+        let itemC = WorkItemID(rawValue: "work-c")!
+        var selection = WorkListSelection()
+
+        XCTAssertEqual(
+            selection.applyNativeSelection([itemB], orderedWorkItemIDs: [itemA, itemB, itemC]),
+            itemB
+        )
+        XCTAssertEqual(
+            selection.applyNativeSelection([itemA, itemB], orderedWorkItemIDs: [itemA, itemB, itemC]),
+            itemB
+        )
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemA, itemB])
+        XCTAssertEqual(selection.primaryWorkItemID, itemB)
+
+        XCTAssertEqual(
+            selection.applyNativeSelection([itemA, itemC], orderedWorkItemIDs: [itemA, itemB, itemC]),
+            itemC
+        )
+        XCTAssertEqual(selection.primaryWorkItemID, itemC)
+    }
+
+    func testSelectionRestorationPreservesLocalMultipleSelectionOnlyWithinItsWorkspace() {
+        let account = AccountID(rawValue: "account")!
+        let firstOrganization = OrganizationID(rawValue: "organization-a")!
+        let secondOrganization = OrganizationID(rawValue: "organization-b")!
+        let itemA = WorkItemID(rawValue: "work-a")!
+        let itemB = WorkItemID(rawValue: "work-b")!
+        var selection = WorkListSelection()
+        let firstRequest = WorkListSelectionRestorationRequest(
+            accountID: account,
+            organizationID: firstOrganization,
+            validWorkItemIDs: [itemA, itemB]
+        )
+
+        selection.restore(primaryWorkItemID: itemA, request: firstRequest)
+        XCTAssertEqual(
+            selection.applyNativeSelection([itemA, itemB], orderedWorkItemIDs: [itemA, itemB]),
+            itemA
+        )
+        selection.restore(primaryWorkItemID: itemA, request: firstRequest)
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemA, itemB])
+
+        selection.restore(
+            primaryWorkItemID: itemB,
+            request: WorkListSelectionRestorationRequest(
+                accountID: account,
+                organizationID: secondOrganization,
+                validWorkItemIDs: [itemA, itemB]
+            )
+        )
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemB])
+        XCTAssertEqual(selection.primaryWorkItemID, itemB)
+    }
+
+    func testContextualSelectionTargetsOnlyThatRowAndExternalHistorySelectionStaysSingle() {
+        let itemA = WorkItemID(rawValue: "work-a")!
+        let itemB = WorkItemID(rawValue: "work-b")!
+        var selection = WorkListSelection()
+
+        _ = selection.applyNativeSelection([itemA, itemB], orderedWorkItemIDs: [itemA, itemB])
+        selection.selectContextualWorkItem(itemB)
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemB])
+        XCTAssertEqual(selection.primaryWorkItemID, itemB)
+
+        selection.synchronizePrimarySelection(itemA)
+        XCTAssertEqual(selection.selectedWorkItemIDs, [itemA])
+        XCTAssertEqual(selection.primaryWorkItemID, itemA)
+    }
+
     func testContextMenuPolicyMatchesActiveWorkflowCommandAvailability() {
         let item = makeWorkItem(
             workflow: WorkflowState(status: .active, updatedAt: now),

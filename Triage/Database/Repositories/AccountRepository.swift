@@ -3,6 +3,7 @@ import GRDB
 
 enum AccountRepositoryError: Error, Equatable, Sendable {
     case accountScopeMismatch
+    case staleCredentialRevision
     case invalidPersistedIdentifier
     case invalidCapabilityScope
     case organizationIdentityMismatch
@@ -29,6 +30,24 @@ actor AccountRepository {
                     ORDER BY created_at_ms
                     """
             ).map { try Self.account(from: $0) }
+        }
+    }
+
+    /// Returns the exact durable credential authority for this vault account.
+    /// Callers use it only after resolving the account from this same vault, so
+    /// an in-flight credential replacement is detected before any identity
+    /// result can be published.
+    func credentialRevision(for accountID: AccountID) async throws -> CredentialRevision {
+        try ensureAccountScope(accountID)
+        return try await vault.read { database in
+            guard let rawValue = try String.fetchOne(
+                database,
+                sql: "SELECT credential_revision FROM accounts WHERE id = ? AND disabled_at_ms IS NULL",
+                arguments: [accountID.rawValue]
+            ), let revision = CredentialRevision(rawValue: rawValue) else {
+                throw AccountRepositoryError.synchronizationScopeUnavailable
+            }
+            return revision
         }
     }
 
@@ -325,6 +344,99 @@ actor AccountRepository {
             }
         }
 
+    }
+
+    /// Adds identities proven by the account-scoped organization inventory
+    /// without letting a superseded credential replay overwrite access state.
+    /// The revision predicate and all inserts share one transaction so account
+    /// removal or another credential rotation wins cleanly at the boundary.
+    func reconcilePostCredentialOrganizationInventory(
+        _ organizations: [GitHubOrganization],
+        accountID: AccountID,
+        expectedCredentialRevision: CredentialRevision,
+        observedAt: Date
+    ) async throws {
+        try Task.checkCancellation()
+        try ensureAccountScope(accountID)
+        let observedAtMilliseconds = Self.milliseconds(observedAt)
+        try await vault.writeTransaction { database in
+            try Task.checkCancellation()
+            let storedRevision: String? = try String.fetchOne(
+                database,
+                sql: "SELECT credential_revision FROM accounts WHERE id = ? AND disabled_at_ms IS NULL",
+                arguments: [accountID.rawValue]
+            )
+            guard storedRevision == expectedCredentialRevision.rawValue else {
+                throw AccountRepositoryError.staleCredentialRevision
+            }
+
+            var organizationIDs = Set<OrganizationID>()
+            for (offset, organization) in organizations.enumerated() {
+                if offset.isMultiple(of: 32) {
+                    try Task.checkCancellation()
+                }
+                guard organizationIDs.insert(organization.id).inserted else {
+                    throw AccountRepositoryError.organizationIdentityMismatch
+                }
+                try database.execute(
+                    sql: """
+                        INSERT INTO organizations (
+                            id, github_organization_id, github_node_id, login, display_name, avatar_url, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            github_organization_id = excluded.github_organization_id,
+                            github_node_id = excluded.github_node_id,
+                            login = excluded.login,
+                            display_name = excluded.display_name,
+                            avatar_url = excluded.avatar_url,
+                            updated_at_ms = excluded.updated_at_ms
+                        """,
+                    arguments: [
+                        organization.id.rawValue,
+                        String(organization.githubOrganizationID),
+                        organization.nodeID.rawValue,
+                        organization.login,
+                        organization.displayName,
+                        organization.avatarURL?.absoluteString,
+                        observedAtMilliseconds
+                    ]
+                )
+                let capabilityRevision = CapabilityRevision(rawValue: UUID().uuidString.lowercased())!
+                try Task.checkCancellation()
+                try database.execute(
+                    sql: """
+                        INSERT INTO account_organizations (
+                            account_id, organization_id, access_state, capability_revision, selected_at_ms, checked_at_ms
+                        ) VALUES (?, ?, 'available', ?, NULL, ?)
+                        ON CONFLICT(account_id, organization_id) DO NOTHING
+                        """,
+                    arguments: [
+                        accountID.rawValue,
+                        organization.id.rawValue,
+                        capabilityRevision.rawValue,
+                        observedAtMilliseconds
+                    ]
+                )
+                guard database.changesCount == 1 else { continue }
+                for capability in GitHubCapability.allCases where capability.scope == .organization {
+                    try database.execute(
+                        sql: """
+                            INSERT INTO capabilities (
+                                id, account_id, organization_id, repository_id, capability, status, checked_at_ms, detail_fingerprint
+                            ) VALUES (?, ?, ?, NULL, ?, 'unknown', ?, NULL)
+                            """,
+                        arguments: [
+                            "\(accountID.rawValue):\(organization.id.rawValue):-:\(capability.rawValue)",
+                            accountID.rawValue,
+                            organization.id.rawValue,
+                            capability.rawValue,
+                            observedAtMilliseconds
+                        ]
+                    )
+                }
+            }
+            try Task.checkCancellation()
+        }
     }
 
     func save(_ snapshot: AccountCapabilitySnapshot) async throws {

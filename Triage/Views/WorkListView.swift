@@ -9,10 +9,11 @@ struct WorkListView: View {
     @State private var searchResultsRequest: WorkListSearchRequest?
     @State private var isSearching = false
     @State private var searchError: String?
+    @State private var workListSelection = WorkListSelection()
     @FocusState private var searchFocus: Bool
 
     var body: some View {
-        List(selection: $appModel.selectedWorkItemID) {
+        List(selection: workItemSelection) {
             ForEach(filteredWorkItems) { item in
                 WorkItemRow(
                     item: item,
@@ -65,6 +66,7 @@ struct WorkListView: View {
             restoreSelectedWorkItem()
         }
         .onChange(of: appModel.selectedWorkItemID) { _, workItemID in
+            workListSelection.synchronizePrimarySelection(workItemID)
             persistSelectedWorkItem(workItemID)
         }
         .onChange(of: workspaceAccessibility.requestedFocus) { _, _ in
@@ -230,6 +232,20 @@ struct WorkListView: View {
         )
     }
 
+    private var workItemSelection: Binding<Set<WorkItemID>> {
+        Binding(
+            get: { workListSelection.selectedWorkItemIDs },
+            set: { selectedWorkItemIDs in
+                let primaryWorkItemID = workListSelection.applyNativeSelection(
+                    selectedWorkItemIDs,
+                    orderedWorkItemIDs: filteredWorkItems.map(\.id)
+                )
+                guard appModel.selectedWorkItemID != primaryWorkItemID else { return }
+                appModel.selectedWorkItemID = primaryWorkItemID
+            }
+        )
+    }
+
     private func matchesListFilter(_ item: WorkItem) -> Bool {
         switch navigation.listFilter {
         case .all:
@@ -248,13 +264,22 @@ struct WorkListView: View {
               let organizationID = appModel.selectedOrganizationID
         else {
             appModel.selectedWorkItemID = nil
+            workListSelection.restore(
+                primaryWorkItemID: nil,
+                request: selectionRestorationRequest
+            )
             return
         }
 
-        appModel.selectedWorkItemID = navigation.validatedSelectedWorkItem(
+        let restoredWorkItemID = navigation.validatedSelectedWorkItem(
             accountID: accountID,
             organizationID: organizationID,
             validWorkItemIDs: selectionRestorationRequest.validWorkItemIDs
+        )
+        appModel.selectedWorkItemID = restoredWorkItemID
+        workListSelection.restore(
+            primaryWorkItemID: restoredWorkItemID,
+            request: selectionRestorationRequest
         )
     }
 
@@ -339,6 +364,7 @@ struct WorkListView: View {
         // The contextual row, rather than an older list selection, is the
         // action target. The List keeps that explicit selection after the
         // local workflow update whenever the row remains visible.
+        workListSelection.selectContextualWorkItem(item.id)
         appModel.selectedWorkItemID = item.id
         let action = operation.workflowAction(now: Date())
         Task {
