@@ -369,6 +369,7 @@
 		F1BAEEF1EDB96EBF261523A2 /* EvidenceAndFreshnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCE6C7E6ACA9040CEB7FC61 /* EvidenceAndFreshnessTests.swift */; };
 		F1E2EA0C7C7B01D47BBC59AE /* WorkspaceNotificationDeliveryAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80ABB3A8AC88E25B725D90F /* WorkspaceNotificationDeliveryAdapterTests.swift */; };
 		F2F097BB5F828A89CA1851AA /* CopilotXPCCallerValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */; };
+		F5C6B0D181CE4B69BFA9A001 /* TriageCopilotXPCListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */; };
 		F38BC5A99ECA9E367527CBDD /* PullRequestReviewThreadRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 738A7187EF795179516FEBB9 /* PullRequestReviewThreadRepository.swift */; };
 		F3AAEBABBED7F89F609F96A5 /* BusinessDayPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E80DE672E00FCF7147665285 /* BusinessDayPolicyTests.swift */; };
 		F3E5C7A841C553B6D180418F /* TimelineCandidateRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDA3EB791B073738499E0AFB /* TimelineCandidateRepositoryTests.swift */; };
@@ -1889,6 +1890,7 @@
 				F2F097BB5F828A89CA1851AA /* CopilotXPCCallerValidator.swift in Sources */,
 				81583E154FDA724FE3ADFD42 /* CopilotXPCFrame.swift in Sources */,
 				57E068C5936DFF50A830B501 /* CopilotXPCInterface.swift in Sources */,
+				F5C6B0D181CE4B69BFA9A001 /* TriageCopilotXPCListener.swift in Sources */,
 				3073FDC23CBFCC4BCDB8CC5C /* TriageCopilotXPCFailClosedTests.swift in Sources */,
 				02E6C9F57E6A5DE8A8B348F9 /* TriageCopilotXPCService.swift in Sources */,
 			);

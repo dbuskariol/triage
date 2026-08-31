@@ -29,6 +29,7 @@ enum PerformanceFixtureQueryShape {
     static let searchPageLimit = 50
     static let timelinePageLimit = 100
     static let commentPageLimit = 32
+    static let detailSelectionPageLimit = 1
 }
 
 enum PerformanceFixtureRecordKind: CaseIterable, Hashable, Sendable {
@@ -158,6 +159,14 @@ struct PerformanceFixtureSeedMetrics: Equatable, Sendable {
     let streamedRecordCount: Int
 }
 
+/// Test seam for asserting that detail setup requests a bounded Inbox page.
+/// The production fixture supplies the standard repository implementation.
+typealias PerformanceFixtureDetailSelectionPageLoader = @Sendable (
+    AccountVault,
+    SynchronizationScope,
+    Int
+) async throws -> [WorkItem]
+
 /// Privacy-safe provenance carried with every benchmark report. It identifies
 /// only the source-controlled fixture shape and bounded seeding behavior; it
 /// deliberately excludes vault paths, account identifiers, credentials, and
@@ -200,6 +209,7 @@ final class PerformanceFixtureStore: @unchecked Sendable {
     let directory: URL
     let vault: AccountVault
     private let generator: PerformanceFixtureGenerator
+    private let detailSelectionPageLoader: PerformanceFixtureDetailSelectionPageLoader
     private var selectedDetailWorkItem: WorkItem?
 
     let accountID = "00000000-0000-4000-8000-000000000501"
@@ -213,8 +223,19 @@ final class PerformanceFixtureStore: @unchecked Sendable {
 
     var synchronizationScope: SynchronizationScope { scope }
 
-    init(generator: PerformanceFixtureGenerator = .init()) async throws {
+    init(
+        generator: PerformanceFixtureGenerator = .init(),
+        detailSelectionPageLoader: @escaping PerformanceFixtureDetailSelectionPageLoader = { vault, scope, limit in
+            try await WorkItemRepository(vault: vault).fetchInboxPage(
+                scope: scope,
+                at: .now,
+                freshness: FreshnessState(status: .fresh),
+                limit: limit
+            )
+        }
+    ) async throws {
         self.generator = generator
+        self.detailSelectionPageLoader = detailSelectionPageLoader
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("triage-performance-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -268,12 +289,9 @@ final class PerformanceFixtureStore: @unchecked Sendable {
                 try self.seed(batch, kind: kind, into: database)
             }
         }
-        // A selection arrives from the cached production workspace graph. Load
-        // it once outside the timed detail samples so this benchmark measures
-        // selection-to-detail data, not a fresh 10k-item graph decode.
-        selectedDetailWorkItem = try await workItems().first {
-            $0.id.rawValue == workItemID(0)
-        }
+        // Select from one bounded production Inbox page. Do not decode the
+        // complete 10k graph merely to prepare a repository detail-load sample.
+        selectedDetailWorkItem = try await selectedDetailItem()
         return PerformanceFixtureSeedMetrics(
             batchCount: batchCount,
             largestBatchSize: largestBatchSize,
@@ -333,9 +351,10 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         ).count
     }
 
-    /// Detail views load the selected item's authoritative local source and a
-    /// bounded timeline page through the production detail repository.
-    func detailInitialPresentation() async throws -> Int {
+    /// Loads the selected item's authoritative local source and a bounded
+    /// timeline page through the production detail repository. This is a
+    /// repository detail-load metric, not a SwiftUI selection-to-render metric.
+    func detailRepositoryLoad() async throws -> Int {
         guard let item = selectedDetailWorkItem else {
             throw PerformanceFixtureError.missingSelectedWorkItem
         }
@@ -350,11 +369,19 @@ final class PerformanceFixtureStore: @unchecked Sendable {
         return (resolvedSource?.bodyMarkdown?.utf8.count ?? 0) + resolvedTimeline.entries.count
     }
 
-    private func workItems() async throws -> [WorkItem] {
-        try await WorkItemRepository(vault: vault).fetch(
-            accountID: scope.accountID,
-            organizationID: scope.organizationID,
-            authorityScope: scope
+    func selectedDetailPageItemCount() async throws -> Int {
+        try await selectedDetailPage().count
+    }
+
+    private func selectedDetailItem() async throws -> WorkItem? {
+        try await selectedDetailPage().first
+    }
+
+    private func selectedDetailPage() async throws -> [WorkItem] {
+        try await detailSelectionPageLoader(
+            vault,
+            scope,
+            PerformanceFixtureQueryShape.detailSelectionPageLimit
         )
     }
 

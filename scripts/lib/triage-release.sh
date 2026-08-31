@@ -41,6 +41,41 @@ triage_plist_value() {
   /usr/libexec/PlistBuddy -c "Print :$1" "$2" 2>/dev/null || true
 }
 
+triage_assert_expected_architectures() {
+  local executable="$1"
+  local label="$2"
+  local architectures architecture
+
+  architectures="$(/usr/bin/lipo -archs "$executable")" \
+    || triage_fail "$label architectures could not be inspected: $executable"
+  for architecture in "${TRIAGE_EXPECTED_ARCHITECTURES[@]}"; do
+    [[ " $architectures " == *" $architecture "* ]] \
+      || triage_fail "$label is missing $architecture (found: $architectures)"
+  done
+}
+
+triage_assert_no_unsafe_entitlements() {
+  local entitlements="$1"
+  local label="$2"
+  local entitlement
+  local unsafe_entitlements=(
+    com.apple.security.get-task-allow
+    com.apple.security.cs.disable-library-validation
+    com.apple.security.cs.allow-dyld-environment-variables
+    com.apple.security.cs.allow-unsigned-executable-memory
+    com.apple.security.cs.allow-jit
+    com.apple.security.cs.debugger
+    com.apple.security.cs.disable-executable-page-protection
+  )
+
+  /usr/bin/plutil -lint "$entitlements" >/dev/null \
+    || triage_fail "$label entitlements are invalid: $entitlements"
+  for entitlement in "${unsafe_entitlements[@]}"; do
+    [[ -z "$(triage_plist_value "$entitlement" "$entitlements")" ]] \
+      || triage_fail "$label contains forbidden entitlement: $entitlement"
+  done
+}
+
 triage_json_value() {
   /usr/bin/plutil -extract "$1" raw -o - "$2" 2>/dev/null || true
 }
@@ -51,6 +86,36 @@ triage_codesign_details() {
 
 triage_signature_team() {
   /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$(triage_codesign_details "$1")"
+}
+
+triage_assert_code_identifier() {
+  local signed_path="$1"
+  local expected_identifier="$2"
+  local label="$3"
+  local actual_identifier
+
+  actual_identifier="$(/usr/bin/awk -F= '/^Identifier=/{print $2; exit}' <<<"$(triage_codesign_details "$signed_path")")"
+  [[ "$actual_identifier" == "$expected_identifier" ]] \
+    || triage_fail "$label has an unexpected code identifier: ${actual_identifier:-missing}"
+}
+
+triage_assert_safe_signed_entitlements() {
+  local signed_path="$1"
+  local label="$2"
+  local entitlements
+
+  entitlements="$(/usr/bin/mktemp -t triage-signed-entitlements.XXXXXX)"
+  /usr/bin/codesign -d --entitlements :- "$signed_path" >"$entitlements" 2>/dev/null \
+    || { /bin/rm -f "$entitlements"; triage_fail "unable to inspect $label entitlements"; }
+  # A code object without an entitlements blob is constrained by no special
+  # entitlement. Treat that as safe while still linting any blob that exists.
+  if [[ -s "$entitlements" ]]; then
+    if ! (triage_assert_no_unsafe_entitlements "$entitlements" "$label"); then
+      /bin/rm -f "$entitlements"
+      triage_fail "$label contains unsafe entitlements"
+    fi
+  fi
+  /bin/rm -f "$entitlements"
 }
 
 triage_assert_developer_id_signature() {
@@ -135,7 +200,7 @@ triage_assert_release_metadata() {
 triage_assert_release_app() {
   local app="$1"
   local expected_team="${2:-}"
-  local info executable bundle_id minimum_system version build architectures team entitlements
+  local info executable bundle_id minimum_system version build team entitlements
 
   [[ -d "$app" ]] || triage_fail "app bundle not found: $app"
   info="$app/Contents/Info.plist"
@@ -162,32 +227,45 @@ triage_assert_release_app() {
   triage_assert_developer_id_signature "$app" "$expected_team" 1
   team="$(triage_signature_team "$app")"
 
-  architectures="$(/usr/bin/lipo -archs "$executable")"
-  local architecture
-  for architecture in "${TRIAGE_EXPECTED_ARCHITECTURES[@]}"; do
-    [[ " $architectures " == *" $architecture "* ]] \
-      || triage_fail "the release is missing $architecture (found: $architectures)"
-  done
+  triage_assert_expected_architectures "$executable" 'the release app executable'
 
   entitlements="$(/usr/bin/mktemp -t triage-entitlements.XXXXXX)"
   /usr/bin/codesign -d --entitlements :- "$app" >"$entitlements" 2>/dev/null \
     || { /bin/rm -f "$entitlements"; triage_fail 'unable to inspect release entitlements'; }
-  [[ -z "$(triage_plist_value com.apple.security.get-task-allow "$entitlements")" ]] \
-    || { /bin/rm -f "$entitlements"; triage_fail 'release contains the debug get-task-allow entitlement'; }
-  [[ -z "$(triage_plist_value com.apple.security.cs.disable-library-validation "$entitlements")" ]] \
-    || { /bin/rm -f "$entitlements"; triage_fail 'release disables library validation'; }
+  if ! (triage_assert_no_unsafe_entitlements "$entitlements" 'release app'); then
+    /bin/rm -f "$entitlements"
+    triage_fail 'release app contains unsafe entitlements'
+  fi
   /bin/rm -f "$entitlements"
 
   [[ -f "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ]] \
     || triage_fail 'the embedded Sparkle framework is missing'
-  local copilot_xpc
+  local copilot_xpc copilot_xpc_executable copilot_helper copilot_xpc_entitlements
   copilot_xpc="$app/Contents/XPCServices/TriageCopilotXPC.xpc"
   [[ -d "$copilot_xpc" ]] || triage_fail 'the embedded Copilot XPC service is missing'
   [[ "$(triage_plist_value CFBundleIdentifier "$copilot_xpc/Contents/Info.plist")" == "com.triage.mac.TriageCopilotXPC" ]] \
     || triage_fail 'the embedded Copilot XPC service has an unexpected bundle identifier'
-  [[ -x "$copilot_xpc/Contents/MacOS/TriageCopilotXPC" ]] \
+  copilot_xpc_executable="$copilot_xpc/Contents/MacOS/TriageCopilotXPC"
+  [[ -x "$copilot_xpc_executable" ]] \
     || triage_fail 'the embedded Copilot XPC service executable is missing'
+  triage_assert_expected_architectures "$copilot_xpc_executable" 'the embedded Copilot XPC service executable'
   triage_assert_developer_id_signature "$copilot_xpc" "$team" 1
+  copilot_xpc_entitlements="$(/usr/bin/mktemp -t triage-copilot-xpc-entitlements.XXXXXX)"
+  /usr/bin/codesign -d --entitlements :- "$copilot_xpc" >"$copilot_xpc_entitlements" 2>/dev/null \
+    || { /bin/rm -f "$copilot_xpc_entitlements"; triage_fail 'unable to inspect Copilot XPC entitlements'; }
+  if ! (triage_assert_no_unsafe_entitlements "$copilot_xpc_entitlements" 'embedded Copilot XPC service'); then
+    /bin/rm -f "$copilot_xpc_entitlements"
+    triage_fail 'embedded Copilot XPC service contains unsafe entitlements'
+  fi
+  /bin/rm -f "$copilot_xpc_entitlements"
+  copilot_helper="$copilot_xpc/Contents/Resources/TriageCopilotHelper"
+  [[ -x "$copilot_helper" ]] \
+    || triage_fail 'the embedded Copilot helper executable is missing'
+  triage_assert_expected_architectures "$copilot_helper" 'the embedded Copilot helper executable'
+  triage_assert_developer_id_signature "$copilot_helper" "$team" 1
+  triage_assert_code_identifier \
+    "$copilot_helper" 'com.triage.mac.TriageCopilotHelper' 'the embedded Copilot helper executable'
+  triage_assert_safe_signed_entitlements "$copilot_helper" 'the embedded Copilot helper executable'
   local sparkle_code
   for sparkle_code in \
     "$app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \

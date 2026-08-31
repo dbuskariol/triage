@@ -126,7 +126,7 @@ final class TriageApplicationDependenciesTests: XCTestCase {
                     unavailableAccountIDs: []
                 )
             },
-            recoverInterruptedRemovals: {
+            recoverInterruptedRemovals: { _ in
                 [firstRecoveredAccountID, secondRecoveredAccountID]
             },
             deletionRecoveryStatePurger: purger
@@ -139,6 +139,61 @@ final class TriageApplicationDependenciesTests: XCTestCase {
         XCTAssertEqual(
             purgedAccountIDs,
             [firstRecoveredAccountID, secondRecoveredAccountID]
+        )
+    }
+
+    func testStartupDeletionRecoveryDrainsAccountAIAndAuthorizationBeforeCryptoErasure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-startup-deletion-drain-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accountID = AccountID.make()
+        let ordering = RecoveryDrainOrdering()
+        let controller = RecoveryAIControllerSpy(ordering: ordering)
+        let authorization = RecoveryAuthorizationSpy(ordering: ordering)
+        let notifications = RecoveryWorkspaceLifecycleSpy(ordering: ordering)
+        let session = TriageAccountSessionService(
+            vaultRegistry: try VaultRegistry(rootDirectory: root),
+            secretStore: KeychainSecretStore(),
+            applicationSupportDirectory: root.appendingPathComponent("Application Support", isDirectory: true),
+            cachesDirectory: root.appendingPathComponent("Caches", isDirectory: true),
+            restoreAccountState: {
+                guard await ordering.events() == [
+                    .notificationsEvicted(accountID),
+                    .controllerEvicted(accountID),
+                    .authorizationDisconnected(accountID),
+                    .cryptoErasure(accountID)
+                ] else {
+                    throw StartupDeletionRecoveryTestError.restoredBeforeCleanup
+                }
+                return AccountRestorationResult(
+                    accounts: [],
+                    organizationsByAccount: [:],
+                    organizationAccessesByAccount: [:],
+                    accountCapabilitiesByAccount: [:],
+                    unavailableAccountIDs: []
+                )
+            },
+            recoverInterruptedRemovals: { beforeCryptoErasure in
+                await beforeCryptoErasure(accountID)
+                await ordering.record(.cryptoErasure(accountID))
+                return [accountID]
+            },
+            organizationAIControllers: controller,
+            copilotRuntimeAuthorization: authorization,
+            workspaceObservationLifecycle: notifications
+        )
+
+        _ = try await session.restoreAccounts()
+
+        let events = await ordering.events()
+        XCTAssertEqual(
+            events,
+            [
+                .notificationsEvicted(accountID),
+                .controllerEvicted(accountID),
+                .authorizationDisconnected(accountID),
+                .cryptoErasure(accountID)
+            ]
         )
     }
 
@@ -446,6 +501,76 @@ private actor SessionSpy: AccountSessionServing {
 
 private enum StartupDeletionRecoveryTestError: Error {
     case restoredBeforeCleanup
+}
+
+private actor RecoveryDrainOrdering {
+    enum Event: Equatable, Sendable {
+        case notificationsEvicted(AccountID)
+        case controllerEvicted(AccountID)
+        case authorizationDisconnected(AccountID)
+        case cryptoErasure(AccountID)
+    }
+
+    private var storage = [Event]()
+
+    func record(_ event: Event) { storage.append(event) }
+    func events() -> [Event] { storage }
+}
+
+private actor RecoveryWorkspaceLifecycleSpy: WorkspaceObservationLifecycleHandling {
+    private let ordering: RecoveryDrainOrdering
+
+    init(ordering: RecoveryDrainOrdering) {
+        self.ordering = ordering
+    }
+
+    func evictAccount(_ accountID: AccountID) async {
+        await ordering.record(.notificationsEvicted(accountID))
+    }
+
+    func shutdown() async {}
+}
+
+private actor RecoveryAIControllerSpy: OrganizationAIControllerProviding {
+    private let ordering: RecoveryDrainOrdering
+
+    init(ordering: RecoveryDrainOrdering) {
+        self.ordering = ordering
+    }
+
+    func controller(for _: AccountVault) async -> OrganizationAIController {
+        fatalError("Recovery drain tests do not construct controllers.")
+    }
+
+    func evict(accountID: AccountID) async {
+        await ordering.record(.controllerEvicted(accountID))
+    }
+
+    func evictAll() async {}
+}
+
+private actor RecoveryAuthorizationSpy: CopilotRuntimeAuthorizationProviding {
+    private let ordering: RecoveryDrainOrdering
+
+    init(ordering: RecoveryDrainOrdering) {
+        self.ordering = ordering
+    }
+
+    func state(for _: AccountID) async -> CopilotAccountAuthorizationState { .unavailable }
+    func acquireRuntimeAtUserRequest() async throws { throw CopilotAuthenticationError.runtimeUnavailable }
+    func repairRuntimeAtUserRequest() async throws { throw CopilotAuthenticationError.runtimeUnavailable }
+    func removeRuntimeAtUserRequest() async throws {}
+    func authenticate(account _: GitHubAccount, organizationID _: OrganizationID, hasOrganizationConsent _: Bool, isEntitled _: Bool) async throws {
+        throw CopilotAuthenticationError.runtimeUnavailable
+    }
+    func models(accountID _: AccountID, organizationID _: OrganizationID) async throws -> [CopilotModel] {
+        throw CopilotAuthenticationError.runtimeUnavailable
+    }
+    func externalState(for _: SynchronizationScope, account _: GitHubAccount) async -> OrganizationAIExternalState { .unavailable }
+
+    func disconnect(accountID: AccountID) async {
+        await ordering.record(.authorizationDisconnected(accountID))
+    }
 }
 
 private actor RecoveredAccountStatePurgerSpy: AccountDeletionRecoveryStatePurging {

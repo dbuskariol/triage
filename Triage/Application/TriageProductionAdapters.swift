@@ -93,6 +93,7 @@ struct TriageProductionComposition: Sendable {
                 cachesDirectory: cachesDirectory,
                 organizationAIControllers: organizationAIControllers,
                 copilotRuntimeAuthorization: copilotRuntimeAuthorization,
+                workspaceObservationLifecycle: workspaceObservationLifecycle,
                 deletionRecoveryStatePurger: deletionRecoveryStatePurger
             ),
             workspaceCoordinator: workspaceCoordinator,
@@ -113,15 +114,21 @@ struct TriageProductionComposition: Sendable {
 }
 
 actor TriageAccountSessionService: AccountSessionServing {
+    typealias InterruptedRemovalRecovering = @Sendable (
+        @escaping @Sendable (AccountID) async -> Void
+    ) async throws -> [AccountID]
+
     private let vaultRegistry: VaultRegistry
     private let secretStore: KeychainSecretStore
     private let applicationSupportDirectory: URL
     private let cachesDirectory: URL
     private let restoreAccountState: @Sendable () async throws -> AccountRestorationResult
-    private let recoverInterruptedRemovals: @Sendable () async throws -> [AccountID]
+    private let recoverInterruptedRemovals: InterruptedRemovalRecovering
+    private let drainAccountBeforeCryptoErasure: @Sendable (AccountID) async -> Void
     private let deletionRecoveryStatePurger: any AccountDeletionRecoveryStatePurging
     private let organizationAIControllers: any OrganizationAIControllerProviding
     private let copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding
+    private let workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling
 
     init(
         vaultRegistry: VaultRegistry,
@@ -129,38 +136,55 @@ actor TriageAccountSessionService: AccountSessionServing {
         applicationSupportDirectory: URL,
         cachesDirectory: URL,
         restoreAccountState: (@Sendable () async throws -> AccountRestorationResult)? = nil,
-        recoverInterruptedRemovals: (@Sendable () async throws -> [AccountID])? = nil,
+        recoverInterruptedRemovals: InterruptedRemovalRecovering? = nil,
         organizationAIControllers: any OrganizationAIControllerProviding = OrganizationAIControllerRegistry(),
         copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding = NoopCopilotRuntimeAuthorizationProvider(),
+        workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle(),
         deletionRecoveryStatePurger: any AccountDeletionRecoveryStatePurging = NoopAccountDeletionRecoveryStatePurger()
     ) {
         self.vaultRegistry = vaultRegistry
         self.secretStore = secretStore
         self.applicationSupportDirectory = applicationSupportDirectory
         self.cachesDirectory = cachesDirectory
+        let drainAccountBeforeCryptoErasure: @Sendable (AccountID) async -> Void = { accountID in
+            // This cancels active delivery work and removes this account's
+            // pending and delivered native notifications before key erasure.
+            // It is idempotent because ordinary UI removal performs the same
+            // fence before requesting session removal.
+            await workspaceObservationLifecycle.evictAccount(accountID)
+            // A deletion journal fences future helper scratch, but an
+            // already-running controller can still own a helper process.
+            // Drain it before crossing the irreversible key-erasure boundary
+            // so it cannot recreate account-scoped artifacts.
+            await organizationAIControllers.evict(accountID: accountID)
+            await copilotRuntimeAuthorization.disconnect(accountID: accountID)
+        }
+        self.drainAccountBeforeCryptoErasure = drainAccountBeforeCryptoErasure
         self.restoreAccountState = restoreAccountState ?? {
             try await AccountRestorationService(
                 secretStore: secretStore,
                 vaultRegistry: vaultRegistry
             ).restore()
         }
-        self.recoverInterruptedRemovals = recoverInterruptedRemovals ?? {
+        self.recoverInterruptedRemovals = recoverInterruptedRemovals ?? { beforeCryptoErasure in
             try await AccountDataRemovalService(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
                 applicationSupportDirectory: applicationSupportDirectory,
-                cachesDirectory: cachesDirectory
+                cachesDirectory: cachesDirectory,
+                willBeginCryptoErasureForAccount: beforeCryptoErasure
             ).recoverInterruptedRemovals()
         }
         self.organizationAIControllers = organizationAIControllers
         self.copilotRuntimeAuthorization = copilotRuntimeAuthorization
+        self.workspaceObservationLifecycle = workspaceObservationLifecycle
         self.deletionRecoveryStatePurger = deletionRecoveryStatePurger
     }
 
     func restoreAccounts() async throws -> AccountSessionSnapshot {
         // A journal is the sole durable authorization for recovery. Complete it
         // before restoration so a keyless vault can never reappear as usable.
-        let recoveredAccountIDs = try await recoverInterruptedRemovals()
+        let recoveredAccountIDs = try await recoverInterruptedRemovals(drainAccountBeforeCryptoErasure)
         for accountID in recoveredAccountIDs {
             await deletionRecoveryStatePurger.purgeRecoveredDeletedAccountState(for: accountID)
         }
@@ -232,16 +256,7 @@ actor TriageAccountSessionService: AccountSessionServing {
             secretStore: secretStore,
             applicationSupportDirectory: applicationSupportDirectory,
             cachesDirectory: cachesDirectory,
-            willBeginCryptoErasure: { [organizationAIControllers, copilotRuntimeAuthorization] in
-                // A deletion journal fences future helper scratch, but an
-                // already-running controller can still own a helper process.
-                // Drain it before crossing the irreversible key-erasure
-                // boundary so it cannot recreate account-scoped artifacts.
-                await organizationAIControllers.evict(accountID: accountID)
-                // This closure is also reached by recovery/deletion paths
-                // that do not pass through the view model.
-                await copilotRuntimeAuthorization.disconnect(accountID: accountID)
-            }
+            willBeginCryptoErasureForAccount: drainAccountBeforeCryptoErasure
         ).removeAllPrivateData(for: accountID)
         await GitHubRateLimitControllerRegistry.shared.removeController(for: accountID)
     }

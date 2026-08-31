@@ -122,6 +122,19 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         XCTAssertEqual(state, .corrupt("checksumMismatch"))
     }
 
+    func testExecutablePinMismatchDoesNotInstall() async throws {
+        let fixture = try Fixture(executableDigest: "not-the-pinned-executable-hash")
+        defer { fixture.remove() }
+        let service = try fixture.service()
+
+        await assertRuntimeThrows { _ = try await service.acquireAtUserRequest() }
+        XCTAssertEqual(fixture.extractor.calls, 1)
+        XCTAssertEqual(fixture.validator.calls, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
+        let state = await service.state()
+        XCTAssertEqual(state, .corrupt("executableChecksumMismatch"))
+    }
+
     func testRedirectAndOversizedArchiveFailuresAreFailClosed() async throws {
         for error in [CopilotRuntimeAcquisitionError.redirectRejected, .archiveTooLarge] {
             let fixture = try Fixture(downloadError: error)
@@ -160,6 +173,82 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         await assertRuntimeThrows { _ = try await service.runtimeForUse() }
     }
 
+    func testRemoveSupersedesSuspendedAcquisitionBeforeExtractionOrInstall() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let downloader = SuspendedDownloader(digest: fixture.archiveDigest)
+        let service = try fixture.service(downloader: downloader)
+        let acquisition = Task { await acquisitionError(from: service) }
+
+        await downloader.waitUntilStarts(1)
+        try await service.removeAtUserRequest()
+        await downloader.resumeNext()
+
+        let acquisitionResult = await acquisition.value
+        XCTAssertEqual(acquisitionResult, .cancellation)
+        XCTAssertEqual(fixture.extractor.calls, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
+        let state = await service.state()
+        XCTAssertEqual(state, .absent)
+    }
+
+    func testNewerAcquisitionSupersedesOlderSuspendedAcquisitionBeforeExtraction() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let downloader = SuspendedDownloader(digest: fixture.archiveDigest)
+        let service = try fixture.service(downloader: downloader)
+        let first = Task { await acquisitionError(from: service) }
+        await downloader.waitUntilStarts(1)
+        let second = Task { await acquisitionError(from: service) }
+        await downloader.waitUntilStarts(2)
+
+        await downloader.resumeNext()
+        let firstResult = await first.value
+        XCTAssertEqual(firstResult, .cancellation)
+        await downloader.resumeNext()
+
+        let secondResult = await second.value
+        XCTAssertNil(secondResult)
+        XCTAssertEqual(fixture.extractor.calls, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
+    }
+
+    func testCancellationDuringSynchronousInstallRollsBackPublishedRuntime() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let files = BlockingInstallFiles()
+        let service = try fixture.service(files: files)
+        let acquisition = Task { await acquisitionError(from: service) }
+
+        XCTAssertEqual(files.waitForInstallStart(), .success)
+        acquisition.cancel()
+        files.allowInstallToFinish()
+
+        let acquisitionResult = await acquisition.value
+        XCTAssertEqual(acquisitionResult, .cancellation)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
+        let state = await service.state()
+        XCTAssertEqual(state, .absent)
+    }
+
+    func testAcquireAndRemoveScavengeOnlyUUIDStagingArtifacts() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let stage = try fixture.makeStaleStage(named: ".copilot-stage-\(UUID().uuidString.lowercased())")
+        let nonStage = try fixture.makeStaleStage(named: ".copilot-stage-not-a-uuid")
+        let service = try fixture.service()
+
+        _ = try await service.acquireAtUserRequest()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nonStage.path))
+
+        let removeStage = try fixture.makeStaleStage(named: ".copilot-stage-\(UUID().uuidString.lowercased())")
+        try await service.removeAtUserRequest()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeExecutable.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: removeStage.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nonStage.path))
+    }
+
     func testDelayedProgressAfterCancellationCannotOverwriteAbsentState() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-progress-race-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -175,7 +264,8 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         await assertRuntimeThrows { _ = try await service.acquireAtUserRequest() }
         downloader.emitDelayedProgress()
         for _ in 0..<16 { await Task.yield() }
-        XCTAssertEqual(await service.state(), .absent)
+        let state = await service.state()
+        XCTAssertEqual(state, .absent)
     }
 
     func testCancellationResponseAndCompletionRaceResumesDownloadOnce() async throws {
@@ -211,7 +301,8 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         let response = try XCTUnwrap(HTTPURLResponse(url: source, statusCode: 200, httpVersion: nil, headerFields: nil))
         transfer.urlSession(session, dataTask: callbackTask, didReceive: response) { _ in }
         transfer.urlSession(session, task: callbackTask, didCompleteWithError: nil)
-        XCTAssertTrue(await operation.value)
+        let didCancel = await operation.value
+        XCTAssertTrue(didCancel)
     }
 
     func testRedirectPolicyAllowsOnlyPinnedGitHubAuthoritiesWithoutCredentialsOrQuery() {
@@ -246,6 +337,37 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         XCTAssertThrowsError(try files.install(source, root: runtimeRoot, release: .pinned, architecture: .arm64))
     }
 
+    func testDescriptorPublisherInstallsPrivateSingleLinkExecutable() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appending(path: "valid-source")
+        try Data([1, 2, 3]).write(to: source)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: source.path)
+        let installed = try CopilotRuntimeFileManager().install(
+            source,
+            root: fixture.runtimeRoot,
+            release: .pinned,
+            architecture: .arm64
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: installed.path))
+    }
+
+    func testStagingScavengerRejectsFIFOWithoutBlocking() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.runtimeDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let fifo = fixture.runtimeDirectory.appending(path: ".copilot-stage-\(UUID().uuidString.lowercased())")
+        XCTAssertEqual(mkfifo(fifo.path, S_IRUSR | S_IWUSR), 0)
+
+        XCTAssertThrowsError(
+            try CopilotRuntimeFileManager().scavengeStaleStages(
+                root: fixture.runtimeRoot,
+                release: .pinned,
+                architecture: .arm64
+            )
+        )
+    }
+
     func testCodeRequirementTextUsesNormalQuotedRequirementAndInjectableParserSeam() {
         XCTAssertEqual(
             CopilotRuntimeCodeValidator.requirementText,
@@ -263,9 +385,18 @@ private final class Fixture {
     let downloader: Downloader
     let extractor: Extractor
     let validator: Validator
+    let executableDigest: String
+
+    var archiveDigest: String { CopilotRuntimeRelease.pinned.archive(for: .arm64).expectedArchiveSHA256 }
+    var runtimeRoot: URL {
+        CopilotRuntimeAcquisitionService.runtimeRoot(applicationSupportDirectory: root)
+    }
+    var runtimeDirectory: URL { runtimeRoot.appending(path: "1.0.81-10/arm64", directoryHint: .isDirectory) }
+    var runtimeExecutable: URL { runtimeDirectory.appending(path: "copilot") }
 
     init(
         digest: String = CopilotRuntimeRelease.pinned.archive(for: .arm64).expectedArchiveSHA256,
+        executableDigest: String = CopilotRuntimeRelease.pinned.archive(for: .arm64).expectedExecutableSHA256,
         downloadError: CopilotRuntimeAcquisitionError? = nil,
         extractError: CopilotRuntimeAcquisitionError? = nil,
         validationError: CopilotRuntimeAcquisitionError? = nil
@@ -275,16 +406,42 @@ private final class Fixture {
         downloader = Downloader(digest: digest, error: downloadError)
         extractor = Extractor(error: extractError)
         validator = Validator(error: validationError)
+        self.executableDigest = executableDigest
     }
 
-    func service() throws -> CopilotRuntimeAcquisitionService {
+    func service(
+        downloader: (any CopilotRuntimeDownloading)? = nil,
+        files: (any CopilotRuntimeFileManaging)? = nil
+    ) throws -> CopilotRuntimeAcquisitionService {
         try CopilotRuntimeAcquisitionService(
             applicationSupportDirectory: root,
             architecture: .arm64,
-            downloader: downloader,
+            downloader: downloader ?? self.downloader,
             extractor: extractor,
-            validator: validator
+            validator: validator,
+            hasher: FileHasher(digest: executableDigest),
+            files: files ?? CopilotRuntimeFileManager()
         )
+    }
+
+    func makeStaleStage(named name: String) throws -> URL {
+        for directory in [
+            root.appending(path: "Triage", directoryHint: .isDirectory),
+            runtimeRoot,
+            runtimeRoot.appending(path: "1.0.81-10", directoryHint: .isDirectory),
+            runtimeDirectory,
+        ] {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        }
+        let stage = runtimeDirectory.appending(path: name)
+        try Data("partial runtime".utf8).write(to: stage)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: stage.path)
+        return stage
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }
@@ -415,18 +572,70 @@ private final class DelayedProgressDownloader: CopilotRuntimeDownloading, @unche
     private var progress: (@Sendable (Int64, Int64?) -> Void)?
 
     func download(_ archive: CopilotRuntimeArchive, to destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) async throws -> String {
-        lock.lock()
-        self.progress = progress
-        lock.unlock()
+        lock.withLock { self.progress = progress }
         throw CopilotRuntimeAcquisitionError.cancellation
     }
 
     func emitDelayedProgress() {
-        lock.lock()
-        let callback = progress
-        lock.unlock()
+        let callback = lock.withLock { progress }
         callback?(42, 42)
     }
+}
+
+private actor SuspendedDownloader: CopilotRuntimeDownloading {
+    private let digest: String
+    private var starts = 0
+    private var continuations: [CheckedContinuation<String, Error>] = []
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(digest: String) { self.digest = digest }
+
+    func download(_ archive: CopilotRuntimeArchive, to destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) async throws -> String {
+        try Data("suspended archive".utf8).write(to: destination)
+        starts += 1
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        return try await withCheckedThrowingContinuation { continuations.append($0) }
+    }
+
+    func waitUntilStarts(_ expected: Int) async {
+        while starts < expected {
+            await withCheckedContinuation { startWaiters.append($0) }
+        }
+    }
+
+    func resumeNext() {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: digest)
+    }
+}
+
+private final class BlockingInstallFiles: CopilotRuntimeFileManaging, @unchecked Sendable {
+    private let base = CopilotRuntimeFileManager()
+    private let installStarted = DispatchSemaphore(value: 0)
+    private let allowInstall = DispatchSemaphore(value: 0)
+
+    func makeTemporaryDirectory() throws -> URL { try base.makeTemporaryDirectory() }
+    func removeIfPresent(_ url: URL) { base.removeIfPresent(url) }
+    func installedExecutable(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) -> URL {
+        base.installedExecutable(root: root, release: release, architecture: architecture)
+    }
+    func install(_ executable: URL, root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws -> URL {
+        installStarted.signal()
+        _ = allowInstall.wait(timeout: .now() + 2)
+        return try base.install(executable, root: root, release: release, architecture: architecture)
+    }
+    func removeInstalled(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws {
+        try base.removeInstalled(root: root, release: release, architecture: architecture)
+    }
+    func scavengeStaleStages(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws {
+        try base.scavengeStaleStages(root: root, release: release, architecture: architecture)
+    }
+    func exists(_ url: URL) -> Bool { base.exists(url) }
+
+    func waitForInstallStart() -> DispatchTimeoutResult { installStarted.wait(timeout: .now() + 2) }
+    func allowInstallToFinish() { allowInstall.signal() }
 }
 
 private final class SuspendedRuntimeDownloadURLProtocol: URLProtocol, @unchecked Sendable {
@@ -460,6 +669,7 @@ private final class Extractor: CopilotRuntimeExtracting, @unchecked Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let executable = directory.appending(path: "copilot")
         try Data([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: executable.path)
         return executable
     }
 }
@@ -471,6 +681,22 @@ private final class Validator: CopilotRuntimeValidating, @unchecked Sendable {
     func validate(_ executable: URL, architecture: CopilotRuntimeArchitecture) throws {
         calls += 1
         if let error { throw error }
+    }
+}
+
+private struct FileHasher: CopilotRuntimeHashing {
+    let digest: String
+    func sha256(of file: URL) throws -> String { digest }
+}
+
+private func acquisitionError(from service: CopilotRuntimeAcquisitionService) async -> CopilotRuntimeAcquisitionError? {
+    do {
+        _ = try await service.acquireAtUserRequest()
+        return nil
+    } catch let error as CopilotRuntimeAcquisitionError {
+        return error
+    } catch {
+        return .fileSystem
     }
 }
 

@@ -83,7 +83,7 @@ enum PersonalAccessTokenReplacementPresentation: Equatable, Sendable {
         case .replaceClassicToken:
             nil
         case .fineGrainedReplacementUnavailable:
-            "Fine-grained tokens cannot be replaced in place. Connect the new token as a separate account and enter the resource-owner organization selected when you created it."
+            "Fine-grained tokens cannot be replaced in place. Choose Add Account, then enter the new token and the resource-owner organization selected when you created it."
         }
     }
 }
@@ -106,6 +106,8 @@ struct SettingsView: View {
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
     @EnvironmentObject private var appModel: TriageAppModel
     @State private var accountReplacingToken: GitHubAccount?
+    @State private var isPresentingAccountAddition = false
+    @State private var isPresentingPersonalAccessTokenAddition = false
     @State private var accountPendingRemoval: GitHubAccount?
     @State private var unavailableAccountPendingRemoval: AccountID?
     @State private var verifiedBackupPendingRestore: VerifiedMigrationBackupRestoreRequest?
@@ -167,6 +169,34 @@ struct SettingsView: View {
                     }
                 }
             )
+        }
+        .sheet(isPresented: $isPresentingPersonalAccessTokenAddition) {
+            PersonalAccessTokenSheet(
+                isSubmitting: appModel.isConnecting,
+                error: appModel.connectionError,
+                onSubmit: { token, organization in
+                    await appModel.connectPersonalAccessToken(
+                        token,
+                        resourceOwnerOrganization: organization
+                    )
+                    return appModel.connectionError == nil
+                }
+            )
+        }
+        .confirmationDialog(
+            "Add a GitHub Account",
+            isPresented: $isPresentingAccountAddition,
+            titleVisibility: .visible
+        ) {
+            Button("Continue with GitHub") {
+                connectAdditionalAccountWithOAuth()
+            }
+            Button("Use a Personal Access Token") {
+                isPresentingPersonalAccessTokenAddition = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Add another GitHub account without changing your existing encrypted local accounts or data.")
         }
         .confirmationDialog(
             removalConfirmationTitle,
@@ -330,6 +360,11 @@ struct SettingsView: View {
                 Text("No GitHub accounts are connected.")
                     .foregroundStyle(.secondary)
             }
+            Button("Add Account…") {
+                isPresentingAccountAddition = true
+            }
+            .disabled(appModel.isConnecting)
+            .accessibilityHint("Adds another GitHub account without removing existing encrypted local accounts or data.")
             if !appModel.accounts.isEmpty {
                 ForEach(appModel.accounts) { account in
                     SettingsValueRow(
@@ -420,6 +455,7 @@ struct SettingsView: View {
             if let error = PersonalAccessTokenErrorPresentation.sharedConnectionError(
                 appModel.connectionError,
                 isPresentingPersonalAccessToken: accountReplacingToken != nil
+                    || isPresentingPersonalAccessTokenAddition
             ) {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
@@ -430,6 +466,16 @@ struct SettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
+        }
+    }
+
+    private func connectAdditionalAccountWithOAuth() {
+        guard let window = NSApp.keyWindow else {
+            appModel.recordConnectionWindowError()
+            return
+        }
+        Task {
+            await appModel.connectGitHub(presentationAnchor: window)
         }
     }
 

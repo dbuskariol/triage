@@ -54,7 +54,14 @@ actor CopilotHelperClient: TriageCopilotHelping {
   }
 
   func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse {
-    try await exchange(request, expectedStatus: .authentication, timeout: 60)
+    try validate(request.header)
+    let payload = try CopilotAuthenticationRequestEncoder.encode(request)
+    return try await exchangePayload(
+      header: request.header,
+      expectedStatus: .authentication,
+      timeout: 60,
+      payload: payload
+    )
   }
 
   func models(_ request: CopilotModelsRequest) async throws -> CopilotModelsResponse {
@@ -125,16 +132,33 @@ actor CopilotHelperClient: TriageCopilotHelping {
     expectedStatus: CopilotResponseStatus,
     timeout: TimeInterval?
   ) async throws -> Response {
+    var encoded = try CopilotJSONCodec.encode(request)
+    let payload = CopilotOwnedPayload(copying: encoded)
+    encoded.resetBytes(in: encoded.startIndex..<encoded.endIndex)
+    return try await exchangePayload(
+      header: request.header,
+      expectedStatus: expectedStatus,
+      timeout: timeout,
+      payload: payload
+    )
+  }
+
+  private func exchangePayload<Response: Decodable & CopilotResponseContaining & Sendable>(
+    header: CopilotRequestHeader,
+    expectedStatus: CopilotResponseStatus,
+    timeout: TimeInterval?,
+    payload: CopilotOwnedPayload
+  ) async throws -> Response {
     guard !isShutDown else { throw CopilotXPCError.shutDown }
     guard activeOperation == nil else { throw CopilotXPCError.operationInProgress }
-    try validate(request.header)
+    try validate(header)
 
     let operation = ActiveOperation(
       exchangeID: exchangeIDGenerator(),
-      requestID: request.header.requestID,
-      accountID: request.header.accountID,
-      organizationID: request.header.organizationID,
-      operation: request.header.operation
+      requestID: header.requestID,
+      accountID: header.accountID,
+      organizationID: header.organizationID,
+      operation: header.operation
     )
     activeOperation = operation
     defer {
@@ -145,11 +169,6 @@ actor CopilotHelperClient: TriageCopilotHelping {
       }
     }
 
-    var payload = try CopilotJSONCodec.encode(request)
-    // Authenticate requests contain a Keychain credential. This client owns
-    // this JSON buffer and wipes it after the sole framed exchange returns or
-    // is cancelled; transports independently wipe their frame copies.
-    defer { payload.resetBytes(in: 0..<payload.count) }
     guard payload.count <= CopilotIPC.maximumRequestBytes else {
       throw CopilotFrameError.payloadTooLarge
     }
@@ -163,7 +182,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
       let response: Response = try await withTaskCancellationHandler {
         try await readResponse(
           payload: payload,
-          request: request.header,
+          request: header,
           expectedStatus: expectedStatus,
           timeout: timeout,
           exchangeID: exchangeID
@@ -203,7 +222,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
   }
 
   private func readResponse<Response: Decodable & CopilotResponseContaining & Sendable>(
-    payload: Data,
+    payload: CopilotOwnedPayload,
     request: CopilotRequestHeader,
     expectedStatus: CopilotResponseStatus,
     timeout: TimeInterval?,
@@ -245,11 +264,18 @@ actor CopilotHelperClient: TriageCopilotHelping {
   }
 
   private func performExchange<Response: Decodable & CopilotResponseContaining & Sendable>(
-    payload: Data,
+    payload: CopilotOwnedPayload,
     request: CopilotRequestHeader,
     expectedStatus: CopilotResponseStatus
   ) async throws -> Response {
-    try await transport.writeFrame(payload)
+    guard var requestBytes = payload.take() else {
+      throw CopilotXPCError.malformedFrame
+    }
+    defer {
+      requestBytes.resetBytes(in: requestBytes.startIndex..<requestBytes.endIndex)
+      requestBytes.removeAll(keepingCapacity: false)
+    }
+    try await transport.writeFrame(requestBytes)
     let responseData = try await transport.readFrame(
       maximumBytes: CopilotIPC.maximumResponseBytes
     )
@@ -353,7 +379,6 @@ private protocol CopilotRequestContaining {
 }
 
 extension CopilotHealthRequest: CopilotRequestContaining {}
-extension CopilotAuthenticateRequest: CopilotRequestContaining {}
 extension CopilotModelsRequest: CopilotRequestContaining {}
 extension CopilotAnalyzeRequest: CopilotRequestContaining {}
 extension CopilotCancelRequest: CopilotRequestContaining {}
@@ -385,6 +410,69 @@ private enum CopilotJSONCodec {
     } catch {
       throw CopilotXPCError.invalidResponse
     }
+  }
+}
+
+/// A single-use frame payload. `take()` transfers its only mutable buffer to
+/// the transport call, so timeout and cancellation cannot leave another
+/// app-owned alias containing an authentication credential.
+private final class CopilotOwnedPayload: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: Data
+
+  init(copying source: Data) {
+    storage = source.withUnsafeBytes { bytes in
+      guard let baseAddress = bytes.baseAddress else { return Data() }
+      return Data(bytes: baseAddress, count: bytes.count)
+    }
+  }
+
+  deinit { wipe() }
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage.count
+  }
+
+  func take() -> Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !storage.isEmpty else { return nil }
+    let value = storage
+    storage.removeAll(keepingCapacity: false)
+    return value
+  }
+
+  private func wipe() {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !storage.isEmpty else { return }
+    storage.resetBytes(in: storage.startIndex..<storage.endIndex)
+    storage.removeAll(keepingCapacity: false)
+  }
+}
+
+private enum CopilotAuthenticationRequestEncoder {
+  static func encode(_ request: CopilotAuthenticateRequest) throws -> CopilotOwnedPayload {
+    // `wireRequest` is the top-level v2 header object. Keeping the wrapper
+    // itself non-Codable prevents authentication from accidentally entering
+    // a generic serializer that could retain the credential as a String.
+    var payload = try CopilotJSONCodec.encode(request.header.wireRequest)
+    defer {
+      payload.resetBytes(in: payload.startIndex..<payload.endIndex)
+      payload.removeAll(keepingCapacity: false)
+    }
+    guard payload.popLast() == 0x7d else { throw CopilotXPCError.malformedFrame }
+    // `,"credential":` in bytes. Keeping this non-secret structural text
+    // out of a Swift String prevents accidental interpolation with the value.
+    payload.append(contentsOf: [
+      0x2c, 0x22, 0x63, 0x72, 0x65, 0x64, 0x65,
+      0x6e, 0x74, 0x69, 0x61, 0x6c, 0x22, 0x3a,
+    ])
+    try request.credential.appendJSONString(to: &payload)
+    payload.append(0x7d)
+    return CopilotOwnedPayload(copying: payload)
   }
 }
 

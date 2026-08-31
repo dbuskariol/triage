@@ -34,7 +34,10 @@ final class TriagePerformanceScrollTests: XCTestCase {
             "The fixture must expose the stable non-content visible-count accessibility value."
         )
 
-        for _ in 0..<Configuration.warmupSampleCount {
+        // XCTest's `measure` executes its closure once as a discarded warmup.
+        // These two manual pairs therefore make the declared total exactly
+        // three warmups before the eleven retained iterations.
+        for _ in 0..<2 {
             performMeasuredGesturePair(in: workList)
         }
 
@@ -54,8 +57,8 @@ final class TriagePerformanceScrollTests: XCTestCase {
             durationSamples.append(Double(elapsed) / 1_000_000)
         }
 
-        // XCTest invokes the measure closure once extra as its discarded
-        // warmup. Preserve only aggregates from the reported iterations.
+        // XCTest invokes the measure closure once extra as the third discarded
+        // warmup. Preserve only aggregates from the eleven reported iterations.
         let measuredSamples = Array(durationSamples.dropFirst())
         XCTAssertEqual(measuredSamples.count, Configuration.measuredSampleCount)
         try writeAggregateReport(samples: measuredSamples)

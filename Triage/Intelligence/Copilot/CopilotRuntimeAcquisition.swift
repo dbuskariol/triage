@@ -1,8 +1,8 @@
 import CryptoKit
-import Compression
 import Darwin
 import Foundation
 import Security
+import zlib
 
 /// The only Copilot CLI release that this client will acquire.  This is an
 /// acquisition boundary, not a runtime enablement switch: callers must still
@@ -80,6 +80,7 @@ enum CopilotRuntimeAcquisitionError: Error, Equatable, Sendable {
     case invalidResponse
     case archiveTooLarge
     case checksumMismatch
+    case executableChecksumMismatch
     case invalidArchive
     case executableMissing
     case invalidExecutableArchitecture
@@ -109,6 +110,13 @@ protocol CopilotRuntimeValidating: Sendable {
     func validate(_ executable: URL, architecture: CopilotRuntimeArchitecture) throws
 }
 
+/// The extracted executable has a separate, architecture-specific pin from
+/// the compressed release asset. Keeping this operation injectable lets the
+/// acquisition lifecycle be tested without manufacturing a SHA-256 preimage.
+protocol CopilotRuntimeHashing: Sendable {
+    func sha256(of file: URL) throws -> String
+}
+
 /// Isolating file operations makes adversarial acquisition tests deterministic.
 protocol CopilotRuntimeFileManaging: Sendable {
     func makeTemporaryDirectory() throws -> URL
@@ -116,6 +124,7 @@ protocol CopilotRuntimeFileManaging: Sendable {
     func installedExecutable(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) -> URL
     func install(_ executable: URL, root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws -> URL
     func removeInstalled(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws
+    func scavengeStaleStages(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws
     func exists(_ url: URL) -> Bool
 }
 
@@ -161,6 +170,7 @@ actor CopilotRuntimeAcquisitionService {
     private let downloader: any CopilotRuntimeDownloading
     private let extractor: any CopilotRuntimeExtracting
     private let validator: any CopilotRuntimeValidating
+    private let hasher: any CopilotRuntimeHashing
     private let files: any CopilotRuntimeFileManaging
     private var currentState: CopilotRuntimeAcquisitionState = .absent
     private var stateObservers: [UUID: AsyncStream<CopilotRuntimeAcquisitionState>.Continuation] = [:]
@@ -176,15 +186,38 @@ actor CopilotRuntimeAcquisitionService {
         downloader: any CopilotRuntimeDownloading = URLSessionCopilotRuntimeDownloader(),
         extractor: any CopilotRuntimeExtracting = CopilotRuntimeTarExtractor(),
         validator: any CopilotRuntimeValidating = CopilotRuntimeCodeValidator(),
+        hasher: any CopilotRuntimeHashing = CopilotRuntimeSHA256Hasher(),
         files: any CopilotRuntimeFileManaging = CopilotRuntimeFileManager()
     ) throws {
+        if !FileManager.default.fileExists(atPath: applicationSupportDirectory.path) {
+            try FileManager.default.createDirectory(
+                at: applicationSupportDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
         self.release = release
         self.architecture = try architecture ?? .host()
-        root = applicationSupportDirectory.appending(path: "Triage/CopilotRuntime", directoryHint: .isDirectory)
+        root = Self.runtimeRoot(applicationSupportDirectory: applicationSupportDirectory)
         self.downloader = downloader
         self.extractor = extractor
         self.validator = validator
+        self.hasher = hasher
         self.files = files
+    }
+
+    /// Canonicalizes only the existing, trusted support-directory boundary.
+    /// `URL.resolvingSymlinksInPath()` does not expand macOS's `/var` firmlink;
+    /// POSIX `realpath` does. App-owned descendants are appended afterward and
+    /// remain protected by the descriptor walk's O_NOFOLLOW checks.
+    nonisolated static func runtimeRoot(applicationSupportDirectory: URL) -> URL {
+        guard let resolved = Darwin.realpath(applicationSupportDirectory.path, nil) else {
+            return applicationSupportDirectory
+                .appending(path: "Triage/CopilotRuntime", directoryHint: .isDirectory)
+        }
+        defer { Darwin.free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+            .appending(path: "Triage/CopilotRuntime", directoryHint: .isDirectory)
     }
 
     func state() -> CopilotRuntimeAcquisitionState { currentState }
@@ -211,38 +244,53 @@ actor CopilotRuntimeAcquisitionService {
             throw CopilotRuntimeAcquisitionError.invalidSource
         }
         let generation = beginAcquisition()
+        var installed: URL?
         do {
             let temporary = try files.makeTemporaryDirectory()
             defer { files.removeIfPresent(temporary) }
             let downloaded = temporary.appending(path: "runtime.tar.gz")
+            try requireActiveAcquisition(generation)
+            try files.scavengeStaleStages(root: root, release: release, architecture: architecture)
+            try requireActiveAcquisition(generation)
             let digest = try await downloader.download(archive, to: downloaded, maximumBytes: Self.maximumArchiveBytes) { [weak self] received, expected in
                 Task { await self?.publishDownloadProgress(received, expected: expected, generation: generation) }
             }
-            try Task.checkCancellation()
+            try requireActiveAcquisition(generation)
             guard digest.lowercased() == archive.expectedArchiveSHA256 else {
                 throw CopilotRuntimeAcquisitionError.checksumMismatch
             }
             publishActiveState(.verifying, generation: generation)
             let extraction = temporary.appending(path: "extracted", directoryHint: .isDirectory)
+            try requireActiveAcquisition(generation)
             let executable = try extractor.extractVerifiedExecutable(from: downloaded, to: extraction)
+            try requireActiveAcquisition(generation)
+            guard try hasher.sha256(of: executable).lowercased() == archive.expectedExecutableSHA256 else {
+                throw CopilotRuntimeAcquisitionError.executableChecksumMismatch
+            }
             try validator.validate(executable, architecture: architecture)
-            try Task.checkCancellation()
-            let installed = try files.install(executable, root: root, release: release, architecture: architecture)
+            try requireActiveAcquisition(generation)
+            installed = try files.install(executable, root: root, release: release, architecture: architecture)
+            try requireActiveAcquisition(generation)
             // Validation after the atomic publish catches replacement between
             // extraction and use; clients must call `runtimeForUse` again at exec.
-            try validator.validate(installed, architecture: architecture)
-            finishAcquisition(.ready(installed), generation: generation)
-            return installed
+            try validator.validate(installed!, architecture: architecture)
+            try requireActiveAcquisition(generation)
+            finishAcquisition(.ready(installed!), generation: generation)
+            return installed!
         } catch is CancellationError {
+            rollbackInstalledRuntime(installed, generation: generation)
             finishAcquisition(.absent, generation: generation)
             throw CopilotRuntimeAcquisitionError.cancellation
         } catch CopilotRuntimeAcquisitionError.cancellation {
+            rollbackInstalledRuntime(installed, generation: generation)
             finishAcquisition(.absent, generation: generation)
             throw CopilotRuntimeAcquisitionError.cancellation
         } catch let error as CopilotRuntimeAcquisitionError {
+            rollbackInstalledRuntime(installed, generation: generation)
             finishAcquisition(.corrupt(String(describing: error)), generation: generation)
             throw error
         } catch {
+            rollbackInstalledRuntime(installed, generation: generation)
             finishAcquisition(.corrupt("acquisition failed"), generation: generation)
             throw CopilotRuntimeAcquisitionError.fileSystem
         }
@@ -270,12 +318,7 @@ actor CopilotRuntimeAcquisitionService {
 
     func removeAtUserRequest() throws {
         do {
-            try CopilotRuntimeInstallLock.withExclusiveLock(root: root) {
-                let installed = files.installedExecutable(root: root, release: release, architecture: architecture)
-                if files.exists(installed) {
-                    try files.removeInstalled(root: root, release: release, architecture: architecture)
-                }
-            }
+            try files.removeInstalled(root: root, release: release, architecture: architecture)
             invalidateAcquisitionAndPublish(.absent)
         } catch {
             invalidateAcquisitionAndPublish(.corrupt("runtime removal failed"))
@@ -293,6 +336,27 @@ actor CopilotRuntimeAcquisitionService {
         activeProgressGeneration = acquisitionGeneration
         publishState(.downloading(receivedBytes: 0, expectedBytes: nil))
         return acquisitionGeneration
+    }
+
+    /// A newer user action (including Remove) invalidates the old operation
+    /// before it can extract or publish anything. This check also closes the
+    /// cancellation window around synchronous extraction and installation.
+    private func requireActiveAcquisition(_ generation: UInt64) throws {
+        guard activeProgressGeneration == generation, acquisitionGeneration == generation else {
+            throw CopilotRuntimeAcquisitionError.cancellation
+        }
+        try Task.checkCancellation()
+    }
+
+    /// An install is atomic but synchronous, so cancellation can arrive while
+    /// it is in progress. Once it returns, remove the just-published file
+    /// before reporting cancellation or verification failure.
+    private func rollbackInstalledRuntime(_ installed: URL?, generation: UInt64) {
+        guard installed != nil,
+              activeProgressGeneration == generation,
+              acquisitionGeneration == generation
+        else { return }
+        try? files.removeInstalled(root: root, release: release, architecture: architecture)
     }
 
     private func publishDownloadProgress(_ received: Int64, expected: Int64?, generation: UInt64) {
@@ -606,45 +670,98 @@ struct CopilotRuntimeTarExtractor: CopilotRuntimeExtracting {
 
 private enum CopilotRuntimeGzip {
     static func decode(_ source: Data, maximumOutputBytes: Int) throws -> Data {
-        let initialDestination = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-        let initialSource = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-        defer { initialDestination.deallocate(); initialSource.deallocate() }
-        var stream = compression_stream(dst_ptr: initialDestination, dst_size: 0, src_ptr: initialSource, src_size: 0, state: nil)
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR else { throw CopilotRuntimeAcquisitionError.invalidArchive }
-        defer { compression_stream_destroy(&stream) }
-        var output = Data(); var status: compression_status = COMPRESSION_STATUS_OK
-        var remainingInput = 0
+        let (deflateRange, expectedCRC32, expectedSize) = try gzipMember(in: source)
+        var stream = z_stream()
+        guard inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            throw CopilotRuntimeAcquisitionError.invalidArchive
+        }
+        defer { inflateEnd(&stream) }
+        var output = Data()
         try source.withUnsafeBytes { input in
             guard let base = input.bindMemory(to: UInt8.self).baseAddress else { throw CopilotRuntimeAcquisitionError.invalidArchive }
-            stream.src_ptr = base; stream.src_size = source.count
+            stream.next_in = UnsafeMutablePointer(mutating: base.advanced(by: deflateRange.lowerBound))
+            stream.avail_in = uInt(deflateRange.count)
             repeat {
                 var buffer = [UInt8](repeating: 0, count: 32 * 1_024)
-                let inputBytesBefore = stream.src_size
-                status = try buffer.withUnsafeMutableBytes { destination in
-                    stream.dst_ptr = destination.bindMemory(to: UInt8.self).baseAddress!; stream.dst_size = destination.count
-                    // The complete archive is already in memory. Tell the
-                    // decoder that no more input can arrive: without this,
-                    // a valid member that has consumed its input may report
-                    // `OK` while waiting for a finalization call, while a
-                    // truncated member can report `OK` forever.
-                    let result = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                    let outputBytes = destination.count - stream.dst_size
+                let inputBytesBefore = stream.avail_in
+                let status = try buffer.withUnsafeMutableBytes { destination in
+                    stream.next_out = destination.bindMemory(to: UInt8.self).baseAddress!
+                    stream.avail_out = uInt(destination.count)
+                    let result = inflate(&stream, Z_NO_FLUSH)
+                    let outputBytes = destination.count - Int(stream.avail_out)
                     output.append(destination.bindMemory(to: UInt8.self).baseAddress!, count: outputBytes)
                     guard output.count <= maximumOutputBytes else { throw CopilotRuntimeAcquisitionError.archiveTooLarge }
-                    // A fixed, malformed input can make Compression report
-                    // `OK` while waiting for more bytes. There are no more
-                    // bytes to supply here, so continuing would spin forever.
-                    guard result != COMPRESSION_STATUS_OK
-                        || stream.src_size < inputBytesBefore
+                    guard result == Z_OK || result == Z_STREAM_END else {
+                        throw CopilotRuntimeAcquisitionError.invalidArchive
+                    }
+                    // This decoder receives the complete member at once. A
+                    // `Z_OK` result with neither consumed input nor output is
+                    // malformed/truncated input, not an invitation to spin.
+                    guard result != Z_OK
+                        || stream.avail_in < inputBytesBefore
                         || outputBytes > 0
                     else { throw CopilotRuntimeAcquisitionError.invalidArchive }
                     return result
                 }
-            } while status == COMPRESSION_STATUS_OK
-            remainingInput = stream.src_size
+                guard status == Z_STREAM_END, stream.avail_in == 0 else {
+                    if status == Z_OK { continue }
+                    throw CopilotRuntimeAcquisitionError.invalidArchive
+                }
+                break
+            } while true
         }
-        guard status == COMPRESSION_STATUS_END, remainingInput == 0 else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        let actualCRC32 = output.withUnsafeBytes { bytes in
+            UInt32(truncatingIfNeeded: crc32(0, bytes.bindMemory(to: Bytef.self).baseAddress, uInt(bytes.count)))
+        }
+        guard actualCRC32 == expectedCRC32,
+              UInt32(truncatingIfNeeded: output.count) == expectedSize
+        else { throw CopilotRuntimeAcquisitionError.invalidArchive }
         return output
+    }
+
+    /// Parses one RFC 1952 member and makes its raw DEFLATE region explicit.
+    /// zlib's `inflateInit2` raw mode lets us reject any second member or
+    /// trailing payload by requiring the region to be consumed exactly.
+    private static func gzipMember(in source: Data) throws -> (Range<Int>, UInt32, UInt32) {
+        guard source.count >= 18,
+              source[0] == 0x1f, source[1] == 0x8b, source[2] == 8,
+              source[3] & 0xe0 == 0
+        else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        let trailerStart = source.count - 8
+        var offset = 10
+        let flags = source[3]
+        if flags & 0x04 != 0 {
+            guard offset + 2 <= trailerStart else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            let length = Int(source[offset]) | (Int(source[offset + 1]) << 8)
+            offset += 2
+            guard offset + length <= trailerStart else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            offset += length
+        }
+        if flags & 0x08 != 0 { offset = try skipCString(in: source, from: offset, before: trailerStart) }
+        if flags & 0x10 != 0 { offset = try skipCString(in: source, from: offset, before: trailerStart) }
+        if flags & 0x02 != 0 {
+            guard offset + 2 <= trailerStart else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+            offset += 2
+        }
+        guard offset < trailerStart else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        let expectedCRC32 = littleEndian32(source, at: trailerStart)
+        let expectedSize = littleEndian32(source, at: trailerStart + 4)
+        return (offset..<trailerStart, expectedCRC32, expectedSize)
+    }
+
+    private static func skipCString(in source: Data, from offset: Int, before limit: Int) throws -> Int {
+        guard offset < limit else { throw CopilotRuntimeAcquisitionError.invalidArchive }
+        guard let terminator = source[offset..<limit].firstIndex(of: 0) else {
+            throw CopilotRuntimeAcquisitionError.invalidArchive
+        }
+        return terminator + 1
+    }
+
+    private static func littleEndian32(_ source: Data, at offset: Int) -> UInt32 {
+        UInt32(source[offset])
+            | (UInt32(source[offset + 1]) << 8)
+            | (UInt32(source[offset + 2]) << 16)
+            | (UInt32(source[offset + 3]) << 24)
     }
 }
 
@@ -675,6 +792,18 @@ struct CopilotRuntimeCodeValidator: CopilotRuntimeValidating {
         var information: CFDictionary?; guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
               let flags = (information as? [CFString: Any])?[kSecCodeInfoFlags] as? UInt32,
               flags & 0x10000 != 0 else { throw CopilotRuntimeAcquisitionError.invalidCodeSignature }
+    }
+}
+
+struct CopilotRuntimeSHA256Hasher: CopilotRuntimeHashing {
+    func sha256(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let bytes = try handle.read(upToCount: 64 * 1_024), !bytes.isEmpty {
+            hasher.update(data: bytes)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -714,16 +843,39 @@ struct CopilotRuntimeFileManager: CopilotRuntimeFileManaging {
         }
     }
     func removeInstalled(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws {
-        let rootDescriptor = try CopilotRuntimePOSIX.openDirectoryTree(root, create: false)
+        try CopilotRuntimeInstallLock.withExclusiveLock(root: root) {
+            let architectureDescriptor = try runtimeDirectory(root: root, release: release, architecture: architecture)
+            defer { close(architectureDescriptor) }
+            let executable = openat(architectureDescriptor, "copilot", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            if executable >= 0 {
+                defer { close(executable) }
+                try CopilotRuntimePOSIX.requirePrivateRegularFile(executable)
+                guard unlinkat(architectureDescriptor, "copilot", 0) == 0 else {
+                    throw CopilotRuntimeAcquisitionError.fileSystem
+                }
+            } else if errno != ENOENT {
+                throw CopilotRuntimeAcquisitionError.fileSystem
+            }
+            try CopilotRuntimePOSIX.removeStaleStageFiles(beneath: architectureDescriptor)
+            guard fsync(architectureDescriptor) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        }
+    }
+
+    func scavengeStaleStages(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws {
+        try CopilotRuntimeInstallLock.withExclusiveLock(root: root) {
+            let architectureDescriptor = try runtimeDirectory(root: root, release: release, architecture: architecture)
+            defer { close(architectureDescriptor) }
+            try CopilotRuntimePOSIX.removeStaleStageFiles(beneath: architectureDescriptor)
+            guard fsync(architectureDescriptor) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        }
+    }
+
+    private func runtimeDirectory(root: URL, release: CopilotRuntimeRelease, architecture: CopilotRuntimeArchitecture) throws -> Int32 {
+        let rootDescriptor = try CopilotRuntimePOSIX.openDirectoryTree(root, create: true)
         defer { close(rootDescriptor) }
-        let versionDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(release.version, beneath: rootDescriptor, create: false)
+        let versionDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(release.version, beneath: rootDescriptor)
         defer { close(versionDescriptor) }
-        let architectureDescriptor = try CopilotRuntimePOSIX.openOrCreateDirectory(architecture.rawValue, beneath: versionDescriptor, create: false)
-        defer { close(architectureDescriptor) }
-        let executable = try CopilotRuntimePOSIX.openRegularFile("copilot", beneath: architectureDescriptor)
-        defer { close(executable) }
-        try CopilotRuntimePOSIX.requirePrivateRegularFile(executable)
-        guard unlinkat(architectureDescriptor, "copilot", 0) == 0, fsync(architectureDescriptor) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        return try CopilotRuntimePOSIX.openOrCreateDirectory(architecture.rawValue, beneath: versionDescriptor)
     }
     func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 }
@@ -731,6 +883,7 @@ struct CopilotRuntimeFileManager: CopilotRuntimeFileManaging {
 private enum CopilotRuntimePOSIX {
     private static let privateDirectoryMode: mode_t = S_IRWXU
     private static let privateExecutableMode: mode_t = S_IRUSR | S_IXUSR
+    private static let stagePrefix = ".copilot-stage-"
 
     static func openDirectoryTree(_ url: URL, create: Bool) throws -> Int32 {
         guard url.isFileURL else { throw CopilotRuntimeAcquisitionError.fileSystem }
@@ -771,7 +924,7 @@ private enum CopilotRuntimePOSIX {
     }
 
     static func openVerifiedRegularFile(_ url: URL) throws -> Int32 {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
         do { try requirePrivateRegularFile(descriptor) } catch { close(descriptor); throw error }
         return descriptor
@@ -779,7 +932,7 @@ private enum CopilotRuntimePOSIX {
 
     static func openRegularFile(_ name: String, beneath parent: Int32) throws -> Int32 {
         guard isSafeComponent(name) else { throw CopilotRuntimeAcquisitionError.fileSystem }
-        let descriptor = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
         do { try requirePrivateRegularFile(descriptor) } catch { close(descriptor); throw error }
         return descriptor
@@ -815,6 +968,46 @@ private enum CopilotRuntimePOSIX {
               information.st_nlink == 1,
               (information.st_mode & 0o077) == 0,
               (information.st_mode & privateExecutableMode) == privateExecutableMode else { throw CopilotRuntimeAcquisitionError.fileSystem }
+    }
+
+    /// Scavenge only files that can have been created by our descriptor-safe
+    /// publisher. Other names are never enumerated for deletion.
+    static func removeStaleStageFiles(beneath directory: Int32) throws {
+        let copy = dup(directory)
+        guard copy >= 0, let stream = fdopendir(copy) else {
+            if copy >= 0 { close(copy) }
+            throw CopilotRuntimeAcquisitionError.fileSystem
+        }
+        defer { closedir(stream) }
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                guard errno == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+                break
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: UInt8.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(decodingCString: $0, as: UTF8.self)
+                }
+            }
+            guard isStagingName(name) else { continue }
+            let stage = openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            guard stage >= 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+            do {
+                try requirePrivateRegularFile(stage)
+            } catch {
+                close(stage)
+                throw error
+            }
+            close(stage)
+            guard unlinkat(directory, name, 0) == 0 else { throw CopilotRuntimeAcquisitionError.fileSystem }
+        }
+    }
+
+    private static func isStagingName(_ name: String) -> Bool {
+        guard name.hasPrefix(stagePrefix) else { return false }
+        let suffix = String(name.dropFirst(stagePrefix.count))
+        return UUID(uuidString: suffix)?.uuidString.caseInsensitiveCompare(suffix) == .orderedSame
     }
 
     private static func isSafeComponent(_ value: String) -> Bool {

@@ -171,10 +171,10 @@ actor StatusCheckRepository {
         }
         return try await vault.read { database in
             try OrganizationSchedulerStateRepository.validateCurrentScope(scope, in: database)
-            guard let currentRevision: String = try String.fetchOne(
+            guard let currentHeadCommitSHA: String = try String.fetchOne(
                 database,
                 sql: """
-                    SELECT source_revision FROM github_nodes
+                    SELECT pull_request_head_commit_sha FROM github_nodes
                     WHERE github_node_id = ? AND account_id = ? AND organization_id = ?
                     """,
                 arguments: [pullRequestNodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue]
@@ -190,7 +190,7 @@ actor StatusCheckRepository {
                     """,
                 arguments: [
                     pullRequestNodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue, currentRevision
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue, currentHeadCommitSHA
                 ]
             ), let mergeable: String = marker["mergeable_state"],
               let sourceRevision: String = marker["source_revision"],
@@ -209,7 +209,7 @@ actor StatusCheckRepository {
                     """,
                 arguments: [
                     pullRequestNodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
-                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue, currentRevision
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue, currentHeadCommitSHA
                 ]
             )
             let records = try rows.map { row -> StatusCheckRecord in
@@ -217,7 +217,7 @@ actor StatusCheckRepository {
                       let stateValue: String = row["state"],
                       let state = GitHubPullRequestStatusCheckState(rawValue: stateValue),
                       let required: Bool = row["is_required"],
-                      let sourceRevision: String = row["source_revision"], sourceRevision == currentRevision,
+                      let sourceRevision: String = row["source_revision"], sourceRevision == currentHeadCommitSHA,
                       let observed: Int64 = row["observed_at_ms"], observed >= 0
                 else { throw StatusCheckRepositoryError.invalidPersistedData }
                 return .init(
@@ -273,7 +273,7 @@ actor StatusCheckRepository {
         guard let row = try Row.fetchOne(
             database,
             sql: """
-                SELECT github_nodes.source_revision
+                SELECT github_nodes.pull_request_head_commit_sha
                 FROM github_nodes JOIN pull_requests
                   ON pull_requests.github_node_id = github_nodes.github_node_id
                 WHERE github_nodes.github_node_id = ?
@@ -284,10 +284,10 @@ actor StatusCheckRepository {
                 authority.scope.accountID.rawValue,
                 authority.scope.organizationID.rawValue
             ]
-        ), let revision: String = row["source_revision"] else {
+        ), let headCommitSHA: String = row["pull_request_head_commit_sha"] else {
             throw StatusCheckRepositoryError.pullRequestScopeMismatch
         }
-        guard revision == authority.pullRequestSourceRevision else {
+        guard headCommitSHA == authority.pullRequestSourceRevision else {
             throw StatusCheckRepositoryError.stalePullRequestRevision
         }
     }

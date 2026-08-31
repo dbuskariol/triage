@@ -66,7 +66,10 @@ actor PullRequestStatusCheckRefreshService {
                 sourceRevision: headSHA
             )
             do {
-                let source = try await client.allStatusChecks(pullRequestNodeID: candidate.nodeID)
+                let source = try await client.allStatusChecks(
+                    pullRequestNodeID: candidate.nodeID,
+                    expectedHeadCommitSHA: headSHA
+                )
                 try Task.checkCancellation()
                 let record = CoverageRecord(
                     accountID: scope.accountID,

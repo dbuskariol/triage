@@ -45,7 +45,7 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
         let comments: CommentConnection?
         let mergeable: String?
         let headRefName: String?
-        let headRefOid: String? = nil
+        var headRefOid: String? = nil
         let baseRefName: String?
         let reviewDecision: String?
         let author: Actor?

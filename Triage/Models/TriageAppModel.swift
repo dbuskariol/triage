@@ -427,6 +427,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         cachedInboxPages[snapshot.scope] = snapshot.items
         cachedInboxPageSnapshots[snapshot.scope] = snapshot
         scheduleInboxPageTimeRefresh(for: snapshot)
+        repairSelectionAfterInboxPublication(
+            page: snapshot.items,
+            fullGraph: workItems,
+            evaluatedAt: snapshot.evaluatedAt
+        )
         if selectedWorkItem == nil {
             selectedWorkItemID = snapshot.items.first?.id
         }
@@ -582,6 +587,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             // full graph. Re-arm its lightweight observation once the graph
             // supplies exact local snooze/follow-up boundaries.
             scheduleInboxPageTimeRefresh(for: inboxPageSnapshot)
+            repairSelectionAfterInboxPublication(
+                page: inboxPageSnapshot.items,
+                fullGraph: snapshot.workItems,
+                evaluatedAt: inboxPageSnapshot.evaluatedAt
+            )
         }
     }
 
@@ -772,6 +782,25 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         Self.selectionWorkItems(inboxPage: inboxPage, fullGraph: workItems)
     }
 
+    private func repairSelectionAfterInboxPublication(
+        page: [WorkItem],
+        fullGraph: [WorkItem],
+        evaluatedAt: Date
+    ) {
+        let repair = Self.repairedInboxSelection(
+            selectedWorkItemID: selectedWorkItemID,
+            selectedWorkItemIDs: selectedWorkItemIDs,
+            inboxPage: page,
+            fullGraph: fullGraph,
+            evaluatedAt: evaluatedAt
+        )
+        guard repair.primaryWorkItemID != selectedWorkItemID
+                || repair.selectedWorkItemIDs != selectedWorkItemIDs
+        else { return }
+        selectedWorkItemID = repair.primaryWorkItemID
+        selectedWorkItemIDs = repair.selectedWorkItemIDs
+    }
+
     nonisolated static func selectionWorkItems(
         inboxPage: [WorkItem]?,
         fullGraph: [WorkItem]
@@ -781,6 +810,43 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         let pageIDs = Set(page.map(\.id))
         return page.map { fullGraphByID[$0.id] ?? $0 }
             + fullGraph.filter { !pageIDs.contains($0.id) }
+    }
+
+    struct InboxSelectionRepair: Equatable, Sendable {
+        let primaryWorkItemID: WorkItemID?
+        let selectedWorkItemIDs: Set<WorkItemID>
+    }
+
+    /// Repairs only a selection which the current full graph proves has left
+    /// Inbox and which is absent from the authoritative current page. An Inbox
+    /// item beyond the loaded page remains selected, preserving restored and
+    /// multi-selection semantics while pagination catches up.
+    nonisolated static func repairedInboxSelection(
+        selectedWorkItemID: WorkItemID?,
+        selectedWorkItemIDs: Set<WorkItemID>,
+        inboxPage: [WorkItem],
+        fullGraph: [WorkItem],
+        evaluatedAt: Date
+    ) -> InboxSelectionRepair {
+        guard let selectedWorkItemID,
+              !inboxPage.contains(where: { $0.id == selectedWorkItemID }),
+              let selected = fullGraph.first(where: { $0.id == selectedWorkItemID }),
+              InboxEligibilityRule().disposition(for: selected, at: evaluatedAt) != .inbox
+        else {
+            return .init(
+                primaryWorkItemID: selectedWorkItemID,
+                selectedWorkItemIDs: selectedWorkItemIDs
+            )
+        }
+
+        var repairedIDs = selectedWorkItemIDs
+        repairedIDs.remove(selectedWorkItemID)
+        let replacement = inboxPage.first(where: { repairedIDs.contains($0.id) })?.id
+            ?? inboxPage.first?.id
+        if let replacement {
+            repairedIDs.insert(replacement)
+        }
+        return .init(primaryWorkItemID: replacement, selectedWorkItemIDs: repairedIDs)
     }
 
     func connectGitHub(presentationAnchor: NSWindow) async {
@@ -830,6 +896,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         _ rawValue: String,
         resourceOwnerOrganization: String?
     ) async {
+        // This is the authority boundary for both onboarding and Settings Add
+        // Account. The sheet can receive two input events before SwiftUI has
+        // rendered its disabled state; admit only one credential connection.
+        guard !isConnecting else { return }
         connectionError = nil
         isConnecting = true
         defer { isConnecting = false }

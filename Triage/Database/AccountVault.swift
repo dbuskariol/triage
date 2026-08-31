@@ -353,6 +353,91 @@ enum NoFollowFilesystem {
         return try operation(directory)
     }
 
+    /// Returns the kernel's current path for a held directory descriptor.
+    /// This follows the opened directory across a rename instead of resolving
+    /// the original account-owned pathname again.
+    static func currentPath(of directory: Int32) throws -> String {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard Darwin.fcntl(directory, F_GETPATH, &buffer) == 0 else {
+            throw posixError()
+        }
+        let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+        return String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
+    }
+
+    /// Supplies an app-private directory for SQLite, whose macOS VFS needs a
+    /// conventional pathname rather than `/dev/fd`. The source ciphertext is
+    /// copied from its already-held no-follow descriptor, so account path
+    /// swaps cannot change the bytes SQLCipher verifies.
+    static func withPrivateVerificationDirectory<Value>(
+        _ operation: (String, Int32) throws -> Value
+    ) throws -> Value {
+        let templatePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("triage-vault-verify-XXXXXXXX", isDirectory: true)
+            .path
+        var template = Array(templatePath.utf8CString)
+        guard template.withUnsafeMutableBufferPointer({ Darwin.mkdtemp($0.baseAddress) }) != nil else {
+            throw posixError()
+        }
+        let terminator = template.firstIndex(of: 0) ?? template.endIndex
+        let directoryPath = String(
+            decoding: template[..<terminator].map(UInt8.init(bitPattern:)),
+            as: UTF8.self
+        )
+        let directory = Darwin.open(directoryPath, directoryFlags)
+        guard directory != -1 else {
+            _ = Darwin.rmdir(directoryPath)
+            throw posixError()
+        }
+        var status = stat()
+        guard Darwin.fstat(directory, &status) == 0,
+              (status.st_mode & S_IFMT) == S_IFDIR,
+              Darwin.fchmod(directory, 0o700) == 0
+        else {
+            _ = Darwin.close(directory)
+            _ = Darwin.rmdir(directoryPath)
+            throw posixError(code: EINVAL)
+        }
+        defer {
+            _ = Darwin.unlinkat(directory, "verified.sqlite", 0)
+            _ = Darwin.close(directory)
+            _ = Darwin.rmdir(directoryPath)
+        }
+        return try operation(directoryPath, directory)
+    }
+
+    /// Descends from an already-held directory descriptor without resolving
+    /// the account namespace again. The parent remains owned by the caller;
+    /// only descendant descriptors opened here are closed.
+    static func withDirectory<Value>(
+        relativeTo parent: Int32,
+        components: [String],
+        create: Bool,
+        _ operation: (Int32) throws -> Value
+    ) throws -> Value {
+        guard !components.isEmpty else { return try operation(parent) }
+        var directory = try openDirectory(
+            named: components[0],
+            relativeTo: parent,
+            create: create
+        )
+        if create, Darwin.fchmod(directory, 0o700) != 0 {
+            _ = Darwin.close(directory)
+            throw posixError()
+        }
+        defer { _ = Darwin.close(directory) }
+        for component in components.dropFirst() {
+            let next = try openDirectory(named: component, relativeTo: directory, create: create)
+            if create, Darwin.fchmod(next, 0o700) != 0 {
+                _ = Darwin.close(next)
+                throw posixError()
+            }
+            _ = Darwin.close(directory)
+            directory = next
+        }
+        return try operation(directory)
+    }
+
     static func setRegularFilePermissions(
         relativeTo directory: Int32,
         name: String,
@@ -417,6 +502,59 @@ enum NoFollowFilesystem {
               Darwin.fsync(destination) == 0,
               Darwin.renameat(directory, temporary, directory, destinationName) == 0,
               Darwin.fsync(directory) == 0
+        else { throw posixError() }
+    }
+
+    /// Publishes the exact regular file already opened by the caller. This is
+    /// used when SQLCipher has verified a backup through that file descriptor:
+    /// reopening the source by name would permit a replacement between
+    /// verification and installation.
+    static func copyOpenRegularFileAtomically(
+        _ source: Int32,
+        to destinationDirectory: Int32,
+        destinationName: String,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard source >= 0, isSafeComponent(destinationName) else {
+            throw posixError(code: EINVAL)
+        }
+        var sourceStatus = stat()
+        guard Darwin.fstat(source, &sourceStatus) == 0,
+              (sourceStatus.st_mode & S_IFMT) == S_IFREG,
+              Darwin.lseek(source, 0, SEEK_SET) >= 0
+        else { throw posixError(code: EINVAL) }
+
+        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
+        let destination = Darwin.openat(
+            destinationDirectory,
+            temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            permissions
+        )
+        guard destination != -1 else { throw posixError() }
+        defer {
+            _ = Darwin.close(destination)
+            _ = Darwin.unlinkat(destinationDirectory, temporary, 0)
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(source, $0.baseAddress, $0.count) }
+            guard count >= 0 else { throw posixError() }
+            guard count > 0 else { break }
+            try buffer.withUnsafeBytes { bytes in
+                var offset = 0
+                while offset < count {
+                    let written = Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
+                    guard written > 0 else { throw posixError() }
+                    offset += written
+                }
+            }
+        }
+        guard Darwin.fchmod(destination, permissions) == 0,
+              Darwin.fsync(destination) == 0,
+              Darwin.renameat(destinationDirectory, temporary, destinationDirectory, destinationName) == 0,
+              Darwin.fsync(destinationDirectory) == 0
         else { throw posixError() }
     }
 
@@ -737,6 +875,10 @@ actor AccountVault {
                 relativeTo: vaultDirectoryDescriptor,
                 name: "triage.sqlite"
             )
+            // SQLite's WAL VFS requires a normal sibling pathname on macOS;
+            // `/dev/fd/<directory>/<name>` is not traversable. The complete
+            // private path has already been created and verified no-follow,
+            // and the held directory descriptor remains our containment proof.
             let pool = try DatabasePool(
                 path: paths.database.path,
                 configuration: Self.configuration(vaultKey: vaultKey)
@@ -890,35 +1032,22 @@ actor AccountVault {
                 relativeTo: backupDirectory,
                 name: temporaryName
             )
-            let temporaryWritePath = rootDirectory
-                .appendingPathComponent("Vaults", isDirectory: true)
-                .appendingPathComponent(accountID.rawValue, isDirectory: true)
-                .appendingPathComponent("MigrationBackups", isDirectory: true)
+            let heldBackupPath = try NoFollowFilesystem.currentPath(of: backupDirectory)
+            let temporaryPath = URL(fileURLWithPath: heldBackupPath, isDirectory: true)
                 .appendingPathComponent(temporaryName, isDirectory: false)
                 .path
-            let temporaryVerificationPath = temporaryWritePath
             var backupConfiguration = configuration(vaultKey: vaultKey)
             backupConfiguration.journalMode = .default
             backupConfiguration.prepareDatabase { database in
-                // A descriptor-relative pathname has no stable sibling path
-                // for a rollback journal. Keep backup journaling in memory;
-                // the completed encrypted file is fsynced before publication.
                 try database.execute(sql: "PRAGMA journal_mode = MEMORY")
             }
             let destination = try DatabaseQueue(
-                path: temporaryWritePath,
+                path: temporaryPath,
                 configuration: backupConfiguration
             )
             try source.backup(to: destination)
-            try destination.close()
-
-            let verificationPool = try DatabasePool(
-                path: temporaryVerificationPath,
-                configuration: configuration(vaultKey: vaultKey, readonly: true)
-            )
-            defer { try? verificationPool.close() }
-            try verify(verificationPool)
-            let verified = try verificationPool.read { database in
+            try verify(destination)
+            let verified = try destination.read { database in
                 guard try database.tableExists("role_search_page_replays"),
                       try String.fetchOne(
                         database,
@@ -933,17 +1062,25 @@ actor AccountVault {
                     sql: "SELECT COUNT(*) FROM role_search_page_replays"
                 ) ?? 0) == sourceReplayCount
             }
+            try destination.close()
             guard verified else { throw VaultError.invalidMigrationBackup }
+
             try NoFollowFilesystem.setRegularFilePermissions(
                 relativeTo: backupDirectory,
                 name: temporaryName
             )
-
-            try NoFollowFilesystem.copyRegularFileWithinDirectoryAtomically(
-                backupDirectory,
-                sourceName: temporaryName,
-                destinationName: "\(migrationID).sqlite"
-            )
+            let published: Bool? = try NoFollowFilesystem.withRegularFileIfPresent(
+                relativeTo: backupDirectory,
+                name: temporaryName
+            ) { temporaryFile in
+                try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                    temporaryFile,
+                    to: backupDirectory,
+                    destinationName: "\(migrationID).sqlite"
+                )
+                return true
+            }
+            guard published == true else { throw VaultError.invalidMigrationBackup }
         }
     }
 
@@ -953,48 +1090,107 @@ actor AccountVault {
         vaultKey: VaultKey
     ) throws -> [String] {
         _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
-        let backupComponents = ["Vaults", accountID.rawValue, "MigrationBackups"]
-        do {
-            return try NoFollowFilesystem.withDirectory(
-                beneath: rootDirectory,
-                components: backupComponents,
-                create: false
-            ) { backupDirectory in
-                var verifiedIDs: [String] = []
-                for migrationID in destructiveMigrationBackupIDs {
-                    let backupName = "\(migrationID).sqlite"
-                    do {
-                        let isExpectedPreMigrationBackup = try NoFollowFilesystem.withRegularFileIfPresent(
-                            relativeTo: backupDirectory,
-                            name: backupName
-                        ) { backupFile in
-                            let pool = try DatabasePool(
-                                path: "/dev/fd/\(backupFile)",
-                                configuration: configuration(vaultKey: vaultKey, readonly: true)
-                            )
-                            defer { try? pool.close() }
-                            try verify(pool)
-                            return try pool.read { database in
-                                let hasReplayTable = try database.tableExists("role_search_page_replays")
-                                let migrationChecksum = try String.fetchOne(
-                                    database,
-                                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                                    arguments: [migrationID]
-                                )
-                                return hasReplayTable && migrationChecksum == nil
-                            }
-                        }
-                        if isExpectedPreMigrationBackup == true { verifiedIDs.append(migrationID) }
-                    } catch {
-                        // A corrupt or replaced backup is never advertised as a
-                        // recovery option. The caller still reports the vault issue.
+        var verifiedIDs: [String] = []
+        for migrationID in destructiveMigrationBackupIDs {
+            do {
+                try withVerifiedMigrationBackup(
+                    rootDirectory: rootDirectory,
+                    accountID: accountID,
+                    vaultKey: vaultKey,
+                    migrationID: migrationID
+                ) { _ in }
+                verifiedIDs.append(migrationID)
+            } catch {
+                // A corrupt or replaced backup is never advertised as a
+                // recovery option. The caller still reports the vault issue.
+            }
+        }
+        return verifiedIDs
+    }
+
+    /// Retains the exact no-follow candidate descriptor from SQLCipher
+    /// verification through `operation`. Callers that install a backup must
+    /// copy this descriptor rather than resolving its filename again.
+    static func withVerifiedMigrationBackup<Value>(
+        rootDirectory: URL,
+        accountID: AccountID,
+        vaultKey: VaultKey,
+        migrationID: String,
+        _ operation: (Int32) throws -> Value
+    ) throws -> Value {
+        guard destructiveMigrationBackupIDs.contains(migrationID) else {
+            throw VaultError.invalidMigrationBackup
+        }
+        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
+        return try NoFollowFilesystem.withDirectory(
+            beneath: rootDirectory,
+            components: ["Vaults", accountID.rawValue],
+            create: false
+        ) { vaultDirectory in
+            try withVerifiedMigrationBackup(
+                relativeTo: vaultDirectory,
+                vaultKey: vaultKey,
+                migrationID: migrationID,
+                operation
+            )
+        }
+    }
+
+    /// Uses a vault directory descriptor already retained by the caller so an
+    /// account pathname swap cannot select a different candidate while the
+    /// verified descriptor is in flight.
+    static func withVerifiedMigrationBackup<Value>(
+        relativeTo vaultDirectory: Int32,
+        vaultKey: VaultKey,
+        migrationID: String,
+        _ operation: (Int32) throws -> Value
+    ) throws -> Value {
+        guard destructiveMigrationBackupIDs.contains(migrationID) else {
+            throw VaultError.invalidMigrationBackup
+        }
+        return try NoFollowFilesystem.withDirectory(
+            relativeTo: vaultDirectory,
+            components: ["MigrationBackups"],
+            create: false
+        ) { backupDirectory in
+            let value = try NoFollowFilesystem.withRegularFileIfPresent(
+                relativeTo: backupDirectory,
+                name: "\(migrationID).sqlite"
+            ) { backupFile in
+                let isExpectedPreMigrationBackup = try NoFollowFilesystem.withPrivateVerificationDirectory {
+                    verificationDirectoryPath, verificationDirectory in
+                    try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                        backupFile,
+                        to: verificationDirectory,
+                        destinationName: "verified.sqlite"
+                    )
+                    let pool = try DatabasePool(
+                        path: URL(fileURLWithPath: verificationDirectoryPath, isDirectory: true)
+                            .appendingPathComponent("verified.sqlite", isDirectory: false)
+                            .path,
+                        configuration: configuration(vaultKey: vaultKey, readonly: true)
+                    )
+                    defer { try? pool.close() }
+                    try verify(pool)
+                    return try pool.read { database in
+                        let hasReplayTable = try database.tableExists("role_search_page_replays")
+                        let migrationChecksum = try String.fetchOne(
+                            database,
+                            sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                            arguments: [migrationID]
+                        )
+                        return hasReplayTable && migrationChecksum == nil
                     }
                 }
-                return verifiedIDs
+                guard isExpectedPreMigrationBackup else {
+                    throw VaultError.invalidMigrationBackup
+                }
+                return try operation(backupFile)
             }
-        } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
-            // A vault without destructive migrations has no backup directory.
-            return []
+            guard let value else {
+                throw VaultError.invalidMigrationBackup
+            }
+            return value
         }
     }
 
@@ -1009,87 +1205,94 @@ actor AccountVault {
         vaultKey: VaultKey,
         migrationID: String
     ) throws {
-        guard try verifiedMigrationBackupIDs(
-            rootDirectory: rootDirectory,
-            accountID: accountID,
-            vaultKey: vaultKey
-        ).contains(migrationID) else {
-            throw VaultError.invalidMigrationBackup
-        }
         _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
         let vaultComponents = ["Vaults", accountID.rawValue]
         let archiveID = "before-\(migrationID)-\(UUID().uuidString.lowercased())"
-        let archiveComponents = vaultComponents + ["RecoveryCopies", archiveID]
-        try NoFollowFilesystem.ensureDirectory(at: rootDirectory, components: archiveComponents)
-
-        // Copy the entire encrypted SQLite set before touching the live
-        // database. A missing sidecar is normal; a symlink/non-regular file is
-        // never treated as a recoverable artifact.
-        for name in ["triage.sqlite", "triage.sqlite-wal", "triage.sqlite-shm"] {
-            guard try NoFollowFilesystem.regularFileExists(
-                beneath: rootDirectory,
-                directoryComponents: vaultComponents,
-                name: name
-            ) else { continue }
-            try NoFollowFilesystem.copyRegularFileAtomically(
-                beneath: rootDirectory,
-                sourceDirectoryComponents: vaultComponents,
-                sourceName: name,
-                destinationDirectoryComponents: archiveComponents,
-                destinationName: name
-            )
-        }
-
-        // Re-copy through a descriptor-relative source and verify the exact
-        // installed bytes before allowing callers to reopen/migrate it.
-        try NoFollowFilesystem.copyRegularFileAtomically(
-            beneath: rootDirectory,
-            sourceDirectoryComponents: vaultComponents + ["MigrationBackups"],
-            sourceName: "\(migrationID).sqlite",
-            destinationDirectoryComponents: vaultComponents,
-            destinationName: "triage.sqlite"
-        )
-        try NoFollowFilesystem.removeRegularFileIfPresent(
-            beneath: rootDirectory,
-            directoryComponents: vaultComponents,
-            name: "triage.sqlite-wal"
-        )
-        try NoFollowFilesystem.removeRegularFileIfPresent(
-            beneath: rootDirectory,
-            directoryComponents: vaultComponents,
-            name: "triage.sqlite-shm"
-        )
 
         try NoFollowFilesystem.withDirectory(
             beneath: rootDirectory,
             components: vaultComponents,
             create: false
         ) { vaultDirectory in
-            let validation = try NoFollowFilesystem.withRegularFileIfPresent(
+            try withVerifiedMigrationBackup(
                 relativeTo: vaultDirectory,
-                name: "triage.sqlite"
-            ) { restoredFile in
-                let restored = try DatabasePool(
-                    path: "/dev/fd/\(restoredFile)",
-                    configuration: configuration(vaultKey: vaultKey, readonly: true)
-                )
-                defer { try? restored.close() }
-                try verify(restored)
-                return try restored.read { database in
-                    let hasReplayTable = try database.tableExists("role_search_page_replays")
-                    let migrationChecksum = try String.fetchOne(
-                        database,
-                        sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                        arguments: [migrationID]
-                    )
-                    return hasReplayTable && migrationChecksum == nil
+                vaultKey: vaultKey,
+                migrationID: migrationID
+            ) { backupFile in
+                try NoFollowFilesystem.withDirectory(
+                    relativeTo: vaultDirectory,
+                    components: ["RecoveryCopies", archiveID],
+                    create: true
+                ) { archiveDirectory in
+                    // Copy the entire encrypted SQLite set before touching the
+                    // live database. A missing sidecar is normal; a
+                    // symlink/non-regular file is never treated as recoverable.
+                    for name in ["triage.sqlite", "triage.sqlite-wal", "triage.sqlite-shm"] {
+                        _ = try NoFollowFilesystem.withRegularFileIfPresent(
+                            relativeTo: vaultDirectory,
+                            name: name
+                        ) { artifact in
+                            try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                                artifact,
+                                to: archiveDirectory,
+                                destinationName: name
+                            )
+                        }
+                    }
                 }
-            }
-            guard let isExpectedPreMigrationBackup = validation else {
-                throw VaultError.invalidMigrationBackup
-            }
-            guard isExpectedPreMigrationBackup else {
-                throw VaultError.invalidMigrationBackup
+
+                // The verified candidate descriptor and vault directory remain
+                // held until this copy completes, so neither a candidate nor
+                // account pathname swap can install different bytes.
+                try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                    backupFile,
+                    to: vaultDirectory,
+                    destinationName: "triage.sqlite"
+                )
+                try NoFollowFilesystem.removeRegularFileIfPresent(
+                    relativeTo: vaultDirectory,
+                    name: "triage.sqlite-wal"
+                )
+                try NoFollowFilesystem.removeRegularFileIfPresent(
+                    relativeTo: vaultDirectory,
+                    name: "triage.sqlite-shm"
+                )
+
+                let validation = try NoFollowFilesystem.withRegularFileIfPresent(
+                    relativeTo: vaultDirectory,
+                    name: "triage.sqlite"
+                ) { restoredFile in
+                    try NoFollowFilesystem.withPrivateVerificationDirectory {
+                        verificationDirectoryPath, verificationDirectory in
+                        try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                            restoredFile,
+                            to: verificationDirectory,
+                            destinationName: "verified.sqlite"
+                        )
+                        let restored = try DatabasePool(
+                            path: URL(fileURLWithPath: verificationDirectoryPath, isDirectory: true)
+                                .appendingPathComponent("verified.sqlite", isDirectory: false)
+                                .path,
+                            configuration: configuration(vaultKey: vaultKey, readonly: true)
+                        )
+                        defer { try? restored.close() }
+                        try verify(restored)
+                        return try restored.read { database in
+                            let hasReplayTable = try database.tableExists("role_search_page_replays")
+                            let migrationChecksum = try String.fetchOne(
+                                database,
+                                sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
+                                arguments: [migrationID]
+                            )
+                            return hasReplayTable && migrationChecksum == nil
+                        }
+                    }
+                }
+                guard let isExpectedPreMigrationBackup = validation,
+                      isExpectedPreMigrationBackup
+                else {
+                    throw VaultError.invalidMigrationBackup
+                }
             }
         }
     }
@@ -1105,6 +1308,21 @@ actor AccountVault {
             )
             // SQLCipher reports one row per integrity error and no rows when
             // every encrypted page passes HMAC verification.
+            guard integrityRows.isEmpty else {
+                throw VaultError.invalidIntegrityCheck
+            }
+        }
+    }
+
+    static func verify(_ databaseQueue: DatabaseQueue) throws {
+        try databaseQueue.read { database in
+            guard !(try database.cipherVersion).isEmpty else {
+                throw VaultError.sqlCipherUnavailable
+            }
+            let integrityRows = try String.fetchAll(
+                database,
+                sql: "PRAGMA cipher_integrity_check"
+            )
             guard integrityRows.isEmpty else {
                 throw VaultError.invalidIntegrityCheck
             }

@@ -173,7 +173,7 @@ final class OnboardingPresentationStateTests: XCTestCase {
         XCTAssertNil(PersonalAccessTokenReplacementPresentation.action(for: .oauth))
         XCTAssertEqual(
             PersonalAccessTokenReplacementPresentation.fineGrainedReplacementUnavailable.unavailableDetail,
-            "Fine-grained tokens cannot be replaced in place. Connect the new token as a separate account and enter the resource-owner organization selected when you created it."
+            "Fine-grained tokens cannot be replaced in place. Choose Add Account, then enter the new token and the resource-owner organization selected when you created it."
         )
     }
 

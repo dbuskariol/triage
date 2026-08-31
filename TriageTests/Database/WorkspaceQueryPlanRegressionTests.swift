@@ -249,6 +249,44 @@ final class WorkspaceQueryPlanRegressionTests: XCTestCase {
             arguments: fixture.scopeArguments
         )
     }
+
+    func testTenThousandWorkspaceRowsKeepInboxRevisionLookupConstant() throws {
+        let fixture = try QueryPlanFixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspaceRows(count: 10_000)
+
+        var statements: [String] = []
+        let revision = try fixture.pool.read { database in
+            database.trace { event in
+                if case let .statement(statement) = event {
+                    statements.append(statement.sql)
+                }
+            }
+            defer { database.trace(options: []) }
+            return try WorkspaceDatabaseObservationService.revision(
+                in: database,
+                scope: fixture.workspaceScope
+            )
+        }
+
+        XCTAssertEqual(revision.inboxPresentationFingerprint, "0")
+        XCTAssertEqual(
+            statements.filter { $0.contains("FROM workspace_inbox_revisions") }.count,
+            1,
+            "The revision fence must read one scope marker, not scan every Inbox dependency."
+        )
+        XCTAssertFalse(
+            statements.contains { statement in
+                statement.contains("FROM workflow_states")
+                    || statement.contains("FROM action_items")
+                    || statement.contains("FROM attention_scores")
+                    || statement.contains("FROM rule_evaluations")
+                    || statement.contains("FROM work_item_group_memberships")
+                    || statement.contains("FROM work_item_graph_runs")
+            },
+            "The bounded revision fence must not reintroduce a dependency-row scan."
+        )
+    }
 }
 
 private final class QueryPlanFixture: @unchecked Sendable {

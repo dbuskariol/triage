@@ -243,6 +243,38 @@ final class WorkspaceObservationServiceTests: XCTestCase {
         XCTAssertNotEqual(graphRunChanged.revision, groupingChanged.revision)
     }
 
+    func testInboxPageRevisionSeesScopedWriteFromSeparateDatabaseConnection() throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspace()
+
+        let initial = try fixture.pool.read { database in
+            try WorkspaceDatabaseObservationService.revision(in: database, scope: fixture.scope)
+        }
+        let peer = try DatabasePool(path: fixture.directory.appendingPathComponent("triage.sqlite").path)
+        defer { try? peer.close() }
+
+        try peer.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE workflow_states
+                    SET pinned = 1, updated_at_ms = 10_000
+                    WHERE work_item_id = ?
+                    """,
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+
+        let refreshed = try fixture.pool.read { database in
+            try WorkspaceDatabaseObservationService.revision(in: database, scope: fixture.scope)
+        }
+        XCTAssertNotEqual(refreshed, initial)
+        XCTAssertNotEqual(
+            refreshed.inboxPresentationFingerprint,
+            initial.inboxPresentationFingerprint
+        )
+    }
+
     func testMenuCountsExcludeRuleEvaluationsOutsideTheActiveSourceRevision() throws {
         let fixture = try Fixture()
         defer { fixture.close() }

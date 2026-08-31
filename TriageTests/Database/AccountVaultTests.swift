@@ -99,10 +99,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "058-ai-action-confidence-threshold-v1")
+        XCTAssertEqual(migrations.last?.id, "060-workspace-inbox-presentation-revision-v1")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
+            "47e96afd4aec1db46e8036d516ceebed62dc1f9c3fc9ce1f9aedacda70809046"
         )
         let timelineMembershipSchema = try await vault.read { database in
             (
@@ -703,12 +703,18 @@ final class AccountVaultTests: XCTestCase {
             accountID: accountID,
             vaultKey: key
         )
-        XCTAssertEqual(candidates, ["033-role-search-page-replay-v2"])
+        XCTAssertEqual(
+            candidates,
+            [
+                "033-role-search-page-replay-v2",
+                "034-role-search-page-replay-parser-identity"
+            ]
+        )
 
         try await registry.restoreVerifiedMigrationBackup(
             accountID: accountID,
             vaultKey: key,
-            migrationID: "033-role-search-page-replay-v2"
+            migrationID: "034-role-search-page-replay-parser-identity"
         )
 
         let recoveryCopies = try FileManager.default.contentsOfDirectory(
@@ -743,7 +749,7 @@ final class AccountVaultTests: XCTestCase {
         try await registry.restoreVerifiedMigrationBackup(
             accountID: accountID,
             vaultKey: key,
-            migrationID: "033-role-search-page-replay-v2"
+            migrationID: "034-role-search-page-replay-parser-identity"
         )
         let sidecarlessRecovery = try XCTUnwrap(
             try FileManager.default.contentsOfDirectory(
@@ -1594,6 +1600,173 @@ final class AccountVaultTests: XCTestCase {
         )
     }
 
+    func testHeldFileSQLCipherStagingWriteResistsDirectorySwap() throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let key = try VaultKey.generate()
+        let accountID = AccountID.make()
+        let components = ["Vaults", accountID.rawValue, "MigrationBackups"]
+        let databaseName = ".migration.partial"
+        try NoFollowFilesystem.ensureDirectory(at: directory, components: components)
+        let targetDirectory = components.reduce(directory) { partial, component in
+            partial.appendingPathComponent(component, isDirectory: true)
+        }
+        let heldDirectory = targetDirectory.deletingLastPathComponent()
+            .appendingPathComponent("MigrationBackups-held", isDirectory: true)
+
+        try NoFollowFilesystem.withDirectory(
+            beneath: directory,
+            components: components,
+            create: false
+        ) { descriptor in
+            try NoFollowFilesystem.createRegularFileIfMissing(
+                relativeTo: descriptor,
+                name: databaseName
+            )
+            try FileManager.default.moveItem(at: targetDirectory, to: heldDirectory)
+            try FileManager.default.createSymbolicLink(at: targetDirectory, withDestinationURL: external)
+
+            var configuration = AccountVault.configuration(vaultKey: key)
+            configuration.journalMode = .default
+            configuration.prepareDatabase { database in
+                try database.execute(sql: "PRAGMA journal_mode = MEMORY")
+            }
+            let heldPath = try NoFollowFilesystem.currentPath(of: descriptor)
+            let queue = try DatabaseQueue(
+                path: URL(fileURLWithPath: heldPath, isDirectory: true)
+                    .appendingPathComponent(databaseName, isDirectory: false)
+                    .path,
+                configuration: configuration
+            )
+            try queue.write { database in
+                try database.execute(sql: "CREATE TABLE held_write_values (value INTEGER NOT NULL)")
+                try database.execute(sql: "INSERT INTO held_write_values (value) VALUES (1)")
+            }
+            try queue.close()
+        }
+
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(at: external, includingPropertiesForKeys: nil),
+            []
+        )
+        let pool = try DatabasePool(
+            path: heldDirectory.appendingPathComponent(databaseName).path,
+            configuration: AccountVault.configuration(vaultKey: key, readonly: true)
+        )
+        defer { try? pool.close() }
+        XCTAssertEqual(
+            try pool.read { database in
+                try Int.fetchOne(database, sql: "SELECT value FROM held_write_values")
+            },
+            1
+        )
+    }
+
+    func testVerifiedMigrationBackupRestorePathsRemainBoundAfterAccountDirectorySwap() throws {
+        let directory = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let migrationID = "033-role-search-page-replay-v2"
+        let vaultComponents = ["Vaults", accountID.rawValue]
+        let backupComponents = vaultComponents + ["MigrationBackups"]
+        let candidateName = "\(migrationID).sqlite"
+        try NoFollowFilesystem.ensureDirectory(at: directory, components: backupComponents)
+        let backupDirectory = backupComponents.reduce(directory) { partial, component in
+            partial.appendingPathComponent(component, isDirectory: true)
+        }
+        let candidate = backupDirectory.appendingPathComponent(candidateName)
+        var candidateConfiguration = AccountVault.configuration(vaultKey: key)
+        candidateConfiguration.journalMode = .default
+        candidateConfiguration.prepareDatabase { database in
+            try database.execute(sql: "PRAGMA journal_mode = MEMORY")
+        }
+        let candidateQueue = try DatabaseQueue(
+            path: candidate.path,
+            configuration: candidateConfiguration
+        )
+        try candidateQueue.write { database in
+            try database.execute(sql: "CREATE TABLE role_search_page_replays (value INTEGER NOT NULL)")
+            try database.execute(sql: "INSERT INTO role_search_page_replays (value) VALUES (1)")
+            try database.execute(sql: "CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, checksum TEXT)")
+        }
+        try candidateQueue.close()
+
+        let vaultPath = directory
+            .appendingPathComponent("Vaults", isDirectory: true)
+            .appendingPathComponent(accountID.rawValue, isDirectory: true)
+        let heldVaultPath = vaultPath.deletingLastPathComponent()
+            .appendingPathComponent("\(accountID.rawValue)-held", isDirectory: true)
+        try NoFollowFilesystem.withDirectory(
+            beneath: directory,
+            components: vaultComponents,
+            create: false
+        ) { vaultDirectory in
+            try AccountVault.withVerifiedMigrationBackup(
+                relativeTo: vaultDirectory,
+                vaultKey: key,
+                migrationID: migrationID
+            ) { candidateFile in
+                // This closure runs only after SQLCipher verification. Moving
+                // the account directory now replaces every ordinary pathname;
+                // archival and install must stay relative to vaultDirectory.
+                try FileManager.default.moveItem(at: vaultPath, to: heldVaultPath)
+                try FileManager.default.createSymbolicLink(at: vaultPath, withDestinationURL: external)
+                try NoFollowFilesystem.withDirectory(
+                    relativeTo: vaultDirectory,
+                    components: ["RecoveryCopies", "before"],
+                    create: true
+                ) { archiveDirectory in
+                    try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                        candidateFile,
+                        to: archiveDirectory,
+                        destinationName: "candidate.sqlite"
+                    )
+                }
+                try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                    candidateFile,
+                    to: vaultDirectory,
+                    destinationName: "triage.sqlite"
+                )
+            }
+        }
+
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                at: external,
+                includingPropertiesForKeys: nil
+            ),
+            []
+        )
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: heldVaultPath
+                .appendingPathComponent("RecoveryCopies", isDirectory: true)
+                .appendingPathComponent("before", isDirectory: true)
+                .appendingPathComponent("candidate.sqlite").path
+        ))
+        let restored = try DatabasePool(
+            path: heldVaultPath.appendingPathComponent("triage.sqlite").path,
+            configuration: AccountVault.configuration(vaultKey: key, readonly: true)
+        )
+        defer { try? restored.close() }
+        XCTAssertEqual(
+            try restored.read { database in
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM role_search_page_replays")
+            },
+            1
+        )
+    }
+
     func testHeldDirectorySQLCipherVerificationPathsResistCandidateAndInstalledDatabaseSwaps() throws {
         let directory = try makeTemporaryDirectory()
         let external = try makeTemporaryDirectory()
@@ -1643,16 +1816,26 @@ final class AccountVaultTests: XCTestCase {
                     try FileManager.default.moveItem(at: targetDirectory, to: heldDirectory)
                     try FileManager.default.createSymbolicLink(at: targetDirectory, withDestinationURL: external)
 
-                    let pool = try DatabasePool(
-                        path: "/dev/fd/\(databaseFile)",
-                        configuration: AccountVault.configuration(vaultKey: key, readonly: true)
-                    )
-                    defer { try? pool.close() }
-                    try AccountVault.verify(pool)
-                    let value = try pool.read { database in
-                        try Int.fetchOne(database, sql: "SELECT value FROM held_descriptor_values")
+                    try NoFollowFilesystem.withPrivateVerificationDirectory {
+                        verificationDirectoryPath, verificationDirectory in
+                        try NoFollowFilesystem.copyOpenRegularFileAtomically(
+                            databaseFile,
+                            to: verificationDirectory,
+                            destinationName: "verified.sqlite"
+                        )
+                        let pool = try DatabasePool(
+                            path: URL(fileURLWithPath: verificationDirectoryPath, isDirectory: true)
+                                .appendingPathComponent("verified.sqlite", isDirectory: false)
+                                .path,
+                            configuration: AccountVault.configuration(vaultKey: key, readonly: true)
+                        )
+                        defer { try? pool.close() }
+                        try AccountVault.verify(pool)
+                        let value = try pool.read { database in
+                            try Int.fetchOne(database, sql: "SELECT value FROM held_descriptor_values")
+                        }
+                        XCTAssertEqual(value, 1)
                     }
-                    XCTAssertEqual(value, 1)
                 }
             }
 
