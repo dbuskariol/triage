@@ -203,6 +203,7 @@ struct TriageApp: App {
                     idealHeight: 680
                 )
         }
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
     }
 
     private var menuBarExtraInsertion: Binding<Bool> {

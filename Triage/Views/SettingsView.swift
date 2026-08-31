@@ -13,6 +13,8 @@ enum AccountRemovalPresentation {
         }
         return "\(localRemoval) \(externalBackupDisclosure)"
     }
+
+    static let unavailableVaultRecoveryMessage = "This removes encrypted local Triage data whose vault key is unavailable. GitHub content is not changed. Afterward, reconnect to GitHub to resync. \(externalBackupDisclosure)"
 }
 
 enum NotificationAuthorizationAction: Equatable {
@@ -46,40 +48,11 @@ enum NotificationSettingsPresentation {
 }
 
 enum SettingsSidebarLayout {
-    // List rows carry less internal top padding than the large detail heading.
-    // Offset the sidebar content so their visible glyph tops align optically.
-    static let contentAlignmentInset: CGFloat = 15
     static let minimumWidth: CGFloat = 240
     static let idealWidth: CGFloat = 260
     static let maximumWidth: CGFloat = 320
     static let minimumWindowWidth: CGFloat = 800
     static let defaultWindowWidth: CGFloat = 860
-}
-
-private struct SettingsWindowChromeConfigurator: NSViewRepresentable {
-    func makeNSView(context _: Context) -> SettingsWindowChromeView {
-        SettingsWindowChromeView()
-    }
-
-    func updateNSView(_ nsView: SettingsWindowChromeView, context _: Context) {
-        nsView.configureWindow()
-    }
-}
-
-private final class SettingsWindowChromeView: NSView {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        configureWindow()
-    }
-
-    func configureWindow() {
-        guard let window else { return }
-        window.title = "Settings"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unifiedCompact
-        window.styleMask.insert(.fullSizeContentView)
-    }
 }
 
 struct SettingsView: View {
@@ -92,6 +65,7 @@ struct SettingsView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @State private var accountReplacingToken: GitHubAccount?
     @State private var accountPendingRemoval: GitHubAccount?
+    @State private var unavailableAccountPendingRemoval: AccountID?
     @State private var accountRemovalError: String?
     @State private var notificationSettingsOpenError: String?
 
@@ -104,11 +78,6 @@ struct SettingsView: View {
                     .tag(category)
             }
             .listStyle(.sidebar)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                Color.clear
-                    .frame(height: SettingsSidebarLayout.contentAlignmentInset)
-                    .accessibilityHidden(true)
-            }
             .navigationSplitViewColumnWidth(
                 min: SettingsSidebarLayout.minimumWidth,
                 ideal: SettingsSidebarLayout.idealWidth,
@@ -119,7 +88,6 @@ struct SettingsView: View {
             selectedSettingsPage
         }
         .navigationSplitViewStyle(.balanced)
-        .background(SettingsWindowChromeConfigurator())
         .onAppear {
             preferences.refreshLaunchAtLoginStatus()
         }
@@ -169,6 +137,25 @@ struct SettingsView: View {
             .keyboardShortcut(.cancelAction)
         } message: {
             Text(removalConfirmationMessage)
+        }
+        .confirmationDialog(
+            "Remove unavailable local account data?",
+            isPresented: Binding(
+                get: { unavailableAccountPendingRemoval != nil },
+                set: { if !$0 { unavailableAccountPendingRemoval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Local Data", role: .destructive) {
+                removeUnavailablePendingAccount()
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {
+                unavailableAccountPendingRemoval = nil
+            }
+            .keyboardShortcut(.cancelAction)
+        } message: {
+            Text(AccountRemovalPresentation.unavailableVaultRecoveryMessage)
         }
         .alert(
             "Triage could not remove this account",
@@ -269,10 +256,11 @@ struct SettingsView: View {
 
     private var accountsSettings: some View {
         SettingsCard(title: "Connected Accounts") {
-            if appModel.accounts.isEmpty {
+            if appModel.accounts.isEmpty, appModel.unavailableAccountIDs.isEmpty {
                 Text("No GitHub accounts are connected.")
                     .foregroundStyle(.secondary)
-            } else {
+            }
+            if !appModel.accounts.isEmpty {
                 ForEach(appModel.accounts) { account in
                     SettingsValueRow(
                         title: account.login,
@@ -291,6 +279,26 @@ struct SettingsView: View {
                                 "Removes this account, its credentials, and encrypted local Triage data from this Mac. It does not change GitHub."
                             )
                         }
+                    }
+                }
+            }
+            if !appModel.unavailableAccountIDs.isEmpty {
+                if !appModel.accounts.isEmpty {
+                    SettingsDivider()
+                }
+                ForEach(appModel.unavailableAccountIDs.sorted { $0.rawValue < $1.rawValue }, id: \.self) { accountID in
+                    SettingsValueRow(
+                        title: "Unavailable local account",
+                        detail: "Its encrypted vault key is unavailable. Remove local data, then reconnect to resync.",
+                        systemImage: "lock.trianglebadge.exclamationmark"
+                    ) {
+                        Button("Remove Local Data…", role: .destructive) {
+                            unavailableAccountPendingRemoval = accountID
+                        }
+                        .disabled(appModel.isConnecting)
+                        .accessibilityHint(
+                            "Removes this unavailable account's encrypted local data from this Mac. GitHub content is not changed."
+                        )
                     }
                 }
             }
@@ -710,6 +718,18 @@ struct SettingsView: View {
                 try await appModel.removeAccount(account.id)
             } catch {
                 accountRemovalError = "The account and its encrypted local data were not removed. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func removeUnavailablePendingAccount() {
+        guard let accountID = unavailableAccountPendingRemoval else { return }
+        unavailableAccountPendingRemoval = nil
+        Task {
+            do {
+                try await appModel.removeAccount(accountID)
+            } catch {
+                accountRemovalError = "The unavailable account's encrypted local data were not removed. \(error.localizedDescription)"
             }
         }
     }
