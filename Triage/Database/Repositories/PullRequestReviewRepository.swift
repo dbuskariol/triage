@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -6,6 +7,139 @@ enum PullRequestReviewRepositoryError: Error, Equatable, Sendable {
     case reviewNodeScopeMismatch
     case invalidReviewNodeID
     case duplicateReviewNodeID
+    case invalidTraversalReceipt
+}
+
+enum PullRequestReviewReplacementProofError: Error, Equatable, Sendable {
+    case invalidTraversalReceipt
+    case normalizedDigestMismatch
+}
+
+/// A transaction-local authorization for replacing the two normalized review
+/// collections. The receipt alone proves raw traversal completeness; this
+/// proof additionally binds that receipt to the exact normalized responses
+/// about to be written.
+struct PullRequestReviewReplacementProof: Sendable {
+    let completeTraversalReceipt: ReviewCandidateCompleteTraversalReceiptToken
+    private let reviewsDigest: Data
+    private let requestedReviewersDigest: Data
+
+    nonisolated static func normalizedDigest(
+        reviews: [GitHubPullRequestReviewDTO],
+        requestedReviewers: GitHubRequestedReviewersDTO
+    ) -> Data {
+        var material = Data()
+        append(reviewsDigest(for: reviews), to: &material)
+        append(requestedReviewersDigest(for: requestedReviewers), to: &material)
+        return Data(SHA256.hash(data: material))
+    }
+
+    nonisolated static func make(
+        reviews: [GitHubPullRequestReviewDTO],
+        requestedReviewers: GitHubRequestedReviewersDTO,
+        completeTraversalReceipt: ReviewCandidateCompleteTraversalReceiptToken,
+        in database: Database
+    ) throws -> Self {
+        try ReviewCandidateCompleteTraversalReceiptRepository.validate(
+            completeTraversalReceipt,
+            in: database
+        )
+        guard let receiptDigest = try Data.fetchOne(
+            database,
+            sql: "SELECT normalized_digest FROM review_candidate_complete_traversal_receipts WHERE id = ?",
+            arguments: [completeTraversalReceipt.id.uuidString.lowercased()]
+        ), receiptDigest == normalizedDigest(reviews: reviews, requestedReviewers: requestedReviewers)
+        else {
+            throw PullRequestReviewReplacementProofError.normalizedDigestMismatch
+        }
+        return Self(
+            completeTraversalReceipt: completeTraversalReceipt,
+            reviewsDigest: reviewsDigest(for: reviews),
+            requestedReviewersDigest: requestedReviewersDigest(for: requestedReviewers)
+        )
+    }
+
+    nonisolated func validate(
+        reviews: [GitHubPullRequestReviewDTO],
+        pullRequestNodeID: GitHubNodeID,
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        guard completeTraversalReceipt.feature == .reviews,
+              completeTraversalReceipt.candidateNodeID == pullRequestNodeID,
+              completeTraversalReceipt.scope.accountID == accountID
+        else {
+            throw PullRequestReviewReplacementProofError.invalidTraversalReceipt
+        }
+        try ReviewCandidateCompleteTraversalReceiptRepository.validate(
+            completeTraversalReceipt,
+            in: database
+        )
+        guard reviewsDigest == Self.reviewsDigest(for: reviews) else {
+            throw PullRequestReviewReplacementProofError.normalizedDigestMismatch
+        }
+    }
+
+    nonisolated func validate(
+        requestedReviewers: GitHubRequestedReviewersDTO,
+        pullRequestNodeID: GitHubNodeID,
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        guard completeTraversalReceipt.feature == .reviews,
+              completeTraversalReceipt.candidateNodeID == pullRequestNodeID,
+              completeTraversalReceipt.scope.accountID == accountID
+        else {
+            throw PullRequestReviewReplacementProofError.invalidTraversalReceipt
+        }
+        try ReviewCandidateCompleteTraversalReceiptRepository.validate(
+            completeTraversalReceipt,
+            in: database
+        )
+        guard requestedReviewersDigest == Self.requestedReviewersDigest(for: requestedReviewers) else {
+            throw PullRequestReviewReplacementProofError.normalizedDigestMismatch
+        }
+    }
+
+    private nonisolated static func reviewsDigest(for reviews: [GitHubPullRequestReviewDTO]) -> Data {
+        let records = reviews.map { review in
+            [
+                "review", review.nodeID, String(review.id), review.state,
+                review.body ?? "", review.submittedAt.map { String($0.timeIntervalSince1970) } ?? ""
+            ]
+        }.sorted(by: { $0.lexicographicallyPrecedes($1) })
+        return digest(records)
+    }
+
+    private nonisolated static func requestedReviewersDigest(
+        for requestedReviewers: GitHubRequestedReviewersDTO
+    ) -> Data {
+        let records = requestedReviewers.users.map {
+            ["user", $0.nodeID, $0.login ?? "", $0.slug ?? ""]
+        } + requestedReviewers.teams.map {
+            ["team", $0.nodeID, $0.login ?? "", $0.slug ?? ""]
+        }
+        return digest(records.sorted(by: { $0.lexicographicallyPrecedes($1) }))
+    }
+
+    private nonisolated static func digest(_ records: [[String]]) -> Data {
+        var material = Data()
+        records.flatMap { $0 }.forEach { append($0, to: &material) }
+        return Data(SHA256.hash(data: material))
+    }
+
+    private nonisolated static func append(_ value: String, to data: inout Data) {
+        let valueData = Data(value.utf8)
+        var length = UInt64(valueData.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(valueData)
+    }
+
+    private nonisolated static func append(_ value: Data, to data: inout Data) {
+        var length = UInt64(value.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
+    }
 }
 
 actor PullRequestReviewRepository {
@@ -46,6 +180,7 @@ actor PullRequestReviewRepository {
     func replace(
         reviews: [GitHubPullRequestReviewDTO],
         pullRequestNodeID: GitHubNodeID,
+        replacementProof: PullRequestReviewReplacementProof,
         observedAt: Date = .now
     ) async throws {
         let observedAtMilliseconds = Self.milliseconds(observedAt)
@@ -55,6 +190,7 @@ actor PullRequestReviewRepository {
                 pullRequestNodeID: pullRequestNodeID,
                 accountID: vault.accountID,
                 observedAtMilliseconds: observedAtMilliseconds,
+                replacementProof: replacementProof,
                 in: database
             )
         }
@@ -65,8 +201,19 @@ actor PullRequestReviewRepository {
         pullRequestNodeID: GitHubNodeID,
         accountID: AccountID,
         observedAtMilliseconds: Int64,
+        replacementProof: PullRequestReviewReplacementProof,
         in database: Database
     ) throws {
+        do {
+            try replacementProof.validate(
+                reviews: reviews,
+                pullRequestNodeID: pullRequestNodeID,
+                accountID: accountID,
+                in: database
+            )
+        } catch {
+            throw PullRequestReviewRepositoryError.invalidTraversalReceipt
+        }
         let reviewNodeIDs = try reviewNodeIDs(for: reviews)
         try validatePullRequestNodeScope(pullRequestNodeID, accountID: accountID, in: database)
         try validateReviewNodeScopes(

@@ -6,13 +6,88 @@ final class GitHubGraphQLClientTests: XCTestCase {
         XCTAssertThrowsError(try GitHubGraphQLQuery(document: "mutation { nope }", operationName: "Nope"))
     }
 
+    func testRegisteredQueryInventoryCoversEveryProductionOperation() throws {
+        let queries = try GitHubGraphQLQueries.registeredQueries()
+        XCTAssertEqual(
+            queries.map(\.operationName),
+            [
+                "TriageViewer",
+                "TriageHydrateNodes",
+                "TriagePullRequestReviewThreads",
+                "TriagePullRequestReviewThreadComments",
+                "TriageRepositoryDiscussions",
+                "TriageDiscussionComments",
+                "TriageDiscussionCommentReplies",
+                "TriageOrganizationProjectsV2",
+                "TriageProjectV2Items",
+                "TriageProjectV2ItemFieldValues"
+            ]
+        )
+        XCTAssertNoThrow(try GitHubGraphQLQueries.validateProductionRegistry(queries))
+        XCTAssertTrue(queries.allSatisfy { query in
+            query.document.hasPrefix("query ")
+                && !query.document.localizedCaseInsensitiveContains("mutation")
+                && !query.document.localizedCaseInsensitiveContains("subscription")
+                && query.document.range(
+                    of: #"\brateLimit\s*\{\s*cost\s+remaining\s+resetAt\s*\}"#,
+                    options: [.regularExpression, .caseInsensitive]
+                ) != nil
+        })
+    }
+
+    func testRegistryValidationRejectsMismatchedOperationAndMissingRateLimit() throws {
+        let registered = try GitHubGraphQLQueries.registeredQueries()
+        var mismatchedName = registered
+        mismatchedName[0] = try GitHubGraphQLQuery(
+            document: "query TriageViewerTypo { rateLimit { cost remaining resetAt } }",
+            operationName: "TriageViewer"
+        )
+        XCTAssertThrowsError(try GitHubGraphQLQueries.validateProductionRegistry(mismatchedName)) {
+            XCTAssertEqual($0 as? GitHubGraphQLError, .invalidQuery)
+        }
+
+        var missingRateLimit = registered
+        missingRateLimit[0] = try GitHubGraphQLQuery(
+            document: "query TriageViewer { viewer { id login name avatarUrl } }",
+            operationName: "TriageViewer"
+        )
+        XCTAssertThrowsError(try GitHubGraphQLQueries.validateProductionRegistry(missingRateLimit)) {
+            XCTAssertEqual($0 as? GitHubGraphQLError, .invalidQuery)
+        }
+    }
+
+    func testRejectsAnUnregisteredDocumentBeforeContactingTransport() async throws {
+        let session = GraphQLStubSession(body: Data(#"{"data":{"viewer":{"login":"octocat"}}}"#.utf8))
+        let client = GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        let documentMismatch = try GitHubGraphQLQuery(
+            document: "query TriageViewer { viewer { login } }",
+            operationName: "TriageViewer"
+        )
+        let viewer = try GitHubGraphQLQueries.viewer()
+        let operationMismatch = try GitHubGraphQLQuery(
+            document: viewer.document,
+            operationName: "TriageViewerTypo"
+        )
+
+        for unregistered in [documentMismatch, operationMismatch] {
+            do {
+                _ = try await client.execute(unregistered, variables: EmptyVariables(), as: ViewerPayload.self)
+                XCTFail("Expected the committed-query boundary to reject a mismatch.")
+            } catch let error as GitHubGraphQLError {
+                XCTAssertEqual(error, .unregisteredQuery)
+            }
+        }
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 0)
+    }
+
     func testDecodesPartialResponse() async throws {
         let client = GitHubGraphQLClient(
             session: GraphQLStubSession(body: Data(#"{"data":{"viewer":{"login":"octocat"}},"errors":[{"message":"partial"}]}"#.utf8)),
             credential: SecretValue("token")
         )
         let response = try await client.execute(
-            GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+            try GitHubGraphQLQueries.viewer(),
             variables: EmptyVariables(),
             as: ViewerPayload.self
         )
@@ -31,7 +106,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         )
 
         let response = try await client.execute(
-            GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+            try GitHubGraphQLQueries.viewer(),
             variables: EmptyVariables(),
             as: ViewerPayload.self
         )
@@ -60,7 +135,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         )
 
         let result = try await client.executePreservingUndecodableResponse(
-            GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+            try GitHubGraphQLQueries.viewer(),
             variables: EmptyVariables(),
             as: ViewerPayload.self
         )
@@ -85,7 +160,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
         do {
             _ = try await client.executeComplete(
-                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                try GitHubGraphQLQueries.viewer(),
                 variables: EmptyVariables(),
                 as: ViewerPayload.self
             )
@@ -103,7 +178,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
         do {
             _ = try await client.executeComplete(
-                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                try GitHubGraphQLQueries.viewer(),
                 variables: EmptyVariables(),
                 as: ViewerPayload.self
             )
@@ -121,7 +196,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
         do {
             _ = try await client.execute(
-                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                try GitHubGraphQLQueries.viewer(),
                 variables: EmptyVariables(),
                 as: ViewerPayload.self
             )
@@ -133,17 +208,17 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
     func testDecodesGraphQLISO8601Dates() async throws {
         let client = GitHubGraphQLClient(
-            session: GraphQLStubSession(body: Data(#"{"data":{"resetAt":"2026-08-29T00:00:00Z"}}"#.utf8)),
+            session: GraphQLStubSession(body: Data(#"{"data":{"rateLimit":{"resetAt":"2026-08-29T00:00:00Z"}}}"#.utf8)),
             credential: SecretValue("token")
         )
 
         let response = try await client.executeComplete(
-            GitHubGraphQLQuery(document: "query RateLimit { resetAt }", operationName: "RateLimit"),
+            try GitHubGraphQLQueries.viewer(),
             variables: EmptyVariables(),
-            as: DatePayload.self
+            as: RateLimitDatePayload.self
         )
 
-        XCTAssertEqual(response.resetAt, Date(timeIntervalSince1970: 1_787_961_600))
+        XCTAssertEqual(response.rateLimit.resetAt, Date(timeIntervalSince1970: 1_787_961_600))
     }
 
     func testNormalizesBoundedTransportResponseTooLarge() async throws {
@@ -154,7 +229,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
         do {
             _ = try await client.execute(
-                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                try GitHubGraphQLQueries.viewer(),
                 variables: EmptyVariables(),
                 as: ViewerPayload.self
             )
@@ -176,7 +251,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
 
         do {
             _ = try await client.execute(
-                GitHubGraphQLQuery(document: "query Viewer { viewer { login } }", operationName: "Viewer"),
+                try GitHubGraphQLQueries.viewer(),
                 variables: EmptyVariables(),
                 as: ViewerPayload.self
             )
@@ -194,12 +269,14 @@ final class GitHubGraphQLClientTests: XCTestCase {
 private struct EmptyVariables: Codable, Sendable {}
 private struct ViewerPayload: Codable, Sendable { let viewer: Viewer }
 private struct Viewer: Codable, Sendable { let login: String }
-private struct DatePayload: Codable, Sendable { let resetAt: Date }
+private struct RateLimitDatePayload: Codable, Sendable { let rateLimit: RateLimit }
+private struct RateLimit: Codable, Sendable { let resetAt: Date }
 
 private actor GraphQLStubSession: HTTPSession {
     let body: Data
     let statusCode: Int
     let headers: [String: String]
+    private var requests = 0
 
     init(
         body: Data,
@@ -212,7 +289,8 @@ private actor GraphQLStubSession: HTTPSession {
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        (
+        requests += 1
+        return (
             body,
             HTTPURLResponse(
                 url: request.url!,
@@ -222,6 +300,8 @@ private actor GraphQLStubSession: HTTPSession {
             )!
         )
     }
+
+    func requestCount() -> Int { requests }
 }
 
 private actor GraphQLBoundedErrorSession: BoundedHTTPSession {

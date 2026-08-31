@@ -36,6 +36,7 @@ enum NotificationLocalActionPolicy {
   }
 }
 
+@MainActor
 protocol NotificationLocalActionHandling: Sendable {
-  func handle(_ action: NotificationLocalAction) async
+    func handle(_ action: NotificationLocalAction) async
 }

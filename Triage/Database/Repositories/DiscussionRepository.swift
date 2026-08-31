@@ -277,6 +277,9 @@ actor DiscussionRepository {
         repositoryNodeID: GitHubNodeID,
         requiresCompleteTraversal: Bool
     ) throws {
+        guard !requiresCompleteTraversal || !pages.isEmpty else {
+            throw DiscussionRepositoryError.invalidRawAuthority
+        }
         let prefix = "graphql:TriageRepositoryDiscussions/repository=\(repositoryNodeID.rawValue)/after="
         var priorInfo: DiscussionPageInfo?
         for (offset, page) in pages.enumerated() {

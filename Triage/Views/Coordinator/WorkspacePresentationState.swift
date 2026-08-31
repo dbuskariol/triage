@@ -2,6 +2,9 @@ import Foundation
 
 struct WorkspacePresentationState: Equatable {
     enum SynchronizationStatus: Equatable {
+        case noAccount
+        case noOrganization
+        case initialSynchronization
         case upToDate
         case refreshing
         case partial
@@ -13,6 +16,9 @@ struct WorkspacePresentationState: Equatable {
 
         var title: String {
             switch self {
+            case .noAccount: "No GitHub account"
+            case .noOrganization: "Choose an organization"
+            case .initialSynchronization: "Ready to synchronize"
             case .upToDate: "Up to date"
             case .refreshing: "Refreshing"
             case .partial: "Partial access"
@@ -26,6 +32,9 @@ struct WorkspacePresentationState: Equatable {
 
         var systemImage: String {
             switch self {
+            case .noAccount: "person.crop.circle.badge.questionmark"
+            case .noOrganization: "building.2.crop.circle"
+            case .initialSynchronization: "arrow.triangle.2.circlepath"
             case .upToDate: "checkmark.circle"
             case .refreshing: "arrow.triangle.2.circlepath"
             case .partial: "exclamationmark.circle"
@@ -67,12 +76,16 @@ struct WorkspacePresentationState: Equatable {
         sectionCounts = AppSection.allCases.map { section in
             SectionCount(
                 section: section,
-                count: Self.count(for: section, in: workItems, at: now)
+                count: selectedAccountID != nil && selectedOrganizationID != nil
+                    ? Self.count(for: section, in: workItems, at: now)
+                    : 0
             )
         }
 
         let status = Self.status(
             workItems: workItems,
+            selectedAccountID: selectedAccountID,
+            selectedOrganizationID: selectedOrganizationID,
             organizationAccess: organizationAccess,
             hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
             isRefreshing: isRefreshing,
@@ -112,12 +125,22 @@ struct WorkspacePresentationState: Equatable {
 
     private static func status(
         workItems: [WorkItem],
+        selectedAccountID: AccountID?,
+        selectedOrganizationID: OrganizationID?,
         organizationAccess: OrganizationAccess?,
         hasSSOAuthorizationHeader: Bool,
         isRefreshing: Bool,
         refreshError: String?,
         workspaceFreshness: FreshnessState?
     ) -> (status: SynchronizationStatus, detail: String?) {
+        guard selectedAccountID != nil else {
+            return (.noAccount, "Connect a GitHub account to view work.")
+        }
+
+        guard selectedOrganizationID != nil else {
+            return (.noOrganization, "Choose an organization to view its local work queue.")
+        }
+
         if isRefreshing {
             return (.refreshing, "Updating work for the selected organization.")
         }
@@ -147,6 +170,14 @@ struct WorkspacePresentationState: Equatable {
             return status(for: workspaceFreshness, refreshError: refreshError)
         }
 
+        if let refreshError {
+            return (.partial, refreshError)
+        }
+
+        if workItems.isEmpty {
+            return (.initialSynchronization, "Synchronize this organization to create its local work queue.")
+        }
+
         if let offlineItem = workItems.first(where: { $0.freshness.status == .offline }) {
             return (.offline, offlineItem.freshness.detail ?? "Showing the most recent local work.")
         }
@@ -172,7 +203,7 @@ struct WorkspacePresentationState: Equatable {
             return (.signInRequired, refreshError ?? "Account access is required before work can refresh.")
         }
 
-        return (.unavailable, refreshError)
+        return (.unavailable, "No current synchronization coverage is available.")
     }
 
     private static func status(

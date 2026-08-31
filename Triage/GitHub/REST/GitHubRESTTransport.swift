@@ -159,11 +159,31 @@ protocol BoundedHTTPSession: HTTPSession {
     ) async throws -> (Data, HTTPURLResponse)
 }
 
+/// Creates isolated transport sessions for every production GitHub and OAuth
+/// request path. Callers that need deterministic behavior continue to inject an
+/// `HTTPSession` directly.
+enum TriageHTTPSessionFactory {
+    static func makeConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.waitsForConnectivity = false
+        return configuration
+    }
+
+    static func makeSession() -> URLSession {
+        URLSession(configuration: makeConfiguration())
+    }
+}
+
 struct URLSessionHTTPSession: BoundedHTTPSession {
     private let session: URLSession
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        self.session = session ?? TriageHTTPSessionFactory.makeSession()
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {

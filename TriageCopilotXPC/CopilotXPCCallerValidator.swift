@@ -3,17 +3,12 @@ import Security
 
 enum CopilotXPCCallerValidator {
   static func validateCurrentConnection() throws {
-    guard let connection = NSXPCConnection.current(),
-      let teamIdentifier = Bundle.main.object(
-        forInfoDictionaryKey: "TriageExpectedTeamIdentifier"
-      ) as? String,
-      teamIdentifier.range(
-        of: #"^[A-Z0-9]{10}$"#,
-        options: .regularExpression
-      ) != nil
-    else {
+    guard let connection = NSXPCConnection.current() else {
       throw CopilotXPCServiceError.callerNotAuthorized
     }
+    let teamIdentifier = try validatedTeamIdentifier(
+      Bundle.main.object(forInfoDictionaryKey: "TriageExpectedTeamIdentifier") as? String
+    )
 
     let attributes: CFDictionary = [
       kSecGuestAttributePid: NSNumber(value: connection.processIdentifier)
@@ -34,5 +29,14 @@ enum CopilotXPCCallerValidator {
     else {
       throw CopilotXPCServiceError.callerNotAuthorized
     }
+  }
+
+  static func validatedTeamIdentifier(_ value: String?) throws -> String {
+    guard let value,
+      value.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil
+    else {
+      throw CopilotXPCServiceError.callerNotAuthorized
+    }
+    return value
   }
 }

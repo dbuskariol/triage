@@ -1998,6 +1998,635 @@ enum TriageDatabaseMigrator {
                     credential_revision, capability_revision, source_revision, page_index
                 )
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "040-review-candidate-failure-envelopes",
+            checksum: "9241fecb2d6cffcfc87a91e553b8599f0913dc2e16b705fcd2b038cad30c5a81"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_failure_envelopes (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature IN ('reviews', 'reviewThreads')),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    candidate_node_id TEXT NOT NULL CHECK (length(candidate_node_id) BETWEEN 1 AND 512),
+                    repository_id TEXT NOT NULL CHECK (length(repository_id) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    attempted_at_ms INTEGER NOT NULL,
+                    terminal_at_ms INTEGER NOT NULL CHECK (terminal_at_ms >= attempted_at_ms),
+                    classification TEXT NOT NULL CHECK (classification IN (
+                        'authenticationRequired', 'ssoRequired', 'approvalRequired',
+                        'rateLimited', 'unavailableOrPermission', 'transportFailure',
+                        'serverFailure', 'malformedResponse', 'normalizationFailure'
+                    )),
+                    redacted_diagnostic TEXT NOT NULL CHECK (length(redacted_diagnostic) BETWEEN 1 AND 4096),
+                    raw_page_count INTEGER NOT NULL CHECK (raw_page_count >= 0),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_failure_pages (
+                    envelope_id TEXT NOT NULL
+                        REFERENCES review_candidate_failure_envelopes(id) ON DELETE CASCADE,
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    page_ordinal INTEGER NOT NULL CHECK (page_ordinal > 0),
+                    raw_snapshot_id TEXT NOT NULL
+                        REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    PRIMARY KEY (envelope_id, request_key, page_ordinal),
+                    UNIQUE (envelope_id, raw_snapshot_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_failure_envelopes_scope_candidate_terminal
+                ON review_candidate_failure_envelopes (
+                    account_id, organization_id, feature, stream_id, candidate_node_id,
+                    credential_revision, capability_revision, terminal_at_ms DESC, id DESC
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_failure_pages_raw_snapshot
+                ON review_candidate_failure_pages (raw_snapshot_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "041-notification-source-authority-v1",
+            checksum: "6e396d1e9e4142d866ad417b9845bcaa274bec64babb4b929ac3a42206153f7a"
+        ) { database in
+            // Account notifications remain discovery evidence. Their current
+            // page membership and 304 receipt must never be confused with
+            // local notification delivery or deletion authority.
+            try database.execute(sql: """
+                CREATE TABLE notification_threads (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    notification_id TEXT NOT NULL CHECK (length(notification_id) BETWEEN 1 AND 512),
+                    repository_node_id TEXT NOT NULL CHECK (length(repository_node_id) BETWEEN 1 AND 512),
+                    reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 100),
+                    is_unread INTEGER NOT NULL CHECK (is_unread IN (0, 1)),
+                    subject_type TEXT NOT NULL CHECK (length(subject_type) BETWEEN 1 AND 100),
+                    subject_title TEXT NOT NULL CHECK (length(subject_title) BETWEEN 1 AND 8192),
+                    subject_url TEXT CHECK (subject_url IS NULL OR length(subject_url) BETWEEN 1 AND 2048),
+                    updated_at_ms INTEGER NOT NULL,
+                    last_read_at_ms INTEGER,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64 AND source_revision NOT GLOB '*[^0-9a-f]*'),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT CHECK (length(raw_snapshot_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    observed_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, notification_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE notification_current_pages (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (feature = 'notifications'),
+                    stream_id TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64 AND source_revision NOT GLOB '*[^0-9a-f]*'),
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT CHECK (length(raw_snapshot_id) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048 AND request_key LIKE 'GET /notifications?%'),
+                    observed_at_ms INTEGER NOT NULL,
+                    is_terminal INTEGER NOT NULL CHECK (is_terminal IN (0, 1)),
+                    PRIMARY KEY (account_id, organization_id, feature, stream_id, credential_revision, capability_revision, source_revision, page_index),
+                    UNIQUE (account_id, organization_id, feature, stream_id, credential_revision, capability_revision, source_revision, raw_snapshot_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id, organization_id, feature, stream_id)
+                        REFERENCES sync_streams(account_id, organization_id, feature, id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE notification_replay_receipts (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (feature = 'notifications'),
+                    stream_id TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (request_key = 'GET /notifications?all=true&participating=false&per_page=100'),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    etag TEXT CHECK (etag IS NULL OR length(etag) BETWEEN 1 AND 2048),
+                    last_modified TEXT CHECK (last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 2048),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64 AND source_revision NOT GLOB '*[^0-9a-f]*'),
+                    notification_count INTEGER NOT NULL CHECK (notification_count BETWEEN 0 AND 10000),
+                    notification_digest TEXT NOT NULL CHECK (length(notification_digest) = 64 AND notification_digest NOT GLOB '*[^0-9a-f]*'),
+                    completed_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, feature, stream_id, request_key, credential_revision, capability_revision),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id, organization_id, feature, stream_id)
+                        REFERENCES sync_streams(account_id, organization_id, feature, id) ON DELETE CASCADE,
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE notification_failure_envelopes (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 128),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (feature = 'notifications'),
+                    stream_id TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    classification TEXT NOT NULL CHECK (classification IN ('ssoRequired', 'approvalRequired', 'authenticationRequired', 'rateLimited', 'unavailableOrPermission', 'integrity', 'transient')),
+                    retry_at_ms INTEGER,
+                    observed_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id, organization_id, feature, stream_id)
+                        REFERENCES sync_streams(account_id, organization_id, feature, id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE notification_failure_pages (
+                    failure_id TEXT NOT NULL REFERENCES notification_failure_envelopes(id) ON DELETE CASCADE CHECK (length(failure_id) BETWEEN 1 AND 128),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT CHECK (length(raw_snapshot_id) BETWEEN 1 AND 512),
+                    page_index INTEGER NOT NULL CHECK (page_index BETWEEN 1 AND 100),
+                    PRIMARY KEY (failure_id, page_index),
+                    UNIQUE (failure_id, raw_snapshot_id)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_threads_current_scope
+                ON notification_threads (account_id, organization_id, credential_revision, capability_revision, updated_at_ms DESC, notification_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_threads_raw_snapshot ON notification_threads (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_current_pages_scope
+                ON notification_current_pages (account_id, organization_id, feature, stream_id, credential_revision, capability_revision, source_revision, page_index)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_current_pages_raw_snapshot ON notification_current_pages (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_replay_receipts_scope
+                ON notification_replay_receipts (account_id, organization_id, feature, stream_id, credential_revision, capability_revision, completed_at_ms DESC)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_failure_envelopes_scope
+                ON notification_failure_envelopes (account_id, organization_id, feature, stream_id, credential_revision, capability_revision, observed_at_ms DESC, id DESC)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_failure_pages_raw_snapshot ON notification_failure_pages (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER notification_protect_provenance_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots
+                WHEN (
+                    EXISTS (SELECT 1 FROM notification_current_pages WHERE raw_snapshot_id = OLD.id)
+                    OR EXISTS (SELECT 1 FROM notification_threads WHERE raw_snapshot_id = OLD.id)
+                    OR EXISTS (SELECT 1 FROM notification_failure_pages WHERE raw_snapshot_id = OLD.id)
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'notification source provenance is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER notification_protect_provenance_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN (
+                    EXISTS (SELECT 1 FROM notification_current_pages WHERE raw_snapshot_id = OLD.id)
+                    OR EXISTS (SELECT 1 FROM notification_threads WHERE raw_snapshot_id = OLD.id)
+                    OR EXISTS (SELECT 1 FROM notification_failure_pages WHERE raw_snapshot_id = OLD.id)
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'notification source provenance is immutable'); END
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "042-derived-intelligence-revision-evidence-v1",
+            checksum: "aee0510ac9a74c252acf9cf2d8227ebd7da278fa879d9fa64efa5a2370a0285f"
+        ) { database in
+            // This is the single current derived projection for a selected
+            // account/organization. `source_revision` is the adapter's
+            // canonical SHA-256 over the normalized primary-source revisions.
+            try database.execute(sql: """
+                CREATE TABLE derived_intelligence_runs (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+                        CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+                        CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    source_revision TEXT NOT NULL CHECK (
+                        length(source_revision) = 64
+                        AND source_revision NOT GLOB '*[^0-9a-f]*'
+                    ),
+                    evaluated_at_ms INTEGER NOT NULL,
+                    coverage_state TEXT NOT NULL CHECK (coverage_state IN ('trusted', 'incomplete', 'unknown')),
+                    freshness_status TEXT NOT NULL CHECK (freshness_status IN (
+                        'fresh', 'refreshing', 'stale', 'partial', 'offline',
+                        'authenticationRequired', 'ssoRequired', 'approvalRequired',
+                        'rateLimited', 'failed'
+                    )),
+                    is_provisional INTEGER NOT NULL CHECK (is_provisional IN (0, 1)),
+                    freshness_last_successful_at_ms INTEGER,
+                    freshness_next_retry_at_ms INTEGER,
+                    freshness_detail TEXT,
+                    missing_coverage_json BLOB NOT NULL CHECK (length(missing_coverage_json) <= 4194304),
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE rule_evaluations (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 512),
+                    account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE
+                        CHECK (length(work_item_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    source_revision TEXT NOT NULL CHECK (
+                        length(source_revision) = 64
+                        AND source_revision NOT GLOB '*[^0-9a-f]*'
+                    ),
+                    rule_id TEXT NOT NULL CHECK (length(rule_id) BETWEEN 1 AND 512),
+                    rule_version INTEGER NOT NULL CHECK (rule_version > 0),
+                    category TEXT NOT NULL CHECK (category IN (
+                        'directResponsibility', 'conversation', 'pullRequest',
+                        'progress', 'waiting', 'deadline'
+                    )),
+                    strength INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    explanation TEXT NOT NULL,
+                    evaluated_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE rule_evaluation_evidence (
+                    rule_evaluation_id TEXT NOT NULL REFERENCES rule_evaluations(id) ON DELETE CASCADE,
+                    evidence_id TEXT NOT NULL CHECK (length(evidence_id) BETWEEN 1 AND 512),
+                    source TEXT NOT NULL CHECK (source IN (
+                        'restSearch', 'restTimeline', 'restReview', 'restNotification',
+                        'graphQL', 'localWorkflow', 'legacyUnverified'
+                    )),
+                    source_locator_kind TEXT NOT NULL CHECK (source_locator_kind IN (
+                        'endpoint', 'query', 'localWorkflow', 'legacyUnverified'
+                    )),
+                    source_locator TEXT NOT NULL CHECK (length(source_locator) BETWEEN 1 AND 2048),
+                    authority_kind TEXT NOT NULL CHECK (authority_kind IN (
+                        'github', 'localWorkflow', 'legacyUnverified'
+                    )),
+                    authority_account_id TEXT,
+                    authority_organization_id TEXT,
+                    authority_feature TEXT,
+                    authority_stream_id TEXT,
+                    authority_credential_revision TEXT,
+                    authority_capability_revision TEXT,
+                    source_node_id TEXT,
+                    source_event_id TEXT,
+                    source_revision TEXT CHECK (source_revision IS NULL OR length(source_revision) BETWEEN 1 AND 500),
+                    raw_snapshot_id TEXT REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    confidence TEXT NOT NULL CHECK (confidence IN ('provisional', 'confirmed')),
+                    confirmation TEXT NOT NULL CHECK (confirmation IN ('provisional', 'confirmed')),
+                    observed_at_ms INTEGER NOT NULL,
+                    excerpt TEXT,
+                    PRIMARY KEY (rule_evaluation_id, evidence_id),
+                    CHECK (
+                        (
+                            authority_kind = 'github'
+                            AND source IN ('restSearch', 'restTimeline', 'restReview', 'restNotification', 'graphQL')
+                            AND source_locator_kind IN ('endpoint', 'query')
+                            AND authority_account_id IS NOT NULL
+                            AND authority_organization_id IS NOT NULL
+                            AND authority_feature IS NOT NULL
+                            AND authority_stream_id IS NOT NULL
+                            AND authority_credential_revision IS NOT NULL
+                            AND authority_capability_revision IS NOT NULL
+                        ) OR (
+                            authority_kind = 'localWorkflow'
+                            AND source = 'localWorkflow'
+                            AND source_locator_kind = 'localWorkflow'
+                            AND authority_account_id IS NOT NULL
+                            AND authority_organization_id IS NOT NULL
+                            AND authority_feature IS NULL
+                            AND authority_stream_id IS NULL
+                            AND authority_credential_revision IS NULL
+                            AND authority_capability_revision IS NULL
+                        ) OR (
+                            authority_kind = 'legacyUnverified'
+                            AND source = 'legacyUnverified'
+                            AND source_locator_kind = 'legacyUnverified'
+                            AND source_locator = 'legacy-unverified'
+                            AND authority_account_id IS NULL
+                            AND authority_organization_id IS NULL
+                            AND authority_feature IS NULL
+                            AND authority_stream_id IS NULL
+                            AND authority_credential_revision IS NULL
+                            AND authority_capability_revision IS NULL
+                            AND confidence = 'provisional'
+                            AND confirmation = 'provisional'
+                        )
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE ai_action_candidates (
+                    account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE
+                        CHECK (length(work_item_id) BETWEEN 1 AND 512),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    source_revision TEXT NOT NULL CHECK (
+                        length(source_revision) = 64
+                        AND source_revision NOT GLOB '*[^0-9a-f]*'
+                    ),
+                    candidate_id TEXT CHECK (candidate_id IS NULL OR length(candidate_id) BETWEEN 1 AND 512),
+                    disposition TEXT NOT NULL CHECK (disposition IN ('candidate', 'excluded')),
+                    exclusion_reason TEXT CHECK (exclusion_reason IN (
+                        'incompleteCoverage', 'policyUnavailable', 'unchangedFingerprint', 'cachedAnalysis'
+                    )),
+                    score INTEGER,
+                    score_breakdown_json BLOB,
+                    trigger_reason_ids_json BLOB,
+                    evaluated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, work_item_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE,
+                    CHECK (
+                        (disposition = 'candidate'
+                            AND candidate_id IS NOT NULL AND exclusion_reason IS NULL
+                            AND score IS NOT NULL AND score_breakdown_json IS NOT NULL
+                            AND trigger_reason_ids_json IS NOT NULL)
+                        OR
+                        (disposition = 'excluded'
+                            AND candidate_id IS NULL AND exclusion_reason IS NOT NULL
+                            AND score IS NULL AND score_breakdown_json IS NULL
+                            AND trigger_reason_ids_json IS NULL)
+                    )
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX rule_evaluations_current_scope
+                ON rule_evaluations (
+                    account_id, organization_id, credential_revision, capability_revision,
+                    source_revision, work_item_id, evaluated_at_ms DESC, id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX rule_evaluation_evidence_authority
+                ON rule_evaluation_evidence (
+                    authority_account_id, authority_organization_id, authority_feature,
+                    authority_stream_id, authority_credential_revision,
+                    authority_capability_revision, source_revision, rule_evaluation_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX rule_evaluation_evidence_raw_snapshot
+                ON rule_evaluation_evidence (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX ai_action_candidates_current_scope
+                ON ai_action_candidates (
+                    account_id, organization_id, credential_revision, capability_revision,
+                    source_revision, disposition, work_item_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER derived_intelligence_protect_evidence_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM rule_evaluation_evidence
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'derived intelligence evidence is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER derived_intelligence_protect_evidence_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM rule_evaluation_evidence
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'derived intelligence evidence is immutable'); END
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "043-review-candidate-complete-traversal-receipts-v1",
+            checksum: "1e339b7fbdaa9acafb7463f213ab27828b8d5e0a1d74cbb6d51a79c2620d8802"
+        ) { database in
+            // This receipt is the source-completeness gate for review and
+            // thread reconciliation. Candidate identifiers intentionally are
+            // evidence rather than cascading foreign keys so a later source
+            // tombstone cannot silently erase provenance.
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_complete_traversal_receipts (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 512),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE
+                        CHECK (length(account_id) BETWEEN 1 AND 512),
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+                        CHECK (length(organization_id) BETWEEN 1 AND 512),
+                    feature TEXT NOT NULL CHECK (feature IN ('reviews', 'reviewThreads')),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE
+                        CHECK (length(stream_id) BETWEEN 1 AND 512),
+                    candidate_node_id TEXT NOT NULL CHECK (length(candidate_node_id) BETWEEN 1 AND 512),
+                    repository_id TEXT NOT NULL CHECK (length(repository_id) BETWEEN 1 AND 512),
+                    candidate_source_revision TEXT NOT NULL
+                        CHECK (length(candidate_source_revision) BETWEEN 1 AND 500),
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    capability_revision TEXT NOT NULL CHECK (length(capability_revision) BETWEEN 1 AND 512),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    observed_at_ms INTEGER NOT NULL,
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    segment_count INTEGER NOT NULL CHECK (segment_count > 0),
+                    page_count INTEGER NOT NULL CHECK (page_count > 0),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_complete_traversal_segments (
+                    receipt_id TEXT NOT NULL
+                        REFERENCES review_candidate_complete_traversal_receipts(id) ON DELETE CASCADE,
+                    segment_key TEXT NOT NULL CHECK (length(segment_key) BETWEEN 1 AND 1024),
+                    segment_kind TEXT NOT NULL CHECK (segment_kind IN (
+                        'reviewHistory', 'requestedReviewers', 'reviewThreads', 'threadComments'
+                    )),
+                    parent_thread_node_id TEXT CHECK (
+                        parent_thread_node_id IS NULL OR length(parent_thread_node_id) BETWEEN 1 AND 512
+                    ),
+                    page_count INTEGER NOT NULL CHECK (page_count > 0),
+                    terminal_page_ordinal INTEGER NOT NULL CHECK (terminal_page_ordinal > 0),
+                    PRIMARY KEY (receipt_id, segment_key),
+                    CHECK (
+                        (segment_kind = 'threadComments' AND parent_thread_node_id IS NOT NULL)
+                        OR (segment_kind != 'threadComments' AND parent_thread_node_id IS NULL)
+                    ),
+                    CHECK (terminal_page_ordinal = page_count)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_complete_traversal_pages (
+                    receipt_id TEXT NOT NULL,
+                    segment_key TEXT NOT NULL,
+                    page_ordinal INTEGER NOT NULL CHECK (page_ordinal > 0),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT
+                        CHECK (length(raw_snapshot_id) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (length(request_key) BETWEEN 1 AND 2048),
+                    is_terminal INTEGER NOT NULL CHECK (is_terminal IN (0, 1)),
+                    PRIMARY KEY (receipt_id, segment_key, page_ordinal),
+                    UNIQUE (receipt_id, raw_snapshot_id),
+                    FOREIGN KEY (receipt_id, segment_key)
+                        REFERENCES review_candidate_complete_traversal_segments(receipt_id, segment_key)
+                        ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_complete_traversal_receipts_current_scope
+                ON review_candidate_complete_traversal_receipts (
+                    account_id, organization_id, feature, stream_id, candidate_node_id,
+                    repository_id, candidate_source_revision, credential_revision,
+                    capability_revision, observed_at_ms DESC, id DESC
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_complete_traversal_pages_raw_snapshot
+                ON review_candidate_complete_traversal_pages (raw_snapshot_id)
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_protect_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM review_candidate_complete_traversal_pages
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal provenance is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_protect_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM review_candidate_complete_traversal_pages
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal provenance is immutable'); END
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "044-workspace-query-performance-indexes-v1",
+            checksum: "8b9e0ec0885167e950ef210c8d3a8697559ca1e1c897c41069830417afb90188"
+        ) { database in
+            // Workspace graph, observation, and bounded FTS rebuild paths.
+            // Do not duplicate the existing project_field_values primary key
+            // (project_item_node_id, field_name).
+            try database.execute(sql: """
+                CREATE INDEX workspace_work_items_scope_activity
+                ON work_items (account_id, organization_id, last_relevant_activity_at_ms DESC, id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workspace_attention_reasons_order
+                ON attention_reasons (work_item_id, strength DESC, id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workspace_attention_reasons_rule
+                ON attention_reasons (work_item_id, rule_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workspace_relations_subject_kind
+                ON relations (account_id, subject_node_id, kind)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX workspace_relation_evidence_order
+                ON relation_evidence (
+                    relation_id, observed_at_ms, source, source_locator_kind, source_locator, evidence_id
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX search_comments_parent_updated
+                ON comments (parent_node_id, updated_at_ms DESC, github_node_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX search_reviews_parent_updated
+                ON reviews (pull_request_node_id, updated_at_ms DESC, github_node_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX search_project_items_content_updated
+                ON project_items (content_node_id, updated_at_ms DESC, github_node_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX search_action_items_work_updated
+                ON action_items (work_item_id, updated_at_ms DESC, id)
+                """)
+
+            // DerivedIntelligenceInputAdapter fence and supplemental reads.
+            try database.execute(sql: """
+                CREATE INDEX derived_work_items_scope_id
+                ON work_items (account_id, organization_id, id, primary_node_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX derived_team_memberships_account_state_expiry
+                ON team_memberships (account_id, membership_state, expires_at_ms, team_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX derived_timeline_events_subject_occurred_id
+                ON timeline_events (subject_node_id, occurred_at_ms, github_event_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX derived_review_threads_pull_request_updated
+                ON review_threads (pull_request_node_id, updated_at_ms, github_node_id)
+                """)
+            try database.execute(sql: """
+                CREATE INDEX derived_project_items_content_node
+                ON project_items (content_node_id, github_node_id)
+                """)
         }
     ]
 }

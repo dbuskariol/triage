@@ -2,6 +2,7 @@ import Foundation
 
 enum GitHubGraphQLError: Error, Equatable, Sendable {
     case mutationRejected
+    case unregisteredQuery
     case invalidQuery
     case invalidResponse
     case responseTooLarge
@@ -10,7 +11,7 @@ enum GitHubGraphQLError: Error, Equatable, Sendable {
     case requestFailed(GitHubFailure)
 }
 
-struct GitHubGraphQLQuery: Sendable {
+struct GitHubGraphQLQuery: Equatable, Sendable {
     let document: String
     let operationName: String
 
@@ -133,6 +134,7 @@ actor GitHubGraphQLClient {
         variables: Variables,
         as type: Value.Type
     ) async throws -> GitHubGraphQLDecodingResult<Value> {
+        try Self.validateCommittedQuery(query)
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(credential.rawValue)", forHTTPHeaderField: "Authorization")
@@ -182,6 +184,12 @@ actor GitHubGraphQLClient {
                     metadata: responseMetadata
                 )
             )
+        }
+    }
+
+    private nonisolated static func validateCommittedQuery(_ query: GitHubGraphQLQuery) throws {
+        guard try GitHubGraphQLQueries.registeredQueries().contains(query) else {
+            throw GitHubGraphQLError.unregisteredQuery
         }
     }
 

@@ -59,6 +59,26 @@ final class GitHubNodeHydrationNormalizerTests: XCTestCase {
         XCTAssertEqual(empty.coverageAssessment(kind: .pullRequest).status, .complete)
     }
 
+    func testCommittedQueryRejectionIsUnavailableAndCannotProduceCompleteCoverage() {
+        let status = GitHubNodeHydrationService.status(
+            for: .unregisteredQuery,
+            githubOrganizationID: nil,
+            observedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        XCTAssertEqual(status, .unavailableOrPermission)
+
+        let candidate = GitHubHydrationCandidate(
+            nodeID: GitHubNodeID(rawValue: "I_1")!,
+            repositoryID: RepositoryID(rawValue: "repo-1")!,
+            kind: .issue
+        )
+        let result = GitHubNodeHydrationRefreshResult(outcomes: [
+            .init(candidate: candidate, status: status)
+        ])
+        XCTAssertEqual(result.coverageAssessment(kind: .issue).status, .unavailable)
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testUndecodableHydrationPreservesRawAndClassifiesTypedGraphQLError() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".hydration-undecodable-\(UUID().uuidString)", isDirectory: true)

@@ -28,7 +28,8 @@ actor ProjectV2Repository {
             try Self.validateOrganization(accountID: accountID, organization: organization, in: database)
             try Self.saveRaw(rawPages, scope: scope, feature: .projects, streamID: streamID,
                              sourceNodeID: organization.nodeID, accountID: accountID,
-                             allowedItemNodeIDs: [], requiresCompleteTraversal: true,
+                             allowedItemNodeIDs: [],
+                             requiresCompleteTraversal: coverageRecords.contains { $0.status == .complete },
                              observedAt: observedAt, parserVersion: parserVersion, in: database)
             guard Set(projects.map(\.nodeID)).count == projects.count else { throw GitHubProjectV2NormalizationError.duplicateProjectID }
             for project in projects {
@@ -55,7 +56,8 @@ actor ProjectV2Repository {
         _ items: [GitHubProjectV2ItemRecord], project: GitHubProjectV2Record, rawPages: [GitHubProjectV2RawPage],
         scope: SynchronizationScope, accountID: AccountID, organization: GitHubOrganization,
         streamID: SyncStreamID, observedAt: Date, parserVersion: Int = 1,
-        coverageRecords: [CoverageRecord] = []
+        coverageRecords: [CoverageRecord] = [],
+        redactedItemNodeIDs: Set<GitHubNodeID> = []
     ) async throws {
         guard accountID == vault.accountID, scope.accountID == accountID,
               scope.organizationID == organization.id else { throw ProjectV2RepositoryError.accountScopeMismatch }
@@ -68,13 +70,19 @@ actor ProjectV2Repository {
                 """, arguments: [project.nodeID.rawValue, organization.id.rawValue, accountID.rawValue]) ?? 0
             guard projectCount == 1 else { throw ProjectV2RepositoryError.projectScopeMismatch }
             guard items.allSatisfy({ $0.projectNodeID == project.nodeID }),
-                  Set(items.map(\.nodeID)).count == items.count else { throw GitHubProjectV2NormalizationError.duplicateItemID }
+                  Set(items.map(\.nodeID)).count == items.count
+            else { throw GitHubProjectV2NormalizationError.duplicateItemID }
+            guard redactedItemNodeIDs.isSubset(of: Set(items.map(\.nodeID))) else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
             try Self.saveRaw(rawPages, scope: scope, feature: .projectItems, streamID: streamID,
                              sourceNodeID: project.nodeID, accountID: accountID,
-                             allowedItemNodeIDs: Set(items.map(\.nodeID)), requiresCompleteTraversal: true,
+                             allowedItemNodeIDs: Set(items.map(\.nodeID)),
+                             requiresCompleteTraversal: coverageRecords.contains { $0.status == .complete },
                              observedAt: observedAt, parserVersion: parserVersion, in: database)
             for item in items {
-                let linkedContentNodeID = try Self.linkedContentNodeID(
+                let isRedacted = redactedItemNodeIDs.contains(item.nodeID)
+                let linkedContentNodeID = isRedacted ? nil : try Self.linkedContentNodeID(
                     reference: item.contentNodeID,
                     accountID: accountID,
                     organizationID: organization.id,
@@ -92,24 +100,31 @@ actor ProjectV2Repository {
                       github_node_id, project_node_id, content_node_id, content_node_reference, content_kind, updated_at_ms
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(github_node_id) DO UPDATE SET project_node_id = excluded.project_node_id,
-                      content_node_id = excluded.content_node_id, content_node_reference = excluded.content_node_reference,
-                      content_kind = excluded.content_kind, updated_at_ms = excluded.updated_at_ms
+                      content_node_id = CASE WHEN ? THEN project_items.content_node_id ELSE excluded.content_node_id END,
+                      content_node_reference = CASE WHEN ? THEN project_items.content_node_reference ELSE excluded.content_node_reference END,
+                      content_kind = CASE WHEN ? THEN project_items.content_kind ELSE excluded.content_kind END,
+                      updated_at_ms = excluded.updated_at_ms
                     """, arguments: [item.nodeID.rawValue, item.projectNodeID.rawValue, linkedContentNodeID?.rawValue,
                                      item.contentNodeID?.rawValue,
-                                     item.contentKind?.rawValue, Self.milliseconds(item.updatedAt)])
-                if item.fieldValuesComplete {
+                                     item.contentKind?.rawValue, Self.milliseconds(item.updatedAt),
+                                     isRedacted, isRedacted, isRedacted])
+                if item.fieldValuesComplete && !isRedacted {
                     try database.execute(sql: "DELETE FROM project_field_values WHERE project_item_node_id = ?", arguments: [item.nodeID.rawValue])
                     for field in item.fieldValues {
                         try Self.insertFieldValue(field, itemNodeID: item.nodeID, context: field.context, in: database)
                     }
                 } else {
-                    // A partial field-value connection cannot replace the
-                    // prior authoritative collection. Retain every received
-                    // value as explicit provisional context, inserting only
-                    // previously unseen fields and annotating an existing
-                    // field without changing its authoritative value.
+                    // A partial field-value connection, or a redacted item
+                    // containing an otherwise complete field connection,
+                    // cannot replace the prior authoritative collection.
+                    // Retain every received value as explicit provisional
+                    // context, inserting only previously unseen fields and
+                    // annotating an existing field without changing its
+                    // authoritative value.
                     for field in item.fieldValues {
-                        let provisionalContext = Self.provisionalContext(for: field)
+                        let provisionalContext = isRedacted
+                            ? Self.redactedContext(for: field)
+                            : Self.provisionalContext(for: field)
                         let existing = try Int.fetchOne(
                             database,
                             sql: """
@@ -281,6 +296,16 @@ actor ProjectV2Repository {
         )
     }
 
+    private nonisolated static func redactedContext(
+        for field: GitHubProjectV2FieldValueRecord
+    ) -> String {
+        let display = field.displayValue.map { String($0.prefix(1_024)) } ?? "none"
+        return String(
+            "provisional redacted-item observation: \(field.valueKind); \(field.context); display=\(display)"
+                .prefix(2_048)
+        )
+    }
+
     private nonisolated static func resolveContentReferences(
         accountID: AccountID, organizationID: OrganizationID, in database: Database
     ) throws {
@@ -424,9 +449,15 @@ actor ProjectV2Repository {
         allowedItemNodeIDs: Set<GitHubNodeID>,
         requiresCompleteTraversal: Bool
     ) throws {
-        guard !pages.isEmpty else { return }
+        guard !pages.isEmpty else {
+            guard !requiresCompleteTraversal else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
+            return
+        }
         var seenBases = Set<String>()
         var fieldTargets = Set<GitHubNodeID>()
+        var sawRootTraversal = false
         var currentBase: String?
         var currentIndex = 0
         var priorInfo: ProjectRawPageInfo?
@@ -439,10 +470,12 @@ actor ProjectV2Repository {
                 guard request.target == sourceNodeID, seenBases.isEmpty || currentBase == request.base else {
                     throw ProjectV2RepositoryError.invalidRawAuthority
                 }
+                sawRootTraversal = true
             case (.projectItems, .items):
                 guard request.target == sourceNodeID, !sawFieldGroup else {
                     throw ProjectV2RepositoryError.invalidRawAuthority
                 }
+                sawRootTraversal = true
             case (.projectItems, .fieldValues):
                 sawFieldGroup = true
                 if !allowedItemNodeIDs.isEmpty {
@@ -492,7 +525,7 @@ actor ProjectV2Repository {
             }
         }
         if requiresCompleteTraversal {
-            guard priorInfo?.hasNextPage == false else {
+            guard sawRootTraversal, priorInfo?.hasNextPage == false else {
                 throw ProjectV2RepositoryError.invalidRawAuthority
             }
             if feature == .projectItems {

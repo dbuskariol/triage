@@ -266,6 +266,36 @@ actor RawAPISnapshotRepository {
                       )
                       AND NOT EXISTS (
                           SELECT 1
+                          FROM notification_current_pages
+                          WHERE notification_current_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM notification_threads
+                          WHERE notification_threads.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM notification_failure_pages
+                          WHERE notification_failure_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM review_candidate_failure_pages
+                          WHERE review_candidate_failure_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM review_candidate_complete_traversal_pages
+                          WHERE review_candidate_complete_traversal_pages.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM rule_evaluation_evidence
+                          WHERE rule_evaluation_evidence.raw_snapshot_id = raw_api_snapshots.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
                           FROM repository_inventory_replay_receipt_pages
                           WHERE repository_inventory_replay_receipt_pages.raw_snapshot_id
                               = raw_api_snapshots.id

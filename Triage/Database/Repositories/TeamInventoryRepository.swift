@@ -174,7 +174,11 @@ actor TeamInventoryRepository {
             throw TeamInventoryRepositoryError.duplicateTeam
         }
         let teamIDs = normalizedTeams.map(\.id.rawValue)
-        try deleteAbsentTeams(teamIDs, organizationID: organization.id, in: database)
+        // A team-list omission does not prove that the team was deleted. It
+        // can be caused by private/hidden visibility or a scope change, and
+        // there is not yet a source-specific tombstone receipt that can
+        // authorize physical removal. Preserve omitted teams and their
+        // memberships until such authority exists.
         for teamID in teamIDs {
             try database.execute(
                 sql: """
@@ -229,13 +233,18 @@ actor TeamInventoryRepository {
         else {
             throw TeamInventoryRepositoryError.membershipTeamMismatch
         }
+        let teamIDs = teams.map(\.id.rawValue)
+        guard !teamIDs.isEmpty else { return }
+        let placeholders = Array(repeating: "?", count: teamIDs.count).joined(separator: ", ")
+        var arguments: [DatabaseValueConvertible?] = [accountID.rawValue]
+        arguments.append(contentsOf: teamIDs)
         try database.execute(
             sql: """
                 DELETE FROM team_memberships
                 WHERE account_id = ?
-                  AND team_id IN (SELECT id FROM teams WHERE organization_id = ?)
+                  AND team_id IN (\(placeholders))
                 """,
-            arguments: [accountID.rawValue, organization.id.rawValue]
+            arguments: StatementArguments(arguments)
         )
         let observedAtMilliseconds = milliseconds(observedAt)
         for team in teams {
@@ -395,27 +404,6 @@ actor TeamInventoryRepository {
             }
             return InventoryTeam(id: id, nodeID: nodeID, slug: slug, name: name, privacy: row["privacy"])
         }
-    }
-
-    private nonisolated static func deleteAbsentTeams(
-        _ teamIDs: [String],
-        organizationID: OrganizationID,
-        in database: Database
-    ) throws {
-        if teamIDs.isEmpty {
-            try database.execute(
-                sql: "DELETE FROM teams WHERE organization_id = ?",
-                arguments: [organizationID.rawValue]
-            )
-            return
-        }
-        let placeholders = Array(repeating: "?", count: teamIDs.count).joined(separator: ", ")
-        var arguments: [DatabaseValueConvertible?] = [organizationID.rawValue]
-        arguments.append(contentsOf: teamIDs)
-        try database.execute(
-            sql: "DELETE FROM teams WHERE organization_id = ? AND id NOT IN (\(placeholders))",
-            arguments: StatementArguments(arguments)
-        )
     }
 
     private nonisolated static func isTeamSlug(_ value: String) -> Bool {

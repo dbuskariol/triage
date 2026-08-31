@@ -5,6 +5,7 @@ enum PullRequestReviewRequestRepositoryError: Error, Equatable, Sendable {
     case pullRequestNodeScopeMismatch
     case invalidReviewerNodeID
     case duplicateReviewerNodeID
+    case invalidTraversalReceipt
 }
 
 actor PullRequestReviewRequestRepository {
@@ -19,6 +20,7 @@ actor PullRequestReviewRequestRepository {
     func replace(
         _ requestedReviewers: GitHubRequestedReviewersDTO,
         pullRequestNodeID: GitHubNodeID,
+        replacementProof: PullRequestReviewReplacementProof,
         observedAt: Date = .now
     ) async throws {
         try await vault.writeTransaction { database in
@@ -27,6 +29,7 @@ actor PullRequestReviewRequestRepository {
                 pullRequestNodeID: pullRequestNodeID,
                 accountID: vault.accountID,
                 observedAtMilliseconds: Self.milliseconds(observedAt),
+                replacementProof: replacementProof,
                 in: database
             )
         }
@@ -37,8 +40,19 @@ actor PullRequestReviewRequestRepository {
         pullRequestNodeID: GitHubNodeID,
         accountID: AccountID,
         observedAtMilliseconds: Int64,
+        replacementProof: PullRequestReviewReplacementProof,
         in database: Database
     ) throws {
+        do {
+            try replacementProof.validate(
+                requestedReviewers: requestedReviewers,
+                pullRequestNodeID: pullRequestNodeID,
+                accountID: accountID,
+                in: database
+            )
+        } catch {
+            throw PullRequestReviewRequestRepositoryError.invalidTraversalReceipt
+        }
         let reviewers = try normalizedReviewers(from: requestedReviewers)
         try validatePullRequestNodeScope(pullRequestNodeID, accountID: accountID, in: database)
         try database.execute(

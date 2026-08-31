@@ -50,6 +50,8 @@ struct OrganizationContextRefreshOutcome: Sendable {
 
 enum OrganizationContextRefreshServiceError: Error, Equatable, Sendable {
     case accountScopeMismatch
+    case discussionCommentsRefreshUnavailable
+    case invalidPersistedDiscussionCandidate
 }
 
 /// Coordinates the repository-scoped Discussion and organization-scoped
@@ -70,6 +72,7 @@ actor OrganizationContextRefreshService {
         GitHubOrganization,
         SyncStreamID,
         Date?,
+        SynchronizationReconciliationIntent,
         Date
     ) async throws -> ProjectV2SynchronizationResult
 
@@ -79,21 +82,36 @@ actor OrganizationContextRefreshService {
         GitHubOrganization,
         SyncStreamID,
         Date?,
+        SynchronizationReconciliationIntent,
         Date
     ) async throws -> CoverageRecord
 
+    typealias DiscussionCommentsRefresh = @Sendable (
+        SynchronizationScope,
+        GitHubOrganization,
+        RepositorySummary,
+        GitHubNodeID,
+        SyncStreamID,
+        SyncStreamID,
+        Date?,
+        Date?,
+        Date
+    ) async throws -> DiscussionCommentSynchronizationResult
+
     private static let overlap: TimeInterval = 5 * 60
+    private static let maximumDiscussionCommentCandidatesPerRepository = 25
     private let vault: AccountVault
     private let selectionPolicy: OrganizationContextSelectionPolicy
     private let refreshDiscussion: DiscussionRefresh
     private let refreshProjectInventory: ProjectInventoryRefresh
     private let refreshProjectItems: ProjectItemsRefresh
+    private let runDiscussionCommentsRefresh: DiscussionCommentsRefresh
 
     init(
         vault: AccountVault,
         graphQLClient: GitHubGraphQLClient,
         selectionPolicy: OrganizationContextSelectionPolicy
-    ) {
+    ) throws {
         self.vault = vault
         self.selectionPolicy = selectionPolicy
         let coverage = CoverageRepository(vault: vault)
@@ -107,6 +125,10 @@ actor OrganizationContextRefreshService {
             repository: ProjectV2Repository(vault: vault),
             coverage: coverage
         )
+        let discussionCommentService = DiscussionCommentSynchronizationService(
+            client: try GitHubDiscussionCommentClient(client: graphQLClient),
+            repository: DiscussionCommentRepository(vault: vault)
+        )
         refreshDiscussion = { scope, organization, repository, streamID, previousHighWater, observedAt in
             try await discussionService.refresh(
                 scope: scope,
@@ -118,22 +140,37 @@ actor OrganizationContextRefreshService {
                 observedAt: observedAt
             ).coverage
         }
-        refreshProjectInventory = { scope, organization, streamID, previousHighWater, observedAt in
+        refreshProjectInventory = { scope, organization, streamID, previousHighWater, reconciliationIntent, observedAt in
             try await projectService.refreshProjects(
                 scope: scope,
                 organization: organization,
                 streamID: streamID,
                 previousHighWater: previousHighWater,
+                reconciliationIntent: reconciliationIntent,
                 observedAt: observedAt
             )
         }
-        refreshProjectItems = { project, scope, organization, streamID, previousHighWater, observedAt in
+        refreshProjectItems = { project, scope, organization, streamID, previousHighWater, reconciliationIntent, observedAt in
             try await projectService.refreshItems(
                 project: project,
                 scope: scope,
                 organization: organization,
                 streamID: streamID,
                 previousHighWater: previousHighWater,
+                reconciliationIntent: reconciliationIntent,
+                observedAt: observedAt
+            )
+        }
+        runDiscussionCommentsRefresh = { scope, organization, repository, discussionNodeID, commentStreamID, replyStreamID, commentHighWater, replyHighWater, observedAt in
+            try await discussionCommentService.refresh(
+                discussionNodeID: discussionNodeID,
+                scope: scope,
+                organization: organization,
+                repositoryID: repository.id,
+                commentStreamID: commentStreamID,
+                replyStreamID: replyStreamID,
+                previousCommentHighWater: commentHighWater,
+                previousReplyHighWater: replyHighWater,
                 observedAt: observedAt
             )
         }
@@ -144,19 +181,24 @@ actor OrganizationContextRefreshService {
         selectionPolicy: OrganizationContextSelectionPolicy,
         refreshDiscussion: @escaping DiscussionRefresh,
         refreshProjectInventory: @escaping ProjectInventoryRefresh,
-        refreshProjectItems: @escaping ProjectItemsRefresh
+        refreshProjectItems: @escaping ProjectItemsRefresh,
+        refreshDiscussionComments: @escaping DiscussionCommentsRefresh = { _, _, _, _, _, _, _, _, _ in
+            throw OrganizationContextRefreshServiceError.discussionCommentsRefreshUnavailable
+        }
     ) {
         self.vault = vault
         self.selectionPolicy = selectionPolicy
         self.refreshDiscussion = refreshDiscussion
         self.refreshProjectInventory = refreshProjectInventory
         self.refreshProjectItems = refreshProjectItems
+        self.runDiscussionCommentsRefresh = refreshDiscussionComments
     }
 
     func refresh(
         scope: SynchronizationScope,
         organization: GitHubOrganization,
         repositories: [RepositorySummary],
+        reconciliationIntent: SynchronizationReconciliationIntent = .incremental,
         observedAt: Date
     ) async throws -> OrganizationContextRefreshOutcome {
         guard scope.accountID == vault.accountID,
@@ -186,6 +228,7 @@ actor OrganizationContextRefreshService {
             organization: organization,
             observedAt: observedAt,
             streamsByID: streamsByID,
+            reconciliationIntent: reconciliationIntent,
             recovery: &recovery
         )
         return .init(
@@ -210,6 +253,8 @@ actor OrganizationContextRefreshService {
         }
         var preliminaryCoverage = [CoverageRecord]()
         var metadataStatuses = [CoverageStatus]()
+        var commentStatuses = [CoverageStatus]()
+        var replyStatuses = [CoverageStatus]()
         var eligible = [RepositorySummary]()
         for repository in orderedRepositories {
             let metadataStreamID = Self.discussionStreamID(
@@ -218,6 +263,8 @@ actor OrganizationContextRefreshService {
             )
             if !repository.hasDiscussionsKnown {
                 metadataStatuses.append(.unknown)
+                commentStatuses.append(.unknown)
+                replyStatuses.append(.unknown)
                 preliminaryCoverage.append(makeCoverage(
                     scope: scope,
                     repositoryID: repository.id,
@@ -230,6 +277,8 @@ actor OrganizationContextRefreshService {
                 ))
             } else if !repository.hasDiscussions {
                 metadataStatuses.append(.unavailable)
+                commentStatuses.append(.unavailable)
+                replyStatuses.append(.unavailable)
                 preliminaryCoverage.append(makeCoverage(
                     scope: scope,
                     repositoryID: repository.id,
@@ -243,12 +292,18 @@ actor OrganizationContextRefreshService {
             } else {
                 eligible.append(repository)
             }
-            preliminaryCoverage.append(contentsOf: unavailableNestedDiscussionCoverage(
-                scope: scope,
-                repositoryID: repository.id,
-                observedAt: observedAt,
-                streamsByID: streamsByID
-            ))
+            if !repository.hasDiscussionsKnown || !repository.hasDiscussions {
+                preliminaryCoverage.append(contentsOf: nestedDiscussionPrerequisiteCoverage(
+                    scope: scope,
+                    repositoryID: repository.id,
+                    observedAt: observedAt,
+                    streamsByID: streamsByID,
+                    status: repository.hasDiscussionsKnown ? .unavailable : .unknown,
+                    detail: repository.hasDiscussionsKnown
+                        ? "Discussions are not enabled for this repository."
+                        : "GitHub did not report whether Discussions are enabled for this repository."
+                ))
+            }
         }
         try await saveCoverage(preliminaryCoverage, scope: scope, attemptedAt: observedAt)
 
@@ -293,10 +348,39 @@ actor OrganizationContextRefreshService {
                 guard Self.isExpectedSourceError(error) else { throw error }
                 metadataStatuses.append(Self.coverageStatus(for: error))
                 Self.recordRecovery(from: error, observedAt: observedAt, into: &recovery)
+                commentStatuses.append(.partial)
+                replyStatuses.append(.partial)
+                continue
+            }
+            do {
+                let nested = try await refreshDiscussionComments(
+                    scope: scope,
+                    organization: organization,
+                    repository: repository,
+                    observedAt: observedAt,
+                    streamsByID: streamsByID,
+                    recovery: &recovery
+                )
+                try await validateCurrentScope(scope)
+                commentStatuses.append(nested.comment)
+                replyStatuses.append(nested.reply)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try await validateCurrentScope(scope)
+                if Self.isTransportCancellation(error) { throw CancellationError() }
+                guard Self.isExpectedSourceError(error) else { throw error }
+                let status = Self.coverageStatus(for: error)
+                let source = Self.discussionCommentSource(for: error)
+                commentStatuses.append(source == .comments ? status : .partial)
+                replyStatuses.append(source == .replies ? status : .partial)
+                Self.recordRecovery(from: error, observedAt: observedAt, into: &recovery)
             }
         }
         if deferredCount > 0 {
             metadataStatuses.append(.partial)
+            commentStatuses.append(.partial)
+            replyStatuses.append(.partial)
         }
         let aggregateStatus = Self.aggregateStatus(metadataStatuses)
         let aggregateStreamID = Self.discussionAggregateStreamID(organizationID: organization.id)
@@ -323,8 +407,12 @@ actor OrganizationContextRefreshService {
                 organizationID: organization.id
             )]?.highWater,
             observedAt: observedAt,
-            status: .unavailable,
-            detail: "Discussion comments are unavailable until their independently paginated source is implemented."
+            status: Self.aggregateStatus(commentStatuses),
+            detail: Self.aggregateDetail(
+                feature: "Discussion comment",
+                status: Self.aggregateStatus(commentStatuses),
+                deferredCount: deferredCount
+            )
         )
         let repliesAggregate = makeCoverage(
             scope: scope,
@@ -335,8 +423,12 @@ actor OrganizationContextRefreshService {
                 organizationID: organization.id
             )]?.highWater,
             observedAt: observedAt,
-            status: .unavailable,
-            detail: "Discussion replies are unavailable until their independently paginated source is implemented."
+            status: Self.aggregateStatus(replyStatuses),
+            detail: Self.aggregateDetail(
+                feature: "Discussion reply",
+                status: Self.aggregateStatus(replyStatuses),
+                deferredCount: deferredCount
+            )
         )
         try await saveCoverage(
             [aggregate, commentsAggregate, repliesAggregate],
@@ -351,6 +443,7 @@ actor OrganizationContextRefreshService {
         organization: GitHubOrganization,
         observedAt: Date,
         streamsByID: [SyncStreamID: SyncStream],
+        reconciliationIntent: SynchronizationReconciliationIntent,
         recovery: inout OrganizationContextRecovery
     ) async throws -> (projectCoverage: CoverageRecord?, itemCoverage: CoverageRecord) {
         let inventoryStreamID = Self.projectInventoryStreamID(organizationID: organization.id)
@@ -362,6 +455,7 @@ actor OrganizationContextRefreshService {
                 organization,
                 inventoryStreamID,
                 streamsByID[inventoryStreamID]?.highWater,
+                reconciliationIntent,
                 observedAt
             )
             try await validateCurrentScope(scope)
@@ -420,6 +514,7 @@ actor OrganizationContextRefreshService {
                     organization,
                     streamID,
                     streamsByID[streamID]?.highWater,
+                    reconciliationIntent,
                     observedAt
                 )
                 try await validateCurrentScope(scope)
@@ -457,11 +552,188 @@ actor OrganizationContextRefreshService {
         return (inventory.projectCoverage, aggregate)
     }
 
-    private func unavailableNestedDiscussionCoverage(
+    private func refreshDiscussionComments(
+        scope: SynchronizationScope,
+        organization: GitHubOrganization,
+        repository: RepositorySummary,
+        observedAt: Date,
+        streamsByID: [SyncStreamID: SyncStream],
+        recovery: inout OrganizationContextRecovery
+    ) async throws -> (comment: CoverageStatus, reply: CoverageStatus) {
+        let candidates = try await discussionCommentCandidates(
+            scope: scope,
+            repositoryID: repository.id,
+            observedAt: observedAt
+        )
+        try await validateCurrentScope(scope)
+        let selected = Array(candidates.sorted {
+            let lhsComment = Self.discussionCommentLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: $0
+            )
+            let lhsReply = Self.discussionReplyLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: $0
+            )
+            let rhsComment = Self.discussionCommentLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: $1
+            )
+            let rhsReply = Self.discussionReplyLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: $1
+            )
+            return Self.candidatePrecedes(
+                lhsID: $0.rawValue,
+                lhsAttempt: [streamsByID[lhsComment]?.lastAttemptAt, streamsByID[lhsReply]?.lastAttemptAt]
+                    .compactMap { $0 }
+                    .min(),
+                rhsID: $1.rawValue,
+                rhsAttempt: [streamsByID[rhsComment]?.lastAttemptAt, streamsByID[rhsReply]?.lastAttemptAt]
+                    .compactMap { $0 }
+                    .min()
+            )
+        }.prefix(Self.maximumDiscussionCommentCandidatesPerRepository))
+        let deferredCount = candidates.count - selected.count
+        var comments = [CoverageStatus]()
+        var replies = [CoverageStatus]()
+        for discussionNodeID in selected {
+            try await validateCurrentScope(scope)
+            let commentStreamID = Self.discussionCommentLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: discussionNodeID
+            )
+            let replyStreamID = Self.discussionReplyLeafStreamID(
+                organizationID: organization.id,
+                repositoryID: repository.id,
+                discussionNodeID: discussionNodeID
+            )
+            do {
+                let result = try await runDiscussionCommentsRefresh(
+                    scope,
+                    organization,
+                    repository,
+                    discussionNodeID,
+                    commentStreamID,
+                    replyStreamID,
+                    streamsByID[commentStreamID]?.highWater,
+                    streamsByID[replyStreamID]?.highWater,
+                    observedAt
+                )
+                try await validateCurrentScope(scope)
+                comments.append(result.commentCoverage.status)
+                replies.append(result.replyCoverage.status)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try await validateCurrentScope(scope)
+                if Self.isTransportCancellation(error) { throw CancellationError() }
+                guard Self.isExpectedSourceError(error) else { throw error }
+                let status = Self.coverageStatus(for: error)
+                let source = Self.discussionCommentSource(for: error)
+                comments.append(source == .comments ? status : .partial)
+                replies.append(source == .replies ? status : .partial)
+                Self.recordRecovery(from: error, observedAt: observedAt, into: &recovery)
+            }
+        }
+        if deferredCount > 0 {
+            comments.append(.partial)
+            replies.append(.partial)
+        }
+        let commentStatus = Self.aggregateStatus(comments)
+        let replyStatus = Self.aggregateStatus(replies)
+        try await saveCoverage(
+            [
+                makeCoverage(
+                    scope: scope,
+                    repositoryID: repository.id,
+                    feature: .discussionComments,
+                    streamID: Self.discussionCommentsStreamID(
+                        organizationID: organization.id,
+                        repositoryID: repository.id
+                    ),
+                    previousHighWater: streamsByID[Self.discussionCommentsStreamID(
+                        organizationID: organization.id,
+                        repositoryID: repository.id
+                    )]?.highWater,
+                    observedAt: observedAt,
+                    status: commentStatus,
+                    detail: Self.aggregateDetail(
+                        feature: "Discussion comment",
+                        status: commentStatus,
+                        deferredCount: deferredCount
+                    )
+                ),
+                makeCoverage(
+                    scope: scope,
+                    repositoryID: repository.id,
+                    feature: .discussionReplies,
+                    streamID: Self.discussionRepliesStreamID(
+                        organizationID: organization.id,
+                        repositoryID: repository.id
+                    ),
+                    previousHighWater: streamsByID[Self.discussionRepliesStreamID(
+                        organizationID: organization.id,
+                        repositoryID: repository.id
+                    )]?.highWater,
+                    observedAt: observedAt,
+                    status: replyStatus,
+                    detail: Self.aggregateDetail(
+                        feature: "Discussion reply",
+                        status: replyStatus,
+                        deferredCount: deferredCount
+                    )
+                )
+            ],
+            scope: scope,
+            attemptedAt: observedAt
+        )
+        return (commentStatus, replyStatus)
+    }
+
+    private func discussionCommentCandidates(
+        scope: SynchronizationScope,
+        repositoryID: RepositoryID,
+        observedAt: Date
+    ) async throws -> [GitHubNodeID] {
+        let cutoff = Int64((observedAt.addingTimeInterval(-90 * 24 * 60 * 60).timeIntervalSince1970 * 1_000).rounded())
+        return try await vault.read { database in
+            try Self.validateCurrentScope(scope, in: database)
+            let values = try String.fetchAll(
+                database,
+                sql: """
+                    SELECT discussions.github_node_id
+                    FROM discussions
+                    JOIN github_nodes ON github_nodes.github_node_id = discussions.github_node_id
+                    WHERE github_nodes.account_id = ?
+                      AND github_nodes.organization_id = ?
+                      AND github_nodes.repository_id = ?
+                      AND (github_nodes.state = 'open' OR discussions.updated_at_ms >= ?)
+                    ORDER BY discussions.updated_at_ms DESC, discussions.github_node_id
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, repositoryID.rawValue, cutoff]
+            )
+            return try values.map {
+                guard let nodeID = GitHubNodeID(rawValue: $0) else {
+                    throw OrganizationContextRefreshServiceError.invalidPersistedDiscussionCandidate
+                }
+                return nodeID
+            }
+        }
+    }
+
+    private func nestedDiscussionPrerequisiteCoverage(
         scope: SynchronizationScope,
         repositoryID: RepositoryID,
         observedAt: Date,
-        streamsByID: [SyncStreamID: SyncStream]
+        streamsByID: [SyncStreamID: SyncStream],
+        status: CoverageStatus,
+        detail: String
     ) -> [CoverageRecord] {
         let commentsID = Self.discussionCommentsStreamID(
             organizationID: scope.organizationID,
@@ -479,8 +751,8 @@ actor OrganizationContextRefreshService {
                 streamID: commentsID,
                 previousHighWater: streamsByID[commentsID]?.highWater,
                 observedAt: observedAt,
-                status: .unavailable,
-                detail: "Discussion comments are unavailable until their independently paginated source is implemented."
+                status: status,
+                detail: detail
             ),
             makeCoverage(
                 scope: scope,
@@ -489,8 +761,8 @@ actor OrganizationContextRefreshService {
                 streamID: repliesID,
                 previousHighWater: streamsByID[repliesID]?.highWater,
                 observedAt: observedAt,
-                status: .unavailable,
-                detail: "Discussion replies are unavailable until their independently paginated source is implemented."
+                status: status,
+                detail: detail
             )
         ]
     }
@@ -620,8 +892,10 @@ actor OrganizationContextRefreshService {
 
     private nonisolated static func isExpectedSourceError(_ error: Error) -> Bool {
         error is DiscussionProjectV2SynchronizationError
+            || error is DiscussionCommentSynchronizationError
             || error is GitHubGraphQLError
             || error is GitHubDiscussionClientError
+            || error is GitHubDiscussionCommentClientError
             || error is GitHubProjectV2ClientError
             || error is URLError
     }
@@ -635,6 +909,12 @@ actor OrganizationContextRefreshService {
             return ssoCoverageStatus(header)
         }
         if case DiscussionProjectV2SynchronizationError.requiresApproval = error { return .requiresApproval }
+        if case let DiscussionCommentSynchronizationError.requiresSSO(header) = error {
+            return ssoCoverageStatus(header)
+        }
+        if case DiscussionCommentSynchronizationError.requiresApproval = error {
+            return .requiresApproval
+        }
         guard case let GitHubGraphQLError.requestFailed(failure) = error else {
             return .partial
         }
@@ -659,6 +939,16 @@ actor OrganizationContextRefreshService {
             return
         }
         if case DiscussionProjectV2SynchronizationError.requiresApproval = error {
+            recovery.approvalRequired = true
+            return
+        }
+        if case let DiscussionCommentSynchronizationError.requiresSSO(header) = error {
+            if case .authorizationRequired = header {
+                recovery.ssoRequirement = GitHubSSOHeader.combined([recovery.ssoRequirement, header])
+            }
+            return
+        }
+        if case DiscussionCommentSynchronizationError.requiresApproval = error {
             recovery.approvalRequired = true
             return
         }
@@ -710,6 +1000,27 @@ actor OrganizationContextRefreshService {
         }
     }
 
+    private nonisolated static func discussionCommentSource(
+        for error: Error
+    ) -> GitHubDiscussionCommentSource {
+        switch error {
+        case let GitHubDiscussionCommentClientError.requestFailed(source, _, _),
+             let GitHubDiscussionCommentClientError.paginationLoop(source, _),
+             let GitHubDiscussionCommentClientError.paginationLimitExceeded(source, _),
+             let GitHubDiscussionCommentClientError.queryCostExceeded(source, _),
+             let GitHubDiscussionCommentClientError.aggregateLimitExceeded(source, _),
+             let GitHubDiscussionCommentClientError.missingRequestedNode(source, _),
+             let GitHubDiscussionCommentClientError.incompleteConnection(source, _),
+             let GitHubDiscussionCommentClientError.undecodableResponse(source, _),
+             let GitHubDiscussionCommentClientError.partialResponse(source, _),
+             let GitHubDiscussionCommentClientError.ssoResponse(source, _, _),
+             let GitHubDiscussionCommentClientError.normalizationFailed(source, _):
+            source
+        default:
+            .comments
+        }
+    }
+
     private nonisolated static func discussionAggregateStreamID(
         organizationID: OrganizationID
     ) -> SyncStreamID {
@@ -736,6 +1047,16 @@ actor OrganizationContextRefreshService {
         SyncStreamID(rawValue: "discussion-comments-\(organizationID.rawValue)-\(repositoryID.rawValue)")!
     }
 
+    private nonisolated static func discussionCommentLeafStreamID(
+        organizationID: OrganizationID,
+        repositoryID: RepositoryID,
+        discussionNodeID: GitHubNodeID
+    ) -> SyncStreamID {
+        SyncStreamID(
+            rawValue: "discussion-comments-\(organizationID.rawValue)-\(repositoryID.rawValue)-\(discussionNodeID.rawValue)"
+        )!
+    }
+
     private nonisolated static func discussionRepliesAggregateStreamID(
         organizationID: OrganizationID
     ) -> SyncStreamID {
@@ -747,6 +1068,16 @@ actor OrganizationContextRefreshService {
         repositoryID: RepositoryID
     ) -> SyncStreamID {
         SyncStreamID(rawValue: "discussion-replies-\(organizationID.rawValue)-\(repositoryID.rawValue)")!
+    }
+
+    private nonisolated static func discussionReplyLeafStreamID(
+        organizationID: OrganizationID,
+        repositoryID: RepositoryID,
+        discussionNodeID: GitHubNodeID
+    ) -> SyncStreamID {
+        SyncStreamID(
+            rawValue: "discussion-replies-\(organizationID.rawValue)-\(repositoryID.rawValue)-\(discussionNodeID.rawValue)"
+        )!
     }
 
     private nonisolated static func projectInventoryStreamID(

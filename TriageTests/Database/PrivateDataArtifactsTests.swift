@@ -14,4 +14,685 @@ final class PrivateDataArtifactsTests: XCTestCase {
         XCTAssertTrue(artifacts.artifacts.contains { $0.kind == .vault })
         XCTAssertTrue(artifacts.artifacts.contains { $0.kind == .copilotState })
     }
+
+    func testDeletionClosesOpenVaultBeforeSecretErasureAndRemovesEveryArtifact() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        let vault = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE deletion_marker (value TEXT NOT NULL)")
+        }
+
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        for artifact in artifacts where artifact.kind != .vault {
+            try FileManager.default.createDirectory(
+                at: artifact.url,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try Data("private".utf8).write(to: artifact.url.appendingPathComponent("marker"))
+        }
+
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in
+                await events.recordSecretErasure(
+                    vaultWasOpen: await registry.isOpen(accountID: accountID),
+                    removalWasActive: await registry.isBeingRemoved(accountID: accountID)
+                )
+            }
+        )
+
+        try await service.removeAllPrivateData(for: accountID)
+
+        let secretErasures = await events.secretErasures()
+        let vaultWasOpen = await events.vaultWasOpenAtSecretErasure()
+        let removalWasActive = await events.removalWasActiveAtSecretErasure()
+        let vaultIsOpen = await registry.isOpen(accountID: accountID)
+        let removalIsActive = await registry.isBeingRemoved(accountID: accountID)
+        XCTAssertEqual(secretErasures, 1)
+        XCTAssertEqual(vaultWasOpen, false)
+        XCTAssertEqual(removalWasActive, true)
+        XCTAssertTrue(artifacts.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.url.path)
+        })
+        XCTAssertFalse(vaultIsOpen)
+        XCTAssertTrue(removalIsActive)
+    }
+
+    func testCancelledDeletionBeforeCryptoErasureLeavesVaultAndArtifactsUsable() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let registry = try VaultRegistry(
+            rootDirectory: support.appendingPathComponent("Triage", isDirectory: true)
+        )
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE cancellation_marker (value TEXT NOT NULL)")
+            try database.execute(sql: "INSERT INTO cancellation_marker (value) VALUES ('kept')")
+        }
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+        )
+
+        let cancelled = await Task { () -> Bool in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                try await service.removeAllPrivateData(for: accountID)
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }.value
+
+        let secretErasures = await events.secretErasures()
+        let vaultIsOpen = await registry.isOpen(accountID: accountID)
+        let removalIsActive = await registry.isBeingRemoved(accountID: accountID)
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertTrue(vaultIsOpen)
+        XCTAssertFalse(removalIsActive)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts.first(where: { $0.kind == .vault })!.url.path))
+        let marker = try await vault.read { database in
+            try String.fetchOne(database, sql: "SELECT value FROM cancellation_marker")
+        }
+        XCTAssertEqual(marker, "kept")
+        try await registry.closeAll()
+    }
+
+    func testCancellationAfterVaultCloseRollsBackRemovalBeforeJournalAndKeyErasure() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let key = try VaultKey.generate()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        let vault = try await registry.open(accountID: accountID, vaultKey: key)
+        try await vault.write { database in
+            try database.execute(sql: "CREATE TABLE delayed_cancellation_marker (value TEXT NOT NULL)")
+            try database.execute(sql: "INSERT INTO delayed_cancellation_marker (value) VALUES ('kept')")
+        }
+        let events = DeletionEventLog()
+        let barrier = DeletionBarrier()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in
+                await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false)
+            },
+            willBeginCryptoErasure: { await barrier.pause() }
+        )
+        let removalTask = Task {
+            try await service.removeAllPrivateData(for: accountID)
+        }
+
+        await barrier.waitUntilPaused()
+        let vaultIsOpenBeforeCancellation = await registry.isOpen(accountID: accountID)
+        let removalIsActiveBeforeCancellation = await registry.isBeingRemoved(accountID: accountID)
+        XCTAssertFalse(vaultIsOpenBeforeCancellation)
+        XCTAssertTrue(removalIsActiveBeforeCancellation)
+        removalTask.cancel()
+        await barrier.resume()
+
+        do {
+            try await removalTask.value
+            XCTFail("Expected cancellation before crypto-erasure.")
+        } catch is CancellationError {
+            // The removal gate is released because no irreversible action ran.
+        }
+
+        let secretErasures = await events.secretErasures()
+        let removalIsActive = await registry.isBeingRemoved(accountID: accountID)
+        let reopened = try await registry.open(accountID: accountID, vaultKey: key)
+        let marker = try await reopened.read { database in
+            try String.fetchOne(database, sql: "SELECT value FROM delayed_cancellation_marker")
+        }
+        let journalURL = support
+            .appendingPathComponent("Triage", isDirectory: true)
+            .appendingPathComponent("Recovery", isDirectory: true)
+            .appendingPathComponent(accountID.rawValue, isDirectory: true)
+            .appendingPathComponent("account-deletion.json", isDirectory: false)
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertFalse(removalIsActive)
+        XCTAssertEqual(marker, "kept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+        try await registry.closeAll()
+    }
+
+    func testInterruptedPostErasureDeletionReplaysItsJournalAfterProcessRestart() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        let events = DeletionEventLog()
+        let interrupted = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+        )
+
+        do {
+            try await interrupted.removeAllPrivateData(for: accountID)
+            XCTFail("Expected an interrupted artifact removal.")
+        } catch is URLError {
+            // Crypto-erasure has already occurred. The vault must remain closed.
+        }
+
+        let secretErasures = await events.secretErasures()
+        let vaultIsOpen = await registry.isOpen(accountID: accountID)
+        let removalIsActive = await registry.isBeingRemoved(accountID: accountID)
+        XCTAssertEqual(secretErasures, 1)
+        XCTAssertFalse(vaultIsOpen)
+        XCTAssertTrue(removalIsActive)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts.first(where: { $0.kind == .vault })!.url.path))
+        let journalURL = support
+            .appendingPathComponent("Triage", isDirectory: true)
+            .appendingPathComponent("Recovery", isDirectory: true)
+            .appendingPathComponent(accountID.rawValue, isDirectory: true)
+            .appendingPathComponent("account-deletion.json", isDirectory: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL.path))
+        XCTAssertEqual(try posixPermissions(of: journalURL), 0o600)
+        XCTAssertEqual(try posixPermissions(of: journalURL.deletingLastPathComponent()), 0o700)
+        XCTAssertEqual(
+            try posixPermissions(of: journalURL.deletingLastPathComponent().deletingLastPathComponent()),
+            0o700
+        )
+        XCTAssertEqual(
+            try posixPermissions(
+                of: journalURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            ),
+            0o700
+        )
+
+        // A fresh registry simulates app relaunch: the in-memory removal gate
+        // is gone, so recovery must depend on the durable journal instead.
+        let restartedRegistry = try VaultRegistry(rootDirectory: vaultRoot)
+        let recovery = AccountDataRemovalService(
+            vaultRegistry: restartedRegistry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+        )
+        let recoveredAccountIDs = try await recovery.recoverInterruptedRemovals()
+
+        let totalSecretErasures = await events.secretErasures()
+        let secondReplay = try await recovery.recoverInterruptedRemovals()
+        let secretErasuresAfterSecondReplay = await events.secretErasures()
+        XCTAssertEqual(recoveredAccountIDs, [accountID])
+        XCTAssertEqual(totalSecretErasures, 2)
+        XCTAssertEqual(secondReplay, [])
+        XCTAssertEqual(secretErasuresAfterSecondReplay, 2)
+        XCTAssertTrue(artifacts.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.url.path)
+        })
+    }
+
+    func testLateArtifactFailureRetainsJournalForRestartRecovery() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        let events = DeletionEventLog()
+        let interrupted = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            eraseArtifacts: { batch in
+                for artifact in batch {
+                    if artifact.kind == .previews {
+                        throw URLError(.cannotWriteToFile)
+                    }
+                    if FileManager.default.fileExists(atPath: artifact.url.path) {
+                        try FileManager.default.removeItem(at: artifact.url)
+                    }
+                }
+            }
+        )
+
+        try await assertInterruptedDeletion(interrupted, accountID: accountID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL(for: accountID, support: support).path))
+
+        let recovery = AccountDataRemovalService(
+            vaultRegistry: try VaultRegistry(rootDirectory: vaultRoot),
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+        )
+        let recoveredAccountIDs = try await recovery.recoverInterruptedRemovals()
+        let secretErasures = await events.secretErasures()
+
+        XCTAssertEqual(recoveredAccountIDs, [accountID])
+        XCTAssertEqual(secretErasures, 2)
+        XCTAssertTrue(artifacts.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.url.path)
+        })
+    }
+
+    func testRecoveryRejectsTamperedOrUnsupportedJournalWithoutDeletingData() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        let events = DeletionEventLog()
+        let interrupted = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+        )
+        try await assertInterruptedDeletion(interrupted, accountID: accountID)
+        let journalURL = journalURL(for: accountID, support: support)
+        try Data(
+            "{\"version\":1,\"accountID\":\"\(accountID.rawValue)\",\"checksum\":\"tampered\"}".utf8
+        ).write(to: journalURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: journalURL.path
+        )
+
+        let restartedRegistry = try VaultRegistry(rootDirectory: vaultRoot)
+        let recovery = AccountDataRemovalService(
+            vaultRegistry: restartedRegistry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+        )
+        let tamperedReplay = try await recovery.recoverInterruptedRemovals()
+        let erasuresAfterTamper = await events.secretErasures()
+
+        XCTAssertEqual(tamperedReplay, [])
+        XCTAssertEqual(erasuresAfterTamper, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
+
+        try Data(
+            "{\"version\":999,\"accountID\":\"\(accountID.rawValue)\",\"checksum\":\"ignored\"}".utf8
+        ).write(to: journalURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: journalURL.path
+        )
+        let unsupportedReplay = try await recovery.recoverInterruptedRemovals()
+        let erasuresAfterUnsupportedVersion = await events.secretErasures()
+
+        XCTAssertEqual(unsupportedReplay, [])
+        XCTAssertEqual(erasuresAfterUnsupportedVersion, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
+    }
+
+    func testRecoveryRefusesRelaxedJournalAndDirectoryPermissionsWithoutDeletingData() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        let artifacts = AccountPrivateDataArtifacts(
+            accountID: accountID,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches
+        ).artifacts
+        let events = DeletionEventLog()
+        let interrupted = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) },
+            eraseArtifacts: { _ in throw URLError(.cannotWriteToFile) }
+        )
+        try await assertInterruptedDeletion(interrupted, accountID: accountID)
+
+        let journal = journalURL(for: accountID, support: support)
+        let accountDirectory = journal.deletingLastPathComponent()
+        let recovery = AccountDataRemovalService(
+            vaultRegistry: try VaultRegistry(rootDirectory: vaultRoot),
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: true) }
+        )
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: journal.path)
+        let insecureJournalReplay = try await recovery.recoverInterruptedRemovals()
+        let erasuresAfterInsecureJournal = await events.secretErasures()
+        XCTAssertEqual(insecureJournalReplay, [])
+        XCTAssertEqual(erasuresAfterInsecureJournal, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journal.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: accountDirectory.path)
+        let insecureDirectoryReplay = try await recovery.recoverInterruptedRemovals()
+        let erasuresAfterInsecureDirectory = await events.secretErasures()
+        XCTAssertEqual(insecureDirectoryReplay, [])
+        XCTAssertEqual(erasuresAfterInsecureDirectory, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifacts[0].url.path))
+    }
+
+    func testRecoveryRefusesJournalSymlinkWithoutFollowingItsTarget() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        try await registry.closeAll()
+        let vaultDirectory = VaultPaths(rootDirectory: vaultRoot, accountID: accountID).directory
+        let target = external.appendingPathComponent("outside-journal")
+        try Data("outside".utf8).write(to: target)
+        let journalURL = journalURL(for: accountID, support: support)
+        try FileManager.default.createDirectory(
+            at: journalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        for directory in [
+            support.appendingPathComponent("Triage", isDirectory: true),
+            journalURL.deletingLastPathComponent().deletingLastPathComponent(),
+            journalURL.deletingLastPathComponent()
+        ] {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
+            )
+        }
+        try FileManager.default.createSymbolicLink(at: journalURL, withDestinationURL: target)
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+        )
+
+        let replayed = try await service.recoverInterruptedRemovals()
+        let secretErasures = await events.secretErasures()
+
+        XCTAssertEqual(replayed, [])
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "outside")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: vaultDirectory.path))
+    }
+
+    func testDeletionRefusesSymlinkedSupportRootBeforeSecretErasure() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        let external = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+            try? FileManager.default.removeItem(at: external)
+        }
+
+        let accountID = AccountID.make()
+        let externalMarker = external.appendingPathComponent("must-not-delete")
+        try Data("outside".utf8).write(to: externalMarker)
+        try FileManager.default.createSymbolicLink(
+            at: support.appendingPathComponent("Triage", isDirectory: true),
+            withDestinationURL: external
+        )
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: try VaultRegistry(rootDirectory: support.appendingPathComponent("separate", isDirectory: true)),
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+        )
+
+        do {
+            try await service.removeAllPrivateData(for: accountID)
+            XCTFail("Expected symlinked support root to be refused.")
+        } catch let error as AccountDataRemovalError {
+            XCTAssertEqual(error, .unsafeArtifactPath)
+        }
+
+        let secretErasures = await events.secretErasures()
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertEqual(try String(contentsOf: externalMarker, encoding: .utf8), "outside")
+    }
+
+    func testDeletionRejectsNonOpaqueAccountIDBeforeTouchingStorage() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID(rawValue: "../outside")!
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: try VaultRegistry(rootDirectory: support.appendingPathComponent("Triage", isDirectory: true)),
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false) }
+        )
+
+        do {
+            try await service.removeAllPrivateData(for: accountID)
+            XCTFail("Expected non-opaque account ID to be rejected.")
+        } catch let error as AccountDataRemovalError {
+            XCTAssertEqual(error, .invalidOpaqueAccountID)
+        }
+
+        let secretErasures = await events.secretErasures()
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: support.appendingPathComponent("Triage").path))
+    }
+
+    func testRecoveryNeverErasesAnUnjournaledVault() async throws {
+        let support = try makeTemporaryDirectory()
+        let caches = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: support)
+            try? FileManager.default.removeItem(at: caches)
+        }
+
+        let accountID = AccountID.make()
+        let vaultRoot = support.appendingPathComponent("Triage", isDirectory: true)
+        let registry = try VaultRegistry(rootDirectory: vaultRoot)
+        _ = try await registry.open(accountID: accountID, vaultKey: try VaultKey.generate())
+        try await registry.closeAll()
+        let vaultDirectory = VaultPaths(rootDirectory: vaultRoot, accountID: accountID).directory
+        let events = DeletionEventLog()
+        let service = AccountDataRemovalService(
+            vaultRegistry: registry,
+            applicationSupportDirectory: support,
+            cachesDirectory: caches,
+            eraseSecrets: { _ in
+                await events.recordSecretErasure(vaultWasOpen: false, removalWasActive: false)
+            }
+        )
+
+        let recoveredAccountIDs = try await service.recoverInterruptedRemovals()
+        let secretErasures = await events.secretErasures()
+
+        XCTAssertEqual(recoveredAccountIDs, [])
+        XCTAssertEqual(secretErasures, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: vaultDirectory.path))
+    }
+}
+
+private actor DeletionEventLog {
+    private var secretErasureCount = 0
+    private var vaultOpenAtSecretErasure: Bool?
+    private var removalActiveAtSecretErasure: Bool?
+
+    func recordSecretErasure(vaultWasOpen: Bool, removalWasActive: Bool) {
+        secretErasureCount += 1
+        vaultOpenAtSecretErasure = vaultWasOpen
+        removalActiveAtSecretErasure = removalWasActive
+    }
+
+    func secretErasures() -> Int { secretErasureCount }
+    func vaultWasOpenAtSecretErasure() -> Bool? { vaultOpenAtSecretErasure }
+    func removalWasActiveAtSecretErasure() -> Bool? { removalActiveAtSecretErasure }
+}
+
+private actor DeletionBarrier {
+    private var paused = false
+    private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resumeContinuation: CheckedContinuation<Void, Never>?
+
+    func pause() async {
+        paused = true
+        let waiters = pauseWaiters
+        pauseWaiters = []
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            resumeContinuation = continuation
+        }
+    }
+
+    func waitUntilPaused() async {
+        guard !paused else { return }
+        await withCheckedContinuation { continuation in
+            pauseWaiters.append(continuation)
+        }
+    }
+
+    func resume() {
+        let continuation = resumeContinuation
+        resumeContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+private func journalURL(for accountID: AccountID, support: URL) -> URL {
+    support
+        .appendingPathComponent("Triage", isDirectory: true)
+        .appendingPathComponent("Recovery", isDirectory: true)
+        .appendingPathComponent(accountID.rawValue, isDirectory: true)
+        .appendingPathComponent("account-deletion.json", isDirectory: false)
+}
+
+private func posixPermissions(of url: URL) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    return (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
+}
+
+private func assertInterruptedDeletion(
+    _ service: AccountDataRemovalService,
+    accountID: AccountID,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async throws {
+    do {
+        try await service.removeAllPrivateData(for: accountID)
+        XCTFail("Expected an interrupted artifact deletion.", file: file, line: line)
+    } catch is URLError {
+        // Expected: the journal was persisted before artifact cleanup failed.
+    }
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @escaping () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("Expected an error.", file: file, line: line)
+    } catch {
+        // Expected.
+    }
 }

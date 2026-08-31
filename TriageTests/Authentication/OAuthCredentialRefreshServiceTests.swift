@@ -493,6 +493,108 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
         XCTAssertEqual(refreshToken, Data("refresh-rotated".utf8))
     }
 
+    func testInterruptedRefreshRecoversUsingThePersistedRotatedRefreshToken() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSinceReferenceDate: 1_000)
+        let account = makeExpiringOAuthAccount(now: now)
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: account.id, vaultKey: vaultKey)
+        let repository = AccountRepository(vault: vault)
+        try await repository.save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-original")!
+        )
+        let secrets = InMemorySecretStore(
+            values: [
+                .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+                .init(
+                    kind: .oauthAccessToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("access-original".utf8),
+                .init(
+                    kind: .oauthRefreshToken,
+                    accountID: account.id,
+                    credentialID: account.credentialID
+                ): Data("refresh-original".utf8)
+            ],
+            failingWritesForKinds: [.oauthAccessToken]
+        )
+        let interrupted = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: StubBroker(
+                result: .success(
+                    AuthBrokerTokenResponse(
+                        accessToken: OAuthAccessToken("access-first"),
+                        refreshToken: OAuthRefreshToken("refresh-rotated"),
+                        tokenType: "bearer",
+                        scope: nil,
+                        expiresIn: 3_600,
+                        refreshTokenExpiresIn: 7_200
+                    )
+                )
+            )
+        )
+
+        do {
+            _ = try await interrupted.refreshIfNeeded(account)
+            XCTFail("Expected the interrupted refresh to fail.")
+        } catch is URLError {
+            // The rotated refresh token was committed before the local access
+            // token write failed, so recovery must use that replacement.
+        }
+
+        await secrets.setFailingWritesForKinds([])
+        let recoveryBroker = StubBroker(
+            result: .success(
+                AuthBrokerTokenResponse(
+                    accessToken: OAuthAccessToken("access-recovered"),
+                    refreshToken: OAuthRefreshToken("refresh-recovered"),
+                    tokenType: "bearer",
+                    scope: nil,
+                    expiresIn: 3_600,
+                    refreshTokenExpiresIn: 7_200
+                )
+            )
+        )
+        let recovery = try OAuthCredentialRefreshService(
+            brokerURL: URL(string: "https://oauth.triage.example")!,
+            secretStore: secrets,
+            vaultRegistry: registry,
+            clock: { now },
+            broker: recoveryBroker
+        )
+
+        let refreshed = try await recovery.refreshIfNeeded(account)
+
+        let brokerRequests = await recoveryBroker.requests()
+        let accessToken = await secrets.value(
+            kind: .oauthAccessToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let refreshToken = await secrets.value(
+            kind: .oauthRefreshToken,
+            accountID: account.id,
+            credentialID: account.credentialID
+        )
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(
+            brokerRequests,
+            [AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken("refresh-rotated"))]
+        )
+        XCTAssertEqual(accessToken, Data("access-recovered".utf8))
+        XCTAssertEqual(refreshToken, Data("refresh-recovered".utf8))
+        XCTAssertEqual(storedAccounts, [refreshed])
+    }
+
     private func makeExpiringOAuthAccount(now: Date) -> GitHubAccount {
         GitHubAccount(
             id: AccountID(rawValue: "account-1")!,
@@ -626,7 +728,7 @@ private actor InMemorySecretStore: SecretStore {
     }
 
     private var values: [Key: Data]
-    private let failingWritesForKinds: Set<TriageSecretKind>
+    private var failingWritesForKinds: Set<TriageSecretKind>
     private var writes = 0
 
     init(
@@ -680,5 +782,9 @@ private actor InMemorySecretStore: SecretStore {
 
     func writeCount() -> Int {
         writes
+    }
+
+    func setFailingWritesForKinds(_ kinds: Set<TriageSecretKind>) {
+        failingWritesForKinds = kinds
     }
 }

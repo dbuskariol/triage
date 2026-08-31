@@ -104,12 +104,41 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.tests
 
+  TriageUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - TriageUITests
+    dependencies:
+      - target: Triage
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.uitests
+
+  TriageCopilotXPCTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - TriageCopilotXPCTests
+      - TriageCopilotXPC/CopilotHelperProcess.swift
+      - TriageCopilotXPC/CopilotXPCCallerValidator.swift
+      - TriageCopilotXPC/CopilotXPCFrame.swift
+      - TriageCopilotXPC/TriageCopilotXPCService.swift
+      - Triage/CopilotXPC/CopilotXPCInterface.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.copilotxpctests
+
 schemes:
   Triage:
     build:
       targets:
         Triage: all
         TriageTests: [test]
+        TriageUITests: [test]
+        TriageCopilotXPCTests: [test]
     run:
       config: Debug
     test:
@@ -117,6 +146,10 @@ schemes:
       gatherCoverageData: false
       targets:
         - name: TriageTests
+          parallelizable: true
+        - name: TriageUITests
+          parallelizable: false
+        - name: TriageCopilotXPCTests
           parallelizable: true
     profile:
       config: Release

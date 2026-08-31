@@ -7,22 +7,21 @@ struct SettingsView: View {
     @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
     @EnvironmentObject private var appModel: TriageAppModel
     @State private var accountReplacingToken: GitHubAccount?
+    @State private var accountPendingRemoval: GitHubAccount?
+    @State private var accountRemovalError: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            settingsNavigation
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    pageHeader
-                    categoryContent
-                }
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
+        TabView(selection: selectedCategory) {
+            settingsPage(.accounts) { accountsSettings }
+            settingsPage(.organizations) { organizationSettings }
+            settingsPage(.inbox) { inboxSettings }
+            settingsPage(.notifications) { notificationSettings }
+            settingsPage(.ai) { aiSettings }
+            settingsPage(.general) { generalSettings }
+            settingsPage(.updates) { updateSettings }
+            settingsPage(.about) { aboutSettings }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .tabViewStyle(.sidebarAdaptable)
         .navigationTitle("Settings")
         .onAppear {
             preferences.refreshLaunchAtLoginStatus()
@@ -55,51 +54,76 @@ struct SettingsView: View {
                 }
             )
         }
-    }
-
-    private var settingsNavigation: some View {
-        HStack(spacing: 6) {
-            ForEach(SettingsCategory.allCases) { category in
-                Button {
-                    navigation.settingsCategory = category
-                } label: {
-                    Label(category.title, systemImage: category.systemImage)
-                        .font(.callout.weight(.medium))
-                        .padding(.horizontal, 11)
-                        .frame(height: 32)
-                        .background(
-                            navigation.settingsCategory == category
-                                ? Color.accentColor.opacity(0.16)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(navigation.settingsCategory == category ? .primary : .secondary)
-                .accessibilityAddTraits(
-                    navigation.settingsCategory == category ? .isSelected : []
-                )
-                .help(category.title)
+        .confirmationDialog(
+            removalConfirmationTitle,
+            isPresented: Binding(
+                get: { accountPendingRemoval != nil },
+                set: { if !$0 { accountPendingRemoval = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Account and Data", role: .destructive) {
+                removePendingAccount()
             }
-            Spacer()
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {
+                accountPendingRemoval = nil
+            }
+            .keyboardShortcut(.cancelAction)
+        } message: {
+            Text(removalConfirmationMessage)
         }
-        .padding(.horizontal, 22)
-        .frame(height: 52)
-        .background(.bar)
+        .alert(
+            "Triage could not remove this account",
+            isPresented: Binding(
+                get: { accountRemovalError != nil },
+                set: { if !$0 { accountRemovalError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                accountRemovalError = nil
+            }
+        } message: {
+            Text(accountRemovalError ?? "Try again after resolving any listed account or storage issue.")
+        }
     }
 
-    private var pageHeader: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(navigation.settingsCategory.title)
-                .font(.largeTitle.weight(.bold))
-            Text(categorySubtitle)
-                .font(.title3)
-                .foregroundStyle(.secondary)
-        }
+    private var selectedCategory: Binding<SettingsCategory> {
+        Binding(
+            get: { navigation.settingsCategory },
+            set: { navigation.settingsCategory = $0 }
+        )
     }
 
-    private var categorySubtitle: String {
-        switch navigation.settingsCategory {
+    private func settingsPage<Content: View>(
+        _ category: SettingsCategory,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(categoryTitle(category))
+                        .font(.largeTitle.weight(.bold))
+                        .accessibilityAddTraits(.isHeader)
+                    Text(categorySubtitle(for: category))
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                content()
+            }
+            .scenePadding()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .tabItem { Label(categoryTitle(category), systemImage: category.systemImage) }
+        .tag(category)
+    }
+
+    private func categoryTitle(_ category: SettingsCategory) -> String {
+        category == .ai ? "AI" : category.title
+    }
+
+    private func categorySubtitle(for category: SettingsCategory) -> String {
+        switch category {
         case .accounts: "Manage GitHub identities and encrypted local account data."
         case .organizations: "Review organization access, capabilities, and synchronization coverage."
         case .inbox: "Control the local workflow rules that organize your work."
@@ -108,28 +132,6 @@ struct SettingsView: View {
         case .general: "Choose how Triage integrates with macOS."
         case .updates: "Keep Triage current through signed, verified updates."
         case .about: "Review this installation and its privacy baseline."
-        }
-    }
-
-    @ViewBuilder
-    private var categoryContent: some View {
-        switch navigation.settingsCategory {
-        case .accounts:
-            accountsSettings
-        case .organizations:
-            organizationSettings
-        case .inbox:
-            inboxSettings
-        case .notifications:
-            notificationSettings
-        case .ai:
-            aiSettings
-        case .general:
-            generalSettings
-        case .updates:
-            updateSettings
-        case .about:
-            aboutSettings
         }
     }
 
@@ -146,9 +148,16 @@ struct SettingsView: View {
                         systemImage: "person.crop.circle"
                     ) {
                         HStack(spacing: 10) {
-                            Text(account.credentialStatus.rawValue.capitalized)
+                            Text(credentialStatusTitle(account.credentialStatus))
                                 .foregroundStyle(.secondary)
                             accountCredentialAction(for: account)
+                            Button("Remove…", role: .destructive) {
+                                accountPendingRemoval = account
+                            }
+                            .disabled(appModel.isConnecting)
+                            .accessibilityHint(
+                                "Removes this account, its credentials, and encrypted local Triage data from this Mac. It does not change GitHub."
+                            )
                         }
                     }
                 }
@@ -191,35 +200,88 @@ struct SettingsView: View {
     }
 
     private var organizationSettings: some View {
-        SettingsCard(title: "Organizations") {
-            if appModel.organizations.isEmpty {
-                Text("Connect an account to discover organizations.")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(appModel.organizations) { organization in
-                    SettingsValueRow(
-                        title: organization.displayName ?? organization.login,
-                        detail: organization.login,
-                        systemImage: "building.2"
-                    ) {
-                        Text(organization.id == appModel.selectedOrganizationID ? "Current" : "")
-                            .foregroundStyle(.secondary)
+        VStack(spacing: 16) {
+            SettingsCard(title: "Organizations") {
+                if appModel.organizations.isEmpty {
+                    Text("Connect an account to discover organizations.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(appModel.organizations) { organization in
+                        SettingsValueRow(
+                            title: organization.displayName ?? organization.login,
+                            detail: organization.login,
+                            systemImage: "building.2"
+                        ) {
+                            if organization.id == appModel.selectedOrganizationID {
+                                Text("Current")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
+                }
+            }
+
+            if let access = appModel.selectedOrganizationAccess {
+                SettingsCard(title: "Access and Coverage") {
+                    SettingsValueRow(
+                        title: "Organization access",
+                        detail: access.checkedAt.formatted(date: .abbreviated, time: .shortened),
+                        systemImage: "checkmark.shield"
+                    ) {
+                        Text(organizationAccessTitle(access.state))
+                            .foregroundStyle(
+                                access.state == .available ? Color.secondary : Color.orange
+                            )
+                    }
+
+                    let capabilities = access.capabilities.sorted {
+                        $0.capability.rawValue < $1.capability.rawValue
+                    }
+                    if !capabilities.isEmpty {
+                        SettingsDivider()
+                        ForEach(capabilities, id: \.capability) { capability in
+                            SettingsValueRow(
+                                title: capabilityTitle(capability.capability),
+                                detail: capability.detail ?? "No additional detail is available.",
+                                systemImage: "slider.horizontal.3"
+                            ) {
+                                Text(capabilityStatusTitle(capability.status))
+                                    .foregroundStyle(capabilityTint(capability.status))
+                            }
+                        }
+                    }
+                }
+            } else if appModel.selectedOrganization != nil {
+                SettingsCard(title: "Access and Coverage") {
+                    Label(
+                        "Triage has not verified access for the selected organization yet. Refresh GitHub work to check available coverage.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
     private var inboxSettings: some View {
-        SettingsCard(title: "Attention") {
-            SettingsValueRow(
-                title: "Stale progress",
-                detail: "Owned work becomes stale after three business days without qualifying progress.",
-                systemImage: "clock.badge.exclamationmark"
-            ) {
-                Text("3 days")
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsCard(title: "Attention") {
+                SettingsValueRow(
+                    title: "Stale progress",
+                    detail: "Owned work becomes stale after three business days without qualifying progress.",
+                    systemImage: "clock.badge.exclamationmark"
+                ) {
+                    Text("3 days")
+                        .foregroundStyle(.secondary)
+                }
             }
+            Label(
+                "Triage workflow choices are stored locally and never modify GitHub.",
+                systemImage: "lock"
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Local workflow only. Triage workflow choices never modify GitHub.")
         }
     }
 
@@ -232,8 +294,25 @@ struct SettingsView: View {
 
     private var aiSettings: some View {
         SettingsCard(title: "Copilot") {
-            Text("Copilot analysis is disabled until you explicitly enable it for an organization.")
-                .foregroundStyle(.secondary)
+            SettingsValueRow(
+                title: "Organization consent",
+                detail: "Copilot analysis remains disabled until you explicitly enable it for an organization.",
+                systemImage: "sparkles"
+            ) {
+                Text("Not enabled")
+                    .foregroundStyle(.secondary)
+            }
+            if let capabilities = appModel.selectedAccountCapabilities {
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Copilot entitlement",
+                    detail: "Availability is checked separately from GitHub work synchronization.",
+                    systemImage: "checkmark.shield"
+                ) {
+                    Text(capabilityStatusTitle(capabilities.status(for: .copilot)))
+                        .foregroundStyle(capabilityTint(capabilities.status(for: .copilot)))
+                }
+            }
         }
     }
 
@@ -358,6 +437,92 @@ struct SettingsView: View {
     private var metadata: AppMetadata {
         AppMetadata()
     }
+
+    private var removalConfirmationTitle: String {
+        guard let account = accountPendingRemoval else { return "Remove account?" }
+        return "Remove \(account.login)?"
+    }
+
+    private var removalConfirmationMessage: String {
+        guard let account = accountPendingRemoval else {
+            return "This removes the account and its encrypted local data from this Mac."
+        }
+        return "This removes \(account.login), its credentials, and all encrypted local Triage data from this Mac. GitHub content is not changed."
+    }
+
+    private func removePendingAccount() {
+        guard let account = accountPendingRemoval else { return }
+        accountPendingRemoval = nil
+        Task {
+            do {
+                try await appModel.removeAccount(account.id)
+            } catch {
+                accountRemovalError = "The account and its encrypted local data were not removed. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func credentialStatusTitle(_ status: CredentialStatus) -> String {
+        switch status {
+        case .active: "Active"
+        case .expiring: "Expiring"
+        case .expired: "Expired"
+        case .revoked: "Revoked"
+        case .missing: "Missing"
+        case .capabilityLimited: "Limited"
+        }
+    }
+
+    private func organizationAccessTitle(_ state: OrganizationAccessState) -> String {
+        switch state {
+        case .available: "Available"
+        case .ssoAuthorizationRequired: "SSO required"
+        case .partialSSOAuthorization: "Partial SSO"
+        case .organizationApprovalRequired: "Approval required"
+        case .oauthApplicationApprovalRequired: "OAuth approval"
+        case .organizationPolicyBlocked: "Blocked by policy"
+        case .insufficientPermission: "Insufficient access"
+        case .inaccessible: "Inaccessible"
+        case .credentialExpired: "Credential expired"
+        case .unknown: "Not verified"
+        }
+    }
+
+    private func capabilityTitle(_ capability: GitHubCapability) -> String {
+        switch capability {
+        case .privateRepositories: "Private repositories"
+        case .visibleTeams: "Visible teams"
+        case .issueAndPullRequestSearch: "Issue and PR search"
+        case .pullRequestReviews: "Pull request reviews"
+        case .pullRequestReviewThreads: "Review threads"
+        case .issueTimeline: "Issue timeline"
+        case .discussions: "Discussions"
+        case .projects: "Projects"
+        case .projectFields: "Project fields"
+        case .notifications: "Notifications"
+        case .copilot: "Copilot"
+        case .copilotModels: "Copilot models"
+        }
+    }
+
+    private func capabilityStatusTitle(_ status: CapabilityStatus) -> String {
+        switch status {
+        case .available: "Available"
+        case .unavailable: "Unavailable"
+        case .unknown: "Not verified"
+        case .requiresSSO: "SSO required"
+        case .requiresApproval: "Approval required"
+        case .notApplicable: "Not applicable"
+        }
+    }
+
+    private func capabilityTint(_ status: CapabilityStatus) -> Color {
+        switch status {
+        case .available: .secondary
+        case .unavailable, .notApplicable, .unknown: .secondary
+        case .requiresSSO, .requiresApproval: .orange
+        }
+    }
 }
 
 private struct SettingsCard<Content: View>: View {
@@ -374,6 +539,7 @@ private struct SettingsCard<Content: View>: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text(title)
                     .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
                 content
             }
         }

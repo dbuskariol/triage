@@ -5,14 +5,30 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked S
     label: "com.triage.mac.copilot-xpc",
     qos: .userInitiated
   )
-  private let helperProcess = CopilotHelperProcess()
+  private let callerValidator: () throws -> Void
+  private let helperProcess: any CopilotHelperProcessing
+
+  override init() {
+    callerValidator = CopilotXPCCallerValidator.validateCurrentConnection
+    helperProcess = CopilotHelperProcess()
+    super.init()
+  }
+
+  init(
+    callerValidator: @escaping () throws -> Void,
+    helperProcess: any CopilotHelperProcessing
+  ) {
+    self.callerValidator = callerValidator
+    self.helperProcess = helperProcess
+    super.init()
+  }
 
   func exchange(
     frame: Data,
     withReply reply: @escaping @Sendable (Data?, NSError?) -> Void
   ) {
     do {
-      try CopilotXPCCallerValidator.validateCurrentConnection()
+      try callerValidator()
     } catch let error as CopilotXPCServiceError {
       reply(nil, error.nsError)
       return

@@ -36,6 +36,13 @@ struct GitHubProjectV2Inventory: Sendable {
 struct GitHubProjectV2Items: Sendable {
     let items: [GitHubProjectV2ItemRecord]
     let rawPages: [GitHubProjectV2RawPage]
+    /// A redacted item is still a source item. Its wrapped content must not be
+    /// interpreted as an authoritative removal of a previously visible link.
+    let redactedItemNodeIDs: Set<GitHubNodeID>
+
+    var hasIncompleteFieldValues: Bool {
+        items.contains(where: { !$0.fieldValuesComplete })
+    }
 }
 
 actor GitHubProjectV2Client {
@@ -176,8 +183,10 @@ actor GitHubProjectV2Client {
         }
         let itemIDs = try uniqueItemIDs(items, rawPages: rawPages)
         var normalized = [GitHubProjectV2ItemRecord]()
+        var redactedItemNodeIDs = Set<GitHubNodeID>()
         for (item, itemID) in zip(items, itemIDs) {
             try Task.checkCancellation()
+            try await validateScope()
             let values = try await allFieldValues(
                 itemNodeID: itemID,
                 githubOrganizationID: githubOrganizationID,
@@ -190,8 +199,15 @@ actor GitHubProjectV2Client {
             } catch {
                 throw GitHubProjectV2ClientError.normalizationFailed(rawPages)
             }
+            if isRedacted(item) {
+                redactedItemNodeIDs.insert(itemID)
+            }
         }
-        return .init(items: normalized, rawPages: rawPages)
+        return .init(
+            items: normalized,
+            rawPages: rawPages,
+            redactedItemNodeIDs: redactedItemNodeIDs
+        )
     }
 
     private func allFieldValues(
@@ -326,6 +342,16 @@ actor GitHubProjectV2Client {
             throw GitHubProjectV2ClientError.duplicateItem(rawPages)
         }
         return identifiers
+    }
+
+    /// GitHub can retain a ProjectV2Item while withholding its wrapped content
+    /// (`REDACTED`, `RedactedItem`, or a null content union). Treating that
+    /// shape as a deletion would erase local provenance merely because the
+    /// current credential has less visibility than a prior one.
+    private func isRedacted(_ item: GitHubProjectV2ItemPayload.Item) -> Bool {
+        item.type.caseInsensitiveCompare("REDACTED") == .orderedSame
+            || item.content == nil
+            || item.content?.typeName == "RedactedItem"
     }
 
     private struct OrganizationProjectsVariables: Encodable, Sendable {

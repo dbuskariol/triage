@@ -80,7 +80,10 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
                 streamID: fixture.streamID
             )
         }) { error in
-            XCTAssertEqual(error as? PullRequestReviewThreadRepositoryError, .duplicateThreadNodeID)
+            XCTAssertEqual(
+                error as? ReviewCandidateCompleteTraversalReceiptRepositoryError,
+                .invalidTraversal
+            )
         }
         let after = try await fixture.durableState()
         XCTAssertEqual(after, before)
@@ -125,19 +128,249 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
                 try String.fetchOne(database, sql: "SELECT body_markdown FROM comments WHERE github_node_id = 'COMMENT_1'")
             )
         }
-        XCTAssertEqual(persisted.0, 1)
+        XCTAssertEqual(persisted.0, 2)
         XCTAssertEqual(persisted.1, fixture.firstPullRequest.nodeID.rawValue)
         XCTAssertEqual(persisted.2, "THREAD_1")
         XCTAssertEqual(persisted.3, "Please update this line.")
     }
 
-    func testRemoteFailureStopsBeforeLaterCandidateAndDoesNotAdvanceWithoutProvenance() async throws {
+    func testVerifiedCompleteTraversalPrunesStaleThreadsAndComments() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        // Select the same candidate for the next authoritative traversal.
+        try await fixture.vault.write { database in
+            try database.execute(sql: "DELETE FROM sync_shards")
+        }
+
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(fixture.emptyInventory())
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt.addingTimeInterval(1),
+            streamID: fixture.streamID
+        )
+
+        let persisted = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_threads"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts")
+            )
+        }
+        XCTAssertEqual(persisted.0, 0)
+        XCTAssertEqual(persisted.1, 0)
+        XCTAssertEqual(persisted.2, 2)
+    }
+
+    func testIncompleteSuccessfulTraversalRollsBackAndRetainsPriorThreads() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        try await fixture.vault.write { database in
+            try database.execute(sql: "DELETE FROM sync_shards")
+        }
+        let incomplete = GitHubPullRequestReviewThreadInventory(
+            records: fixture.inventory(threadID: "THREAD_2", commentID: "COMMENT_2").records,
+            rawPages: [
+                .init(
+                    endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
+                    requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                    payload: fixture.rootPayload(
+                        pullRequestNodeID: fixture.firstPullRequest.nodeID,
+                        threadNodeIDs: [GitHubNodeID(rawValue: "THREAD_2")!]
+                    )
+                )
+            ],
+            metrics: .init(pageCount: 1, responseBytes: 116, queryCost: 1)
+        )
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+                fixture.firstPullRequest.nodeID: .inventory(incomplete)
+            ])).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.observedAt.addingTimeInterval(1),
+                streamID: fixture.streamID
+            )
+        }) { error in
+            XCTAssertEqual(
+                error as? ReviewCandidateCompleteTraversalReceiptRepositoryError,
+                .invalidTraversal
+            )
+        }
+        let persisted = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(database, sql: "SELECT github_node_id FROM review_threads ORDER BY github_node_id"),
+                try String.fetchAll(database, sql: "SELECT github_node_id FROM comments ORDER BY github_node_id"),
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_complete_traversal_receipts")
+            )
+        }
+        XCTAssertEqual(persisted.0, ["THREAD_1"])
+        XCTAssertEqual(persisted.1, ["COMMENT_1"])
+        XCTAssertEqual(persisted.2, 1)
+    }
+
+    func testCrossScopeReceiptCannotAuthorizePruning() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        let persistedReceipt = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT id FROM review_candidate_complete_traversal_receipts LIMIT 1"
+            )
+        }
+        let wrongScope = SynchronizationScope(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            credentialRevision: CredentialRevision(rawValue: "credential-1")!,
+            capabilityRevision: CapabilityRevision(rawValue: "other-capability")!
+        )
+        let wrongReceipt = ReviewCandidateCompleteTraversalReceiptToken(
+            id: try XCTUnwrap(UUID(uuidString: try XCTUnwrap(persistedReceipt))),
+            scope: wrongScope,
+            feature: .reviewThreads,
+            streamID: fixture.streamID,
+            candidateNodeID: fixture.firstPullRequest.nodeID,
+            repositoryID: fixture.repositoryID,
+            candidateSourceRevision: "revision-1"
+        )
+
+        await XCTAssertThrowsErrorAsync({
+            try await PullRequestReviewCandidateRepository(vault: fixture.vault).writeTransaction(
+                accountID: fixture.accountID
+            ) { database in
+                try PullRequestReviewThreadRepository.replace(
+                    pullRequestNodeID: fixture.firstPullRequest.nodeID,
+                    accountID: fixture.accountID,
+                    organizationID: fixture.organizationID,
+                    repositoryID: fixture.repositoryID,
+                    currentUserNodeID: GitHubNodeID(rawValue: "USER_1")!,
+                    records: [],
+                    scope: fixture.scope,
+                    streamID: fixture.streamID,
+                    completeTraversalReceipt: wrongReceipt,
+                    observedAt: fixture.observedAt.addingTimeInterval(1),
+                    in: database
+                )
+            }
+        }) { error in
+            XCTAssertEqual(error as? PullRequestReviewThreadRepositoryError, .invalidTraversalReceipt)
+        }
+        let persisted = try await fixture.vault.read { database in
+            try String.fetchAll(database, sql: "SELECT github_node_id FROM review_threads ORDER BY github_node_id")
+        }
+        XCTAssertEqual(persisted, ["THREAD_1"])
+    }
+
+    func testReceiptDigestDoesNotAuthorizeEmptyOrMismatchedReplacement() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .inventory(
+                fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        let persistedReceipt = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT id FROM review_candidate_complete_traversal_receipts LIMIT 1"
+            )
+        }
+        let receipt = ReviewCandidateCompleteTraversalReceiptToken(
+            id: try XCTUnwrap(UUID(uuidString: try XCTUnwrap(persistedReceipt))),
+            scope: fixture.scope,
+            feature: .reviewThreads,
+            streamID: fixture.streamID,
+            candidateNodeID: fixture.firstPullRequest.nodeID,
+            repositoryID: fixture.repositoryID,
+            candidateSourceRevision: "revision-1"
+        )
+        let mismatchedRecords = fixture.inventory(
+            threadID: "THREAD_2",
+            commentID: "COMMENT_2"
+        ).records
+        for records in [[], mismatchedRecords] {
+            await XCTAssertThrowsErrorAsync({
+                try await PullRequestReviewCandidateRepository(vault: fixture.vault).writeTransaction(
+                    accountID: fixture.accountID
+                ) { database in
+                    try PullRequestReviewThreadRepository.replace(
+                        pullRequestNodeID: fixture.firstPullRequest.nodeID,
+                        accountID: fixture.accountID,
+                        organizationID: fixture.organizationID,
+                        repositoryID: fixture.repositoryID,
+                        currentUserNodeID: GitHubNodeID(rawValue: "USER_1")!,
+                        records: records,
+                        scope: fixture.scope,
+                        streamID: fixture.streamID,
+                        completeTraversalReceipt: receipt,
+                        observedAt: fixture.observedAt.addingTimeInterval(1),
+                        in: database
+                    )
+                }
+            }) { error in
+                XCTAssertEqual(error as? PullRequestReviewThreadRepositoryError, .invalidTraversalReceipt)
+            }
+        }
+        let persisted = try await fixture.vault.read { database in
+            (
+                try String.fetchAll(database, sql: "SELECT github_node_id FROM review_threads ORDER BY github_node_id"),
+                try String.fetchAll(database, sql: "SELECT github_node_id FROM comments ORDER BY github_node_id")
+            )
+        }
+        XCTAssertEqual(persisted.0, ["THREAD_1"])
+        XCTAssertEqual(persisted.1, ["COMMENT_1"])
+    }
+
+    func testRemoteFailurePublishesTerminalEvidenceAdvancesAndStopsBeforeLaterCandidate() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
         let secondPullRequest = try await fixture.addPullRequest(nodeID: "PR_2", number: 2)
         let fetcher = ReviewThreadFetcher(plans: [
             fixture.firstPullRequest.nodeID: .failure(.generic),
-            secondPullRequest.nodeID: .inventory(fixture.inventory(threadID: "THREAD_2", commentID: "COMMENT_2"))
+            secondPullRequest.nodeID: .inventory(
+                fixture.inventory(
+                    pullRequestNodeID: secondPullRequest.nodeID,
+                    threadID: "THREAD_2",
+                    commentID: "COMMENT_2"
+                )
+            )
         ])
         let before = try await fixture.durableState()
 
@@ -155,14 +388,36 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         }
         XCTAssertEqual(persistedThreadIDs, [])
         let after = try await fixture.durableState()
-        XCTAssertEqual(after, before)
+        XCTAssertEqual(after.rawSnapshots, before.rawSnapshots)
+        XCTAssertEqual(after.reviewThreads, before.reviewThreads)
+        XCTAssertEqual(after.comments, before.comments)
+        XCTAssertEqual(after.failureEnvelopes, before.failureEnvelopes + 1)
+        XCTAssertEqual(after.schedulerShards, before.schedulerShards + 2)
+        let rawFailure = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(
+                    database,
+                    sql: "SELECT raw_page_count FROM review_candidate_failure_envelopes LIMIT 1"
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT classification FROM review_candidate_failure_envelopes LIMIT 1"
+                )
+            )
+        }
+        XCTAssertEqual(rawFailure.0, 0)
+        XCTAssertEqual(rawFailure.1, "transportFailure")
 
         let retry = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
             fixture.firstPullRequest.nodeID: .inventory(
                 fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
             ),
             secondPullRequest.nodeID: .inventory(
-                fixture.inventory(threadID: "THREAD_2", commentID: "COMMENT_2")
+                fixture.inventory(
+                    pullRequestNodeID: secondPullRequest.nodeID,
+                    threadID: "THREAD_2",
+                    commentID: "COMMENT_2"
+                )
             )
         ])).refresh(
             scope: fixture.scope,
@@ -172,9 +427,213 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         )
         XCTAssertEqual(
             retry.outcomes.map(\.pullRequestNodeID),
-            [fixture.firstPullRequest.nodeID, secondPullRequest.nodeID]
+            [secondPullRequest.nodeID]
         )
-        XCTAssertEqual(retry.outcomes.map(\.status), [.refreshed, .refreshed])
+        XCTAssertEqual(retry.outcomes.map(\.status), [.refreshed])
+    }
+
+    func testCandidateLocalForbiddenAndNotFoundFailuresContinueFairCandidates() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        let secondPullRequest = try await fixture.addPullRequest(nodeID: "PR_2", number: 2)
+        let thirdPullRequest = try await fixture.addPullRequest(nodeID: "PR_3", number: 3)
+
+        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .failure(.forbidden),
+            secondPullRequest.nodeID: .failure(.notFound),
+            thirdPullRequest.nodeID: .inventory(
+                fixture.inventory(
+                    pullRequestNodeID: thirdPullRequest.nodeID,
+                    threadID: "THREAD_3",
+                    commentID: "COMMENT_3"
+                )
+            )
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertEqual(
+            result.outcomes.map(\.pullRequestNodeID),
+            [fixture.firstPullRequest.nodeID, secondPullRequest.nodeID, thirdPullRequest.nodeID]
+        )
+        XCTAssertEqual(
+            result.outcomes.map(\.status),
+            [.unavailableOrPermission, .unavailableOrPermission, .refreshed]
+        )
+        XCTAssertEqual(result.coverageAssessment.status, .unavailable)
+        let failureClassifications = try await fixture.vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: "SELECT classification FROM review_candidate_failure_envelopes ORDER BY candidate_node_id"
+            )
+        }
+        XCTAssertEqual(failureClassifications, ["unavailableOrPermission", "unavailableOrPermission"])
+    }
+
+    func testSSOApprovalAndRateLimitFailuresStopCandidatePass() async throws {
+        let cases: [(ReviewThreadFetcher.Failure, PullRequestReviewThreadRefreshOutcomeStatus)] = [
+            (
+                .sso,
+                .ssoRequired(
+                    .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso-secret")!)
+                )
+            ),
+            (.approval, .approvalRequired),
+            (.rateLimited, .rateLimited(retryAt: Date(timeIntervalSince1970: 1_060)))
+        ]
+        for (failure, expectedStatus) in cases {
+            let fixture = try await ReviewThreadRefreshFixture()
+            defer { fixture.remove() }
+            let secondPullRequest = try await fixture.addPullRequest(nodeID: "PR_2", number: 2)
+            let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+                fixture.firstPullRequest.nodeID: .failure(failure),
+                secondPullRequest.nodeID: .inventory(
+                    fixture.inventory(
+                        pullRequestNodeID: secondPullRequest.nodeID,
+                        threadID: "THREAD_2",
+                        commentID: "COMMENT_2"
+                    )
+                )
+            ])).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.observedAt,
+                streamID: fixture.streamID
+            )
+            XCTAssertEqual(result.outcomes.map(\.pullRequestNodeID), [fixture.firstPullRequest.nodeID])
+            XCTAssertEqual(result.outcomes.map(\.status), [expectedStatus])
+        }
+    }
+
+    func testFailureWithoutInjectedEnvelopeRepositoryDoesNotAdvanceOrPersist() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        let before = try await fixture.durableState()
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(
+                fetcher: ReviewThreadFetcher(plans: [fixture.firstPullRequest.nodeID: .failure(.generic)]),
+                injectFailureEnvelopeRepository: false
+            ).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.observedAt,
+                streamID: fixture.streamID
+            )
+        }) { _ in }
+
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+
+    func testTraversalFailurePersistsAccumulatedGraphQLPagesWithExactRequestKeys() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+
+        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .failure(.traversal)
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+
+        XCTAssertEqual(result.outcomes.map(\.status), [.failed])
+        let persisted = try await fixture.vault.read { database in
+            (
+                try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_pages"),
+                try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT raw_api_snapshots.authority_request_key
+                        FROM review_candidate_failure_pages
+                        JOIN raw_api_snapshots
+                          ON raw_api_snapshots.id = review_candidate_failure_pages.raw_snapshot_id
+                        ORDER BY raw_api_snapshots.authority_request_key
+                        """
+                ),
+                try String.fetchAll(
+                    database,
+                    sql: """
+                        SELECT raw_api_snapshots.endpoint
+                        FROM review_candidate_failure_pages
+                        JOIN raw_api_snapshots
+                          ON raw_api_snapshots.id = review_candidate_failure_pages.raw_snapshot_id
+                        ORDER BY raw_api_snapshots.authority_request_key
+                        """
+                ),
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT request_key FROM review_candidate_failure_envelopes LIMIT 1"
+                )
+            )
+        }
+        XCTAssertEqual(persisted.0, 2)
+        XCTAssertEqual(persisted.1, [
+            "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/after=none",
+            "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none"
+        ])
+        XCTAssertEqual(persisted.2, [
+            "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/page=1",
+            "graphql:TriagePullRequestReviewThreads/page=1"
+        ])
+        XCTAssertEqual(
+            persisted.3,
+            "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/after=none"
+        )
+    }
+
+    func testFabricatedTraversalTerminalKeyDoesNotAdvanceOrPersistFailure() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+        let before = try await fixture.durableState()
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+                fixture.firstPullRequest.nodeID: .failure(.fabricatedTerminal)
+            ])).refresh(
+                scope: fixture.scope,
+                githubOrganizationID: fixture.githubOrganizationID,
+                observedAt: fixture.observedAt,
+                streamID: fixture.streamID
+            )
+        }) { error in
+            XCTAssertEqual(error as? ReviewCandidateFailureEnvelopeRepositoryError, .invalidRawPages)
+        }
+        let after = try await fixture.durableState()
+        XCTAssertEqual(after, before)
+    }
+
+    func testPageTwoTraversalFailureBindsEnvelopeToPageTwoRequestKey() async throws {
+        let fixture = try await ReviewThreadRefreshFixture()
+        defer { fixture.remove() }
+
+        _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+            fixture.firstPullRequest.nodeID: .failure(.pageTwoTraversal)
+        ])).refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.observedAt,
+            streamID: fixture.streamID
+        )
+        let persisted = try await fixture.vault.read { database in
+            (
+                try String.fetchOne(
+                    database,
+                    sql: "SELECT request_key FROM review_candidate_failure_envelopes LIMIT 1"
+                ),
+                try Int.fetchOne(database, sql: "SELECT raw_page_count FROM review_candidate_failure_envelopes LIMIT 1")
+            )
+        }
+        XCTAssertEqual(
+            persisted.0,
+            "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=Y3Vyc29yLTE="
+        )
+        XCTAssertEqual(persisted.1, 2)
     }
 
     func testSSOAndApprovalFailuresAreRedactedAndClassified() async throws {
@@ -203,6 +662,14 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         let persistedDetail = try XCTUnwrap(result.coverageAssessment.failureDetail)
         XCTAssertFalse(persistedDetail.contains("https://"))
         XCTAssertFalse(persistedDetail.contains("sso-secret"))
+        let persistedFailureDetail = try await fixture.vault.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT redacted_diagnostic FROM review_candidate_failure_envelopes LIMIT 1"
+            )
+        }
+        XCTAssertFalse(try XCTUnwrap(persistedFailureDetail).contains("https://"))
+        XCTAssertFalse(try XCTUnwrap(persistedFailureDetail).contains("sso-secret"))
 
         let approvalFixture = try await ReviewThreadRefreshFixture()
         defer { approvalFixture.remove() }
@@ -362,6 +829,7 @@ private struct ReviewThreadDurableState: Equatable {
     let reviewThreads: Int
     let comments: Int
     let schedulerShards: Int
+    let failureEnvelopes: Int
 }
 
 private actor ReviewThreadFetcher: PullRequestReviewThreadFetching {
@@ -372,6 +840,12 @@ private actor ReviewThreadFetcher: PullRequestReviewThreadFetching {
 
     enum Failure: Error, Sendable {
         case generic
+        case traversal
+        case fabricatedTerminal
+        case pageTwoTraversal
+        case forbidden
+        case notFound
+        case rateLimited
         case sso
         case approval
         case unrelatedSSO
@@ -394,31 +868,121 @@ private actor ReviewThreadFetcher: PullRequestReviewThreadFetching {
             return inventory
         case .failure(.generic):
             throw Failure.generic
+        case .failure(.forbidden):
+            throw Self.remoteTraversalFailure(
+                GitHubFailure(kind: .forbidden, statusCode: 403),
+                pullRequestNodeID: pullRequestNodeID
+            )
+        case .failure(.notFound):
+            throw Self.remoteTraversalFailure(
+                GitHubFailure(kind: .notFound, statusCode: 404),
+                pullRequestNodeID: pullRequestNodeID
+            )
+        case .failure(.rateLimited):
+            throw Self.remoteTraversalFailure(
+                GitHubFailure(kind: .rateLimited, statusCode: 429, retryAfter: 60),
+                pullRequestNodeID: pullRequestNodeID
+            )
+        case .failure(.traversal):
+            throw GitHubPullRequestReviewThreadTraversalFailure(
+                reason: .missingData,
+                rawPages: [
+                    .init(
+                        endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
+                        requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                        payload: Data("{\"data\":{}}".utf8)
+                    ),
+                    .init(
+                        endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/page=1",
+                        requestKey: "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/after=none",
+                        payload: Data("{\"data\":{}}".utf8)
+                    )
+                ],
+                terminalRequestKey: "graphql:TriagePullRequestReviewThreadComments/thread=THREAD_1/after=none",
+                remoteFailure: nil,
+                ssoHeader: nil
+            )
+        case .failure(.fabricatedTerminal):
+            throw GitHubPullRequestReviewThreadTraversalFailure(
+                reason: .missingData,
+                rawPages: [
+                    .init(
+                        endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
+                        requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                        payload: Data("{\"data\":{}}".utf8)
+                    )
+                ],
+                terminalRequestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=fabricated",
+                remoteFailure: nil,
+                ssoHeader: nil
+            )
+        case .failure(.pageTwoTraversal):
+            throw GitHubPullRequestReviewThreadTraversalFailure(
+                reason: .missingData,
+                rawPages: [
+                    .init(
+                        endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
+                        requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                        payload: Data("{\"data\":{}}".utf8)
+                    ),
+                    .init(
+                        endpoint: "graphql:TriagePullRequestReviewThreads/page=2",
+                        requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=Y3Vyc29yLTE=",
+                        payload: Data("{\"data\":{}}".utf8)
+                    )
+                ],
+                terminalRequestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=Y3Vyc29yLTE=",
+                remoteFailure: nil,
+                ssoHeader: nil
+            )
         case .failure(.sso):
-            throw GitHubGraphQLError.requestFailed(
+            throw Self.remoteTraversalFailure(
                 GitHubFailure(
                     kind: .forbidden,
                     statusCode: 403,
                     ssoHeader: .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso-secret")!)
-                )
+                ),
+                pullRequestNodeID: pullRequestNodeID
             )
         case .failure(.approval):
-            throw GitHubGraphQLError.requestFailed(
+            throw Self.remoteTraversalFailure(
                 GitHubFailure(
                     kind: .forbidden,
                     statusCode: 403,
                     accessRestriction: .organizationApprovalRequired
-                )
+                ),
+                pullRequestNodeID: pullRequestNodeID
             )
         case .failure(.unrelatedSSO):
-            throw GitHubGraphQLError.requestFailed(
+            throw Self.remoteTraversalFailure(
                 GitHubFailure(
                     kind: .forbidden,
                     statusCode: 403,
                     ssoHeader: .partialResults([999])
-                )
+                ),
+                pullRequestNodeID: pullRequestNodeID
             )
         }
+    }
+
+    private nonisolated static func remoteTraversalFailure(
+        _ remoteFailure: GitHubFailure,
+        pullRequestNodeID: GitHubNodeID
+    ) -> GitHubPullRequestReviewThreadTraversalFailure {
+        let requestKey = "graphql:TriagePullRequestReviewThreads/pull-request=\(pullRequestNodeID.rawValue)/after=none/terminal"
+        return .init(
+            reason: .requestFailed,
+            rawPages: [
+                .init(
+                    endpoint: "graphql:TriagePullRequestReviewThreads/page=1/terminal",
+                    requestKey: requestKey,
+                    payload: Data("{\"triageFailureEnvelopeVersion\":1,\"reason\":\"requestFailed\"}".utf8)
+                )
+            ],
+            terminalRequestKey: requestKey,
+            remoteFailure: remoteFailure,
+            ssoHeader: remoteFailure.ssoHeader
+        )
     }
 }
 
@@ -575,12 +1139,18 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
         firstPullRequest = try await addPullRequest(nodeID: "PR_1", number: 1)
     }
 
-    func service(fetcher: any PullRequestReviewThreadFetching) -> PullRequestReviewThreadRefreshService {
+    func service(
+        fetcher: any PullRequestReviewThreadFetching,
+        injectFailureEnvelopeRepository: Bool = true
+    ) -> PullRequestReviewThreadRefreshService {
         PullRequestReviewThreadRefreshService(
             fetcher: fetcher,
             candidateRepository: PullRequestReviewCandidateRepository(vault: vault),
             threadRepository: PullRequestReviewThreadRepository(vault: vault),
-            currentUserNodeID: GitHubNodeID(rawValue: "USER_1")!
+            currentUserNodeID: GitHubNodeID(rawValue: "USER_1")!,
+            failureEnvelopeRepository: injectFailureEnvelopeRepository
+                ? ReviewCandidateFailureEnvelopeRepository(vault: vault)
+                : nil
         )
     }
 
@@ -626,7 +1196,12 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
         return node
     }
 
-    func inventory(threadID: String, commentID: String) -> GitHubPullRequestReviewThreadInventory {
+    func inventory(
+        pullRequestNodeID: GitHubNodeID? = nil,
+        threadID: String,
+        commentID: String
+    ) -> GitHubPullRequestReviewThreadInventory {
+        let pullRequestNodeID = pullRequestNodeID ?? firstPullRequest.nodeID
         let author = ActorSummary(
             id: ActorID(rawValue: "REVIEWER_1")!,
             nodeID: GitHubNodeID(rawValue: "REVIEWER_1")!,
@@ -642,6 +1217,24 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
             updatedAt: observedAt.addingTimeInterval(1),
             url: URL(string: "https://github.com/acme/widget/pull/1#discussion_r1")!
         )
+        let rawPages = [
+            GitHubPullRequestReviewThreadRawPage(
+                endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
+                requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=\(pullRequestNodeID.rawValue)/after=none",
+                payload: rootPayload(
+                    pullRequestNodeID: pullRequestNodeID,
+                    threadNodeIDs: [GitHubNodeID(rawValue: threadID)!]
+                )
+            ),
+            GitHubPullRequestReviewThreadRawPage(
+                endpoint: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadID)/page=1",
+                requestKey: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadID)/after=none",
+                payload: commentPayload(
+                    threadNodeID: GitHubNodeID(rawValue: threadID)!,
+                    commentNodeIDs: [GitHubNodeID(rawValue: commentID)!]
+                )
+            )
+        ]
         return GitHubPullRequestReviewThreadInventory(
             records: [
                 PullRequestReviewThreadRecord(
@@ -652,13 +1245,53 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
                     updatedAt: comment.updatedAt
                 )
             ],
+            rawPages: rawPages,
+            metrics: .init(
+                pageCount: rawPages.count,
+                responseBytes: rawPages.reduce(0) { $0 + $1.payload.count },
+                queryCost: 2
+            )
+        )
+    }
+
+    func emptyInventory() -> GitHubPullRequestReviewThreadInventory {
+        .init(
+            records: [],
             rawPages: [
-                GitHubPullRequestReviewThreadRawPage(
+                .init(
                     endpoint: "graphql:TriagePullRequestReviewThreads/page=1",
-                    payload: Data("{\"data\":{}}".utf8)
+                    requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none",
+                    payload: rootPayload(
+                        pullRequestNodeID: firstPullRequest.nodeID,
+                        threadNodeIDs: []
+                    )
                 )
             ],
-            metrics: .init(pageCount: 1, responseBytes: 11, queryCost: 1)
+            metrics: .init(pageCount: 1, responseBytes: 100, queryCost: 1)
+        )
+    }
+
+    func rootPayload(
+        pullRequestNodeID: GitHubNodeID,
+        threadNodeIDs: [GitHubNodeID]
+    ) -> Data {
+        let nodes = threadNodeIDs.map { "{\"id\":\"\($0.rawValue)\"}" }.joined(separator: ",")
+        return Data(
+            """
+            {"data":{"node":{"id":"\(pullRequestNodeID.rawValue)","reviewThreads":{"nodes":[\(nodes)],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+            """.utf8
+        )
+    }
+
+    private func commentPayload(
+        threadNodeID: GitHubNodeID,
+        commentNodeIDs: [GitHubNodeID]
+    ) -> Data {
+        let nodes = commentNodeIDs.map { "{\"id\":\"\($0.rawValue)\"}" }.joined(separator: ",")
+        return Data(
+            """
+            {"data":{"node":{"id":"\(threadNodeID.rawValue)","comments":{"nodes":[\(nodes)],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+            """.utf8
         )
     }
 
@@ -679,7 +1312,11 @@ private final class ReviewThreadRefreshFixture: @unchecked Sendable {
                     sql: "SELECT COUNT(*) FROM review_threads"
                 )!,
                 comments: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM comments")!,
-                schedulerShards: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_shards")!
+                schedulerShards: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sync_shards")!,
+                failureEnvelopes: try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM review_candidate_failure_envelopes"
+                )!
             )
         }
     }

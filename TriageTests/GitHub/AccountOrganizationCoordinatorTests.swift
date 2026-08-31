@@ -143,6 +143,45 @@ final class AccountOrganizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(accessibleState?.freshness.status, .partial)
     }
 
+    func testExhaustedUnavailableReviewCoverageNeverBecomesSuccessful() async throws {
+        let fixture = CoordinatorFixture()
+        let scope = fixture.scope()
+        let unavailableCoverage = CoverageRecord(
+            accountID: scope.accountID,
+            organizationID: scope.organizationID,
+            repositoryID: nil,
+            feature: .reviews,
+            streamID: SyncStreamID(rawValue: "pull-request-reviews-\(scope.organizationID.rawValue)")!,
+            intervalStart: nil,
+            intervalEnd: nil,
+            credentialRevision: scope.credentialRevision,
+            capabilityRevision: scope.capabilityRevision,
+            status: .unavailable,
+            lastSuccessfulAt: nil,
+            failureDetail: "The selected account cannot access this pull request's reviews."
+        )
+        let unavailableState = AccountOrganizationCachedState(
+            coverage: [unavailableCoverage],
+            lastSuccessfulSyncAt: nil
+        )
+
+        try await fixture.coordinator.select(scope)
+        let request = try await fixture.operation.request(at: 0)
+        await fixture.operation.succeed(request, with: unavailableState)
+        try await fixture.stateStore.awaitSaveAttempt(1)
+        _ = try await awaitNonRefreshingState(from: fixture.coordinator, scope: scope)
+
+        let storedState = await fixture.stateStore.state(for: scope)
+        let durable = try XCTUnwrap(storedState)
+        let coverage = try XCTUnwrap(durable.cachedState?.coverage)
+        XCTAssertEqual(coverage.count, 1)
+        let persistedCoverage = try XCTUnwrap(coverage.first)
+        XCTAssertEqual(persistedCoverage.feature, .reviews)
+        XCTAssertEqual(persistedCoverage.status, .unavailable)
+        XCTAssertNil(persistedCoverage.lastSuccessfulAt)
+        XCTAssertNil(durable.cachedState?.lastSuccessfulSyncAt)
+    }
+
     func testAttachedPriorityRegressionUsesContinuationReceiptRatherThanArrayIndexing() async throws {
         let fixture = CoordinatorFixture()
         let scope = fixture.scope()

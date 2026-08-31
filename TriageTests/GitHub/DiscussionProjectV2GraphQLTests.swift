@@ -207,6 +207,53 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertFalse(bodies.contains { String(decoding: $0, as: UTF8.self).contains("\"nodeID\"") })
     }
 
+    func testProjectClientRetainsDraftAndRedactedItemsAsDistinctSourceFacts() async throws {
+        let session = DiscussionProjectSession(responses: [
+            projectItemsResponse(nodes: """
+            [{"id":"PVTI_redacted","type":"REDACTED","updatedAt":"2026-01-01T00:00:00Z","content":null},
+             {"id":"PVTI_draft","type":"DRAFT_ISSUE","updatedAt":"2026-01-01T00:00:00Z","content":{"__typename":"DraftIssue","id":"PVDI_1"}}]
+            """),
+            projectFieldValuesResponse(itemID: "PVTI_redacted"),
+            projectFieldValuesResponse(itemID: "PVTI_draft")
+        ])
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        let inventory = try await client.allItems(
+            projectNodeID: GitHubNodeID(rawValue: "P_1")!,
+            githubOrganizationID: 1,
+            validateScope: {}
+        )
+
+        XCTAssertEqual(inventory.redactedItemNodeIDs, [GitHubNodeID(rawValue: "PVTI_redacted")!])
+        XCTAssertFalse(inventory.hasIncompleteFieldValues)
+        let draft = try XCTUnwrap(inventory.items.first(where: { $0.nodeID.rawValue == "PVTI_draft" }))
+        XCTAssertEqual(draft.contentNodeID, GitHubNodeID(rawValue: "PVDI_1")!)
+        XCTAssertEqual(draft.contentKind, .projectDraftIssue)
+    }
+
+    func testProjectClientStopsWhenScopeChangesAfterAnInFlightPage() async throws {
+        let session = DiscussionProjectSession(responses: [projectInventoryResponse()])
+        let validator = ScopeChangeAfterNetworkValidator()
+        let client = GitHubProjectV2Client(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        do {
+            _ = try await client.allProjects(
+                organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
+                githubOrganizationID: 1,
+                validateScope: { try await validator.validate() }
+            )
+            XCTFail("Expected the post-request scope validation to cancel the traversal.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let callCount = await validator.callCount()
+        XCTAssertEqual(callCount, 3)
+    }
+
     func testProjectClientPreservesScopedPartialResultsWithoutNormalizingThem() async throws {
         let header = "partial-results; organizations=1"
         let session = DiscussionProjectSession(
@@ -324,15 +371,17 @@ private func projectInventoryResponse() -> Data {
     """.utf8)
 }
 
-private func projectItemsResponse() -> Data {
+private func projectItemsResponse(nodes: String = """
+[{"id":"PVTI_1","type":"ISSUE","updatedAt":"2026-01-01T00:00:00Z","content":{"__typename":"Issue","id":"I_1"}}]
+""") -> Data {
     Data("""
-    {"data":{"node":{"id":"P_1","items":{"nodes":[{"id":"PVTI_1","type":"ISSUE","updatedAt":"2026-01-01T00:00:00Z","content":{"__typename":"Issue","id":"I_1"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4998,"resetAt":"2026-01-02T00:00:00Z"}}}
+    {"data":{"node":{"id":"P_1","items":{"nodes":\(nodes),"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4998,"resetAt":"2026-01-02T00:00:00Z"}}}
     """.utf8)
 }
 
-private func projectFieldValuesResponse() -> Data {
+private func projectFieldValuesResponse(itemID: String = "PVTI_1") -> Data {
     Data("""
-    {"data":{"node":{"id":"PVTI_1","fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4997,"resetAt":"2026-01-02T00:00:00Z"}}}
+    {"data":{"node":{"id":"\(itemID)","fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4997,"resetAt":"2026-01-02T00:00:00Z"}}}
     """.utf8)
 }
 
