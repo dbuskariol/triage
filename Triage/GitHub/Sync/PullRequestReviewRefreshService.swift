@@ -369,7 +369,8 @@ actor PullRequestReviewRefreshService {
             redactedDiagnostic: Self.diagnostic(for: classification),
             rawProvenance: Self.rawProvenance(
                 for: failure,
-                accumulatedRawPages: accumulatedRawPages
+                accumulatedRawPages: accumulatedRawPages,
+                classification: classification
             ),
             rawPages: rawPages
         )
@@ -431,8 +432,17 @@ actor PullRequestReviewRefreshService {
 
     private nonisolated static func rawProvenance(
         for failure: GitHubPullRequestReviewFetchFailure,
-        accumulatedRawPages: [GitHubPullRequestReviewRawPage]
+        accumulatedRawPages: [GitHubPullRequestReviewRawPage],
+        classification: ReviewCandidateFailureClassification
     ) -> ReviewCandidateFailureRawProvenance {
+        if accumulatedRawPages.isEmpty,
+           failure.rawPages.isEmpty,
+           classification == .ssoRequired,
+           case let .github(githubFailure) = failure.terminalFailure,
+           githubFailure.kind == .forbidden,
+           githubFailure.statusCode == 403 {
+            return .zeroRawBodylessSelectedOrganizationSSOFailure
+        }
         guard accumulatedRawPages.isEmpty, failure.rawPages.isEmpty,
               case let .github(githubFailure) = failure.terminalFailure,
               (githubFailure.kind == .forbidden || githubFailure.kind == .notFound),

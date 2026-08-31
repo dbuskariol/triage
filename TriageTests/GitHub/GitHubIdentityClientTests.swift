@@ -2,6 +2,99 @@ import XCTest
 @testable import Triage
 
 final class GitHubIdentityClientTests: XCTestCase {
+    func testAuthenticatedUserRejectsRevokedAndMalformedIdentityWithoutYieldingAProfile() async throws {
+        let revokedSession = IdentityFixtureSession(responses: [
+            "/user": .init(statusCode: 401, body: Data(#"{"message":"Bad credentials"}"#.utf8))
+        ])
+        let revokedClient = try identityClient(session: revokedSession)
+
+        do {
+            _ = try await GitHubIdentityClient(client: revokedClient).authenticatedUser()
+            XCTFail("A revoked credential must not yield a replacement profile.")
+        } catch let failure as GitHubFailure {
+            XCTAssertEqual(failure.kind, .unauthorized)
+        }
+        let revokedPaths = await revokedSession.requestedPaths()
+        XCTAssertEqual(revokedPaths, ["/user"])
+
+        let malformedSession = IdentityFixtureSession(responses: [
+            "/user": .init(statusCode: 200, body: Data(#"{"id":"not-a-number"}"#.utf8))
+        ])
+        let malformedClient = try identityClient(session: malformedSession)
+
+        do {
+            _ = try await GitHubIdentityClient(client: malformedClient).authenticatedUser()
+            XCTFail("An invalid identity payload must not yield a profile to overwrite local state.")
+        } catch let error as GitHubRESTClientError {
+            XCTAssertEqual(error, .invalidJSON)
+        }
+        let malformedPaths = await malformedSession.requestedPaths()
+        XCTAssertEqual(malformedPaths, ["/user"])
+    }
+
+    func testEmptyOrganizationPageIsASuccessfulInventoryRatherThanNegativeEvidence() async throws {
+        let session = IdentityFixtureSession(responses: [
+            "/user/orgs?per_page=100": .init(statusCode: 200, body: Data("[]".utf8))
+        ])
+        let client = try identityClient(session: session)
+
+        let page = try await GitHubIdentityClient(client: client).organizations()
+
+        XCTAssertTrue(page.values.isEmpty)
+        XCTAssertNil(page.nextPageURL)
+        XCTAssertNil(page.ssoHeader)
+        let requestedPaths = await session.requestedPaths()
+        XCTAssertEqual(requestedPaths, ["/user/orgs?per_page=100"])
+    }
+
+    func testSelectedOrganizationSSOAndApprovalFailuresRemainScopedToThatOrganization() async throws {
+        let ssoSession = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(
+                statusCode: 403,
+                body: Data(#"{"message":"SSO required"}"#.utf8),
+                headers: ["X-GitHub-SSO": "required; url=https://github.com/orgs/acme/sso"]
+            ),
+            "/orgs/other": .init(
+                statusCode: 200,
+                body: Data(#"{"id":2,"node_id":"O_2","login":"other"}"#.utf8)
+            )
+        ])
+        let ssoClient = try identityClient(session: ssoSession)
+        let identity = GitHubIdentityClient(client: ssoClient)
+
+        do {
+            _ = try await identity.organization(named: "acme")
+            XCTFail("SSO must block only the selected organization request.")
+        } catch let failure as GitHubFailure {
+            XCTAssertEqual(failure.kind, .forbidden)
+            XCTAssertEqual(
+                failure.ssoHeader,
+                .authorizationRequired(URL(string: "https://github.com/orgs/acme/sso")!)
+            )
+        }
+        let other = try await identity.organization(named: "other")
+        XCTAssertEqual(other.value.login, "other")
+        let ssoPaths = await ssoSession.requestedPaths()
+        XCTAssertEqual(ssoPaths, ["/orgs/acme", "/orgs/other"])
+
+        let approvalSession = IdentityFixtureSession(responses: [
+            "/orgs/acme": .init(
+                statusCode: 403,
+                body: Data(#"{"message":"Personal access token pending approval"}"#.utf8)
+            )
+        ])
+        let approvalClient = try identityClient(session: approvalSession)
+
+        do {
+            _ = try await GitHubIdentityClient(client: approvalClient).organization(named: "acme")
+            XCTFail("Organization approval must remain an explicit access failure.")
+        } catch let failure as GitHubFailure {
+            XCTAssertEqual(failure.accessRestriction, .organizationApprovalRequired)
+        }
+        let approvalPaths = await approvalSession.requestedPaths()
+        XCTAssertEqual(approvalPaths, ["/orgs/acme"])
+    }
+
     func testOrganizationInventoryPaginatesDeduplicatesAndAggregatesSSOHeaders() async throws {
         let secondPage = URL(string: "https://api.github.com/user/orgs?page=2")!
         let client = GitHubRESTClient(
@@ -106,6 +199,54 @@ final class GitHubIdentityClientTests: XCTestCase {
         let inventory = try await GitHubIdentityClient(client: client).allRepositories(in: "acme")
 
         XCTAssertEqual(inventory.repositories.map(\.hasDiscussions), [nil])
+    }
+
+    private func identityClient(session: IdentityFixtureSession) throws -> GitHubRESTClient {
+        GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token")
+        )
+    }
+}
+
+private actor IdentityFixtureSession: HTTPSession {
+    struct Response: Sendable {
+        let statusCode: Int
+        let body: Data
+        let headers: [String: String]
+
+        init(statusCode: Int, body: Data, headers: [String: String] = [:]) {
+            self.statusCode = statusCode
+            self.body = body
+            self.headers = headers
+        }
+    }
+
+    private let responses: [String: Response]
+    private var paths = [String]()
+
+    init(responses: [String: Response]) {
+        self.responses = responses
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard let url = request.url else { throw URLError(.badURL) }
+        let path = [url.path, url.query].compactMap { $0 }.joined(separator: "?")
+        guard let response = responses[path] else { throw URLError(.resourceUnavailable) }
+        paths.append(path)
+        return (
+            response.body,
+            HTTPURLResponse(
+                url: url,
+                statusCode: response.statusCode,
+                httpVersion: nil,
+                headerFields: response.headers
+            )!
+        )
+    }
+
+    func requestedPaths() -> [String] {
+        paths
     }
 }
 

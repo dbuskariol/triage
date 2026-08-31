@@ -28,7 +28,7 @@ actor ProjectV2Repository {
             try Self.validateOrganization(accountID: accountID, organization: organization, in: database)
             try Self.saveRaw(rawPages, scope: scope, feature: .projects, streamID: streamID,
                              sourceNodeID: organization.nodeID, accountID: accountID,
-                             allowedItemNodeIDs: [],
+                             normalizedRootNodeIDs: Set(projects.map(\.nodeID)),
                              requiresCompleteTraversal: coverageRecords.contains { $0.status == .complete },
                              observedAt: observedAt, parserVersion: parserVersion, in: database)
             guard Set(projects.map(\.nodeID)).count == projects.count else { throw GitHubProjectV2NormalizationError.duplicateProjectID }
@@ -77,7 +77,7 @@ actor ProjectV2Repository {
             }
             try Self.saveRaw(rawPages, scope: scope, feature: .projectItems, streamID: streamID,
                              sourceNodeID: project.nodeID, accountID: accountID,
-                             allowedItemNodeIDs: Set(items.map(\.nodeID)),
+                             normalizedRootNodeIDs: Set(items.map(\.nodeID)),
                              requiresCompleteTraversal: coverageRecords.contains { $0.status == .complete },
                              observedAt: observedAt, parserVersion: parserVersion, in: database)
             for item in items {
@@ -190,7 +190,7 @@ actor ProjectV2Repository {
             try Self.validateOrganization(accountID: accountID, organization: organization, in: database)
             for snapshot in try Self.preparedRaw(
                 pages, scope: scope, feature: feature, streamID: streamID, sourceNodeID: sourceNodeID,
-                accountID: accountID, allowedItemNodeIDs: [], requiresCompleteTraversal: false,
+                accountID: accountID, normalizedRootNodeIDs: [], requiresCompleteTraversal: false,
                 observedAt: observedAt, parserVersion: parserVersion
             ) {
                 try Self.save(snapshot, rejectingConflictAt: observedAt, in: database)
@@ -223,12 +223,12 @@ actor ProjectV2Repository {
     private nonisolated static func saveRaw(
         _ pages: [GitHubProjectV2RawPage], scope: SynchronizationScope, feature: CoverageFeature,
         streamID: SyncStreamID, sourceNodeID: GitHubNodeID, accountID: AccountID,
-        allowedItemNodeIDs: Set<GitHubNodeID>, requiresCompleteTraversal: Bool,
+        normalizedRootNodeIDs: Set<GitHubNodeID>, requiresCompleteTraversal: Bool,
         observedAt: Date, parserVersion: Int, in database: Database
     ) throws {
         for snapshot in try preparedRaw(pages, scope: scope, feature: feature, streamID: streamID,
                                         sourceNodeID: sourceNodeID, accountID: accountID,
-                                        allowedItemNodeIDs: allowedItemNodeIDs,
+                                        normalizedRootNodeIDs: normalizedRootNodeIDs,
                                         requiresCompleteTraversal: requiresCompleteTraversal,
                                         observedAt: observedAt, parserVersion: parserVersion) {
             try save(snapshot, rejectingConflictAt: observedAt, in: database)
@@ -361,7 +361,7 @@ actor ProjectV2Repository {
     private nonisolated static func preparedRaw(
         _ pages: [GitHubProjectV2RawPage], scope: SynchronizationScope, feature: CoverageFeature,
         streamID: SyncStreamID, sourceNodeID: GitHubNodeID, accountID: AccountID,
-        allowedItemNodeIDs: Set<GitHubNodeID>, requiresCompleteTraversal: Bool,
+        normalizedRootNodeIDs: Set<GitHubNodeID>, requiresCompleteTraversal: Bool,
         observedAt: Date, parserVersion: Int
     ) throws -> [RawAPISnapshot] {
         guard (feature == .projects || feature == .projectItems),
@@ -372,7 +372,7 @@ actor ProjectV2Repository {
             pages,
             feature: feature,
             sourceNodeID: sourceNodeID,
-            allowedItemNodeIDs: allowedItemNodeIDs,
+            normalizedRootNodeIDs: normalizedRootNodeIDs,
             requiresCompleteTraversal: requiresCompleteTraversal
         )
         return try pages.map { page in
@@ -440,13 +440,14 @@ actor ProjectV2Repository {
     private struct ProjectRawPageInfo {
         let hasNextPage: Bool
         let endCursor: String?
+        let connectionNodeIDs: Set<GitHubNodeID>?
     }
 
     private nonisolated static func validateTraversal(
         _ pages: [GitHubProjectV2RawPage],
         feature: CoverageFeature,
         sourceNodeID: GitHubNodeID,
-        allowedItemNodeIDs: Set<GitHubNodeID>,
+        normalizedRootNodeIDs: Set<GitHubNodeID>,
         requiresCompleteTraversal: Bool
     ) throws {
         guard !pages.isEmpty else {
@@ -457,6 +458,7 @@ actor ProjectV2Repository {
         }
         var seenBases = Set<String>()
         var fieldTargets = Set<GitHubNodeID>()
+        var rootNodeIDs = Set<GitHubNodeID>()
         var sawRootTraversal = false
         var currentBase: String?
         var currentIndex = 0
@@ -478,8 +480,8 @@ actor ProjectV2Repository {
                 sawRootTraversal = true
             case (.projectItems, .fieldValues):
                 sawFieldGroup = true
-                if !allowedItemNodeIDs.isEmpty {
-                    guard allowedItemNodeIDs.contains(request.target) else {
+                if !normalizedRootNodeIDs.isEmpty {
+                    guard normalizedRootNodeIDs.contains(request.target) else {
                         throw ProjectV2RepositoryError.invalidRawAuthority
                     }
                 }
@@ -516,6 +518,19 @@ actor ProjectV2Repository {
                         operation: request.operation,
                         expectedTarget: request.target
                     )
+                    if request.operation == .projects || request.operation == .items {
+                        guard let connectionNodeIDs = priorInfo?.connectionNodeIDs else {
+                            if requiresCompleteTraversal {
+                                throw ProjectV2RepositoryError.invalidRawAuthority
+                            }
+                            continue
+                        }
+                        if requiresCompleteTraversal,
+                           !rootNodeIDs.isDisjoint(with: connectionNodeIDs) {
+                            throw ProjectV2RepositoryError.invalidRawAuthority
+                        }
+                        rootNodeIDs.formUnion(connectionNodeIDs)
+                    }
                 } catch {
                     // Failed traversals retain their terminal malformed page as
                     // raw evidence, but it can never authorize complete state.
@@ -528,8 +543,11 @@ actor ProjectV2Repository {
             guard sawRootTraversal, priorInfo?.hasNextPage == false else {
                 throw ProjectV2RepositoryError.invalidRawAuthority
             }
+            guard rootNodeIDs == normalizedRootNodeIDs else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
             if feature == .projectItems {
-                guard fieldTargets == allowedItemNodeIDs else {
+                guard fieldTargets == normalizedRootNodeIDs else {
                     throw ProjectV2RepositoryError.invalidRawAuthority
                 }
             }
@@ -594,7 +612,27 @@ actor ProjectV2Repository {
         guard !hasNextPage || endCursor?.isEmpty == false else {
             throw ProjectV2RepositoryError.invalidRawAuthority
         }
-        return ProjectRawPageInfo(hasNextPage: hasNextPage, endCursor: endCursor)
+        let connectionNodeIDs: Set<GitHubNodeID>?
+        switch operation {
+        case .projects, .items:
+            guard let rawNodes = connection["nodes"] as? [[String: Any]] else {
+                connectionNodeIDs = nil
+                break
+            }
+            let parsedNodeIDs = rawNodes.compactMap { $0["id"] as? String }.compactMap(GitHubNodeID.init(rawValue:))
+            guard parsedNodeIDs.count == rawNodes.count,
+                  Set(parsedNodeIDs).count == parsedNodeIDs.count else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
+            connectionNodeIDs = Set(parsedNodeIDs)
+        case .fieldValues:
+            connectionNodeIDs = nil
+        }
+        return ProjectRawPageInfo(
+            hasNextPage: hasNextPage,
+            endCursor: endCursor,
+            connectionNodeIDs: connectionNodeIDs
+        )
     }
 
     private nonisolated static func save(

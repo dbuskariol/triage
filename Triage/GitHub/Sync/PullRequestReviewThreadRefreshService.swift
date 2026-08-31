@@ -309,6 +309,11 @@ actor PullRequestReviewThreadRefreshService {
         else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
         }
+        let discoveredCommentNodeIDsByThread = Dictionary(
+            uniqueKeysWithValues: inventory.records.map { record in
+                (record.nodeID, record.comments.map(\.nodeID))
+            }
+        )
 
         var segments = [ReviewCandidateTraversalSegment]()
         segments.append(
@@ -345,6 +350,7 @@ actor PullRequestReviewThreadRefreshService {
                 for: inventory.records
             ),
             discoveredThreadNodeIDs: discoveredThreadNodeIDs,
+            discoveredCommentNodeIDsByThread: discoveredCommentNodeIDsByThread,
             segments: segments
         )
     }

@@ -22,11 +22,28 @@ struct TriageProductionComposition: Sendable {
         self.cachesDirectory = cachesDirectory
     }
 
-    func dependencies() -> TriageApplicationDependencies {
+    func dependencies(
+        notificationSettings: (any NotificationDeliveryPreferencesProviding)? = nil
+    ) -> TriageApplicationDependencies {
         let workspaceCoordinator = TriageWorkspaceCoordinator(
             vaultRegistry: vaultRegistry,
             secretStore: secretStore
         )
+        let databaseObserver = DatabaseWorkspaceObserver(
+            vaultRegistry: vaultRegistry,
+            secretStore: secretStore
+        )
+        let workspaceObserver: any WorkspaceObserving
+        if let notificationSettings {
+            workspaceObserver = NotificationDeliveringWorkspaceObserver(
+                source: databaseObserver,
+                vaultRegistry: vaultRegistry,
+                secretStore: secretStore,
+                settings: notificationSettings
+            )
+        } else {
+            workspaceObserver = databaseObserver
+        }
         return TriageApplicationDependencies(
             accountSession: TriageAccountSessionService(
                 vaultRegistry: vaultRegistry,
@@ -36,10 +53,7 @@ struct TriageProductionComposition: Sendable {
             ),
             workspaceCoordinator: workspaceCoordinator,
             refreshLifecycle: workspaceCoordinator,
-            workspaceObserver: DatabaseWorkspaceObserver(
-                vaultRegistry: vaultRegistry,
-                secretStore: secretStore
-            ),
+            workspaceObserver: workspaceObserver,
             workspaceMutator: TriageWorkspaceMutator(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore

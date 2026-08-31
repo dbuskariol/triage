@@ -91,6 +91,8 @@ struct TriageApp: App {
     @StateObject private var navigation = AppNavigationModel()
     @StateObject private var appModel: TriageAppModel
     @StateObject private var preferences = AppPreferences()
+    @StateObject private var notificationSettings: NativeNotificationSettings
+    @StateObject private var notificationAuthorization: NotificationSystemAuthorization
     @StateObject private var softwareUpdates = SoftwareUpdateController()
     @StateObject private var externalNavigation = ExternalNavigationConfirmationCoordinator()
     private let notificationScheduler = UserNotificationCenterScheduler()
@@ -98,6 +100,9 @@ struct TriageApp: App {
 
     init() {
         do {
+            let notificationSettings = NativeNotificationSettings()
+            _notificationSettings = StateObject(wrappedValue: notificationSettings)
+            _notificationAuthorization = StateObject(wrappedValue: NotificationSystemAuthorization())
             let fileManager = FileManager.default
             let applicationSupportDirectory = try fileManager.url(
                 for: .applicationSupportDirectory,
@@ -119,11 +124,11 @@ struct TriageApp: App {
                 cachesDirectory: cachesDirectory
             )
             _appModel = StateObject(wrappedValue: TriageAppModel(
-                dependencies: composition.dependencies(),
+                dependencies: composition.dependencies(notificationSettings: notificationSettings),
                 vaultRegistry: vaultRegistry
             ))
         } catch {
-            fatalError("Triage could not construct its local encrypted workspace: \(error)")
+            fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
         }
     }
 
@@ -134,6 +139,8 @@ struct TriageApp: App {
                     .environmentObject(appModel)
                     .environmentObject(navigation)
                     .environmentObject(preferences)
+                    .environmentObject(notificationSettings)
+                    .environmentObject(notificationAuthorization)
                     .environmentObject(softwareUpdates)
                     .frame(minWidth: 940, minHeight: 680)
                     .task {
@@ -181,6 +188,8 @@ struct TriageApp: App {
                 .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
+                .environmentObject(notificationSettings)
+                .environmentObject(notificationAuthorization)
                 .environmentObject(softwareUpdates)
                 .frame(width: 720, height: 620)
         }
@@ -196,4 +205,10 @@ struct TriageApp: App {
         )
     }
 
+}
+
+enum TriageStartupDiagnostics {
+    static func workspaceConstructionFatalDiagnostic(for _: Error) -> String {
+        "Triage could not construct its local encrypted workspace."
+    }
 }

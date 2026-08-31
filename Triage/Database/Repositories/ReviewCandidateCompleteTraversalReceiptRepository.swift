@@ -234,6 +234,130 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         }) else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
         }
+        try validatePersistedTopology(token, in: database)
+    }
+
+    /// Rebuilds the persisted receipt from its immutable raw bindings before
+    /// permitting a destructive replacement. This rejects count-preserving
+    /// corruption of segment kinds, request keys, endpoints, or GraphQL page
+    /// topology even if a database predates append-only receipt triggers.
+    private nonisolated static func validatePersistedTopology(
+        _ token: ReviewCandidateCompleteTraversalReceiptToken,
+        in database: Database
+    ) throws {
+        guard let candidateRow = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT repositories.owner_login, repositories.name, github_nodes.number
+                FROM github_nodes
+                JOIN repositories ON repositories.id = github_nodes.repository_id
+                WHERE github_nodes.github_node_id = ? AND github_nodes.repository_id = ?
+                """,
+            arguments: [token.candidateNodeID.rawValue, token.repositoryID.rawValue]
+        ),
+        let owner: String = candidateRow["owner_login"],
+        let repository: String = candidateRow["name"],
+        let number: Int = candidateRow["number"],
+        let repositoryPath = try? GitHubRepositoryPath(owner: owner, repository: repository),
+        let receiptRow = try Row.fetchOne(
+            database,
+            sql: "SELECT parser_version, observed_at_ms, normalized_digest FROM review_candidate_complete_traversal_receipts WHERE id = ?",
+            arguments: [token.id.uuidString.lowercased()]
+        ),
+        let parserVersion: Int = receiptRow["parser_version"],
+        let observedAtMilliseconds: Int64 = receiptRow["observed_at_ms"],
+        let normalizedDigest: Data = receiptRow["normalized_digest"]
+        else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
+
+        let rows = try Row.fetchAll(
+            database,
+            sql: """
+                SELECT segments.segment_key, segments.segment_kind, segments.parent_thread_node_id,
+                       pages.page_ordinal, pages.raw_snapshot_id, pages.request_key, pages.is_terminal,
+                       raw.endpoint, raw.etag, raw.last_modified, raw.payload
+                FROM review_candidate_complete_traversal_segments segments
+                JOIN review_candidate_complete_traversal_pages pages
+                  ON pages.receipt_id = segments.receipt_id AND pages.segment_key = segments.segment_key
+                JOIN raw_api_snapshots raw ON raw.id = pages.raw_snapshot_id
+                WHERE segments.receipt_id = ?
+                ORDER BY segments.segment_key, pages.page_ordinal
+                """,
+            arguments: [token.id.uuidString.lowercased()]
+        )
+        let grouped = Dictionary(grouping: rows) { (row: Row) -> String? in row["segment_key"] }
+        guard !grouped.isEmpty, !grouped.keys.contains(nil) else {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+        }
+        let scope = token.scope
+        let reconstructed = try grouped.values.map { rows -> ReviewCandidateTraversalSegment in
+            guard let first = rows.first,
+                  let key: String = first["segment_key"],
+                  let kindValue: String = first["segment_kind"],
+                  let kind = ReviewCandidateTraversalSegmentKind(rawValue: kindValue)
+            else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
+            let parentValue: String? = first["parent_thread_node_id"]
+            let parent = parentValue.flatMap(GitHubNodeID.init(rawValue:))
+            guard (parentValue == nil) == (parent == nil), key == segmentKey(kind: kind, parentThreadNodeID: parent) else {
+                throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+            }
+            let pages = try rows.map { row -> ReviewCandidateTraversalPage in
+                guard let ordinal: Int = row["page_ordinal"],
+                      let rawValue: String = row["raw_snapshot_id"], let rawSnapshotID = RawAPISnapshotID(rawValue: rawValue),
+                      let requestKey: String = row["request_key"],
+                      let terminal: Int = row["is_terminal"], terminal == 0 || terminal == 1,
+                      let endpoint: String = row["endpoint"],
+                      let payload: Data = row["payload"]
+                else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
+                let eTag: String? = row["etag"]
+                let lastModified: String? = row["last_modified"]
+                return .init(
+                    ordinal: ordinal, rawSnapshotID: rawSnapshotID,
+                    requestIdentity: .init(scope: scope, feature: token.feature, streamID: token.streamID, requestKey: requestKey),
+                    endpoint: endpoint, eTag: eTag, lastModified: lastModified, payload: payload,
+                    isTerminal: terminal == 1
+                )
+            }
+            return .init(kind: kind, parentThreadNodeID: parent, pages: pages)
+        }
+        let candidate = PullRequestReviewCandidate(
+            nodeID: token.candidateNodeID, repositoryID: token.repositoryID,
+            repository: repositoryPath, number: number, sourceRevision: token.candidateSourceRevision
+        )
+        var discoveredCommentNodeIDsByThread = [GitHubNodeID: [GitHubNodeID]]()
+        if token.feature == .reviewThreads {
+            for segment in reconstructed where segment.kind == .threadComments {
+                guard let threadNodeID = segment.parentThreadNodeID,
+                      discoveredCommentNodeIDsByThread[threadNodeID] == nil
+                else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken }
+                let commentNodeIDs = try segment.pages.flatMap { page -> [GitHubNodeID] in
+                    guard let evidence = graphQLCommentEvidence(
+                        page.payload,
+                        threadNodeID: threadNodeID
+                    ) else {
+                        throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+                    }
+                    return evidence.commentNodeIDs
+                }
+                discoveredCommentNodeIDsByThread[threadNodeID] = commentNodeIDs
+            }
+        }
+        let traversal = ReviewCandidateCompleteTraversal(
+            id: token.id, scope: scope, feature: token.feature, streamID: token.streamID,
+            candidate: candidate, candidateSourceRevision: token.candidateSourceRevision,
+            parserVersion: parserVersion,
+            observedAt: Date(timeIntervalSince1970: TimeInterval(observedAtMilliseconds) / 1_000),
+            normalizedDigest: normalizedDigest,
+            discoveredThreadNodeIDs: reconstructed.compactMap { segment in
+                segment.kind == .threadComments ? segment.parentThreadNodeID : nil
+            },
+            discoveredCommentNodeIDsByThread: discoveredCommentNodeIDsByThread,
+            segments: reconstructed
+        )
+        do {
+            try validateTopology(traversal)
+        } catch {
+            throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidReceiptToken
+        }
     }
 
     private nonisolated static func validate(
@@ -341,6 +465,7 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         switch traversal.feature {
         case .reviews:
             guard traversal.discoveredThreadNodeIDs.isEmpty,
+                  traversal.discoveredCommentNodeIDsByThread.isEmpty,
                   traversal.segments.count == 2,
                   traversal.segments.contains(where: { $0.kind == .reviewHistory && $0.parentThreadNodeID == nil }),
                   let requested = traversal.segments.first(where: { $0.kind == .requestedReviewers }),
@@ -357,13 +482,17 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
             guard roots.count == 1,
                   Set(comments.compactMap(\.parentThreadNodeID)) == Set(traversal.discoveredThreadNodeIDs),
                   comments.count == traversal.discoveredThreadNodeIDs.count,
+                  Set(traversal.discoveredCommentNodeIDsByThread.keys) == Set(traversal.discoveredThreadNodeIDs),
+                  traversal.discoveredCommentNodeIDsByThread.values.flatMap({ $0 }).count
+                    == Set(traversal.discoveredCommentNodeIDsByThread.values.flatMap({ $0 })).count,
                   !traversal.segments.contains(where: { $0.kind == .reviewHistory || $0.kind == .requestedReviewers })
             else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
             try validateGraphQLThreadTopology(
                 rootPages: roots[0].pages,
                 commentSegments: comments,
                 candidateNodeID: traversal.candidate.nodeID,
-                discoveredThreadNodeIDs: traversal.discoveredThreadNodeIDs
+                discoveredThreadNodeIDs: traversal.discoveredThreadNodeIDs,
+                discoveredCommentNodeIDsByThread: traversal.discoveredCommentNodeIDsByThread
             )
         default:
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidFeature
@@ -415,7 +544,8 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         rootPages: [ReviewCandidateTraversalPage],
         commentSegments: [ReviewCandidateTraversalSegment],
         candidateNodeID: GitHubNodeID,
-        discoveredThreadNodeIDs: [GitHubNodeID]
+        discoveredThreadNodeIDs: [GitHubNodeID],
+        discoveredCommentNodeIDsByThread: [GitHubNodeID: [GitHubNodeID]]
     ) throws {
         guard Set(rootPages.map(\.requestIdentity.requestKey)).count == rootPages.count else {
             throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage
@@ -440,9 +570,11 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
         }
         for segment in commentSegments {
             guard let threadNodeID = segment.parentThreadNodeID,
+                  let expectedCommentNodeIDs = discoveredCommentNodeIDsByThread[threadNodeID],
                   Set(segment.pages.map(\.requestIdentity.requestKey)).count == segment.pages.count
             else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
             var expectedCommentCursor: String? = ""
+            var payloadCommentNodeIDs = [GitHubNodeID]()
             for page in segment.pages {
                 let expectedEndpoint = "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/page=\(page.ordinal)"
                 guard page.endpoint == expectedEndpoint,
@@ -451,10 +583,14 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
                         prefix: "graphql:TriagePullRequestReviewThreadComments/thread=\(threadNodeID.rawValue)/after="
                       ) == expectedCommentCursor,
                       let evidence = graphQLCommentEvidence(page.payload, threadNodeID: threadNodeID),
-                      evidence.isTerminal == page.isTerminal
+                      evidence.pageInfo.isTerminal == page.isTerminal
                 else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage }
-                expectedCommentCursor = evidence.endCursor
+                payloadCommentNodeIDs.append(contentsOf: evidence.commentNodeIDs)
+                expectedCommentCursor = evidence.pageInfo.endCursor
             }
+            guard payloadCommentNodeIDs.count == expectedCommentNodeIDs.count,
+                  Set(payloadCommentNodeIDs) == Set(expectedCommentNodeIDs)
+            else { throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal }
         }
     }
 
@@ -486,12 +622,16 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     private nonisolated static func graphQLCommentEvidence(
         _ payload: Data,
         threadNodeID: GitHubNodeID
-    ) -> GraphQLPageInfo? {
+    ) -> GraphQLCommentEvidence? {
         guard let node = graphQLNode(payload),
               node["id"] as? String == threadNodeID.rawValue,
-              let comments = node["comments"] as? [String: Any]
+              let comments = node["comments"] as? [String: Any],
+              let nodes = comments["nodes"] as? [[String: Any]],
+              let pageInfo = graphQLPageInfo(comments["pageInfo"])
         else { return nil }
-        return graphQLPageInfo(comments["pageInfo"])
+        let identifiers = nodes.compactMap { $0["id"] as? String }.compactMap(GitHubNodeID.init(rawValue:))
+        guard identifiers.count == nodes.count else { return nil }
+        return .init(commentNodeIDs: identifiers, pageInfo: pageInfo)
     }
 
     private nonisolated static func graphQLPageInfo(_ value: Any?) -> GraphQLPageInfo? {
@@ -520,6 +660,11 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
 
     private struct GraphQLRootEvidence {
         let threadIDs: Set<GitHubNodeID>
+        let pageInfo: GraphQLPageInfo
+    }
+
+    private struct GraphQLCommentEvidence {
+        let commentNodeIDs: [GitHubNodeID]
         let pageInfo: GraphQLPageInfo
     }
 
@@ -574,11 +719,19 @@ actor ReviewCandidateCompleteTraversalReceiptRepository {
     }
 
     private nonisolated static func segmentKey(_ segment: ReviewCandidateTraversalSegment) -> String {
-        switch segment.kind {
+        segmentKey(kind: segment.kind, parentThreadNodeID: segment.parentThreadNodeID)
+    }
+
+    private nonisolated static func segmentKey(
+        kind: ReviewCandidateTraversalSegmentKind,
+        parentThreadNodeID: GitHubNodeID?
+    ) -> String {
+        switch kind {
         case .threadComments:
-            return "threadComments:\(segment.parentThreadNodeID!.rawValue)"
+            guard let parentThreadNodeID else { return "" }
+            return "threadComments:\(parentThreadNodeID.rawValue)"
         default:
-            return segment.kind.rawValue
+            return kind.rawValue
         }
     }
 

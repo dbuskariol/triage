@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import GRDB
 
@@ -27,8 +26,8 @@ struct DerivedIntelligenceInputSnapshot: Sendable {
     let input: DerivedIntelligenceInput
     let sourceStates: [DerivedIntelligenceSourceState]
     let sourceRevisions: [WorkItemID: String]
-    /// Stable SHA-256 digest of every admitted primary source revision. This
-    /// is suitable for binding a durable derived projection to its inputs.
+    /// Stable SHA-256 digest of primary and scoped supplemental source
+    /// authorities, suitable for binding a durable derived projection.
     let aggregateSourceRevision: String
     let isProvisional: Bool
 }
@@ -142,7 +141,10 @@ actor DerivedIntelligenceInputAdapter {
             ),
             sourceStates: sourceStates,
             sourceRevisions: sourceRevisions,
-            aggregateSourceRevision: Self.aggregateSourceRevision(sourceRevisions),
+            aggregateSourceRevision: DerivedIntelligenceSourceRevision.aggregate(
+                primaryRevisions: sourceRevisions,
+                supplementalSources: after.supplementalSources
+            ),
             isProvisional: !fullCoverage.isComplete
                 || after.primarySources.contains(where: { !$0.isCurrent })
                 || sourceStates.contains(where: { $0.availability != .trusted })
@@ -169,6 +171,7 @@ actor DerivedIntelligenceInputAdapter {
         let coverageRecords: [CoverageRecord]
         let coverageRequirements: [CoverageRequirement]
         let primarySources: [PrimarySource]
+        let supplementalSources: [DerivedIntelligenceSupplementalSource]
     }
 
     private struct SupplementalData: Sendable {
@@ -203,6 +206,10 @@ actor DerivedIntelligenceInputAdapter {
 
             let coverage = try CoverageRepository.currentRecords(for: scope, in: database)
             let requirements = try CoverageRequirementProfile.build(for: scope, coverage: coverage, in: database)
+            let supplementalSources = try DerivedIntelligenceSourceRevision.supplementalSources(
+                for: scope,
+                in: database
+            )
             let teams = try Row.fetchAll(
                 database,
                 sql: """
@@ -272,7 +279,8 @@ actor DerivedIntelligenceInputAdapter {
                 visibleTeamNodeIDs: teamRequirement ? Set(teams) : [],
                 coverageRecords: coverage,
                 coverageRequirements: requirements,
-                primarySources: sources
+                primarySources: sources,
+                supplementalSources: supplementalSources
             )
         }
     }
@@ -843,18 +851,4 @@ actor DerivedIntelligenceInputAdapter {
         milliseconds.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
     }
 
-    private nonisolated static func aggregateSourceRevision(_ revisions: [WorkItemID: String]) -> String {
-        var material = Data("triage.derived-input.source-revision.v1".utf8)
-        for (workItemID, revision) in revisions.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
-            appendLengthPrefixed(Data(workItemID.rawValue.utf8), to: &material)
-            appendLengthPrefixed(Data(revision.utf8), to: &material)
-        }
-        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private nonisolated static func appendLengthPrefixed(_ value: Data, to material: inout Data) {
-        var length = UInt64(value.count).bigEndian
-        Swift.withUnsafeBytes(of: &length) { material.append(contentsOf: $0) }
-        material.append(value)
-    }
 }

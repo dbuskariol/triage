@@ -231,6 +231,10 @@ actor ReviewCandidateFailureEnvelopeRepository {
                   statusCode == 403 || statusCode == 404,
                   publication.rawPages.isEmpty
             else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
+        case .zeroRawBodylessSelectedOrganizationSSOFailure:
+            guard publication.classification == .ssoRequired,
+                  publication.rawPages.isEmpty
+            else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidRawPages }
         }
         try validateScheduleStream(publication, in: database)
         try validateCandidate(publication.candidate, scope: publication.scope, in: database)
@@ -371,7 +375,8 @@ actor ReviewCandidateFailureEnvelopeRepository {
               rawPageCount >= 0,
               (rawPageCount > 0
                 || classification == .transportFailure
-                || classification == .unavailableOrPermission),
+                || classification == .unavailableOrPermission
+                || classification == .ssoRequired),
               redactedDiagnosticIsSafe(diagnostic)
         else { throw ReviewCandidateFailureEnvelopeRepositoryError.invalidPersistedData }
         let attemptedAt = Date(timeIntervalSince1970: TimeInterval(attemptedAtMilliseconds) / 1_000)

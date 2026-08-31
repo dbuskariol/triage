@@ -89,6 +89,55 @@ final class PullRequestReviewRefreshServiceTests: XCTestCase {
         XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
     }
 
+    func testBodylessSelectedOrganizationForbiddenPublishesDurableSSOFailure() async throws {
+        let fixture = try await PullRequestReviewRefreshFixture()
+        defer { fixture.remove() }
+        try await fixture.seedCachedReviewState()
+        let durableStateBefore = try await fixture.durableState()
+        let service = try fixture.service(responses: [
+            fixture.reviewsPath: .status(
+                403,
+                Data(),
+                headers: [
+                    "X-GitHub-SSO": "partial-results; organizations=\(fixture.githubOrganizationID)"
+                ]
+            )
+        ], persistsFailures: true)
+
+        let result = try await service.refresh(
+            scope: fixture.scope,
+            githubOrganizationID: fixture.githubOrganizationID,
+            observedAt: fixture.date.addingTimeInterval(10),
+            streamID: fixture.streamID
+        )
+
+        XCTAssertTrue(result.refreshedPullRequestNodeIDs.isEmpty)
+        XCTAssertEqual(result.failureClassifications, [.ssoRequired])
+        XCTAssertEqual(
+            result.ssoHeader?.scoped(to: fixture.githubOrganizationID),
+            .partialResults([fixture.githubOrganizationID])
+        )
+        let cached = try await fixture.persistedReviewState(for: fixture.pullRequest.nodeID)
+        XCTAssertEqual(cached.reviewNodeIDs, [fixture.cachedReviewNodeID.rawValue])
+        XCTAssertEqual(cached.requestedReviewerNodeIDs, [fixture.cachedReviewerNodeID.rawValue])
+        let durableState = try await fixture.durableState()
+        XCTAssertEqual(durableState.rawSnapshots, durableStateBefore.rawSnapshots)
+        let durableFailureCount = try await fixture.vault.read { database in
+            try Int.fetchOne(
+                database,
+                sql: """
+                    SELECT COUNT(*) FROM review_candidate_failure_envelopes
+                    WHERE candidate_node_id = ? AND classification = ?
+                    """,
+                arguments: [
+                    fixture.pullRequest.nodeID.rawValue,
+                    ReviewCandidateFailureClassification.ssoRequired.rawValue
+                ]
+            )
+        }
+        XCTAssertEqual(durableFailureCount, 1)
+    }
+
     func testUnrelatedOrganizationPartialHeaderAllowsCleanReplacement() async throws {
         let fixture = try await PullRequestReviewRefreshFixture()
         defer { fixture.remove() }

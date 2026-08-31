@@ -124,6 +124,53 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         }
     }
 
+    func testSupplementalReviewAndThreadRevisionsInvalidateAggregateAndPersistence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.seedNormalizedSources()
+        let adapter = DerivedIntelligenceInputAdapter(vault: fixture.vault)
+        let initial = try await adapter.snapshot(for: fixture.scope, aiPolicy: fixture.aiPolicy, evaluatedAt: fixture.now)
+        let output = try DerivedIntelligenceCoordinator().recompute(initial.input)
+        let persisted = persistenceSnapshot(output: output, input: initial)
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+
+        try await fixture.advanceReviewSourceRevision()
+        let afterReview = try await adapter.snapshot(for: fixture.scope, aiPolicy: fixture.aiPolicy, evaluatedAt: fixture.now)
+        try await fixture.advanceReviewThreadSourceRevision()
+        let refreshed = try await adapter.snapshot(for: fixture.scope, aiPolicy: fixture.aiPolicy, evaluatedAt: fixture.now)
+
+        XCTAssertNotEqual(initial.aggregateSourceRevision, afterReview.aggregateSourceRevision)
+        XCTAssertNotEqual(afterReview.aggregateSourceRevision, refreshed.aggregateSourceRevision)
+        do {
+            try await repository.replace(persisted)
+            XCTFail("A revision-stale review-thread authority must not be persisted.")
+        } catch {
+            XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .staleSourceRevision)
+        }
+    }
+
+    func testProjectFieldValueChangeInvalidatesAggregateAndPersistence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        try await fixture.seedNormalizedSources()
+        let adapter = DerivedIntelligenceInputAdapter(vault: fixture.vault)
+        let initial = try await adapter.snapshot(for: fixture.scope, aiPolicy: fixture.aiPolicy, evaluatedAt: fixture.now)
+        let output = try DerivedIntelligenceCoordinator().recompute(initial.input)
+        let persisted = persistenceSnapshot(output: output, input: initial)
+        let repository = DerivedIntelligenceRepository(vault: fixture.vault)
+
+        try await fixture.updateProjectFieldValue(to: "Urgent")
+        let refreshed = try await adapter.snapshot(for: fixture.scope, aiPolicy: fixture.aiPolicy, evaluatedAt: fixture.now)
+
+        XCTAssertNotEqual(initial.aggregateSourceRevision, refreshed.aggregateSourceRevision)
+        do {
+            try await repository.replace(persisted)
+            XCTFail("A changed project-field authority must not be persisted under the old aggregate.")
+        } catch {
+            XCTAssertEqual(error as? DerivedIntelligenceRepositoryError, .staleSourceRevision)
+        }
+    }
+
     private func persistenceSnapshot(
         output: DerivedIntelligenceOutput,
         input: DerivedIntelligenceInputSnapshot
@@ -155,6 +202,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         let accountNodeID = GitHubNodeID(rawValue: "derived-e2e-user")!
         let pullRequestNodeID = GitHubNodeID(rawValue: "derived-e2e-pr")!
         let reviewNodeID = GitHubNodeID(rawValue: "derived-e2e-review")!
+        let reviewThreadNodeID = GitHubNodeID(rawValue: "derived-e2e-review-thread")!
         let projectNodeID = GitHubNodeID(rawValue: "derived-e2e-project")!
         let projectItemNodeID = GitHubNodeID(rawValue: "derived-e2e-project-item")!
         let timelineEventID = GitHubEventID(rawValue: "derived-e2e-event")!
@@ -274,6 +322,7 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
             try await saveCoverage(.projectItems, stream: "projects-v2-items-\(organizationID.rawValue)-\(projectNodeID.rawValue)")
             try await insertCurrentAssignment()
             try await insertReview()
+            try await insertReviewThread()
             try await insertTimeline()
             try await insertProjectEvidence()
         }
@@ -309,6 +358,49 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                     body: "Normalized pull request body after a source update"
                 )
             )
+        }
+
+        func advanceReviewThreadSourceRevision() async throws {
+            try await GitHubNodeRepository(vault: vault).save(
+                Self.node(
+                    id: reviewThreadNodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    now: now,
+                    kind: .pullRequestReviewThread,
+                    title: "Review thread",
+                    sourceRevision: "derived-e2e-review-thread-r2",
+                    body: nil
+                )
+            )
+        }
+
+        func advanceReviewSourceRevision() async throws {
+            try await GitHubNodeRepository(vault: vault).save(
+                Self.node(
+                    id: reviewNodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    now: now,
+                    kind: .pullRequestReview,
+                    title: "Changes requested",
+                    sourceRevision: "derived-e2e-review-r2",
+                    body: "Please address the review."
+                )
+            )
+        }
+
+        func updateProjectFieldValue(to value: String) async throws {
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        UPDATE project_field_values
+                        SET display_value = ?
+                        WHERE project_item_node_id = ? AND field_name = 'Priority'
+                        """,
+                    arguments: [value, projectItemNodeID.rawValue]
+                )
+            }
         }
 
         private func saveCoverage(_ feature: CoverageFeature, stream: String) async throws {
@@ -399,6 +491,32 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
                         "Please address the review.", milliseconds(now),
                         "https://github.com/acme/repo/pull/1#review", milliseconds(now)
                     ]
+                )
+            }
+        }
+
+        private func insertReviewThread() async throws {
+            try await GitHubNodeRepository(vault: vault).save(
+                Self.node(
+                    id: reviewThreadNodeID,
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    now: now,
+                    kind: .pullRequestReviewThread,
+                    title: "Review thread",
+                    sourceRevision: "derived-e2e-review-thread-r1",
+                    body: nil
+                )
+            )
+            try await vault.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO review_threads (
+                            github_node_id, pull_request_node_id, is_resolved,
+                            requires_current_user_response, updated_at_ms
+                        ) VALUES (?, ?, 0, 1, ?)
+                        """,
+                    arguments: [reviewThreadNodeID.rawValue, pullRequestNodeID.rawValue, milliseconds(now)]
                 )
             }
         }

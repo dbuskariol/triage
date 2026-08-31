@@ -24,7 +24,7 @@ enum NotificationDestination: String, Codable, Sendable {
   case inbox
 }
 
-enum NotificationReason: String, CaseIterable, Codable, Sendable {
+enum NotificationReason: String, CaseIterable, Codable, Hashable, Sendable {
   case directAssignment
   case directReviewRequest
   case teamReviewRequest
@@ -32,6 +32,24 @@ enum NotificationReason: String, CaseIterable, Codable, Sendable {
   case waitingResponse
   case snoozeDue
   case explicitDeadline
+}
+
+extension NotificationReason {
+  /// User-facing labels intentionally describe a local Triage condition rather
+  /// than reproducing GitHub content in Settings.
+  var title: String {
+    switch self {
+    case .directAssignment: "Assigned to you"
+    case .directReviewRequest: "Direct review request"
+    case .teamReviewRequest: "Team review request"
+    case .highPriorityInboxItem: "High-priority inbox item"
+    case .waitingResponse: "Waiting for a response"
+    case .snoozeDue: "Snooze is due"
+    case .explicitDeadline: "Upcoming deadline"
+    }
+  }
+
+  var notificationSettingsTitle: String { title }
 }
 
 struct NotificationDedupeKey: Codable, Equatable, Hashable, Sendable {

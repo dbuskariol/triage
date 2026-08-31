@@ -181,10 +181,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
 
     func install(
         workItems: [WorkItem],
-        accountID: AccountID,
-        organizationID: OrganizationID
+        scope: SynchronizationScope
     ) {
-        cachedWorkItems[accountID, organizationID] = workItems
+        cachedWorkItems[scope] = workItems
         present(workItems: workItems)
     }
 
@@ -257,7 +256,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               selectedAccountID == scope.accountID,
               selectedOrganizationID == scope.organizationID
         else { return }
-        cachedWorkItems[scope.accountID, scope.organizationID] = snapshot.workItems
+        cachedWorkItems[scope] = snapshot.workItems
         selectedOrganizationFreshness = snapshot.durableState.freshness
         selectedWorkspaceCoverage = snapshot.coverageEvaluation
         present(workItems: snapshot.workItems)
@@ -1027,8 +1026,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             selectedOrganizationFreshness = coordinatorState?.freshness
             install(
                 workItems: workItems,
-                accountID: account.id,
-                organizationID: organization.id
+                scope: scope
             )
             replaceWorkspaceObservation(for: scope)
         } catch is CancellationError {
@@ -1261,17 +1259,13 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             else {
                 return
             }
-            install(
-                workItems: workItems,
-                accountID: account.id,
-                organizationID: organization.id
-            )
             let scope = try await AccountRepository(vault: vault).synchronizationScope(
                 for: account.id,
                 organizationID: organization.id
             )
             try Task.checkCancellation()
             guard workspaceActivation.isCurrent(activationGeneration) else { return }
+            install(workItems: workItems, scope: scope)
             replaceWorkspaceObservation(for: scope)
         } catch is CancellationError {
             return
@@ -1490,7 +1484,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private func presentCachedWorkItems() {
         guard let accountID = selectedAccountID,
               let organizationID = selectedOrganizationID,
-              let cachedWorkItems = cachedWorkItems[accountID, organizationID]
+              let scope = workspaceObservationScope,
+              scope.accountID == accountID,
+              scope.organizationID == organizationID,
+              let cachedWorkItems = cachedWorkItems[scope]
         else {
             present(workItems: [])
             return

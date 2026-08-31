@@ -41,13 +41,14 @@ struct WorkDetailView: View {
                 } label: {
                     Label("Inspector", systemImage: "sidebar.right")
                 }
-                .help("Show Inspector")
-                .accessibilityLabel(navigation.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
+                .help(inspectorVisibility.wrappedValue ? "Hide Inspector" : "Show Inspector")
+                .accessibilityLabel(inspectorVisibility.wrappedValue ? "Hide Inspector" : "Show Inspector")
                 .accessibilityIdentifier("work-detail-inspector-toggle")
                 .focused($accessibilityFocus, equals: .inspectorToggle)
+                .disabled(!WorkDetailPresentation.inspectorIsAvailable(hasSelection: item != nil))
             }
         }
-        .focusedSceneValue(\.triageInspectorVisibility, inspectorVisibility)
+        .focusedSceneValue(\.triageInspectorVisibility, inspectorCommandBinding)
         .onChange(of: navigation.isInspectorVisible) { _, isPresented in
             accessibilityFocus = WorkDetailPresentation.inspectorFocusTarget(isPresented: isPresented)
         }
@@ -66,9 +67,20 @@ struct WorkDetailView: View {
 
     private var inspectorVisibility: Binding<Bool> {
         Binding(
-            get: { navigation.isInspectorVisible },
-            set: { navigation.isInspectorVisible = $0 }
+            get: {
+                WorkDetailPresentation.inspectorIsAvailable(hasSelection: item != nil)
+                    && navigation.isInspectorVisible
+            },
+            set: { isVisible in
+                guard WorkDetailPresentation.inspectorIsAvailable(hasSelection: item != nil) else { return }
+                navigation.isInspectorVisible = isVisible
+            }
         )
+    }
+
+    private var inspectorCommandBinding: Binding<Bool>? {
+        guard WorkDetailPresentation.inspectorIsAvailable(hasSelection: item != nil) else { return nil }
+        return inspectorVisibility
     }
 }
 

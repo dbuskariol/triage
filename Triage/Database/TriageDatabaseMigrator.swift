@@ -2627,6 +2627,43 @@ enum TriageDatabaseMigrator {
                 CREATE INDEX derived_project_items_content_node
                 ON project_items (content_node_id, github_node_id)
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "045-review-candidate-receipt-append-only-v1",
+            checksum: "a2f5e3bd86a41558c5f8e6c906c0e37318c4d9e511b7bb328fa1bcc765beed95"
+        ) { database in
+            // Complete traversal receipts authorize destructive reconciliation.
+            // Their topology is as immutable as the raw snapshots they bind.
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_receipt_no_update
+                BEFORE UPDATE ON review_candidate_complete_traversal_receipts
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal receipt is append-only'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_receipt_no_delete
+                BEFORE DELETE ON review_candidate_complete_traversal_receipts
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal receipt is append-only'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_segment_no_update
+                BEFORE UPDATE ON review_candidate_complete_traversal_segments
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal segment is append-only'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_segment_no_delete
+                BEFORE DELETE ON review_candidate_complete_traversal_segments
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal segment is append-only'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_page_no_update
+                BEFORE UPDATE ON review_candidate_complete_traversal_pages
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal page is append-only'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER review_candidate_complete_traversal_page_no_delete
+                BEFORE DELETE ON review_candidate_complete_traversal_pages
+                BEGIN SELECT RAISE(ABORT, 'review complete traversal page is append-only'); END
+                """)
         }
     ]
 }

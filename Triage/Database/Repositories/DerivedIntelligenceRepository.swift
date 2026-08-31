@@ -112,6 +112,19 @@ struct DerivedIntelligencePersistedProjection: Equatable, Sendable {
 
 actor DerivedIntelligenceRepository {
     static let maximumSearchDocumentBytes = 128 * 1_024
+    /// SQLite's host parameter limit is commonly 999. Keep validation batches
+    /// comfortably below that limit so corrupted durable projections cannot
+    /// turn an otherwise bounded read into an unbounded SQL statement.
+    static let maximumProjectionValidationBatchSize = 500
+
+    private struct RawSnapshotAuthority: Equatable {
+        let accountID: String
+        let organizationID: String
+        let feature: String
+        let streamID: String
+        let credentialRevision: String
+        let capabilityRevision: String
+    }
 
     private let vault: AccountVault
 
@@ -344,19 +357,31 @@ actor DerivedIntelligenceRepository {
                 scope.accountID.rawValue, scope.organizationID.rawValue
             ]
         )
-        var material = Data("triage.derived-input.source-revision.v1".utf8)
+        var primaryRevisions = [WorkItemID: String]()
         for row in rows {
-            guard let workItemID: String = row["id"],
+            guard let rawWorkItemID: String = row["id"],
+                  let workItemID = WorkItemID(rawValue: rawWorkItemID),
                   let sourceRevision: String = row["source_revision"],
-                  boundedIdentifier(workItemID),
+                  boundedIdentifier(rawWorkItemID),
                   boundedSourceRevision(sourceRevision)
             else {
                 throw DerivedIntelligenceRepositoryError.staleSourceRevision
             }
-            appendLengthPrefixed(Data(workItemID.utf8), to: &material)
-            appendLengthPrefixed(Data(sourceRevision.utf8), to: &material)
+            guard primaryRevisions.updateValue(sourceRevision, forKey: workItemID) == nil else {
+                throw DerivedIntelligenceRepositoryError.staleSourceRevision
+            }
         }
-        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
+        do {
+            return DerivedIntelligenceSourceRevision.aggregate(
+                primaryRevisions: primaryRevisions,
+                supplementalSources: try DerivedIntelligenceSourceRevision.supplementalSources(
+                    for: scope,
+                    in: database
+                )
+            )
+        } catch {
+            throw DerivedIntelligenceRepositoryError.staleSourceRevision
+        }
     }
 
     private nonisolated static func deleteDerivedRows(
@@ -766,6 +791,85 @@ actor DerivedIntelligenceRepository {
         }
     }
 
+    /// Projection reads validate raw provenance again. Fetch each referenced
+    /// snapshot once per bounded batch rather than issuing a query per piece
+    /// of evidence, while retaining the exact authority-tuple comparison used
+    /// on the write path.
+    private nonisolated static func validatePersistedRawSnapshotReferences(
+        _ evidence: [EvidenceReference],
+        in database: Database
+    ) throws {
+        var expectedAuthorities = [String: RawSnapshotAuthority]()
+        for reference in evidence {
+            guard let rawSnapshotID = reference.rawSnapshotID else { continue }
+            let authority = evidenceAuthorityColumns(reference.authority)
+            guard authority.kind == "github",
+                  let accountID = authority.accountID,
+                  let organizationID = authority.organizationID,
+                  let feature = authority.feature,
+                  let streamID = authority.streamID,
+                  let credentialRevision = authority.credentialRevision,
+                  let capabilityRevision = authority.capabilityRevision
+            else {
+                throw DerivedIntelligenceRepositoryError.invalidEvidence
+            }
+            let expected = RawSnapshotAuthority(
+                accountID: accountID,
+                organizationID: organizationID,
+                feature: feature,
+                streamID: streamID,
+                credentialRevision: credentialRevision,
+                capabilityRevision: capabilityRevision
+            )
+            let key = rawSnapshotID.rawValue
+            if let existing = expectedAuthorities[key] {
+                guard existing == expected else {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+            } else {
+                expectedAuthorities[key] = expected
+            }
+        }
+        var persistedAuthorities = [String: RawSnapshotAuthority]()
+        for batch in batches(expectedAuthorities.keys.sorted()) {
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, account_id, authority_organization_id, authority_feature,
+                           authority_stream_id, authority_credential_revision,
+                           authority_capability_revision
+                    FROM raw_api_snapshots
+                    WHERE id IN (\(placeholders(for: batch)))
+                    """,
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let id: String = row["id"],
+                      let accountID: String = row["account_id"],
+                      let organizationID: String = row["authority_organization_id"],
+                      let feature: String = row["authority_feature"],
+                      let streamID: String = row["authority_stream_id"],
+                      let credentialRevision: String = row["authority_credential_revision"],
+                      let capabilityRevision: String = row["authority_capability_revision"],
+                      persistedAuthorities[id] == nil
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidEvidence
+                }
+                persistedAuthorities[id] = RawSnapshotAuthority(
+                    accountID: accountID,
+                    organizationID: organizationID,
+                    feature: feature,
+                    streamID: streamID,
+                    credentialRevision: credentialRevision,
+                    capabilityRevision: capabilityRevision
+                )
+            }
+        }
+        guard expectedAuthorities == persistedAuthorities else {
+            throw DerivedIntelligenceRepositoryError.invalidEvidence
+        }
+    }
+
     private nonisolated static func fetchRun(
         scope: SynchronizationScope,
         in database: Database
@@ -1006,9 +1110,11 @@ actor DerivedIntelligenceRepository {
                 """,
             arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
         )
-        for row in rows {
-            try validate(evidence: try evidence(from: row), scope: scope)
+        let evidence = try rows.map { try evidence(from: $0) }
+        for reference in evidence {
+            try validate(evidence: reference, scope: scope)
         }
+        try validatePersistedRawSnapshotReferences(evidence, in: database)
     }
 
     private nonisolated static func validatePersistedCandidates(
@@ -1055,6 +1161,72 @@ actor DerivedIntelligenceRepository {
               coverageState == .trusted || exclusionsAreIncompleteCoverage
         else {
             throw DerivedIntelligenceRepositoryError.invalidPersistedData
+        }
+        let persistedCandidates = candidates.compactMap(\.candidate)
+        let workItemIDs = persistedCandidates.map(\.workItemID)
+        guard Set(workItemIDs).count == workItemIDs.count else {
+            throw DerivedIntelligenceRepositoryError.invalidPersistedData
+        }
+        let rawWorkItemIDs = workItemIDs.map(\.rawValue).sorted()
+        var scores = [WorkItemID: AttentionScore]()
+        var reasonIDs = [WorkItemID: Set<String>]()
+        for batch in batches(rawWorkItemIDs) {
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_id, score, breakdown_json
+                    FROM attention_scores
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    """,
+                arguments: StatementArguments(batch)
+            )
+            for row in rows {
+                guard let rawWorkItemID: String = row["work_item_id"],
+                      let workItemID = WorkItemID(rawValue: rawWorkItemID),
+                      let score: Int = row["score"],
+                      let breakdown: Data = row["breakdown_json"],
+                      scores[workItemID] == nil
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidPersistedData
+                }
+                do {
+                    scores[workItemID] = AttentionScore(
+                        value: score,
+                        breakdown: try JSONDecoder().decode([String: Int].self, from: breakdown)
+                    )
+                } catch {
+                    throw DerivedIntelligenceRepositoryError.invalidPersistedData
+                }
+            }
+            let reasonRows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT work_item_id, id
+                    FROM attention_reasons
+                    WHERE work_item_id IN (\(placeholders(for: batch)))
+                    """,
+                arguments: StatementArguments(batch)
+            )
+            for row in reasonRows {
+                guard let rawWorkItemID: String = row["work_item_id"],
+                      let workItemID = WorkItemID(rawValue: rawWorkItemID),
+                      let reasonID: String = row["id"],
+                      boundedIdentifier(reasonID)
+                else {
+                    throw DerivedIntelligenceRepositoryError.invalidPersistedData
+                }
+                reasonIDs[workItemID, default: []].insert(reasonID)
+            }
+        }
+        for candidate in persistedCandidates {
+            guard let persistedScore = scores[candidate.workItemID],
+                  candidate.score == persistedScore,
+                  Set(candidate.triggerReasonIDs).isSubset(
+                      of: reasonIDs[candidate.workItemID, default: []]
+                  )
+            else {
+                throw DerivedIntelligenceRepositoryError.invalidPersistedData
+            }
         }
     }
 
@@ -1218,6 +1390,17 @@ actor DerivedIntelligenceRepository {
 
     private nonisolated static func boundedIdentifier(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 512 && !value.unicodeScalars.contains(where: { $0.properties.isWhitespace })
+    }
+
+    private nonisolated static func batches(_ values: [String]) -> [[String]] {
+        stride(from: 0, to: values.count, by: maximumProjectionValidationBatchSize).map {
+            Array(values[$0 ..< min($0 + maximumProjectionValidationBatchSize, values.count)])
+        }
+    }
+
+    private nonisolated static func placeholders(for values: [String]) -> String {
+        precondition(!values.isEmpty)
+        return Array(repeating: "?", count: values.count).joined(separator: ", ")
     }
 
     private nonisolated static func boundedSourceRevision(_ value: String) -> Bool {

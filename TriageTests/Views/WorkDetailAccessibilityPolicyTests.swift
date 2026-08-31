@@ -35,4 +35,9 @@ final class WorkDetailAccessibilityPolicyTests: XCTestCase {
             .inspectorToggle
         )
     }
+
+    func testInspectorCommandsRequireASelectedWorkItem() {
+        XCTAssertFalse(WorkDetailPresentation.inspectorIsAvailable(hasSelection: false))
+        XCTAssertTrue(WorkDetailPresentation.inspectorIsAvailable(hasSelection: true))
+    }
 }
