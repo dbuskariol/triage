@@ -45,6 +45,7 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
         let comments: CommentConnection?
         let mergeable: String?
         let headRefName: String?
+        let headRefOid: String? = nil
         let baseRefName: String?
         let reviewDecision: String?
         let author: Actor?
@@ -57,7 +58,7 @@ struct GitHubNodeHydrationPayload: Codable, Sendable {
         enum CodingKeys: String, CodingKey {
             case typeName = "__typename"
             case id, databaseId, number, title, body, url, state, createdAt, updatedAt, closedAt, mergedAt, isDraft
-            case locked, comments, mergeable, headRefName, baseRefName, reviewDecision
+            case locked, comments, mergeable, headRefName, headRefOid, baseRefName, reviewDecision
             case author, repository, assignees, labels, reviewRequests, closingIssuesReferences
         }
     }
@@ -374,8 +375,16 @@ enum GitHubNodeHydrationNormalizer {
             closedAt: node.closedAt,
             mergedAt: node.mergedAt,
             sourceRevision: node.updatedAt.ISO8601Format(),
+            pullRequestHeadCommitSHA: kind == .pullRequest ? validCommitSHA(node.headRefOid) : nil,
             observedAt: observedAt,
             accessibility: .accessible
         )
+    }
+
+    private static func validCommitSHA(_ value: String?) -> String? {
+        guard let value, value.count == 64,
+              value.unicodeScalars.allSatisfy({ $0.isASCII && ($0.properties.numericType != nil || (97...102).contains($0.value)) })
+        else { return nil }
+        return value
     }
 }

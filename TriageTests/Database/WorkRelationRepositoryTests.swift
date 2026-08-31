@@ -43,6 +43,48 @@ final class WorkRelationRepositoryTests: XCTestCase {
         XCTAssertEqual(evidenceCount, 0)
     }
 
+    func testCompleteReplacementScopesDeletionToItsRelationFamily() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = WorkRelationRepository(vault: fixture.vault)
+        let responsibility = fixture.relation
+        let closing = fixture.makeRelation(
+            for: fixture.authority,
+            kind: .closes,
+            evidenceID: "closing-1"
+        )
+
+        try await repository.replace(
+            [responsibility],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority,
+            replacingKinds: [.assigned]
+        )
+        try await repository.replace(
+            [closing],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority,
+            replacingKinds: [.closes]
+        )
+
+        try await repository.replace(
+            [],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority,
+            replacingKinds: [.closes]
+        )
+        let kinds = try await fixture.vault.read { database in
+            try String.fetchAll(
+                database,
+                sql: "SELECT kind FROM relations ORDER BY kind"
+            )
+        }
+        XCTAssertEqual(kinds, [WorkRelationKind.assigned.rawValue])
+    }
+
     func testScopedWorkItemPresentationExcludesMixedRevisionAndCrossOrganizationEvidence() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -238,7 +280,7 @@ final class WorkRelationRepositoryTests: XCTestCase {
         )
         do {
             try await repository.replace(
-                [fixture.relation],
+                [fixture.makeRelation(for: wrongSnapshotAuthority)],
                 accountID: fixture.accountID,
                 subjectNodeID: fixture.node.nodeID,
                 authority: wrongSnapshotAuthority

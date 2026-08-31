@@ -137,6 +137,14 @@ struct WorkListView: View {
 
     private var filteredWorkItems: [WorkItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The bounded Inbox graph is immediately actionable. Keep it in the
+        // presentation source while the independent complete graph is still
+        // decoding, so a first-page search result is never discarded merely
+        // because that background read has not published yet.
+        let availableItems = TriageAppModel.selectionWorkItems(
+            inboxPage: appModel.inboxPage,
+            fullGraph: appModel.workItems
+        )
         let sourceItems: [WorkItem]
         if navigation.section == .inbox,
            query.isEmpty,
@@ -145,7 +153,7 @@ struct WorkListView: View {
         {
             sourceItems = inboxItemsEnsuringSelection(in: inboxPage)
         } else {
-            sourceItems = appModel.workItems
+            sourceItems = availableItems
         }
         let currentViewItems = WorkListPresentation.items(
             from: sourceItems,
@@ -159,7 +167,7 @@ struct WorkListView: View {
 
         let allowedItems = navigation.searchScope == .currentView
             ? currentViewItems
-            : WorkListPresentation.rankedPersisted(appModel.workItems.filter(matchesListFilter))
+            : WorkListPresentation.rankedPersisted(availableItems.filter(matchesListFilter))
         let itemsByID = Dictionary(uniqueKeysWithValues: allowedItems.map { ($0.id, $0) })
         // Results only belong to the exact query and workspace that produced
         // them. This prevents an old query (or another organization with an

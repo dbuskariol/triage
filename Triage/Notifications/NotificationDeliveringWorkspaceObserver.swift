@@ -9,6 +9,9 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         let accountID: AccountID
         let epoch: UInt64
         let subscriptionID: UUID
+        /// Routes this task can submit to UserNotifications. A newer observed
+        /// snapshot cancels matching tasks before purging a removed route.
+        let routes: Set<NotificationRoute>
         let task: Task<Void, Never>
     }
 
@@ -206,7 +209,8 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
                     snapshot,
                     candidates: candidates,
                     removedRoutes: removedRoutes,
-                    accountEpoch: accountEpoch
+                    accountEpoch: accountEpoch,
+                    deliveryID: deliveryID
                 )
             } catch {
                 // Delivery is best-effort macOS integration. It cannot alter
@@ -218,6 +222,7 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
             accountID: snapshot.scope.accountID,
             epoch: accountEpoch,
             subscriptionID: subscriptionID,
+            routes: Set(candidates.map(\.candidate.route)),
             task: task
         )
     }
@@ -243,6 +248,26 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
     private func cancelAndWaitForDeliveries(for accountID: AccountID) async {
         let ids = deliveryTasks.compactMap { id, value in
             value.accountID == accountID ? id : nil
+        }
+        let tasks = ids.compactMap { deliveryTasks.removeValue(forKey: $0)?.task }
+        tasks.forEach { $0.cancel() }
+        for task in tasks {
+            await task.value
+        }
+    }
+
+    /// A disappearance in a later observed snapshot is a route revocation.
+    /// Cancel every older delivery that can still add that route and wait for
+    /// its scheduler cancellation fence before removing native requests. In
+    /// particular, this closes the interval where `UNUserNotificationCenter`
+    /// is still completing an add after the route has left the workspace.
+    private func cancelAndWaitForDeliveries(
+        for routes: Set<NotificationRoute>,
+        excluding deliveryID: UUID
+    ) async {
+        guard !routes.isEmpty else { return }
+        let ids = deliveryTasks.compactMap { id, value in
+            id != deliveryID && !value.routes.isDisjoint(with: routes) ? id : nil
         }
         let tasks = ids.compactMap { deliveryTasks.removeValue(forKey: $0)?.task }
         tasks.forEach { $0.cancel() }
@@ -307,9 +332,12 @@ actor NotificationDeliveringWorkspaceObserver: WorkspaceObserving, WorkspaceObse
         _ snapshot: WorkspacePresentationSnapshot,
         candidates: [NotificationCandidatePresentation],
         removedRoutes: [NotificationRoute],
-        accountEpoch: UInt64
+        accountEpoch: UInt64,
+        deliveryID: UUID
     ) async throws {
         guard isActive(accountID: snapshot.scope.accountID, epoch: accountEpoch) else { return }
+        let removedRouteSet = Set(removedRoutes)
+        await cancelAndWaitForDeliveries(for: removedRouteSet, excluding: deliveryID)
         for route in removedRoutes {
             guard !Task.isCancelled,
                   isActive(accountID: snapshot.scope.accountID, epoch: accountEpoch)

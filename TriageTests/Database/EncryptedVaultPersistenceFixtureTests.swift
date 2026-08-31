@@ -229,6 +229,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             MigrationRow(
                 id: "058-ai-action-confidence-threshold-v1",
                 checksum: "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
+            ),
+            MigrationRow(
+                id: "059-pull-request-head-commit-authority-v1",
+                checksum: "f2d54196288e2c0c0b1dc01b20b06bc45da27e2bfb73ab710a0114f59f311d4a"
             )
         ])
         XCTAssertEqual(upgradedMigrations.count, TriageDatabaseMigrator.migrationCount)
@@ -238,6 +242,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             triggers: Set<String>,
             projectItemRawProvenanceColumns: Set<String>,
             workflowHistoryColumns: Set<String>,
+            githubNodeColumns: Set<String>,
             statusChecksColumns: Set<String>,
             aiConsentColumns: Set<String>,
             aiConsentThresholdIsNotNull: Bool,
@@ -273,6 +278,12 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             ).map { row in
                 row["name"] as String
             })
+            let githubNodeColumns = Set(try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(github_nodes)"
+            ).map { row in
+                row["name"] as String
+            })
             let aiConsentColumns = Set(try Row.fetchAll(
                 database,
                 sql: "PRAGMA table_info(ai_consents)"
@@ -293,6 +304,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                 triggers,
                 projectItemRawProvenanceColumns,
                 workflowHistoryColumns,
+                githubNodeColumns,
                 statusChecksColumns,
                 aiConsentColumns,
                 (aiConsentThreshold?["notnull"] as Int? == 1),
@@ -360,6 +372,7 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "source_revision",
             "observed_at_ms"
         ])))
+        XCTAssertTrue(upgradedSchema.githubNodeColumns.contains("pull_request_head_commit_sha"))
         XCTAssertTrue(upgradedSchema.aiConsentColumns.contains(
             "automatic_action_confidence_threshold"
         ))

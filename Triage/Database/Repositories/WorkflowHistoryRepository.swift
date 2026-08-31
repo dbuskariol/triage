@@ -26,10 +26,23 @@ struct WorkflowHistoryTransaction: Equatable, Sendable {
 /// The workflow-state writes and their one grouped undo record share one
 /// database transaction, so an invalid member rolls every member back.
 actor WorkflowHistoryRepository {
+    /// Retain the most recent local workflow transactions per encrypted
+    /// account/organization scope. A transaction may contain many work items,
+    /// so pruning always deletes complete transaction groups.
+    static let maximumRetainedTransactionCount = 100
+
     private let vault: AccountVault
+    private let maximumRetainedTransactionCount: Int
 
     init(vault: AccountVault) {
         self.vault = vault
+        maximumRetainedTransactionCount = WorkflowHistoryRepository.maximumRetainedTransactionCount
+    }
+
+    init(vault: AccountVault, maximumRetainedTransactionCount: Int) {
+        precondition(maximumRetainedTransactionCount > 0)
+        self.vault = vault
+        self.maximumRetainedTransactionCount = maximumRetainedTransactionCount
     }
 
     func apply(
@@ -44,6 +57,7 @@ actor WorkflowHistoryRepository {
         guard !uniqueIDs.isEmpty else { throw WorkflowHistoryRepositoryError.scopeMismatch }
         let transactionID = UUID().uuidString.lowercased()
         let createdAt = Self.milliseconds(date)
+        let retentionLimit = maximumRetainedTransactionCount
         return try await vault.writeTransaction { database in
             try Task.checkCancellation()
             // A new local edit starts a fresh branch. Never allow an old
@@ -76,6 +90,11 @@ actor WorkflowHistoryRepository {
                 )
                 changes.append(.init(workItemID: workItemID, previous: previous, next: next))
             }
+            try Self.pruneOldestTransactionGroups(
+                retaining: retentionLimit,
+                in: scope,
+                database: database
+            )
             try Task.checkCancellation()
             return .init(
                 id: transactionID,
@@ -115,6 +134,7 @@ actor WorkflowHistoryRepository {
         // caller-supplied timestamp and random transaction ID are retained as
         // history data, but must never decide stack head ordering.
         let stackOrdering = isUndone ? "ASC" : "DESC"
+        let retentionLimit = maximumRetainedTransactionCount
         return try await vault.writeTransaction { database in
             try Task.checkCancellation()
             guard let transactionID = try String.fetchOne(
@@ -175,6 +195,11 @@ actor WorkflowHistoryRepository {
                 sql: "UPDATE workflow_history SET is_undone = ? WHERE transaction_id = ? AND account_id = ? AND organization_id = ?",
                 arguments: [restoringNext ? 0 : 1, transactionID, scope.accountID.rawValue, scope.organizationID.rawValue]
             )
+            try Self.pruneOldestTransactionGroups(
+                retaining: retentionLimit,
+                in: scope,
+                database: database
+            )
             try Task.checkCancellation()
             return .init(id: transactionID, accountID: scope.accountID, organizationID: scope.organizationID, changes: changes)
         }
@@ -195,6 +220,40 @@ actor WorkflowHistoryRepository {
             arguments: [workItemID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue]
         ) ?? 0
         guard count == 1 else { throw WorkflowHistoryRepositoryError.scopeMismatch }
+    }
+
+    /// Database row IDs are assigned within the vault write transaction.  Keep
+    /// the newest complete durable groups and remove older groups in the same
+    /// transaction as the successful history write, so history never exposes
+    /// a partially pruned batch after relaunch.
+    private nonisolated static func pruneOldestTransactionGroups(
+        retaining limit: Int,
+        in scope: SynchronizationScope,
+        database: Database
+    ) throws {
+        try database.execute(
+            sql: """
+                DELETE FROM workflow_history
+                WHERE account_id = ? AND organization_id = ?
+                  AND transaction_id IN (
+                    SELECT transaction_id
+                    FROM (
+                        SELECT transaction_id
+                        FROM workflow_history
+                        WHERE account_id = ? AND organization_id = ?
+                          AND transaction_id IS NOT NULL
+                        GROUP BY transaction_id
+                        ORDER BY MIN(rowid) DESC
+                        LIMIT -1 OFFSET ?
+                    )
+                  )
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                limit,
+            ]
+        )
     }
 
     private nonisolated static func state(for workItemID: WorkItemID, database: Database) throws -> WorkflowState {

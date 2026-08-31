@@ -288,6 +288,13 @@ struct OrganizationWorkItemGraphProjectionService: Sendable {
                 accountID: scope.accountID,
                 subjectNodeID: source.nodeID,
                 authority: authority,
+                replacingKinds: [
+                    .authored,
+                    .assigned,
+                    .reviewRequestedDirectly,
+                    .reviewRequestedFromTeam,
+                    .awaitingResponse
+                ],
                 in: database
             )
         }
@@ -730,6 +737,7 @@ struct OrganizationWorkItemGraphProjectionService: Sendable {
                 accountID: scope.accountID,
                 subjectNodeID: source.pullRequestNodeID,
                 authority: authority,
+                replacingKinds: [.closes],
                 in: database
             )
             // The raw GraphQL response is owned by the pull request, not the
@@ -760,6 +768,7 @@ struct OrganizationWorkItemGraphProjectionService: Sendable {
                     accountID: scope.accountID,
                     subjectNodeID: issueNodeID,
                     authority: authority,
+                    replacingKinds: [.closedBy],
                     in: database
                 )
             }

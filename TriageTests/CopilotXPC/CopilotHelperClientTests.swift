@@ -396,7 +396,11 @@ final class CopilotHelperClientTests: XCTestCase {
     let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
     let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
     let transport = BlockingFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
+    let timeout = TimeoutGate()
+    let client = CopilotHelperClient(
+      transport: transport,
+      waitForTimeout: { _ in await timeout.wait() }
+    )
     let request = CopilotAnalyzeRequest(
       organizationID: organizationID,
       input: CopilotAnalysisInput(
@@ -408,15 +412,14 @@ final class CopilotHelperClientTests: XCTestCase {
         conversation: [],
         evidenceIDs: [evidenceID]
       ),
-      deadline: .now.addingTimeInterval(0.1)
+      deadline: .now.addingTimeInterval(60)
     )
 
-    do {
-      _ = try await client.analyze(request)
-      XCTFail("Expected the deadline to expire.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .operationTimedOut)
-    }
+    let analysis = Task { try await client.analyze(request) }
+    await transport.waitUntilReadStarted()
+    await timeout.fire()
+    let result = await analysis.result
+    XCTAssertEqual(error(from: result), .operationTimedOut)
     await transport.waitUntilTerminated()
   }
 
@@ -635,6 +638,34 @@ final class CopilotHelperClientTests: XCTestCase {
     guard case let .failure(error) = result else { return nil }
     return error as? CopilotXPCError
   }
+
+  func testXPCServiceErrorMappingAllowsOnlyStableFailClosedIdentities() {
+    let domain = "com.triage.mac.copilot-xpc"
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 14)),
+      .runtimeUnavailable
+    )
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 15)),
+      .runtimeCorrupt
+    )
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 10)),
+      .operationCancelled
+    )
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 11)),
+      .operationTimedOut
+    )
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 1)),
+      .helperUnavailable
+    )
+    XCTAssertEqual(
+      CopilotXPCServiceClient.mapServiceError(NSError(domain: "untrusted.domain", code: 14)),
+      .helperUnavailable
+    )
+  }
 }
 
 private let copilotTestAccountID = AccountID(
@@ -803,6 +834,22 @@ private actor BlockingFrameTransport: CopilotFrameTransport {
 
   func terminationCount() -> Int {
     terminations
+  }
+}
+
+private actor TimeoutGate {
+  private var fired = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func wait() async {
+    guard !fired else { return }
+    await withCheckedContinuation { waiters.append($0) }
+  }
+
+  func fire() {
+    fired = true
+    waiters.forEach { $0.resume() }
+    waiters.removeAll()
   }
 }
 

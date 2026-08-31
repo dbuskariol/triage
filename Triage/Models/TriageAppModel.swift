@@ -156,6 +156,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// A user-requested runtime operation is active. The companion published
     /// authorization state carries its real downloading/verifying progress.
     @Published private(set) var isCopilotRuntimeOperationInProgress = false
+    /// Account-local deletion remains fenced until the complete removal task
+    /// finishes. Settings observes this state to prevent a second confirmation
+    /// from starting another destructive operation for the same account.
+    @Published private(set) var accountsBeingRemoved: Set<AccountID> = []
 
     private let oauthAuthorizer = GitHubOAuthAuthorizer()
     private let refreshScheduler = ActiveRefreshScheduler()
@@ -171,7 +175,6 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     private let usesInMemoryUITestFixture: Bool
     private var refreshGeneration = 0
     private var backgroundRefreshGeneration: UInt64 = 0
-    private var accountsBeingRemoved: Set<AccountID> = []
     private var foregroundRefreshTask: Task<ForegroundRefreshResult, Never>?
     private var foregroundRefreshTaskID: UUID?
     private var foregroundRefreshTasksAwaitingCredentialMutation: [Task<ForegroundRefreshResult, Never>] = []
@@ -432,16 +435,14 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
 
     private func scheduleInboxPageTimeRefresh(for snapshot: InboxPagePresentationSnapshot) {
         inboxPageTimeRefreshTask?.cancel()
-        let nextKnownBoundary = workItems
-            .flatMap { [$0.workflow.snoozedUntil, $0.workflow.followUpAt] }
-            .compactMap { $0 }
-            .filter { $0 > snapshot.evaluatedAt }
-            .min()
+        let deadline = Self.inboxPageRefreshDeadline(
+            evaluatedAt: snapshot.evaluatedAt,
+            workItems: workItems
+        )
         // A first page can arrive before the independent full graph, so no
         // local boundary may be known yet. Reopen the lightweight observation
         // periodically in that case rather than re-evaluating its rows with a
         // fresh Date and creating a hole at a snooze boundary.
-        let deadline = nextKnownBoundary ?? snapshot.evaluatedAt.addingTimeInterval(30)
         let delay = max(0, deadline.timeIntervalSinceNow)
         inboxPageTimeRefreshTask = Task { [weak self] in
             do {
@@ -458,6 +459,18 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 return
             }
         }
+    }
+
+    nonisolated static func inboxPageRefreshDeadline(
+        evaluatedAt: Date,
+        workItems: [WorkItem]
+    ) -> Date {
+        let nextKnownBoundary = workItems
+            .flatMap { [$0.workflow.snoozedUntil, $0.workflow.followUpAt] }
+            .compactMap { $0 }
+            .filter { $0 > evaluatedAt }
+            .min()
+        return nextKnownBoundary ?? evaluatedAt.addingTimeInterval(30)
     }
 
     func loadMoreInboxPage() async {
@@ -564,6 +577,12 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         selectedWorkspaceCoverage = snapshot.coverageEvaluation
         workspaceAccessibility?.actionItemsInserted(count: insertedActionItemCount)
         present(workItems: snapshot.workItems)
+        if let inboxPageSnapshot, inboxPageSnapshot.scope == scope {
+            // The first page is intentionally allowed to arrive before this
+            // full graph. Re-arm its lightweight observation once the graph
+            // supplies exact local snooze/follow-up boundaries.
+            scheduleInboxPageTimeRefresh(for: inboxPageSnapshot)
+        }
     }
 
     private static func insertedActionItemCount(
@@ -677,7 +696,8 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
 
     func removeAccount(_ accountID: AccountID) async throws {
         guard accounts.contains(where: { $0.id == accountID })
-                || unavailableAccountIDs.contains(accountID)
+                || unavailableAccountIDs.contains(accountID),
+              !accountsBeingRemoved.contains(accountID)
         else { return }
 
         let isRemovingSelectedAccount = selectedAccountID == accountID
@@ -723,6 +743,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             presentCachedWorkItems()
             activateSelectedOrganization()
         }
+    }
+
+    func isRemovingAccount(_ accountID: AccountID) -> Bool {
+        accountsBeingRemoved.contains(accountID)
     }
 
     /// The Inbox page is an authoritative, complete graph for its bounded
@@ -795,7 +819,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 connectionError = "GitHub sign-in could not be completed. Try again."
             }
         } catch {
-            connectionError = "GitHub sign-in could not be completed. Try again."
+            connectionError = Self.oauthFailureMessage(
+                for: error,
+                fallback: "GitHub sign-in could not be completed. Try again."
+            )
         }
     }
 
@@ -905,7 +932,10 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await resumeSelectedOrganization()
         } catch {
             guard canContinueCredentialMutation(for: account.id) else { return }
-            connectionError = "GitHub reconnect could not be completed. Try again."
+            connectionError = Self.oauthFailureMessage(
+                for: error,
+                fallback: "GitHub reconnect could not be completed. Try again."
+            )
             isCredentialMutationInProgress = false
             await resumeSelectedOrganization()
         }
@@ -1848,6 +1878,20 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         case .stagedCredentialCleanupFailed:
             "Triage could not safely clear a staged Keychain credential. The connected profile was not changed."
         }
+    }
+
+    /// Broker failures are untrusted transport data. Only the stable,
+    /// protocol-defined obsolete-client response may reach the UI; every
+    /// other broker detail deliberately uses the caller's generic message.
+    static func oauthFailureMessage(for error: Error, fallback: String) -> String {
+        guard let clientError = error as? AuthBrokerClientError,
+              case let .broker(failure) = clientError,
+              failure.code == .invalidRequest,
+              failure.recoveryDescription == "This version of Triage is not supported by the OAuth service."
+        else {
+            return fallback
+        }
+        return "\(failure.recoveryDescription) Update Triage to continue."
     }
 
     private func persistCredentialStatus(

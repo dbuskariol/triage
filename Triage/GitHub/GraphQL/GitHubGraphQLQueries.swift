@@ -129,7 +129,7 @@ enum GitHubGraphQLQueries {
             }
             ... on PullRequest {
               __typename id databaseId number title body url state createdAt updatedAt closedAt mergedAt isDraft
-              mergeable headRefName baseRefName reviewDecision
+              mergeable headRefName headRefOid baseRefName reviewDecision
               author { ...ActorFields }
               repository { ...RepositoryFields }
               assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }

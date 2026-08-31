@@ -88,6 +88,10 @@ struct PerformanceFixtureGenerator: Sendable {
         self.counts = counts
     }
 
+    func count(for kind: PerformanceFixtureRecordKind) -> Int {
+        counts[kind] ?? kind.count
+    }
+
     func batches(
         maximumBatchSize: Int = PerformanceFixtureScale.batchSize
     ) -> AnySequence<[PerformanceFixtureRecord]> {
@@ -99,7 +103,7 @@ struct PerformanceFixtureGenerator: Sendable {
             return AnyIterator {
                 while kindIndex < PerformanceFixtureRecordKind.allCases.count {
                     let kind = PerformanceFixtureRecordKind.allCases[kindIndex]
-                    let count = counts[kind] ?? kind.count
+                    let count = count(for: kind)
                     guard ordinal < count else {
                         kindIndex += 1
                         ordinal = 0
@@ -446,7 +450,7 @@ final class PerformanceFixtureStore: @unchecked Sendable {
             let workID = workItemID(index)
             try insertNode(
                 id: nodeID,
-                repositoryID: repositoryID(index % PerformanceFixtureScale.repositories),
+                repositoryID: try repositoryID(forWorkItem: index),
                 kind: "pullRequest",
                 title: "Benchmark work item \(index)",
                 body: "benchmark searchable cached work item \(index)",
@@ -686,6 +690,13 @@ final class PerformanceFixtureStore: @unchecked Sendable {
     }
 
     private func repositoryID(_ index: Int) -> String { "repository-\(index)" }
+    private func repositoryID(forWorkItem index: Int) throws -> String {
+        let repositoryCount = generator.count(for: .repository)
+        guard repositoryCount > 0 else {
+            throw PerformanceFixtureError.missingRepositoryParent
+        }
+        return repositoryID(index % repositoryCount)
+    }
     private func workItemID(_ index: Int) -> String { "work-item-\(index)" }
     private func workNodeID(_ index: Int) -> String { "work-node-\(index)" }
     private func discussionNodeID(_ index: Int) -> String { "discussion-node-\(index)" }
@@ -693,6 +704,7 @@ final class PerformanceFixtureStore: @unchecked Sendable {
 
 private enum PerformanceFixtureError: Error {
     case missingSelectedWorkItem
+    case missingRepositoryParent
     case batchExceedsLimit(actual: Int, limit: Int)
     case invalidBatch
 }

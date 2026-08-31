@@ -1,6 +1,18 @@
 import Foundation
 
 actor CopilotHelperClient: TriageCopilotHelping {
+  private enum TerminationReason: Sendable {
+    case callerCancelled
+    case timedOut
+
+    var error: CopilotXPCError {
+      switch self {
+      case .callerCancelled: return .operationCancelled
+      case .timedOut: return .operationTimedOut
+      }
+    }
+  }
+
   private struct ActiveOperation: Sendable {
     /// This is deliberately distinct from the protocol request ID. A caller
     /// may retry with the same request ID, but a cancellation callback belongs
@@ -11,19 +23,25 @@ actor CopilotHelperClient: TriageCopilotHelping {
     let organizationID: OrganizationID
     let operation: CopilotOperation
     var isTerminating = false
+    var terminationReason: TerminationReason?
   }
 
   private let transport: any CopilotFrameTransport
   private let exchangeIDGenerator: @Sendable () -> UUID
+  private let waitForTimeout: @Sendable (TimeInterval) async throws -> Void
   private var activeOperation: ActiveOperation?
   private var isShutDown = false
 
   init(
     transport: any CopilotFrameTransport,
-    exchangeIDGenerator: @escaping @Sendable () -> UUID = { UUID() }
+    exchangeIDGenerator: @escaping @Sendable () -> UUID = { UUID() },
+    waitForTimeout: @escaping @Sendable (TimeInterval) async throws -> Void = {
+      try await Task.sleep(for: .seconds($0))
+    }
   ) {
     self.transport = transport
     self.exchangeIDGenerator = exchangeIDGenerator
+    self.waitForTimeout = waitForTimeout
   }
 
   func health(_ request: CopilotHealthRequest) async throws -> CopilotHealthResponse {
@@ -73,7 +91,10 @@ actor CopilotHelperClient: TriageCopilotHelping {
     }
     // A pipe has one response reader. Termination safely interrupts it; the
     // XPC service will own protocol-level cancellation dispatch.
-    await terminateActiveOperation(matching: activeOperation.exchangeID)
+    await terminateActiveOperation(
+      matching: activeOperation.exchangeID,
+      reason: .callerCancelled
+    )
     return CopilotCancelResponse(
       header: CopilotResponseHeader(
         requestID: request.header.requestID,
@@ -149,7 +170,10 @@ actor CopilotHelperClient: TriageCopilotHelping {
         )
       } onCancel: {
         Task { [client, exchangeID] in
-          await client.cancelRunningProcess(matching: exchangeID)
+          await client.cancelRunningProcess(
+            matching: exchangeID,
+            reason: .callerCancelled
+          )
         }
       }
       // Cancellation handlers are allowed to run asynchronously. Do not
@@ -158,22 +182,22 @@ actor CopilotHelperClient: TriageCopilotHelping {
       try Task.checkCancellation()
       return response
     } catch {
+      if activeOperation?.exchangeID == exchangeID,
+        let reason = activeOperation?.terminationReason {
+        throw reason.error
+      }
       guard error is CancellationError || error as? CopilotXPCError == .operationCancelled else {
         // Invalidating the NSXPC connection is the transport-level fence for
         // an explicit cancel. That invalidation is reported by the concrete
         // XPC client as helper-unavailable, even though this exact exchange
         // was deliberately terminated. Do not widen this normalization to
         // unrelated helper failures.
-        if activeOperation?.exchangeID == exchangeID,
-           activeOperation?.isTerminating == true {
-          throw CopilotXPCError.operationCancelled
-        }
         throw error
       }
       // Both task cancellation and XPC's normalized cancellation error must
       // synchronously fence the active helper. Keeping a per-exchange token
       // prevents an old queued onCancel from terminating a newer retry.
-      await cancelRunningProcess(matching: exchangeID)
+      await cancelRunningProcess(matching: exchangeID, reason: .callerCancelled)
       throw CopilotXPCError.operationCancelled
     }
   }
@@ -195,7 +219,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
           )
         }
         group.addTask {
-          try await Task.sleep(for: .seconds(timeout))
+          try await self.waitForTimeout(timeout)
           throw CopilotXPCError.operationTimedOut
         }
         do {
@@ -207,7 +231,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
         } catch {
           group.cancelAll()
           if error as? CopilotXPCError == .operationTimedOut {
-            await self.cancelRunningProcess(matching: exchangeID)
+            await self.cancelRunningProcess(matching: exchangeID, reason: .timedOut)
           }
           throw error
         }
@@ -253,12 +277,16 @@ actor CopilotHelperClient: TriageCopilotHelping {
   /// triggered this request. The XPC transport cannot be reopened after
   /// termination, so a current-operation cancellation is terminal; a delayed
   /// stale handler is a no-op and cannot shut down a newer retry.
-  private func terminateActiveOperation(matching exchangeID: UUID) async {
+  private func terminateActiveOperation(
+    matching exchangeID: UUID,
+    reason: TerminationReason
+  ) async {
     guard var activeOperation,
       activeOperation.exchangeID == exchangeID,
       !activeOperation.isTerminating
     else { return }
     activeOperation.isTerminating = true
+    activeOperation.terminationReason = reason
     self.activeOperation = activeOperation
     isShutDown = true
     await transport.terminate()
@@ -266,8 +294,17 @@ actor CopilotHelperClient: TriageCopilotHelping {
 
   /// The test-visible cancellation entry point intentionally accepts the
   /// local exchange token, rather than a reusable protocol request ID.
+  private func cancelRunningProcess(
+    matching exchangeID: UUID,
+    reason: TerminationReason
+  ) async {
+    await terminateActiveOperation(matching: exchangeID, reason: reason)
+  }
+
+  /// The test-visible cancellation entry point intentionally accepts the
+  /// local exchange token, rather than a reusable protocol request ID.
   func cancelRunningProcess(matching exchangeID: UUID) async {
-    await terminateActiveOperation(matching: exchangeID)
+    await cancelRunningProcess(matching: exchangeID, reason: .callerCancelled)
   }
 
   private func validate<Response: CopilotResponseContaining>(

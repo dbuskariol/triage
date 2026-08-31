@@ -20,6 +20,9 @@ struct PullRequestReviewCandidate: Sendable {
     /// traversal receipt rechecks this before it authorizes destructive
     /// normalization.
     let sourceRevision: String
+    /// PR head SHA used only by status-check rollups; review/timeline receipt
+    /// revisions remain the hydrated-node revision above.
+    let pullRequestHeadCommitSHA: String?
     let updatedAt: Date
 
     init(
@@ -28,6 +31,7 @@ struct PullRequestReviewCandidate: Sendable {
         repository: GitHubRepositoryPath,
         number: Int,
         sourceRevision: String = "",
+        pullRequestHeadCommitSHA: String? = nil,
         updatedAt: Date = .distantPast
     ) {
         self.nodeID = nodeID
@@ -35,6 +39,7 @@ struct PullRequestReviewCandidate: Sendable {
         self.repository = repository
         self.number = number
         self.sourceRevision = sourceRevision
+        self.pullRequestHeadCommitSHA = pullRequestHeadCommitSHA
         self.updatedAt = updatedAt
     }
 }
@@ -73,7 +78,7 @@ actor PullRequestReviewCandidateRepository {
                 sql: """
                     SELECT github_nodes.github_node_id, repositories.id AS repository_id,
                            repositories.owner_login, repositories.name, github_nodes.number,
-                           github_nodes.source_revision, github_nodes.updated_at_ms
+                           github_nodes.source_revision, github_nodes.pull_request_head_commit_sha, github_nodes.updated_at_ms
                     FROM pull_requests
                     JOIN github_nodes
                       ON github_nodes.github_node_id = pull_requests.github_node_id
@@ -311,6 +316,7 @@ actor PullRequestReviewCandidateRepository {
             ),
             number: number,
             sourceRevision: sourceRevision,
+            pullRequestHeadCommitSHA: row["pull_request_head_commit_sha"],
             updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000)
         )
     }
@@ -326,7 +332,7 @@ actor PullRequestReviewCandidateRepository {
             sql: """
                 SELECT github_nodes.github_node_id, repositories.id AS repository_id,
                        repositories.owner_login, repositories.name, github_nodes.number,
-                       github_nodes.source_revision, github_nodes.updated_at_ms
+                       github_nodes.source_revision, github_nodes.pull_request_head_commit_sha, github_nodes.updated_at_ms
                 FROM pull_requests
                 JOIN github_nodes
                   ON github_nodes.github_node_id = pull_requests.github_node_id

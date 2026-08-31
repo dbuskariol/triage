@@ -150,6 +150,38 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         let base = item(id: "status-marker")
         let nodeID = base.workItem.primaryNodeID
         let primary = currentPrimaryEvidence(for: nodeID, feature: .pullRequests)
+        let sourceRevision = try XCTUnwrap(primary.sourceRevision)
+        let statusCheckRevision = String(repeating: "a", count: 64)
+        let currentRelations = base.workItem.relations.map { relation -> WorkRelation in
+            guard relation.kind == .authored else { return relation }
+            let evidence = relation.evidence.map { source in
+                EvidenceReference(
+                    id: source.id,
+                    source: source.source,
+                    locator: source.locator,
+                    authority: source.authority,
+                    nodeID: source.nodeID,
+                    eventID: source.eventID,
+                    sourceRevision: sourceRevision,
+                    confidence: source.confidence,
+                    confirmation: source.confirmation,
+                    observedAt: source.observedAt
+                )
+            }
+            return WorkRelation(
+                kind: relation.kind,
+                subjectNodeID: relation.subjectNodeID,
+                objectNodeID: relation.objectNodeID,
+                confidence: relation.confidence,
+                evidence: evidence,
+                observedAt: relation.observedAt
+            )
+        }
+        let currentWorkItem = workItem(
+            from: base.workItem,
+            relations: currentRelations,
+            workflow: base.workItem.workflow
+        )
         let statusEvidence = EvidenceReference(
             id: EvidenceID(rawValue: "status-check-marker-test")!,
             source: .graphQL,
@@ -157,10 +189,14 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
             authority: .github(
                 scope: synchronizationScope,
                 feature: .statusChecks,
-                streamID: SyncStreamID(rawValue: "pull-request-status-checks-organization")!
+                streamID: PullRequestStatusCheckRefreshService.sourceStreamID(
+                    organizationID: organizationID,
+                    pullRequestNodeID: nodeID,
+                    sourceRevision: statusCheckRevision
+                )
             ),
             nodeID: nodeID,
-            sourceRevision: primary.sourceRevision,
+            sourceRevision: statusCheckRevision,
             confidence: .confirmed,
             confirmation: .confirmed,
             observedAt: now.addingTimeInterval(-1)
@@ -174,7 +210,7 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         )
         func derived(marker: EvidenceReference) -> DerivedIntelligenceItemInput {
             .init(
-                workItem: base.workItem,
+                workItem: currentWorkItem,
                 primaryEvidence: primary,
                 timeline: base.timeline,
                 timelineEvidence: base.timelineEvidence,
@@ -183,6 +219,7 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                 pullRequestStatusChecks: [check],
                 pullRequestMergeableState: "MERGEABLE",
                 pullRequestStatusCheckMarkerEvidence: marker,
+                pullRequestStatusCheckRevision: statusCheckRevision,
                 searchDocument: base.searchDocument
             )
         }

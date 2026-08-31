@@ -314,6 +314,25 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     XCTAssertEqual(helper.exchangeCount, 0)
   }
 
+  func testEachConnectionOwnsItsHelperCancellation() {
+    let first = CancellationRecordingHelper()
+    let second = CancellationRecordingHelper()
+    var helpers = [first, second]
+    let listener = TriageCopilotXPCListener(makeHelperProcess: {
+      helpers.removeFirst()
+    })
+    let firstService = listener.makeServiceForConnection()
+    let secondService = listener.makeServiceForConnection()
+
+    firstService.cancelActiveProcess()
+    XCTAssertEqual(first.cancelCount, 1)
+    XCTAssertEqual(second.cancelCount, 0)
+
+    secondService.cancelActiveProcess()
+    XCTAssertEqual(first.cancelCount, 1)
+    XCTAssertEqual(second.cancelCount, 1)
+  }
+
   func testAuthenticatedExchangeBindsHeadersWithoutExposingCredential() throws {
     let accountID = UUID().uuidString.lowercased()
     let requestID = UUID().uuidString.lowercased()
@@ -485,6 +504,30 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     ))
 
     XCTAssertEqual(harness.operations, ["authenticate", "models", "analyze"])
+  }
+
+  func testSeparateConnectionProcessesKeepAuthenticatedScopesIndependent() throws {
+    let firstHarness = SyntheticHelperSessionHarness()
+    let secondHarness = SyntheticHelperSessionHarness()
+    let accountID = UUID().uuidString.lowercased()
+    let first = try makeSyntheticSessionProcess(harness: firstHarness)
+    let second = try makeSyntheticSessionProcess(harness: secondHarness)
+
+    _ = try first.exchange(frame: framedSessionRequest(
+      accountID: accountID, organizationID: "org-1", operation: "authenticate"
+    ))
+    _ = try second.exchange(frame: framedSessionRequest(
+      accountID: accountID, organizationID: "org-2", operation: "authenticate"
+    ))
+    _ = try first.exchange(frame: framedSessionRequest(
+      accountID: accountID, organizationID: "org-1", operation: "models"
+    ))
+    _ = try second.exchange(frame: framedSessionRequest(
+      accountID: accountID, organizationID: "org-2", operation: "models"
+    ))
+
+    XCTAssertEqual(firstHarness.operations, ["authenticate", "models"])
+    XCTAssertEqual(secondHarness.operations, ["authenticate", "models"])
   }
 
   func testSyntheticSessionRejectsScopeRotationThenAllowsReauthentication() throws {
@@ -730,6 +773,27 @@ private final class RecordingHelperProcess: CopilotHelperProcessing, @unchecked 
     lock.lock()
     count += 1
     lock.unlock()
+    throw CopilotXPCServiceError.helperUnavailable
+  }
+}
+
+private final class CancellationRecordingHelper: CopilotHelperProcessing, @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  var cancelCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return count
+  }
+
+  func cancel() {
+    lock.lock()
+    count += 1
+    lock.unlock()
+  }
+
+  func exchange(frame _: Data) throws -> Data {
     throw CopilotXPCServiceError.helperUnavailable
   }
 }

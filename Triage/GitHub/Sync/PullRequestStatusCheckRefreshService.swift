@@ -44,10 +44,26 @@ actor PullRequestStatusCheckRefreshService {
         var hadFailure = false
         for candidate in inventory.candidates {
             try Task.checkCancellation()
+            guard let headSHA = candidate.pullRequestHeadCommitSHA,
+                  Self.isCommitSHA(headSHA)
+            else {
+                hadFailure = true
+                try await coverage.save(CoverageRecord(
+                    accountID: scope.accountID, organizationID: scope.organizationID,
+                    repositoryID: candidate.repositoryID, feature: .statusChecks,
+                    streamID: Self.unavailableSourceStreamID(organizationID: scope.organizationID, pullRequestNodeID: candidate.nodeID),
+                    intervalStart: nil, intervalEnd: nil,
+                    credentialRevision: scope.credentialRevision, capabilityRevision: scope.capabilityRevision,
+                    status: .partial, lastSuccessfulAt: nil,
+                    failureDetail: "Pull request head commit is unavailable; status-check coverage is incomplete."
+                ), attemptedAt: observedAt)
+                try await candidates.advanceFairSchedule(after: candidate, scope: scope, streamID: streamID, feature: .statusChecks, at: observedAt)
+                continue
+            }
             let sourceStreamID = Self.sourceStreamID(
                 organizationID: scope.organizationID,
                 pullRequestNodeID: candidate.nodeID,
-                sourceRevision: candidate.sourceRevision
+                sourceRevision: headSHA
             )
             do {
                 let source = try await client.allStatusChecks(pullRequestNodeID: candidate.nodeID)
@@ -72,13 +88,13 @@ actor PullRequestStatusCheckRefreshService {
                         checks: source.checks.map {
                             .init(context: $0.context, state: $0.state, isRequired: $0.isRequired, completedAt: $0.completedAt)
                         },
-                        sourceRevision: candidate.sourceRevision,
+                        sourceRevision: headSHA,
                         observedAt: observedAt
                     ),
                     authority: .init(
                         scope: scope,
                         pullRequestNodeID: candidate.nodeID,
-                        pullRequestSourceRevision: candidate.sourceRevision,
+                        pullRequestSourceRevision: headSHA,
                         streamID: sourceStreamID,
                         schedulingStreamID: streamID,
                         observedAt: observedAt
@@ -130,5 +146,16 @@ actor PullRequestStatusCheckRefreshService {
         sourceRevision: String
     ) -> SyncStreamID {
         SyncStreamID(rawValue: "pull-request-status-checks-\(organizationID.rawValue)-\(pullRequestNodeID.rawValue)-\(sourceRevision)")!
+    }
+
+    nonisolated static func unavailableSourceStreamID(
+        organizationID: OrganizationID,
+        pullRequestNodeID: GitHubNodeID
+    ) -> SyncStreamID {
+        SyncStreamID(rawValue: "pull-request-status-checks-unavailable-\(organizationID.rawValue)-\(pullRequestNodeID.rawValue)")!
+    }
+
+    private nonisolated static func isCommitSHA(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { $0.isASCII && ($0.properties.numericType != nil || (97...102).contains($0.value)) }
     }
 }

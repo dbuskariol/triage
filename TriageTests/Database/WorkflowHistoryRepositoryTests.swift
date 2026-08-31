@@ -100,6 +100,51 @@ final class WorkflowHistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(redoneSecond.id, second.id)
     }
 
+    func testOverflowPrunesWholeOldestGroupsAndRetainsRecentUndoAfterRelaunch() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let repository = WorkflowHistoryRepository(vault: fixture.vault, maximumRetainedTransactionCount: 2)
+
+        let oldest = try await repository.apply(
+            .archive,
+            to: [fixture.firstWorkItemID, fixture.secondWorkItemID],
+            in: fixture.scope,
+            at: fixture.date
+        )
+        let middle = try await repository.apply(
+            .setPinned(true),
+            to: [fixture.firstWorkItemID],
+            in: fixture.scope,
+            at: fixture.date
+        )
+        let newest = try await repository.apply(
+            .setPriority(.high),
+            to: [fixture.secondWorkItemID],
+            in: fixture.scope,
+            at: fixture.date
+        )
+
+        let retainedRows = try await fixture.historyTransactionRowCounts()
+        XCTAssertEqual(
+            retainedRows,
+            [middle.id: 1, newest.id: 1],
+            "The two-row batch must be removed as one complete transaction group."
+        )
+        XCTAssertFalse(retainedRows.keys.contains(oldest.id))
+
+        try await fixture.reopen()
+        let reopened = WorkflowHistoryRepository(vault: fixture.vault, maximumRetainedTransactionCount: 2)
+        let undoneNewest = try await reopened.undoLatest(in: fixture.scope)
+        let undoneMiddle = try await reopened.undoLatest(in: fixture.scope)
+        XCTAssertEqual(undoneNewest.id, newest.id)
+        XCTAssertEqual(undoneMiddle.id, middle.id)
+        await assertWorkflowHistoryThrows {
+            _ = try await reopened.undoLatest(in: fixture.scope)
+        } errorHandler: { error in
+            XCTAssertEqual(error as? WorkflowHistoryRepositoryError, .noUndoAvailable)
+        }
+    }
+
     func testCapturedWindowUndoCannotReverseNewerNotificationTransaction() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
@@ -207,6 +252,26 @@ private final class Fixture: @unchecked Sendable {
             let rows = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM workflow_history") ?? 0
             let undone = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM workflow_history WHERE is_undone = 1") ?? 0
             return (groups, rows, undone)
+        }
+    }
+
+    func historyTransactionRowCounts() async throws -> [String: Int] {
+        try await vault.read { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT transaction_id, COUNT(*) AS row_count
+                    FROM workflow_history
+                    WHERE transaction_id IS NOT NULL
+                    GROUP BY transaction_id
+                    """
+            )
+            return Dictionary(uniqueKeysWithValues: try rows.map { row in
+                guard let transactionID: String = row["transaction_id"],
+                      let rowCount: Int = row["row_count"]
+                else { throw WorkflowHistoryRepositoryError.invalidPersistedHistory }
+                return (transactionID, rowCount)
+            })
         }
     }
 

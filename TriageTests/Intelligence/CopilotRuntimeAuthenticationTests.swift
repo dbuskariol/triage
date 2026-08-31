@@ -113,6 +113,59 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         XCTAssertEqual(modelRequestCount, 1)
     }
 
+    func testXPCAuthenticatorKeepsTwoOrganizationScopesOnSeparateClients() async throws {
+        let factory = DistinctCopilotAuthenticationClientFactory()
+        let authenticator = CopilotXPCAuthenticator(makeClient: { factory.makeClient() })
+        let accountID = AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let firstOrganization = OrganizationID(rawValue: "org-1")!
+        let secondOrganization = OrganizationID(rawValue: "org-2")!
+
+        _ = try await authenticator.authenticateWithEphemeralCredential(
+            accountID: accountID, organizationID: firstOrganization, credential: SecretValue("test-token")
+        )
+        _ = try await authenticator.authenticateWithEphemeralCredential(
+            accountID: accountID, organizationID: secondOrganization, credential: SecretValue("test-token")
+        )
+        _ = try await authenticator.models(accountID: accountID, organizationID: firstOrganization)
+        _ = try await authenticator.models(accountID: accountID, organizationID: secondOrganization)
+
+        XCTAssertEqual(factory.makeCount, 2)
+        XCTAssertEqual(await factory.client(at: 0).modelRequestCount, 1)
+        XCTAssertEqual(await factory.client(at: 1).modelRequestCount, 1)
+    }
+
+    func testDisconnectFencesSuspendedAuthenticationBeforeItCanRetainSession() async throws {
+        let client = SuspendedAuthenticationClient()
+        let accountID = AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let organizationID = self.organizationID
+        let authenticator = CopilotXPCAuthenticator(makeClient: { client })
+        let authentication = Task {
+            try await authenticator.authenticateWithEphemeralCredential(
+                accountID: accountID,
+                organizationID: organizationID,
+                credential: SecretValue("test-token")
+            )
+        }
+
+        await client.waitUntilAuthenticateStarted()
+        await authenticator.removeSession(
+            profileDirectory: URL(fileURLWithPath: "/private/test-profiles/\(accountID.rawValue)")
+        )
+        await client.releaseAuthentication()
+
+        let result = await authentication.result
+        guard case let .failure(error) = result else {
+            return XCTFail("Expected disconnected authentication to be fenced.")
+        }
+        XCTAssertTrue(error is CancellationError)
+        await assertAsyncThrows {
+            _ = try await authenticator.models(accountID: accountID, organizationID: organizationID)
+        } verify: {
+            XCTAssertEqual($0 as? CopilotAuthenticationError, .runtimeUnavailable)
+        }
+        XCTAssertEqual(await client.shutdownCount, 1)
+    }
+
     func testClassicPersonalAccessTokensCannotStartAnUnavailableDeviceLogin() async {
         let authenticator = CopilotXPCAuthenticator()
         await assertAsyncThrows {
@@ -210,6 +263,87 @@ private final class CopilotAuthenticationClientFactory: @unchecked Sendable {
         count += 1
         lock.unlock()
         return client
+    }
+}
+
+private final class DistinctCopilotAuthenticationClientFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var clients: [CopilotAuthenticationClientSpy] = []
+
+    var makeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return clients.count
+    }
+
+    func makeClient() -> any TriageCopilotHelping {
+        let client = CopilotAuthenticationClientSpy()
+        lock.lock()
+        clients.append(client)
+        lock.unlock()
+        return client
+    }
+
+    func client(at index: Int) -> CopilotAuthenticationClientSpy {
+        lock.lock()
+        defer { lock.unlock() }
+        return clients[index]
+    }
+}
+
+private actor SuspendedAuthenticationClient: TriageCopilotHelping {
+    private var didStartAuthentication = false
+    private var isReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var shutdownCount = 0
+
+    func health(_: CopilotHealthRequest) async throws -> CopilotHealthResponse { throw CancellationError() }
+
+    func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse {
+        didStartAuthentication = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        if !isReleased {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return CopilotAuthenticationResponse(
+            header: .init(
+                requestID: request.header.requestID,
+                accountID: request.header.accountID,
+                organizationID: request.header.organizationID,
+                status: .authentication
+            ),
+            authentication: .init(host: "github.com", login: "test", authenticationType: "token", isAuthenticated: true)
+        )
+    }
+
+    func models(_: CopilotModelsRequest) async throws -> CopilotModelsResponse {
+        throw CopilotAuthenticationError.runtimeUnavailable
+    }
+    func analyze(_: CopilotAnalyzeRequest) async throws -> CopilotAnalysisResponse { throw CancellationError() }
+    func cancel(_: CopilotCancelRequest) async throws -> CopilotCancelResponse { throw CancellationError() }
+    func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse {
+        shutdownCount += 1
+        return CopilotShutdownResponse(
+            header: .init(
+                requestID: request.header.requestID,
+                accountID: request.header.accountID,
+                organizationID: request.header.organizationID,
+                status: .shutdown
+            )
+        )
+    }
+
+    func waitUntilAuthenticateStarted() async {
+        guard !didStartAuthentication else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func releaseAuthentication() {
+        isReleased = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
     }
 }
 

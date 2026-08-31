@@ -25,6 +25,8 @@ enum CopilotXPCError: Error, Equatable, Sendable {
   case responseTooLarge
   case invalidAnalysis
   case invalidAccountID
+  case runtimeUnavailable
+  case runtimeCorrupt
 }
 
 struct CopilotRequestHeader: Equatable, Sendable {

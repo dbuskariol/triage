@@ -75,6 +75,50 @@ final class NotificationDeliveringWorkspaceObserverTests: XCTestCase {
         await observer.shutdown()
     }
 
+    func testRemovedWorkItemWaitsForInFlightAddThenPurgesItsExactRequest() async throws {
+        let initial = try makeSnapshot(containsEligibleWorkItem: true)
+        let removed = try makeSnapshot()
+        let source = SubscriptionQuiescenceSource(snapshot: initial)
+        let center = PausingAddNotificationScheduler()
+        let ledger = RecordingNotificationDeliveryLedger()
+        let remover = RouteNotificationRemoverSpy()
+        let adapter = WorkspaceNotificationDeliveryAdapter(
+            scheduler: NotificationScheduler(
+                preferences: .init(isEnabled: true),
+                scheduling: center,
+                deliveryLedger: ledger
+            ),
+            authorizingPreferences: { _ in .init(isEnabled: true) }
+        )
+        let observer = NotificationDeliveringWorkspaceObserver(
+            source: source,
+            deliveryPreferences: { _ in .init(isEnabled: true) },
+            deliveryAdapter: adapter,
+            notificationRemover: remover
+        )
+
+        let values = try await observer.snapshots(for: initial.scope)
+        var iterator = values.makeAsyncIterator()
+        await source.emitSnapshot()
+        XCTAssertEqual(try await iterator.next(), initial)
+        await center.waitUntilAddStarted()
+
+        await source.emit(removed)
+        XCTAssertEqual(try await iterator.next(), removed)
+        await center.waitUntilCancellationObserved()
+        let routesBeforeAddCompletes = await remover.removedRoutes()
+        XCTAssertTrue(routesBeforeAddCompletes.isEmpty)
+
+        await center.resumeAdd()
+        await remover.waitForRouteRemoval()
+
+        let requests = await center.requests()
+        let recordedKeys = await ledger.recordedKeys()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(recordedKeys.isEmpty)
+        await observer.shutdown()
+    }
+
     func testFailingDeliveryDoesNotFailWorkspaceStream() async throws {
         let snapshot = try makeSnapshot()
         let source = SnapshotSource(snapshot: snapshot)
@@ -442,6 +486,10 @@ private actor SubscriptionQuiescenceSource: WorkspaceObserving {
         continuation?.yield(snapshot)
     }
 
+    func emit(_ snapshot: WorkspacePresentationSnapshot) {
+        continuation?.yield(snapshot)
+    }
+
     func waitForTermination() async {
         guard !terminated else { return }
         await withCheckedContinuation { terminationWaiter = $0 }
@@ -473,6 +521,38 @@ private actor AccountNotificationRemoverSpy: AccountNotificationRemoving {
     }
 
     func removedAccountIDs() -> [AccountID] { accountIDs }
+}
+
+private actor RouteNotificationRemoverSpy: AccountNotificationRemoving {
+    private var routes = [NotificationRoute]()
+    private var routeRemovalWaiter: CheckedContinuation<Void, Never>?
+
+    func removeNotifications(for _: AccountID) {}
+
+    func removeNotifications(for route: NotificationRoute) {
+        routes.append(route)
+        routeRemovalWaiter?.resume()
+        routeRemovalWaiter = nil
+    }
+
+    func removedRoutes() -> [NotificationRoute] { routes }
+
+    func waitForRouteRemoval() async {
+        guard routes.isEmpty else { return }
+        await withCheckedContinuation { routeRemovalWaiter = $0 }
+    }
+}
+
+private actor RecordingNotificationDeliveryLedger: NotificationDeliveryLedger {
+    private var recorded = [NotificationDedupeKey]()
+
+    func contains(_: NotificationDedupeKey) -> Bool { false }
+
+    func record(_ key: NotificationDedupeKey) {
+        recorded.append(key)
+    }
+
+    func recordedKeys() -> [NotificationDedupeKey] { recorded }
 }
 
 private actor RevocableNotificationAuthority {
@@ -544,7 +624,9 @@ private actor PausingNotificationScheduler: NotificationScheduling {
 private actor PausingAddNotificationScheduler: NotificationScheduling {
     private var scheduled = [NotificationRequest]()
     private var addStarted = false
+    private var cancellationObserved = false
     private var addStartedWaiter: CheckedContinuation<Void, Never>?
+    private var cancellationWaiter: CheckedContinuation<Void, Never>?
     private var addResume: CheckedContinuation<Void, Never>?
 
     func pendingNotifications() -> [PendingNotification] { [] }
@@ -554,7 +636,14 @@ private actor PausingAddNotificationScheduler: NotificationScheduling {
         addStarted = true
         addStartedWaiter?.resume()
         addStartedWaiter = nil
-        await withCheckedContinuation { addResume = $0 }
+        await withTaskCancellationHandler(
+            operation: {
+                await withCheckedContinuation { addResume = $0 }
+            },
+            onCancel: {
+                Task { await self.recordCancellation() }
+            }
+        )
     }
 
     func removePendingNotifications(identifiedBy identifiers: [String]) {
@@ -566,12 +655,23 @@ private actor PausingAddNotificationScheduler: NotificationScheduling {
         await withCheckedContinuation { addStartedWaiter = $0 }
     }
 
+    func waitUntilCancellationObserved() async {
+        guard !cancellationObserved else { return }
+        await withCheckedContinuation { cancellationWaiter = $0 }
+    }
+
     func resumeAdd() {
         addResume?.resume()
         addResume = nil
     }
 
     func requests() -> [NotificationRequest] { scheduled }
+
+    private func recordCancellation() {
+        cancellationObserved = true
+        cancellationWaiter?.resume()
+        cancellationWaiter = nil
+    }
 }
 
 private actor EvictionCompletion {

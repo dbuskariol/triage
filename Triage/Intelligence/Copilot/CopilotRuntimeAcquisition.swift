@@ -164,6 +164,10 @@ actor CopilotRuntimeAcquisitionService {
     private let files: any CopilotRuntimeFileManaging
     private var currentState: CopilotRuntimeAcquisitionState = .absent
     private var stateObservers: [UUID: AsyncStream<CopilotRuntimeAcquisitionState>.Continuation] = [:]
+    /// Progress arrives on an unstructured task after the downloader callback.
+    /// This generation makes terminal states win when that task is delayed.
+    private var acquisitionGeneration: UInt64 = 0
+    private var activeProgressGeneration: UInt64?
 
     init(
         applicationSupportDirectory: URL,
@@ -206,19 +210,19 @@ actor CopilotRuntimeAcquisitionService {
         guard archive.url.scheme == "https", archive.url.host == CopilotRuntimeRelease.githubAuthority else {
             throw CopilotRuntimeAcquisitionError.invalidSource
         }
-        let temporary = try files.makeTemporaryDirectory()
-        defer { files.removeIfPresent(temporary) }
-        let downloaded = temporary.appending(path: "runtime.tar.gz")
-        publishState(.downloading(receivedBytes: 0, expectedBytes: nil))
+        let generation = beginAcquisition()
         do {
+            let temporary = try files.makeTemporaryDirectory()
+            defer { files.removeIfPresent(temporary) }
+            let downloaded = temporary.appending(path: "runtime.tar.gz")
             let digest = try await downloader.download(archive, to: downloaded, maximumBytes: Self.maximumArchiveBytes) { [weak self] received, expected in
-                Task { await self?.publishDownloadProgress(received, expected: expected) }
+                Task { await self?.publishDownloadProgress(received, expected: expected, generation: generation) }
             }
             try Task.checkCancellation()
             guard digest.lowercased() == archive.expectedArchiveSHA256 else {
                 throw CopilotRuntimeAcquisitionError.checksumMismatch
             }
-            publishState(.verifying)
+            publishActiveState(.verifying, generation: generation)
             let extraction = temporary.appending(path: "extracted", directoryHint: .isDirectory)
             let executable = try extractor.extractVerifiedExecutable(from: downloaded, to: extraction)
             try validator.validate(executable, architecture: architecture)
@@ -227,16 +231,19 @@ actor CopilotRuntimeAcquisitionService {
             // Validation after the atomic publish catches replacement between
             // extraction and use; clients must call `runtimeForUse` again at exec.
             try validator.validate(installed, architecture: architecture)
-            publishState(.ready(installed))
+            finishAcquisition(.ready(installed), generation: generation)
             return installed
         } catch is CancellationError {
-            publishState(.absent)
+            finishAcquisition(.absent, generation: generation)
+            throw CopilotRuntimeAcquisitionError.cancellation
+        } catch CopilotRuntimeAcquisitionError.cancellation {
+            finishAcquisition(.absent, generation: generation)
             throw CopilotRuntimeAcquisitionError.cancellation
         } catch let error as CopilotRuntimeAcquisitionError {
-            publishState(.corrupt(String(describing: error)))
+            finishAcquisition(.corrupt(String(describing: error)), generation: generation)
             throw error
         } catch {
-            publishState(.corrupt("acquisition failed"))
+            finishAcquisition(.corrupt("acquisition failed"), generation: generation)
             throw CopilotRuntimeAcquisitionError.fileSystem
         }
     }
@@ -245,18 +252,18 @@ actor CopilotRuntimeAcquisitionService {
     func runtimeForUse() throws -> URL {
         let executable = files.installedExecutable(root: root, release: release, architecture: architecture)
         guard files.exists(executable) else {
-            publishState(.absent)
+            invalidateAcquisitionAndPublish(.absent)
             throw CopilotRuntimeAcquisitionError.executableMissing
         }
         do {
             try validator.validate(executable, architecture: architecture)
-            publishState(.ready(executable))
+            invalidateAcquisitionAndPublish(.ready(executable))
             return executable
         } catch let error as CopilotRuntimeAcquisitionError {
-            publishState(.corrupt(String(describing: error)))
+            invalidateAcquisitionAndPublish(.corrupt(String(describing: error)))
             throw error
         } catch {
-            publishState(.corrupt("runtime validation failed"))
+            invalidateAcquisitionAndPublish(.corrupt("runtime validation failed"))
             throw CopilotRuntimeAcquisitionError.invalidCodeSignature
         }
     }
@@ -269,9 +276,9 @@ actor CopilotRuntimeAcquisitionService {
                     try files.removeInstalled(root: root, release: release, architecture: architecture)
                 }
             }
-            publishState(.absent)
+            invalidateAcquisitionAndPublish(.absent)
         } catch {
-            publishState(.corrupt("runtime removal failed"))
+            invalidateAcquisitionAndPublish(.corrupt("runtime removal failed"))
             throw CopilotRuntimeAcquisitionError.fileSystem
         }
     }
@@ -281,8 +288,33 @@ actor CopilotRuntimeAcquisitionService {
         return try await acquireAtUserRequest()
     }
 
-    private func publishDownloadProgress(_ received: Int64, expected: Int64?) {
+    private func beginAcquisition() -> UInt64 {
+        acquisitionGeneration &+= 1
+        activeProgressGeneration = acquisitionGeneration
+        publishState(.downloading(receivedBytes: 0, expectedBytes: nil))
+        return acquisitionGeneration
+    }
+
+    private func publishDownloadProgress(_ received: Int64, expected: Int64?, generation: UInt64) {
+        guard activeProgressGeneration == generation, acquisitionGeneration == generation else { return }
         publishState(.downloading(receivedBytes: received, expectedBytes: expected))
+    }
+
+    private func publishActiveState(_ state: CopilotRuntimeAcquisitionState, generation: UInt64) {
+        guard activeProgressGeneration == generation, acquisitionGeneration == generation else { return }
+        publishState(state)
+    }
+
+    private func finishAcquisition(_ state: CopilotRuntimeAcquisitionState, generation: UInt64) {
+        guard acquisitionGeneration == generation else { return }
+        activeProgressGeneration = nil
+        publishState(state)
+    }
+
+    private func invalidateAcquisitionAndPublish(_ state: CopilotRuntimeAcquisitionState) {
+        acquisitionGeneration &+= 1
+        activeProgressGeneration = nil
+        publishState(state)
     }
 
     private func publishState(_ state: CopilotRuntimeAcquisitionState) {
@@ -316,14 +348,17 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
     private let destination: URL
     private let maximumBytes: Int64
     private let progress: @Sendable (Int64, Int64?) -> Void
+    private let stateLock = NSLock()
     private var continuation: CheckedContinuation<String, Error>?
     private var handle: FileHandle?
     private var hasher = SHA256()
     private var received: Int64 = 0
     private var expected: Int64?
-    private var terminalError: Error?
     private var task: URLSessionDataTask?
     private var acceptedRedirect = false
+    /// Stored before resuming so cancellation and URLSession callbacks can
+    /// race without ever resuming the continuation more than once.
+    private var terminalOutcome: Result<String, Error>?
 
     init(destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) {
         self.destination = destination; self.maximumBytes = maximumBytes; self.progress = progress
@@ -332,20 +367,37 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
     func run(session: URLSession, url: URL) async throws -> String {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        handle = try FileHandle(forWritingTo: destination)
+        let fileHandle = try FileHandle(forWritingTo: destination)
+        guard install(fileHandle) else {
+            try? fileHandle.close()
+            throw CopilotRuntimeAcquisitionError.cancellation
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
-                self.continuation = continuation
-                let task = session.dataTask(with: request)
-                self.task = task
-                task.resume()
+                let task: URLSessionDataTask?
+                let terminalOutcome: Result<String, Error>?
+                stateLock.lock()
+                terminalOutcome = self.terminalOutcome
+                if terminalOutcome == nil {
+                    self.continuation = continuation
+                    let createdTask = session.dataTask(with: request)
+                    self.task = createdTask
+                    task = createdTask
+                } else {
+                    task = nil
+                }
+                stateLock.unlock()
+                if let terminalOutcome {
+                    continuation.resume(with: terminalOutcome)
+                    return
+                }
+                task?.resume()
             }
         }, onCancel: { [weak self] in
-            self?.terminalError = CopilotRuntimeAcquisitionError.cancellation
-            self?.task?.cancel()
+            self?.finish(.failure(CopilotRuntimeAcquisitionError.cancellation), cancelTask: true)
         })
     }
 
@@ -368,43 +420,125 @@ final class CopilotRuntimeURLTransfer: NSObject, URLSessionDataDelegate, URLSess
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard !acceptedRedirect,
-              let originalURL = task.originalRequest?.url,
-              let redirectedURL = newRequest.url,
-              Self.isApprovedRedirect(from: originalURL, to: redirectedURL)
-        else {
-            terminalError = CopilotRuntimeAcquisitionError.redirectRejected
+        stateLock.lock()
+        let acceptsRedirect = terminalOutcome == nil
+            && !acceptedRedirect
+            && task.originalRequest?.url.map({ original in
+                newRequest.url.map { Self.isApprovedRedirect(from: original, to: $0) } ?? false
+            }) == true
+        if acceptsRedirect { acceptedRedirect = true }
+        stateLock.unlock()
+        guard acceptsRedirect else {
+            finish(.failure(CopilotRuntimeAcquisitionError.redirectRejected), cancelTask: true)
             completionHandler(nil)
             return
         }
-        acceptedRedirect = true
         completionHandler(newRequest)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
-            terminalError = CopilotRuntimeAcquisitionError.invalidResponse; completionHandler(.cancel); return
+        stateLock.lock()
+        let acceptsResponse = terminalOutcome == nil
+            && (response as? HTTPURLResponse)?.statusCode == 200
+        if acceptsResponse, let response = response as? HTTPURLResponse {
+            expected = response.expectedContentLength >= 0 ? response.expectedContentLength : nil
         }
-        expected = response.expectedContentLength >= 0 ? response.expectedContentLength : nil
-        if let expected, expected > maximumBytes { terminalError = CopilotRuntimeAcquisitionError.archiveTooLarge; completionHandler(.cancel); return }
+        let responseTooLarge = expected.map { $0 > maximumBytes } ?? false
+        stateLock.unlock()
+        guard acceptsResponse else {
+            finish(.failure(CopilotRuntimeAcquisitionError.invalidResponse), cancelTask: true)
+            completionHandler(.cancel)
+            return
+        }
+        if responseTooLarge {
+            finish(.failure(CopilotRuntimeAcquisitionError.archiveTooLarge), cancelTask: true)
+            completionHandler(.cancel)
+            return
+        }
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard terminalError == nil else { dataTask.cancel(); return }
-        received += Int64(data.count)
-        guard received <= maximumBytes else { terminalError = CopilotRuntimeAcquisitionError.archiveTooLarge; dataTask.cancel(); return }
-        do { try handle?.write(contentsOf: data) } catch { terminalError = error; dataTask.cancel(); return }
-        hasher.update(data: data); progress(received, expected)
+        let progressUpdate: (Int64, Int64?)?
+        let failure: Error?
+        stateLock.lock()
+        if terminalOutcome != nil {
+            progressUpdate = nil
+            failure = nil
+        } else if Int64(data.count) > maximumBytes - received {
+            progressUpdate = nil
+            failure = CopilotRuntimeAcquisitionError.archiveTooLarge
+        } else if let handle {
+            do {
+                try handle.write(contentsOf: data)
+                received += Int64(data.count)
+                hasher.update(data: data)
+                progressUpdate = (received, expected)
+                failure = nil
+            } catch {
+                progressUpdate = nil
+                failure = error
+            }
+        } else {
+            progressUpdate = nil
+            failure = CopilotRuntimeAcquisitionError.invalidResponse
+        }
+        stateLock.unlock()
+        if let failure {
+            finish(.failure(failure), cancelTask: true)
+        } else if let progressUpdate {
+            progress(progressUpdate.0, progressUpdate.1)
+        } else {
+            dataTask.cancel()
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        try? handle?.close(); handle = nil
+        stateLock.lock()
+        let isTerminal = terminalOutcome != nil
+        let outcome: Result<String, Error>?
+        if isTerminal {
+            outcome = nil
+        } else if let error {
+            outcome = .failure(error)
+        } else {
+            outcome = .success(hasher.finalize().map { String(format: "%02x", $0) }.joined())
+        }
+        stateLock.unlock()
+        if let outcome { finish(outcome, cancelTask: false) }
+    }
+
+    /// Atomically records the first terminal result, detaches all mutable
+    /// resources, then closes/resumes outside the lock to avoid delegate
+    /// reentrancy. Later cancellation/response/completion callbacks are no-ops.
+    private func finish(_ outcome: Result<String, Error>, cancelTask: Bool) {
+        let continuation: CheckedContinuation<String, Error>?
+        let handle: FileHandle?
+        let task: URLSessionDataTask?
+        stateLock.lock()
+        guard terminalOutcome == nil else {
+            stateLock.unlock()
+            return
+        }
+        terminalOutcome = outcome
+        continuation = self.continuation
+        self.continuation = nil
+        handle = self.handle
+        self.handle = nil
+        task = self.task
         self.task = nil
-        let continuation = continuation; self.continuation = nil
-        if let terminalError { continuation?.resume(throwing: terminalError) }
-        else if let error { continuation?.resume(throwing: error) }
-        else { continuation?.resume(returning: hasher.finalize().map { String(format: "%02x", $0) }.joined()) }
+        stateLock.unlock()
+        try? handle?.close()
+        if cancelTask { task?.cancel() }
+        continuation?.resume(with: outcome)
+    }
+
+    private func install(_ fileHandle: FileHandle) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard terminalOutcome == nil else { return false }
+        handle = fileHandle
+        return true
     }
 }
 
@@ -488,7 +622,12 @@ private enum CopilotRuntimeGzip {
                 let inputBytesBefore = stream.src_size
                 status = try buffer.withUnsafeMutableBytes { destination in
                     stream.dst_ptr = destination.bindMemory(to: UInt8.self).baseAddress!; stream.dst_size = destination.count
-                    let result = compression_stream_process(&stream, 0)
+                    // The complete archive is already in memory. Tell the
+                    // decoder that no more input can arrive: without this,
+                    // a valid member that has consumed its input may report
+                    // `OK` while waiting for a finalization call, while a
+                    // truncated member can report `OK` forever.
+                    let result = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
                     let outputBytes = destination.count - stream.dst_size
                     output.append(destination.bindMemory(to: UInt8.self).baseAddress!, count: outputBytes)
                     guard output.count <= maximumOutputBytes else { throw CopilotRuntimeAcquisitionError.archiveTooLarge }

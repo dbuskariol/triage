@@ -160,6 +160,60 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         await assertRuntimeThrows { _ = try await service.runtimeForUse() }
     }
 
+    func testDelayedProgressAfterCancellationCannotOverwriteAbsentState() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-progress-race-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let downloader = DelayedProgressDownloader()
+        let service = try CopilotRuntimeAcquisitionService(
+            applicationSupportDirectory: root,
+            architecture: .arm64,
+            downloader: downloader,
+            extractor: Extractor(error: nil),
+            validator: Validator(error: nil)
+        )
+
+        await assertRuntimeThrows { _ = try await service.acquireAtUserRequest() }
+        downloader.emitDelayedProgress()
+        for _ in 0..<16 { await Task.yield() }
+        XCTAssertEqual(await service.state(), .absent)
+    }
+
+    func testCancellationResponseAndCompletionRaceResumesDownloadOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-transfer-race-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let started = expectation(description: "URLProtocol started")
+        SuspendedRuntimeDownloadURLProtocol.setStartHandler { started.fulfill() }
+        defer { SuspendedRuntimeDownloadURLProtocol.setStartHandler(nil) }
+
+        let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.81-10/copilot-darwin-arm64.tar.gz")!
+        let transfer = CopilotRuntimeURLTransfer(
+            destination: root.appending(path: "runtime.tar.gz"),
+            maximumBytes: 1_024,
+            progress: { _, _ in }
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SuspendedRuntimeDownloadURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let operation = Task { () -> Bool in
+            do {
+                _ = try await transfer.run(session: session, url: source)
+                return false
+            } catch let error as CopilotRuntimeAcquisitionError {
+                return error == .cancellation
+            } catch {
+                return false
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        operation.cancel()
+
+        let callbackTask = session.dataTask(with: source)
+        let response = try XCTUnwrap(HTTPURLResponse(url: source, statusCode: 200, httpVersion: nil, headerFields: nil))
+        transfer.urlSession(session, dataTask: callbackTask, didReceive: response) { _ in }
+        transfer.urlSession(session, task: callbackTask, didCompleteWithError: nil)
+        XCTAssertTrue(await operation.value)
+    }
+
     func testRedirectPolicyAllowsOnlyPinnedGitHubAuthoritiesWithoutCredentialsOrQuery() {
         let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.81-10/copilot-darwin-arm64.tar.gz")!
         let releaseAsset = URL(string: "https://release-assets.githubusercontent.com/copilot-darwin-arm64.tar.gz")!
@@ -354,6 +408,46 @@ private final class Downloader: CopilotRuntimeDownloading, @unchecked Sendable {
         progress(17, 17)
         return digest
     }
+}
+
+private final class DelayedProgressDownloader: CopilotRuntimeDownloading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var progress: (@Sendable (Int64, Int64?) -> Void)?
+
+    func download(_ archive: CopilotRuntimeArchive, to destination: URL, maximumBytes: Int64, progress: @escaping @Sendable (Int64, Int64?) -> Void) async throws -> String {
+        lock.lock()
+        self.progress = progress
+        lock.unlock()
+        throw CopilotRuntimeAcquisitionError.cancellation
+    }
+
+    func emitDelayedProgress() {
+        lock.lock()
+        let callback = progress
+        lock.unlock()
+        callback?(42, 42)
+    }
+}
+
+private final class SuspendedRuntimeDownloadURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var startHandler: (() -> Void)?
+
+    static func setStartHandler(_ handler: (() -> Void)?) {
+        lock.lock()
+        startHandler = handler
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.startHandler
+        Self.lock.unlock()
+        handler?()
+    }
+    override func stopLoading() {}
 }
 
 private final class Extractor: CopilotRuntimeExtracting, @unchecked Sendable {

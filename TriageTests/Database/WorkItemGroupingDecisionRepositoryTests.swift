@@ -787,7 +787,9 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
     func testHydrationResponsibilityRelationsRequireCurrentCompleteRawCoverage() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }
-        try await fixture.installCurrentHydrationResponsibilityEvidence()
+        try await fixture.installCurrentHydrationResponsibilityEvidence(
+            closingIssueNodeID: fixture.firstNode.nodeID
+        )
 
         try await OrganizationWorkItemGraphProjectionService(vault: fixture.vault)
             .projectAfterNormalizedCommit(for: fixture.scope, at: fixture.date)
@@ -806,6 +808,7 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
         XCTAssertTrue(materialized.contains("reviewRequestedDirectly\u{0}reviewer-node"))
         XCTAssertTrue(materialized.contains("reviewRequestedFromTeam\u{0}review-team-node"))
         XCTAssertTrue(materialized.contains("awaitingResponse\u{0}reviewer-node"))
+        XCTAssertTrue(materialized.contains("closes\u{0}\(fixture.firstNode.nodeID.rawValue)"))
         XCTAssertTrue(pullRequest.relations.allSatisfy {
             $0.evidence.allSatisfy { $0.sourceRevision == fixture.secondNode.sourceRevision }
         })
@@ -1092,7 +1095,9 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
             )
         }
 
-        func installCurrentHydrationResponsibilityEvidence() async throws {
+        func installCurrentHydrationResponsibilityEvidence(
+            closingIssueNodeID: GitHubNodeID? = nil
+        ) async throws {
             let streamID = SyncStreamID(rawValue: "hydration-pull-requests-\(organizationID.rawValue)")!
             try await SyncStreamRepository(vault: vault).save(
                 SyncStream(
@@ -1150,8 +1155,9 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
                     arguments: [accountID.rawValue, Int64(date.timeIntervalSince1970 * 1_000)]
                 )
             }
+            let closingNodes = closingIssueNodeID.map { "{\"id\":\"\($0.rawValue)\"}" } ?? ""
             let payload = Data("""
-                {"data":{"nodes":[{"id":"\(secondNode.nodeID.rawValue)","author":{"id":"account-node"},"assignees":{"nodes":[{"id":"account-node"}],"pageInfo":{"hasNextPage":false}},"reviewRequests":{"nodes":[{"requestedReviewer":{"id":"reviewer-node","login":"reviewer"}},{"requestedReviewer":{"id":"review-team-node","slug":"triage"}}],"pageInfo":{"hasNextPage":false}},"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}]}}
+                {"data":{"nodes":[{"id":"\(secondNode.nodeID.rawValue)","author":{"id":"account-node"},"assignees":{"nodes":[{"id":"account-node"}],"pageInfo":{"hasNextPage":false}},"reviewRequests":{"nodes":[{"requestedReviewer":{"id":"reviewer-node","login":"reviewer"}},{"requestedReviewer":{"id":"review-team-node","slug":"triage"}}],"pageInfo":{"hasNextPage":false}},"closingIssuesReferences":{"nodes":[\(closingNodes)],"pageInfo":{"hasNextPage":false}}}]}}
                 """.utf8)
             try await RawAPISnapshotRepository(vault: vault).save(
                 RawAPISnapshot(

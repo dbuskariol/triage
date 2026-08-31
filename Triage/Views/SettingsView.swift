@@ -60,6 +60,34 @@ enum NotificationSettingsPresentation {
     }
 }
 
+/// Fine-grained tokens are bound to an explicit resource-owner organization
+/// when connected. The replacement flow does not collect that authority, so
+/// only a classic personal access token can be replaced in place.
+enum PersonalAccessTokenReplacementPresentation: Equatable, Sendable {
+    case replaceClassicToken
+    case fineGrainedReplacementUnavailable
+
+    static func action(for authenticationKind: AuthenticationKind) -> Self? {
+        switch authenticationKind {
+        case .oauth:
+            nil
+        case .classicPersonalAccessToken:
+            .replaceClassicToken
+        case .fineGrainedPersonalAccessToken:
+            .fineGrainedReplacementUnavailable
+        }
+    }
+
+    var unavailableDetail: String? {
+        switch self {
+        case .replaceClassicToken:
+            nil
+        case .fineGrainedReplacementUnavailable:
+            "Fine-grained tokens cannot be replaced in place. Connect the new token as a separate account and enter the resource-owner organization selected when you created it."
+        }
+    }
+}
+
 enum SettingsSidebarLayout {
     static let minimumWidth: CGFloat = 240
     static let idealWidth: CGFloat = 260
@@ -316,10 +344,15 @@ struct SettingsView: View {
                             Button("Remove…", role: .destructive) {
                                 accountPendingRemoval = account
                             }
-                            .disabled(appModel.isConnecting)
+                            .disabled(appModel.isConnecting || appModel.isRemovingAccount(account.id))
                             .accessibilityHint(
                                 "Removes this account, its credentials, and encrypted local Triage data from this Mac. It does not change GitHub."
                             )
+                            if appModel.isRemovingAccount(account.id) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .accessibilityLabel("Removing \(account.login) and its local data")
+                            }
                         }
                     }
                 }
@@ -337,10 +370,15 @@ struct SettingsView: View {
                         Button("Remove Local Data…", role: .destructive) {
                             unavailableAccountPendingRemoval = accountID
                         }
-                        .disabled(appModel.isConnecting)
+                        .disabled(appModel.isConnecting || appModel.isRemovingAccount(accountID))
                         .accessibilityHint(
                             "Removes this unavailable account's encrypted local data from this Mac. GitHub content is not changed."
                         )
+                        if appModel.isRemovingAccount(accountID) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Removing unavailable local account data")
+                        }
                     }
                 }
             }
@@ -410,12 +448,30 @@ struct SettingsView: View {
                 }
             }
             .disabled(appModel.isConnecting)
-        case .fineGrainedPersonalAccessToken, .classicPersonalAccessToken:
+        case .classicPersonalAccessToken:
             Button("Replace Token") {
                 appModel.selectAccount(account.id, activatesOrganization: false)
                 accountReplacingToken = account
             }
             .disabled(appModel.isConnecting)
+        case .fineGrainedPersonalAccessToken:
+            if let detail = PersonalAccessTokenReplacementPresentation
+                .action(for: account.authenticationKind)?
+                .unavailableDetail {
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("Replacement unavailable")
+                        .foregroundStyle(.secondary)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: 300, alignment: .trailing)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Fine-grained token replacement unavailable")
+                .accessibilityHint(detail)
+            }
         }
     }
 

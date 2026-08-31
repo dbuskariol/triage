@@ -16,6 +16,51 @@ final class TriageAppModelSelectionTests: XCTestCase {
         }
     }
 
+    func testOAuthFailureMessageOnlyAllowsTheStableUnsupportedVersionRecovery() {
+        let unsupportedVersion = AuthBrokerClientError.broker(
+            AuthBrokerFailure(
+                code: .invalidRequest,
+                recoveryDescription: "This version of Triage is not supported by the OAuth service."
+            )
+        )
+        XCTAssertEqual(
+            TriageAppModel.oauthFailureMessage(
+                for: unsupportedVersion,
+                fallback: "GitHub sign-in could not be completed. Try again."
+            ),
+            "This version of Triage is not supported by the OAuth service. Update Triage to continue."
+        )
+        XCTAssertEqual(
+            TriageAppModel.oauthFailureMessage(
+                for: unsupportedVersion,
+                fallback: "GitHub reconnect could not be completed. Try again."
+            ),
+            "This version of Triage is not supported by the OAuth service. Update Triage to continue."
+        )
+
+        let untrustedBrokerDetail = AuthBrokerClientError.broker(
+            AuthBrokerFailure(code: .invalidGrant, recoveryDescription: "sensitive upstream detail")
+        )
+        XCTAssertEqual(
+            TriageAppModel.oauthFailureMessage(
+                for: untrustedBrokerDetail,
+                fallback: "GitHub sign-in could not be completed. Try again."
+            ),
+            "GitHub sign-in could not be completed. Try again."
+        )
+
+        let unallowlistedInvalidRequest = AuthBrokerClientError.broker(
+            AuthBrokerFailure(code: .invalidRequest, recoveryDescription: "untrusted broker detail")
+        )
+        XCTAssertEqual(
+            TriageAppModel.oauthFailureMessage(
+                for: unallowlistedInvalidRequest,
+                fallback: "GitHub reconnect could not be completed. Try again."
+            ),
+            "GitHub reconnect could not be completed. Try again."
+        )
+    }
+
     func testRapidAToBToAOnlyPublishesFinalActivation() async {
         let controller = WorkspaceActivationTaskController()
         let barrier = ActivationBarrier()
@@ -275,6 +320,33 @@ final class TriageAppModelSelectionTests: XCTestCase {
                 fullGraph: [fullOnlyItem, pageItem]
             ).map(\.id),
             [pageItem.id, fullOnlyItem.id]
+        )
+    }
+
+    func testInboxPageRefreshDeadlineUsesBoundaryLearnedFromFullGraph() {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let evaluatedAt = Date(timeIntervalSinceReferenceDate: 10_000)
+        let boundary = evaluatedAt.addingTimeInterval(75)
+        let item = workItem(account: accountID, organization: organizationID, id: "boundary")
+            .replacing(workflow: WorkflowState(
+                snoozedUntil: boundary,
+                updatedAt: evaluatedAt
+            ))
+
+        XCTAssertEqual(
+            TriageAppModel.inboxPageRefreshDeadline(
+                evaluatedAt: evaluatedAt,
+                workItems: [item]
+            ),
+            boundary
+        )
+        XCTAssertEqual(
+            TriageAppModel.inboxPageRefreshDeadline(
+                evaluatedAt: evaluatedAt,
+                workItems: []
+            ),
+            evaluatedAt.addingTimeInterval(30)
         )
     }
 
@@ -636,6 +708,35 @@ final class TriageAppModelSelectionTests: XCTestCase {
         try await removal.value
     }
 
+    func testSameAccountRemovalIsSingleFlightAndKeepsItsFenceUntilCompletion() async throws {
+        let accountID = AccountID.make()
+        let removalBarrier = AccountRemovalBarrier()
+        let session = BlockingAccountRemovalSessionSpy(barrier: removalBarrier)
+        let model = try makeModel(accountSession: session)
+        model.install(
+            accounts: [account(accountID, suffix: "single-flight")],
+            organizations: [],
+            organizationAccesses: [:],
+            for: accountID
+        )
+
+        let firstRemoval = Task {
+            try await model.removeAccount(accountID)
+        }
+        await removalBarrier.waitForRemovalStart()
+        XCTAssertTrue(model.isRemovingAccount(accountID))
+
+        try await model.removeAccount(accountID)
+        let removalCallCount = await session.removalCallCount()
+        XCTAssertEqual(removalCallCount, 1)
+        XCTAssertTrue(model.isRemovingAccount(accountID))
+
+        await removalBarrier.release()
+        try await firstRemoval.value
+        XCTAssertFalse(model.isRemovingAccount(accountID))
+        XCTAssertTrue(model.accounts.isEmpty)
+    }
+
     private func scope(
         account: AccountID,
         organization: OrganizationID,
@@ -973,6 +1074,7 @@ private actor AccountRemovalOrderSessionSpy: AccountSessionServing {
 
 private actor BlockingAccountRemovalSessionSpy: AccountSessionServing {
     private let barrier: AccountRemovalBarrier
+    private var removalCalls = 0
 
     init(barrier: AccountRemovalBarrier) {
         self.barrier = barrier
@@ -985,9 +1087,12 @@ private actor BlockingAccountRemovalSessionSpy: AccountSessionServing {
     func replacePersonalAccessToken(_: PersonalAccessToken, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { try emptySnapshot() }
 
     func removeAccount(_: AccountID) async throws {
+        removalCalls += 1
         await barrier.markRemovalStarted()
         await barrier.waitForRelease()
     }
+
+    func removalCallCount() -> Int { removalCalls }
 
     private func emptySnapshot() throws -> AccountSessionSnapshot {
         try AccountSessionSnapshot(

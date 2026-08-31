@@ -75,7 +75,7 @@ final class CoverageRequirementProfileTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(requirements.count, 38)
+        XCTAssertEqual(requirements.count, 39)
         XCTAssertTrue(AccountOrganizationCoverageManifest.missingFeatures(in: requirements).isEmpty)
         XCTAssertFalse(requirements.contains { $0.feature == .notifications })
         XCTAssertTrue(requirements.contains {
