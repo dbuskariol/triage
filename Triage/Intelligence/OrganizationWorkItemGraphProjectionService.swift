@@ -489,7 +489,7 @@ struct OrganizationWorkItemGraphProjectionService: Sendable {
     nonisolated static func roleTeamMentionQualifier(
         in query: String
     ) -> (owner: String, slug: String)? {
-        guard let qualifier = roleQueryQualifier(named: "mentions", in: query),
+        guard let qualifier = roleQueryQualifier(named: "team", in: query),
               let slash = qualifier.firstIndex(of: "/"),
               qualifier[qualifier.index(after: slash)...].firstIndex(of: "/") == nil
         else { return nil }
