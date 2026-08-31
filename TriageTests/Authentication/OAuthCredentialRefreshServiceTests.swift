@@ -5,7 +5,7 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
     func testPersonalAccessTokensNeverEnterTheOAuthRefreshPath() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 1_000)
         let account = GitHubAccount(
-            id: AccountID(rawValue: "account-1")!,
+            id: AccountID(rawValue: "00000000-0000-4000-8000-000000000209")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",
@@ -851,7 +851,7 @@ final class OAuthCredentialRefreshServiceTests: XCTestCase {
 
     private func makeExpiringOAuthAccount(now: Date) -> GitHubAccount {
         GitHubAccount(
-            id: AccountID(rawValue: "account-1")!,
+            id: AccountID(rawValue: "00000000-0000-4000-8000-000000000210")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",

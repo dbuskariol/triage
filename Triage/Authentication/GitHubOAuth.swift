@@ -12,6 +12,7 @@ enum GitHubOAuthError: Error, Equatable, Sendable {
     case missingAuthorizationCode
     case authorizationInProgress
     case failedToStartAuthorization
+    case authorizationTimedOut
 }
 
 struct GitHubOAuthConfiguration: Equatable, Sendable {
@@ -122,11 +123,80 @@ struct OAuthAuthorizationSession: Equatable, Sendable {
 }
 
 @MainActor
+protocol OAuthBrowserSession: AnyObject {
+    func start() -> Bool
+    func cancel()
+}
+
+@MainActor
+private final class SystemOAuthBrowserSession: OAuthBrowserSession {
+    private let session: ASWebAuthenticationSession
+
+    init(
+        authorizationURL: URL,
+        callbackURLScheme: String?,
+        presentationContextProvider: ASWebAuthenticationPresentationContextProviding,
+        completion: @escaping @MainActor (URL?, Error?) -> Void
+    ) {
+        session = ASWebAuthenticationSession(
+            url: authorizationURL,
+            callbackURLScheme: callbackURLScheme
+        ) { callbackURL, error in
+            Task { @MainActor in
+                completion(callbackURL, error)
+            }
+        }
+        session.presentationContextProvider = presentationContextProvider
+    }
+
+    func start() -> Bool {
+        session.start()
+    }
+
+    func cancel() {
+        session.cancel()
+    }
+}
+
+@MainActor
 final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationContextProviding {
-    private var activeSession: ASWebAuthenticationSession?
+    static let authorizationTimeout: Duration = .seconds(10 * 60)
+
+    typealias BrowserSessionFactory = @MainActor (
+        URL,
+        String?,
+        ASWebAuthenticationPresentationContextProviding,
+        @escaping @MainActor (URL?, Error?) -> Void
+    ) -> any OAuthBrowserSession
+
+    private let sleep: @Sendable (Duration) async throws -> Void
+    private let browserSessionFactory: BrowserSessionFactory
+    private var activeSession: (any OAuthBrowserSession)?
     private var activeAnchor: ASPresentationAnchor?
     private var continuation: CheckedContinuation<AuthBrokerExchangeRequest, Error>?
     private var authorizationGeneration = OAuthAuthorizationGeneration()
+    private var timeoutTask: Task<Void, Never>?
+
+    init(
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
+            try await Task.sleep(for: duration)
+        },
+        browserSessionFactory: @escaping BrowserSessionFactory = {
+            authorizationURL,
+            callbackURLScheme,
+            presentationContextProvider,
+            completion in
+            SystemOAuthBrowserSession(
+                authorizationURL: authorizationURL,
+                callbackURLScheme: callbackURLScheme,
+                presentationContextProvider: presentationContextProvider,
+                completion: completion
+            )
+        }
+    ) {
+        self.sleep = sleep
+        self.browserSessionFactory = browserSessionFactory
+    }
 
     func authorize(
         configuration: GitHubOAuthConfiguration,
@@ -142,21 +212,19 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
                 activeAnchor = presentationAnchor
-                let session = ASWebAuthenticationSession(
-                    url: authorization.authorizationURL,
-                    callbackURLScheme: configuration.redirectURI.scheme
+                let session = browserSessionFactory(
+                    authorization.authorizationURL,
+                    configuration.redirectURI.scheme,
+                    self
                 ) { [weak self] callbackURL, error in
-                    Task { @MainActor [weak self] in
-                        self?.complete(
-                            callbackURL: callbackURL,
-                            error: error,
-                            authorization: authorization,
-                            redirectURI: configuration.redirectURI,
-                            authorizationID: authorizationID
-                        )
-                    }
+                    self?.complete(
+                        callbackURL: callbackURL,
+                        error: error,
+                        authorization: authorization,
+                        redirectURI: configuration.redirectURI,
+                        authorizationID: authorizationID
+                    )
                 }
-                session.presentationContextProvider = self
                 activeSession = session
                 guard session.start() else {
                     finish(
@@ -165,6 +233,7 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
                     )
                     return
                 }
+                scheduleTimeout(for: authorizationID)
             }
         }, onCancel: {
             Task { @MainActor [weak self] in
@@ -214,8 +283,35 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
 
     private func cancel(authorizationID: UUID) {
         guard authorizationGeneration.isCurrent(authorizationID) else { return }
-        activeSession?.cancel()
+        let session = activeSession
         finish(with: .failure(CancellationError()), authorizationID: authorizationID)
+        session?.cancel()
+    }
+
+    private func scheduleTimeout(for authorizationID: UUID) {
+        timeoutTask?.cancel()
+        let sleep = sleep
+        timeoutTask = Task { [weak self] in
+            do {
+                try await sleep(Self.authorizationTimeout)
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+            self?.timeout(authorizationID: authorizationID)
+        }
+    }
+
+    private func timeout(authorizationID: UUID) {
+        guard authorizationGeneration.isCurrent(authorizationID) else { return }
+        let session = activeSession
+        finish(
+            with: .failure(GitHubOAuthError.authorizationTimedOut),
+            authorizationID: authorizationID
+        )
+        session?.cancel()
     }
 
     private func finish(
@@ -223,6 +319,8 @@ final class GitHubOAuthAuthorizer: NSObject, ASWebAuthenticationPresentationCont
         authorizationID: UUID
     ) {
         guard authorizationGeneration.finish(authorizationID) else { return }
+        timeoutTask?.cancel()
+        timeoutTask = nil
         let continuation = continuation
         self.continuation = nil
         activeSession = nil

@@ -4,6 +4,21 @@ enum AuthBrokerProtocol {
     static let version = 1
     static let maximumRequestBodyBytes = 16 * 1_024
     static let maximumResponseBodyBytes = 32 * 1_024
+    static let requestLifetimeMilliseconds: Int64 = 60_000
+
+    static func isValidApplicationVersion(_ value: String) -> Bool {
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 3 else { return false }
+        return components.allSatisfy { component in
+            guard !component.isEmpty,
+                  component.allSatisfy(\.isNumber),
+                  let number = Int(component)
+            else {
+                return false
+            }
+            return number >= 0 && (component == "0" || !component.hasPrefix("0"))
+        }
+    }
 }
 
 struct OAuthAuthorizationCode: Codable, Equatable, Sendable, CustomStringConvertible {

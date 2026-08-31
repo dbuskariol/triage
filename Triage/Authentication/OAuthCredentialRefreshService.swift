@@ -46,6 +46,7 @@ private actor OAuthCredentialRefreshMutationCoordinator {
 
 actor OAuthCredentialRefreshService {
     private let brokerURL: URL
+    private let applicationVersion: String?
     private let secretStore: any SecretStore
     private let vaultRegistry: VaultRegistry
     private let clock: @Sendable () -> Date
@@ -53,6 +54,7 @@ actor OAuthCredentialRefreshService {
 
     init(
         brokerURL: URL,
+        applicationVersion: String? = nil,
         secretStore: any SecretStore,
         vaultRegistry: VaultRegistry,
         clock: @escaping @Sendable () -> Date = Date.init,
@@ -60,6 +62,7 @@ actor OAuthCredentialRefreshService {
     ) throws {
         try AuthBrokerClient.validate(baseURL: brokerURL)
         self.brokerURL = brokerURL
+        self.applicationVersion = applicationVersion
         self.secretStore = secretStore
         self.vaultRegistry = vaultRegistry
         self.clock = clock
@@ -109,7 +112,13 @@ actor OAuthCredentialRefreshService {
         if let broker {
             refreshClient = broker
         } else {
-            refreshClient = try AuthBrokerClient(baseURL: brokerURL)
+            guard let applicationVersion else {
+                throw AuthBrokerClientError.invalidApplicationVersion
+            }
+            refreshClient = try AuthBrokerClient(
+                baseURL: brokerURL,
+                applicationVersion: applicationVersion
+            )
         }
         let response = try await refreshClient.refresh(
             AuthBrokerRefreshRequest(refreshToken: OAuthRefreshToken(refreshToken))

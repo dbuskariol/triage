@@ -26,16 +26,19 @@ struct AccountConnectionResult: Sendable {
 
 actor AccountConnectionService {
     private let brokerURL: URL?
+    private let applicationVersion: String?
     private let secretStore: any SecretStore
     private let removeAllSecrets: @Sendable (AccountID) async throws -> Void
     private let vaultRegistry: VaultRegistry
 
     init(
         brokerURL: URL,
+        applicationVersion: String,
         secretStore: KeychainSecretStore,
         vaultRegistry: VaultRegistry
     ) {
         self.brokerURL = brokerURL
+        self.applicationVersion = applicationVersion
         self.secretStore = secretStore
         removeAllSecrets = { accountID in
             try await secretStore.removeAllSecrets(for: accountID)
@@ -45,6 +48,7 @@ actor AccountConnectionService {
 
     init(secretStore: KeychainSecretStore, vaultRegistry: VaultRegistry) {
         brokerURL = nil
+        applicationVersion = nil
         self.secretStore = secretStore
         removeAllSecrets = { accountID in
             try await secretStore.removeAllSecrets(for: accountID)
@@ -61,6 +65,7 @@ actor AccountConnectionService {
         removeAllSecrets: @escaping @Sendable (AccountID) async throws -> Void
     ) {
         brokerURL = nil
+        applicationVersion = nil
         self.secretStore = secretStore
         self.removeAllSecrets = removeAllSecrets
         self.vaultRegistry = vaultRegistry
@@ -69,10 +74,13 @@ actor AccountConnectionService {
     func connectOAuth(
         exchangeRequest: AuthBrokerExchangeRequest
     ) async throws -> AccountConnectionResult {
-        guard let brokerURL else {
+        guard let brokerURL, let applicationVersion else {
             throw AccountConnectionError.missingOAuthBroker
         }
-        let broker = try AuthBrokerClient(baseURL: brokerURL)
+        let broker = try AuthBrokerClient(
+            baseURL: brokerURL,
+            applicationVersion: applicationVersion
+        )
         let tokenResponse = try await broker.exchange(exchangeRequest)
         return try await establishAccount(
             accessToken: tokenResponse.accessToken.value,
