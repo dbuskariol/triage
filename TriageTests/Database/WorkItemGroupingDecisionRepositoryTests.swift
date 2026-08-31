@@ -31,19 +31,25 @@ final class WorkItemGroupingDecisionRepositoryTests: XCTestCase {
         )
         XCTAssertNil(
             OrganizationWorkItemGraphProjectionService.roleTeamMentionQualifier(
-                in: "org:github is:open mentions:github/triage/extra"
+                in: "org:github is:open team:github/triage/extra"
             )
         )
         XCTAssertEqual(
             OrganizationWorkItemGraphProjectionService.roleTeamMentionSlug(
-                in: "org:github is:open mentions:github/triage",
+                in: "org:github is:open team:github/triage",
                 organizationLogin: "github"
             ),
             "triage"
         )
         XCTAssertNil(
             OrganizationWorkItemGraphProjectionService.roleTeamMentionSlug(
-                in: "org:github is:open mentions:other-org/triage",
+                in: "org:github is:open team:other-org/triage",
+                organizationLogin: "github"
+            )
+        )
+        XCTAssertNil(
+            OrganizationWorkItemGraphProjectionService.roleTeamMentionSlug(
+                in: "org:github is:open mentions:github/triage",
                 organizationLogin: "github"
             )
         )
