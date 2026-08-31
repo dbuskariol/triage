@@ -113,10 +113,10 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
 
         XCTAssertEqual(firstMigrations, reopenedMigrations)
         XCTAssertEqual(reopenedMigrations.count, TriageDatabaseMigrator.migrationCount)
-        XCTAssertEqual(reopenedMigrations.last?.id, "054-project-item-raw-provenance-v1")
+        XCTAssertEqual(reopenedMigrations.last?.id, "058-ai-action-confidence-threshold-v1")
         XCTAssertEqual(
             reopenedMigrations.last?.checksum,
-            "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
+            "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
         )
         XCTAssertTrue(reopenedMigrations.allSatisfy { migration in
             migration.checksum.range(
@@ -213,6 +213,22 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             MigrationRow(
                 id: "054-project-item-raw-provenance-v1",
                 checksum: "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
+            ),
+            MigrationRow(
+                id: "055-workflow-history-durable-undo-v1",
+                checksum: "a72e9b9d18f7bc9424a497a4320f9d1a381425d7f4c1f1652cd007454c313147"
+            ),
+            MigrationRow(
+                id: "056-pull-request-status-check-authority-v1",
+                checksum: "51aecb18f9132ff0d3d1f17d14c9d33df0d77b6241d0c3666877ee0a1f14d3be"
+            ),
+            MigrationRow(
+                id: "057-copilot-candidate-budget-v1",
+                checksum: "1b91d9eacb16b18cbebe278e2aefae89fdc0a01eaee99d8bb31342a0bb378412"
+            ),
+            MigrationRow(
+                id: "058-ai-action-confidence-threshold-v1",
+                checksum: "d6e912d44f3aa0234d807203d5fce4d7d0322c5753156bba467ea29744251d16"
             )
         ])
         XCTAssertEqual(upgradedMigrations.count, TriageDatabaseMigrator.migrationCount)
@@ -220,7 +236,12 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             tables: Set<String>,
             indexes: Set<String>,
             triggers: Set<String>,
-            projectItemRawProvenanceColumns: Set<String>
+            projectItemRawProvenanceColumns: Set<String>,
+            workflowHistoryColumns: Set<String>,
+            statusChecksColumns: Set<String>,
+            aiConsentColumns: Set<String>,
+            aiConsentThresholdIsNotNull: Bool,
+            aiConsentThresholdDefault: String?
         ) in
             let tables = Set(try String.fetchAll(
                 database,
@@ -240,7 +261,43 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             ).map { row in
                 row["name"] as String
             })
-            return (tables, indexes, triggers, projectItemRawProvenanceColumns)
+            let workflowHistoryColumns = Set(try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(workflow_history)"
+            ).map { row in
+                row["name"] as String
+            })
+            let statusChecksColumns = Set(try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(status_checks)"
+            ).map { row in
+                row["name"] as String
+            })
+            let aiConsentColumns = Set(try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(ai_consents)"
+            ).map { row in
+                row["name"] as String
+            })
+            let aiConsentThreshold = try Row.fetchOne(
+                database,
+                sql: """
+                SELECT \"notnull\", dflt_value
+                FROM pragma_table_info('ai_consents')
+                WHERE name = 'automatic_action_confidence_threshold'
+                """
+            )
+            return (
+                tables,
+                indexes,
+                triggers,
+                projectItemRawProvenanceColumns,
+                workflowHistoryColumns,
+                statusChecksColumns,
+                aiConsentColumns,
+                (aiConsentThreshold?["notnull"] as Int? == 1),
+                aiConsentThreshold?["dflt_value"] as String?
+            )
         }
         XCTAssertTrue(upgradedSchema.tables.isSuperset(of: Set([
             "review_candidate_failure_envelopes",
@@ -257,7 +314,9 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "work_item_group_memberships",
             "repository_ranking_preferences",
             "notification_preferences",
-            "project_item_raw_provenance"
+            "project_item_raw_provenance",
+            "status_check_rollup_markers",
+            "ai_candidate_budget_attempts"
         ])))
         XCTAssertTrue(upgradedSchema.indexes.isSuperset(of: Set([
             "workspace_work_items_scope_activity",
@@ -270,7 +329,11 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "work_item_group_memberships_canonical_scope",
             "repository_ranking_preferences_scope",
             "notification_preferences_scope",
-            "project_item_raw_provenance_current_scope"
+            "project_item_raw_provenance_current_scope",
+            "workflow_history_durable_undo_scope",
+            "status_checks_current_pull_request_scope",
+            "ai_candidate_budget_scope_started",
+            "ai_candidate_budget_scope_active"
         ])))
         XCTAssertTrue(upgradedSchema.projectItemRawProvenanceColumns.isSuperset(of: Set([
             "project_item_node_id",
@@ -283,6 +346,25 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "source_revision",
             "observed_at_ms"
         ])))
+        XCTAssertTrue(upgradedSchema.workflowHistoryColumns.isSuperset(of: Set([
+            "transaction_id",
+            "account_id",
+            "organization_id",
+            "is_undone"
+        ])))
+        XCTAssertTrue(upgradedSchema.statusChecksColumns.isSuperset(of: Set([
+            "account_id",
+            "organization_id",
+            "credential_revision",
+            "capability_revision",
+            "source_revision",
+            "observed_at_ms"
+        ])))
+        XCTAssertTrue(upgradedSchema.aiConsentColumns.contains(
+            "automatic_action_confidence_threshold"
+        ))
+        XCTAssertTrue(upgradedSchema.aiConsentThresholdIsNotNull)
+        XCTAssertEqual(upgradedSchema.aiConsentThresholdDefault, "0.92")
         XCTAssertTrue(upgradedSchema.triggers.isSuperset(of: Set([
             "account_organization_inventory_replay_protect_snapshot_delete",
             "account_organization_inventory_replay_protect_snapshot_update",
