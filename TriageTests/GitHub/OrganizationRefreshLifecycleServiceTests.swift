@@ -3,8 +3,8 @@ import XCTest
 
 final class OrganizationRefreshLifecycleServiceTests: XCTestCase {
     func testLaunchGroupsScopesByAccountAndRetainsOneRuntimePerAccount() async throws {
-        let accountA = AccountID.make()
-        let accountB = AccountID.make()
+        let accountA = AccountID(rawValue: "account-a")!
+        let accountB = AccountID(rawValue: "account-b")!
         let scopeAOne = scope(accountID: accountA, organizationID: "organization-a-one")
         let scopeATwo = scope(accountID: accountA, organizationID: "organization-a-two")
         let scopeB = scope(accountID: accountB, organizationID: "organization-b")
