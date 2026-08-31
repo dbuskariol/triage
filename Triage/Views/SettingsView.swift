@@ -120,6 +120,15 @@ struct SettingsView: View {
     @State private var notificationConsentError: String?
     @State private var isPresentingAIDataSharingDisclosure = false
 
+    private var aiSettingsRefreshIdentity: String {
+        let account = appModel.accounts.first { $0.id == appModel.selectedAccountID }
+        return [
+            appModel.selectedAccountID?.rawValue ?? "no-account",
+            appModel.selectedOrganizationID?.rawValue ?? "no-organization",
+            account?.credentialID.rawValue ?? "account-not-restored",
+        ].joined(separator: "/")
+    }
+
     var body: some View {
         NavigationSplitView {
             List(SettingsCategory.allCases, selection: sidebarSelection) { category in
@@ -1080,7 +1089,7 @@ struct SettingsView: View {
                 }
             }
         }
-        .task(id: appModel.selectedOrganizationID) {
+        .task(id: aiSettingsRefreshIdentity) {
             await appModel.refreshSelectedOrganizationAIStatus()
         }
     }
