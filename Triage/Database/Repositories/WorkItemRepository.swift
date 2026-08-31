@@ -363,7 +363,7 @@ actor WorkItemRepository {
         }
         try Task.checkCancellation()
         let nextCursor = result.hasMore
-            ? try result.items.last.map { try Self.inboxPageCursor(for: $0, scope: scope) }
+            ? result.items.last.map { Self.inboxPageCursor(for: $0, scope: scope) }
             : nil
         return InboxPage(items: result.items, nextCursor: nextCursor, hasMore: result.hasMore)
     }
