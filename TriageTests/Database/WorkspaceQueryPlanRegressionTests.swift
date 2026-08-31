@@ -269,7 +269,10 @@ final class WorkspaceQueryPlanRegressionTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(revision.inboxPresentationFingerprint, "0")
+        // Seeding 10,000 Inbox dependencies advances the trigger-maintained
+        // scope generation once per write. The lookup itself must remain a
+        // single marker read regardless of that generation's value.
+        XCTAssertEqual(revision.inboxPresentationFingerprint, "10000")
         XCTAssertEqual(
             statements.filter { $0.contains("FROM workspace_inbox_revisions") }.count,
             1,

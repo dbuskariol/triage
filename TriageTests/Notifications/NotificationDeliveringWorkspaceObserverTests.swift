@@ -34,7 +34,7 @@ final class NotificationDeliveringWorkspaceObserverTests: XCTestCase {
         let snapshot = try makeSnapshot(containsEligibleWorkItem: true)
         let source = SnapshotSource(snapshot: snapshot, finishes: false)
         let center = PausingAddNotificationScheduler()
-        let remover = AccountNotificationRemoverSpy()
+        let remover = AccountNotificationRemoverSpy(scheduler: center)
         let adapter = WorkspaceNotificationDeliveryAdapter(
             scheduler: NotificationScheduler(
                 preferences: .init(isEnabled: true),
@@ -64,6 +64,10 @@ final class NotificationDeliveringWorkspaceObserverTests: XCTestCase {
         await Task.yield()
         let didFinishBeforeAddReturned = await completion.isComplete()
         XCTAssertFalse(didFinishBeforeAddReturned)
+        // Eviction first cancels and awaits the delivery task. Waiting for the
+        // fake center to observe that cancellation avoids racing its resumed
+        // add with the scheduler's exact-request cancellation cleanup.
+        await center.waitUntilCancellationObserved()
 
         await center.resumeAdd()
         await eviction.value
@@ -517,9 +521,15 @@ private actor DeliveryRecorder {
 
 private actor AccountNotificationRemoverSpy: AccountNotificationRemoving {
     private var accountIDs = [AccountID]()
+    private let scheduler: PausingAddNotificationScheduler?
 
-    func removeNotifications(for accountID: AccountID) {
+    init(scheduler: PausingAddNotificationScheduler? = nil) {
+        self.scheduler = scheduler
+    }
+
+    func removeNotifications(for accountID: AccountID) async {
         accountIDs.append(accountID)
+        await scheduler?.removeAllRequests()
     }
 
     func removedAccountIDs() -> [AccountID] { accountIDs }
@@ -634,7 +644,6 @@ private actor PausingAddNotificationScheduler: NotificationScheduling {
     func pendingNotifications() -> [PendingNotification] { [] }
 
     func schedule(_ request: NotificationRequest) async {
-        scheduled.append(request)
         addStarted = true
         addStartedWaiter?.resume()
         addStartedWaiter = nil
@@ -646,10 +655,18 @@ private actor PausingAddNotificationScheduler: NotificationScheduling {
                 Task { await self.recordCancellation() }
             }
         )
+        // Model UNUserNotificationCenter.add: the request becomes pending when
+        // the suspended add completes, after which NotificationScheduler's
+        // cancellation fence must remove that exact identifier.
+        scheduled.append(request)
     }
 
     func removePendingNotifications(identifiedBy identifiers: [String]) {
         scheduled.removeAll { identifiers.contains($0.identifier) }
+    }
+
+    func removeAllRequests() {
+        scheduled.removeAll(keepingCapacity: false)
     }
 
     func waitUntilAddStarted() async {
