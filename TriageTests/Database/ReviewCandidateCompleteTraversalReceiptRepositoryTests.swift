@@ -762,7 +762,8 @@ private final class ReviewTraversalReceiptFixture: @unchecked Sendable {
         nodeID: GitHubNodeID(rawValue: "RECEIPT_PR")!,
         repositoryID: RepositoryID(rawValue: "receipt-repository")!,
         repository: try! GitHubRepositoryPath(owner: "acme", repository: "repo"),
-        number: 7
+        number: 7,
+        sourceRevision: "rev-1"
     )
 
     var scope: SynchronizationScope {

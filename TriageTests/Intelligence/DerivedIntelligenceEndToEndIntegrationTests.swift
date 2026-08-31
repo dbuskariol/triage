@@ -16,7 +16,20 @@ final class DerivedIntelligenceEndToEndIntegrationTests: XCTestCase {
         )
         XCTAssertTrue(inputSnapshot.isProvisional)
         XCTAssertEqual(inputSnapshot.input.items.count, 1)
-        XCTAssertEqual(inputSnapshot.input.items[0].pullRequestReviews.map(\.id), [fixture.reviewNodeID])
+        // Normalized review rows alone are deliberately not a current source:
+        // the fixture has organization coverage but no immutable, candidate-
+        // revision-qualified complete-traversal receipt.  Keeping those rows
+        // out avoids treating a stale or partial review refresh as trusted
+        // derived input while their revisions still fence persistence.
+        XCTAssertTrue(inputSnapshot.input.items[0].pullRequestReviews.isEmpty)
+        XCTAssertTrue(inputSnapshot.input.items[0].pullRequestReviewThreads.isEmpty)
+        XCTAssertEqual(
+            inputSnapshot.sourceStates.filter { $0.feature == .reviews || $0.feature == .reviewThreads },
+            [
+                .init(workItemID: fixture.workItemID, feature: .reviewThreads, availability: .excluded),
+                .init(workItemID: fixture.workItemID, feature: .reviews, availability: .excluded)
+            ]
+        )
         XCTAssertEqual(inputSnapshot.input.items[0].timeline.map(\.id), [fixture.timelineEventID])
         XCTAssertTrue(inputSnapshot.input.items[0].searchDocument.projectValues.contains("Priority: High"))
 
