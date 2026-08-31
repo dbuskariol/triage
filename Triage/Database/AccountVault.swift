@@ -45,15 +45,38 @@ struct VaultPaths: Equatable, Sendable {
 /// created or opened. Account identifiers are deliberately opaque UUIDs, not
 /// arbitrary strings supplied by persisted or external data.
 private enum VaultPathValidator {
+    /// Validates the caller-selected trusted root before entering the
+    /// account-owned namespace. macOS exposes system aliases and firmlinks
+    /// such as `/var`; preserving the spelling of that root also preserves the
+    /// sandbox extension granted to temporary and Application Support paths.
+    /// The root itself is reopened with `O_NOFOLLOW`, and every `Vaults`
+    /// component below it remains descriptor-relative and no-follow protected.
+    static func canonicalRootDirectory(_ rootDirectory: URL) throws -> URL {
+        let standardized = rootDirectory.standardizedFileURL
+        guard standardized.isFileURL, standardized.path.hasPrefix("/") else {
+            throw VaultError.unsafeAccountIDPath
+        }
+        var status = stat()
+        if Darwin.lstat(standardized.path, &status) == 0 {
+            guard (status.st_mode & S_IFMT) != S_IFLNK else {
+                throw VaultError.unsafeAccountIDPath
+            }
+        } else if errno != ENOENT {
+            throw VaultError.unsafeAccountIDPath
+        }
+        return standardized
+    }
+
     static func paths(rootDirectory: URL, accountID: AccountID) throws -> VaultPaths {
         guard isOpaqueAccountID(accountID) else {
             throw VaultError.unsafeAccountIDPath
         }
 
-        let paths = VaultPaths(rootDirectory: rootDirectory, accountID: accountID)
+        let canonicalRoot = try canonicalRootDirectory(rootDirectory)
+        let paths = VaultPaths(rootDirectory: canonicalRoot, accountID: accountID)
         do {
             try NoFollowFilesystem.assertExistingPath(
-                beneath: rootDirectory,
+                beneath: canonicalRoot,
                 components: ["Vaults", accountID.rawValue]
             )
         } catch {
@@ -63,10 +86,11 @@ private enum VaultPathValidator {
     }
 
     static func ensureVaultDirectory(rootDirectory: URL, accountID: AccountID) throws {
-        _ = try paths(rootDirectory: rootDirectory, accountID: accountID)
+        let canonicalRoot = try canonicalRootDirectory(rootDirectory)
+        _ = try paths(rootDirectory: canonicalRoot, accountID: accountID)
         do {
             try NoFollowFilesystem.ensureDirectory(
-                at: rootDirectory,
+                at: canonicalRoot,
                 components: ["Vaults", accountID.rawValue]
             )
         } catch {
@@ -75,10 +99,11 @@ private enum VaultPathValidator {
     }
 
     static func ensureMigrationBackups(rootDirectory: URL, accountID: AccountID) throws {
-        _ = try paths(rootDirectory: rootDirectory, accountID: accountID)
+        let canonicalRoot = try canonicalRootDirectory(rootDirectory)
+        _ = try paths(rootDirectory: canonicalRoot, accountID: accountID)
         do {
             try NoFollowFilesystem.ensureDirectory(
-                at: rootDirectory,
+                at: canonicalRoot,
                 components: ["Vaults", accountID.rawValue, "MigrationBackups"]
             )
         } catch {
@@ -87,9 +112,10 @@ private enum VaultPathValidator {
     }
 
     static func assertDatabaseFileIsSafe(rootDirectory: URL, accountID: AccountID) throws {
+        let canonicalRoot = try canonicalRootDirectory(rootDirectory)
         do {
             try NoFollowFilesystem.assertRegularFileIfPresent(
-                beneath: rootDirectory,
+                beneath: canonicalRoot,
                 directoryComponents: ["Vaults", accountID.rawValue],
                 name: "triage.sqlite"
             )
@@ -112,6 +138,7 @@ private enum VaultPathValidator {
 /// component and use `O_NOFOLLOW` at every boundary.
 enum NoFollowFilesystem {
     private static let directoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    private static let trustedRootDirectoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_CLOEXEC
 
     static func ensureDirectory(at root: URL, components: [String]) throws {
         var descriptor = try openDirectory(at: root, create: true)
@@ -189,6 +216,23 @@ enum NoFollowFilesystem {
         return true
     }
 
+    /// Returns an owned descriptor for a directory reached entirely through
+    /// the no-follow account namespace. The caller must keep it open for as
+    /// long as any `/dev/fd/<descriptor>/...` pathname may be reopened.
+    static func openDirectoryDescriptor(
+        beneath root: URL,
+        components: [String]
+    ) throws -> Int32 {
+        guard let descriptor = try openedDirectory(
+            beneath: root,
+            components: components,
+            create: false
+        ) else {
+            throw posixError(code: ENOENT)
+        }
+        return descriptor
+    }
+
     /// Checks a file within an already-opened directory. Keeping the caller's
     /// descriptor open lets SQLite use a `/dev/fd` path without reopening any
     /// account-owned pathname after this no-follow check.
@@ -204,6 +248,35 @@ enum NoFollowFilesystem {
         guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
         guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
         return true
+    }
+
+    static func createRegularFileIfMissing(
+        relativeTo directory: Int32,
+        name: String,
+        permissions: mode_t = 0o600
+    ) throws {
+        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
+        let file = Darwin.openat(
+            directory,
+            name,
+            O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            permissions
+        )
+        if file == -1 {
+            guard errno == EEXIST,
+                  try regularFileExists(relativeTo: directory, name: name)
+            else {
+                throw posixError()
+            }
+            return
+        }
+        defer { _ = Darwin.close(file) }
+        guard Darwin.fchmod(file, permissions) == 0,
+              Darwin.fsync(file) == 0,
+              Darwin.fsync(directory) == 0
+        else {
+            throw posixError()
+        }
     }
 
     static func readRegularFileIfPresent(
@@ -532,11 +605,30 @@ enum NoFollowFilesystem {
     private static func openDirectory(at url: URL, create: Bool) throws -> Int32 {
         let path = url.standardizedFileURL.path
         guard path.hasPrefix("/") else { throw posixError(code: EINVAL) }
-        var descriptor = Darwin.open("/", directoryFlags)
+        if !create {
+            let descriptor = Darwin.open(path, directoryFlags)
+            guard descriptor != -1 else { throw posixError() }
+            return descriptor
+        }
+        // The configured root is the trusted boundary and may sit beneath a
+        // macOS system alias or firmlink (`/var`, `/tmp`, Data-volume mounts).
+        // Creation traverses only that trusted boundary using ordinary
+        // directory opens. The completed root is then reopened atomically with
+        // `O_NOFOLLOW`, closing a final-component swap before any account-owned
+        // path is accessed.
+        var descriptor = Darwin.open("/", trustedRootDirectoryFlags)
         guard descriptor != -1 else { throw posixError() }
         for component in path.split(separator: "/").map(String.init) {
             do {
-                let next = try openDirectory(named: component, relativeTo: descriptor, create: create)
+                guard isSafeComponent(component) else { throw posixError(code: EINVAL) }
+                var next = Darwin.openat(descriptor, component, trustedRootDirectoryFlags)
+                if next == -1, create, errno == ENOENT {
+                    guard Darwin.mkdirat(descriptor, component, 0o700) == 0 || errno == EEXIST else {
+                        throw posixError()
+                    }
+                    next = Darwin.openat(descriptor, component, trustedRootDirectoryFlags)
+                }
+                guard next != -1 else { throw posixError() }
                 _ = Darwin.close(descriptor)
                 descriptor = next
             } catch {
@@ -544,6 +636,9 @@ enum NoFollowFilesystem {
                 throw error
             }
         }
+        _ = Darwin.close(descriptor)
+        descriptor = Darwin.open(path, directoryFlags)
+        guard descriptor != -1 else { throw posixError() }
         return descriptor
     }
 
@@ -602,6 +697,7 @@ actor AccountVault {
     let paths: VaultPaths
 
     private let databasePool: DatabasePool
+    private let vaultDirectoryDescriptor: Int32
     private let rootDirectory: URL
     private let vaultKey: VaultKey
 
@@ -612,7 +708,8 @@ actor AccountVault {
     ) throws {
         self.accountID = accountID
         self.vaultKey = vaultKey
-        let root = try rootDirectory ?? VaultPaths.defaultRootDirectory()
+        let configuredRoot = try rootDirectory ?? VaultPaths.defaultRootDirectory()
+        let root = try VaultPathValidator.canonicalRootDirectory(configuredRoot)
         self.rootDirectory = root
         paths = try VaultPathValidator.paths(rootDirectory: root, accountID: accountID)
 
@@ -622,11 +719,30 @@ actor AccountVault {
         try VaultPathValidator.ensureVaultDirectory(rootDirectory: root, accountID: accountID)
         try VaultPathValidator.assertDatabaseFileIsSafe(rootDirectory: root, accountID: accountID)
 
-        databasePool = try DatabasePool(
-            path: paths.database.path,
-            configuration: Self.configuration(vaultKey: vaultKey)
+        let vaultDirectoryDescriptor = try NoFollowFilesystem.openDirectoryDescriptor(
+            beneath: root,
+            components: ["Vaults", accountID.rawValue]
         )
-        try Self.verify(databasePool)
+        self.vaultDirectoryDescriptor = vaultDirectoryDescriptor
+        do {
+            try NoFollowFilesystem.createRegularFileIfMissing(
+                relativeTo: vaultDirectoryDescriptor,
+                name: "triage.sqlite"
+            )
+            let pool = try DatabasePool(
+                path: paths.database.path,
+                configuration: Self.configuration(vaultKey: vaultKey)
+            )
+            try Self.verify(pool)
+            databasePool = pool
+        } catch {
+            _ = Darwin.close(vaultDirectoryDescriptor)
+            throw error
+        }
+    }
+
+    deinit {
+        _ = Darwin.close(vaultDirectoryDescriptor)
     }
 
     func read<Value: Sendable>(
@@ -749,7 +865,6 @@ actor AccountVault {
             create: true
         ) { backupDirectory in
             let temporaryName = ".\(migrationID).\(UUID().uuidString.lowercased()).partial"
-            let temporaryPath = "/dev/fd/\(backupDirectory)/\(temporaryName)"
             defer {
                 try? NoFollowFilesystem.removeRegularFileIfPresent(
                     relativeTo: backupDirectory,
@@ -763,25 +878,34 @@ actor AccountVault {
                 }
             }
 
+            try NoFollowFilesystem.createRegularFileIfMissing(
+                relativeTo: backupDirectory,
+                name: temporaryName
+            )
+            let temporaryWritePath = rootDirectory
+                .appendingPathComponent("Vaults", isDirectory: true)
+                .appendingPathComponent(accountID.rawValue, isDirectory: true)
+                .appendingPathComponent("MigrationBackups", isDirectory: true)
+                .appendingPathComponent(temporaryName, isDirectory: false)
+                .path
+            let temporaryVerificationPath = temporaryWritePath
             var backupConfiguration = configuration(vaultKey: vaultKey)
-            // `/dev/fd/<directory-fd>/…` resolves through the directory we
-            // keep open for the whole exchange. SQLite's pathname API still
-            // works normally, but an attacker cannot redirect this backup by
-            // swapping MigrationBackups or one of its ancestors.
             backupConfiguration.journalMode = .default
+            backupConfiguration.prepareDatabase { database in
+                // A descriptor-relative pathname has no stable sibling path
+                // for a rollback journal. Keep backup journaling in memory;
+                // the completed encrypted file is fsynced before publication.
+                try database.execute(sql: "PRAGMA journal_mode = MEMORY")
+            }
             let destination = try DatabaseQueue(
-                path: temporaryPath,
+                path: temporaryWritePath,
                 configuration: backupConfiguration
             )
             try source.backup(to: destination)
             try destination.close()
-            try NoFollowFilesystem.setRegularFilePermissions(
-                relativeTo: backupDirectory,
-                name: temporaryName
-            )
 
             let verificationPool = try DatabasePool(
-                path: temporaryPath,
+                path: temporaryVerificationPath,
                 configuration: configuration(vaultKey: vaultKey, readonly: true)
             )
             defer { try? verificationPool.close() }
@@ -802,6 +926,10 @@ actor AccountVault {
                 ) ?? 0) == sourceReplayCount
             }
             guard verified else { throw VaultError.invalidMigrationBackup }
+            try NoFollowFilesystem.setRegularFilePermissions(
+                relativeTo: backupDirectory,
+                name: temporaryName
+            )
 
             try NoFollowFilesystem.copyRegularFileWithinDirectoryAtomically(
                 backupDirectory,
@@ -979,7 +1107,8 @@ actor VaultRegistry {
     private var accountsBeingRemoved: Set<AccountID> = []
 
     init(rootDirectory: URL? = nil) throws {
-        self.rootDirectory = try rootDirectory ?? VaultPaths.defaultRootDirectory()
+        let configuredRoot = try rootDirectory ?? VaultPaths.defaultRootDirectory()
+        self.rootDirectory = try VaultPathValidator.canonicalRootDirectory(configuredRoot)
     }
 
     func open(
