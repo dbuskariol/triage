@@ -540,6 +540,46 @@ final class PostAccountIdentityReplayReceiptRepositoryTests: XCTestCase {
         }
     }
 
+    func testAuthenticatedUserReceiptRejectsMismatchedIdentityAndNonMonotonicValidation() async throws {
+        let fixture = try await PostAccountIdentityReplayFixture()
+        defer { fixture.remove() }
+        let repository = AuthenticatedUserReplayReceiptRepository(vault: fixture.vault)
+
+        try await repository.replace(
+            fixture.userResponse(),
+            for: fixture.userIdentity,
+            observedAt: fixture.observedAt
+        )
+        try await fixture.vault.write { database in
+            try database.execute(sql: """
+                UPDATE authenticated_user_replay_receipts
+                SET validated_at_ms = observed_at_ms - 1
+                """)
+        }
+
+        let nonMonotonicReplay = try await repository.validatedUser(
+            for: fixture.userIdentity,
+            validatedAt: fixture.observedAt.addingTimeInterval(1)
+        )
+        XCTAssertNil(nonMonotonicReplay)
+
+        try await repository.replace(
+            fixture.userResponse(),
+            for: fixture.userIdentity,
+            observedAt: fixture.observedAt
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE authenticated_user_replay_receipts SET id = 'wrong-authenticated-user-receipt'"
+            )
+        }
+        let mismatchedIdentityReplay = try await repository.validatedUser(
+            for: fixture.userIdentity,
+            validatedAt: fixture.observedAt.addingTimeInterval(1)
+        )
+        XCTAssertNil(mismatchedIdentityReplay)
+    }
+
     func testAuthenticatedUserReceiptRejectsMalformedImmutableIdentityBeforePersistence() async throws {
         let fixture = try await PostAccountIdentityReplayFixture()
         defer { fixture.remove() }

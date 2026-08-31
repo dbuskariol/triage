@@ -74,7 +74,13 @@ actor AuthenticatedUserReplayReceiptRepository {
 
             let payloadDigest = Self.digest(response.payload)
             let snapshot = RawAPISnapshot(
-                id: Self.snapshotID(identity: identity, payloadDigest: payloadDigest, observedAt: observedAt),
+                id: Self.snapshotID(
+                    identity: identity,
+                    payloadDigest: payloadDigest,
+                    eTag: response.etag,
+                    lastModified: response.lastModified,
+                    observedAt: observedAt
+                ),
                 accountID: identity.accountID,
                 githubNodeID: nil,
                 endpoint: "/user",
@@ -122,15 +128,23 @@ actor AuthenticatedUserReplayReceiptRepository {
             do {
                 guard let row = try Row.fetchOne(database, sql: """
                     SELECT id, etag, last_modified, raw_snapshot_id, raw_payload_digest,
-                           normalized_digest, parser_version, source_revision
+                           normalized_digest, parser_version, source_revision,
+                           observed_at_ms, committed_at_ms, validated_at_ms
                     FROM authenticated_user_replay_receipts
                     WHERE account_id = ? AND credential_revision = ? AND request_key = ?
                     """, arguments: [
                         identity.accountID.rawValue, identity.credentialRevision.rawValue,
                         AuthenticatedUserReplayIdentity.requestKey
                     ]),
+                    let receiptID: String = row["id"],
                     let snapshotID = RawAPISnapshotID(rawValue: row["raw_snapshot_id"]),
                     let snapshot = try Self.snapshot(snapshotID, accountID: identity.accountID, in: database),
+                    let rawPayloadDigest: Data = row["raw_payload_digest"],
+                    rawPayloadDigest.count == SHA256.Digest.byteCount,
+                    receiptID == Self.receiptID(
+                        identity: identity,
+                        payloadDigest: rawPayloadDigest
+                    ),
                     (row["parser_version"] as Int?) == Self.parserVersion,
                     snapshot.accountID == identity.accountID,
                     snapshot.githubNodeID == nil,
@@ -140,8 +154,16 @@ actor AuthenticatedUserReplayReceiptRepository {
                     snapshot.payload.count <= Self.maximumRawPayloadBytes,
                     snapshot.eTag == (row["etag"] as String?),
                     snapshot.lastModified == (row["last_modified"] as String?),
-                    (row["raw_payload_digest"] as Data?) == Self.digest(snapshot.payload),
+                    rawPayloadDigest == Self.digest(snapshot.payload),
                     (row["source_revision"] as String?) == Self.hex(Self.digest(snapshot.payload)),
+                    let observedAtMilliseconds: Int64 = row["observed_at_ms"],
+                    let committedAtMilliseconds: Int64 = row["committed_at_ms"],
+                    let lastValidatedAtMilliseconds: Int64 = row["validated_at_ms"],
+                    observedAtMilliseconds >= 0,
+                    committedAtMilliseconds >= observedAtMilliseconds,
+                    lastValidatedAtMilliseconds >= committedAtMilliseconds,
+                    Self.milliseconds(validatedAt) >= committedAtMilliseconds,
+                    Self.milliseconds(validatedAt) >= lastValidatedAtMilliseconds,
                     let user = try? Self.decoder.decode(GitHubUserDTO.self, from: snapshot.payload),
                     (row["normalized_digest"] as Data?) == Self.userDigest(user),
                     Self.matchesImmutableIdentity(user, accountID: identity.accountID, in: database)
@@ -261,9 +283,21 @@ actor AuthenticatedUserReplayReceiptRepository {
     private nonisolated static func snapshotID(
         identity: AuthenticatedUserReplayIdentity,
         payloadDigest: Data,
+        eTag: String?,
+        lastModified: String?,
         observedAt: Date
     ) -> RawAPISnapshotID {
-        RawAPISnapshotID(rawValue: "authenticated-user-replay-\(hex(digest(Data("\(identity.accountID.rawValue)|\(identity.credentialRevision.rawValue)|\(hex(payloadDigest))|\(milliseconds(observedAt))".utf8))))")!
+        let authority = [
+            identity.accountID.rawValue,
+            identity.credentialRevision.rawValue,
+            hex(payloadDigest),
+            eTag ?? "",
+            lastModified ?? "",
+            String(milliseconds(observedAt))
+        ].joined(separator: "|")
+        return RawAPISnapshotID(
+            rawValue: "authenticated-user-replay-\(hex(digest(Data(authority.utf8))))"
+        )!
     }
 
     private nonisolated static func receiptID(

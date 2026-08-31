@@ -278,6 +278,26 @@ actor OrganizationAIController {
         )
     }
 
+    /// Account teardown must not merely drop the registry reference: a
+    /// non-cooperative external operation can retain this controller and keep
+    /// running. Invalidate every lease, cancel all operations, and wait for
+    /// their bounded operation tasks to quiesce before the vault lifetime is
+    /// released.
+    func cancelAll() async {
+        let scopes = Set(generations.keys).union(activeOperations.keys)
+        for scope in scopes {
+            advanceGeneration(for: scope)
+        }
+        let operations = Array(activeOperations.values)
+        activeOperations.removeAll()
+        for operation in operations {
+            operation.cancel()
+        }
+        for operation in operations {
+            await operation.waitForQuiescence()
+        }
+    }
+
     private func validateScope(_ scope: SynchronizationScope, account: GitHubAccount) throws {
         try validateVaultAccount(scope.accountID)
         guard account.id == scope.accountID else { throw OrganizationAIControllerError.accountScopeMismatch }

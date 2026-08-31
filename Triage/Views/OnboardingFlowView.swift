@@ -50,7 +50,7 @@ enum LocalAccountRecoveryPresentation: Equatable {
         case .unavailableVaultKey:
             "Triage cannot open encrypted local data for one or more saved accounts. In Account Settings, remove each unavailable account’s local data. This removes data stored on this Mac only; it does not change GitHub. Then reconnect to GitHub to resync."
         case .encryptedLocalDataUnavailable:
-            "Triage could not restore encrypted local account data. Try again after local storage is available. Triage has not identified an account that is safe to remove, so no local data will be deleted automatically."
+            "Triage could not restore encrypted local account data. Try again after local storage is available. No local data will be changed automatically."
         }
     }
 

@@ -94,7 +94,8 @@ final class TriageUITestFixture {
                 workspaceCoordinator: FixtureWorkspaceCoordinator(),
                 refreshLifecycle: FixtureRefreshLifecycle(),
                 workspaceObserver: FixtureWorkspaceObserver(),
-                workspaceMutator: FixtureWorkspaceMutator()
+                workspaceMutator: FixtureWorkspaceMutator(),
+                organizationAIControllers: FixtureOrganizationAIControllers()
             ),
             vaultRegistry: vaultRegistry,
             defaults: defaults,
@@ -180,6 +181,17 @@ private struct FixtureWorkspaceMutator: WorkspaceMutating {
     func apply(_: WorkflowAction, to _: WorkItemID, in _: SynchronizationScope) async throws {}
     func completeActionItem(_: ActionItemID, in _: WorkItemID, scope _: SynchronizationScope) async throws {}
     func editActionItem(_: LocalActionItemEdit, actionItemID _: ActionItemID, in _: WorkItemID, expectedUpdatedAt _: Date, scope _: SynchronizationScope) async throws -> ActionItem { throw CancellationError() }
+}
+
+/// Fixture AI entry points are handled in-memory by `TriageAppModel` before a
+/// controller can be requested. Trap if that boundary ever regresses instead
+/// of constructing a Copilot/XPC-backed controller in a UI test process.
+private actor FixtureOrganizationAIControllers: OrganizationAIControllerProviding {
+    func controller(for _: AccountVault) async -> OrganizationAIController {
+        fatalError("The local UI fixture must not construct a Copilot controller.")
+    }
+
+    func evict(accountID _: AccountID) async {}
 }
 
 private enum FixtureData {

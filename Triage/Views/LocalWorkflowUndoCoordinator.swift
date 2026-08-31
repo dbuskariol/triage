@@ -5,6 +5,28 @@ import Foundation
 /// only reversible workflow transitions and never creates an action that could
 /// alter GitHub content.
 enum LocalWorkflowUndoPolicy {
+    /// Registers a native undo operation even when an asynchronous save has
+    /// already ended SwiftUI's event group. Existing AppKit undo/redo groups
+    /// remain intact; a standalone manager receives one named group.
+    @MainActor
+    static func registerNativeUndo(
+        named actionName: String,
+        with undoManager: UndoManager,
+        registration: () -> Void
+    ) {
+        let opensGroup = undoManager.groupingLevel == 0
+            && !undoManager.isUndoing
+            && !undoManager.isRedoing
+        if opensGroup {
+            undoManager.beginUndoGrouping()
+        }
+        registration()
+        undoManager.setActionName(actionName)
+        if opensGroup {
+            undoManager.endUndoGrouping()
+        }
+    }
+
     static func inverse(for action: WorkflowAction, previous: WorkflowState) -> WorkflowAction? {
         switch action {
         case .archive:
@@ -108,28 +130,29 @@ final class LocalWorkflowUndoCoordinator: NSObject, ObservableObject {
         undoManager: UndoManager,
         actionName: String
     ) {
-        undoManager.registerUndo(withTarget: self) { coordinator in
-            coordinator.registerHistoryStep(
-                expectedCurrent: expectedAfterApplying,
-                applying: nextAction,
-                expectedAfterApplying: expectedCurrent,
-                nextAction: applying,
-                item: item,
-                appModel: appModel,
-                undoManager: undoManager,
-                actionName: actionName
-            )
-            Task { @MainActor in
-                await coordinator.applyHistoryStep(
-                    applying,
-                    expectedCurrent: expectedCurrent,
-                    expectedAfterApplying: expectedAfterApplying,
+        LocalWorkflowUndoPolicy.registerNativeUndo(named: actionName, with: undoManager) {
+            undoManager.registerUndo(withTarget: self) { coordinator in
+                coordinator.registerHistoryStep(
+                    expectedCurrent: expectedAfterApplying,
+                    applying: nextAction,
+                    expectedAfterApplying: expectedCurrent,
+                    nextAction: applying,
                     item: item,
-                    appModel: appModel
+                    appModel: appModel,
+                    undoManager: undoManager,
+                    actionName: actionName
                 )
+                Task { @MainActor in
+                    await coordinator.applyHistoryStep(
+                        applying,
+                        expectedCurrent: expectedCurrent,
+                        expectedAfterApplying: expectedAfterApplying,
+                        item: item,
+                        appModel: appModel
+                    )
+                }
             }
         }
-        undoManager.setActionName(actionName)
     }
 
     private func applyHistoryStep(

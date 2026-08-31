@@ -836,8 +836,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     /// Enters the durable due-refresh path after the ordinary selected-workspace
     /// activation has settled, avoiding a second foreground refresh owner.
     func launchOrganizationRefreshLifecycle() async {
-        guard !usesInMemoryUITestFixture else { return }
+        guard !isShuttingDown, !usesInMemoryUITestFixture else { return }
         let scopes = await lifecycleSynchronizationScopes()
+        guard !isShuttingDown else { return }
         await dependencies.refreshLifecycle.launch(
             synchronizationScopes: scopes,
             activeAccountID: selectedAccountID
@@ -907,23 +908,29 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     func restoreAccounts() async {
+        guard !isShuttingDown else { return }
         restorationError = nil
         do {
             let result = try await dependencies.accountSession.restoreAccounts()
+            guard !isShuttingDown else { return }
             await install(session: result)
+            guard !isShuttingDown else { return }
             if !result.accounts.contains(where: { $0.id == selectedAccountID }) {
                 selectedAccountID = result.accounts.first?.id
             }
             if !organizations.contains(where: { $0.id == selectedOrganizationID }) {
                 selectedOrganizationID = organizations.first?.id
             }
+            guard !isShuttingDown else { return }
             activateSelectedOrganization()
+            guard !isShuttingDown else { return }
             if !result.unavailableAccountIDs.isEmpty {
                 restorationError = "An account's encrypted local data cannot be opened. Remove its local data in Settings, then reconnect to resync."
             }
         } catch is CancellationError {
             return
         } catch {
+            guard !isShuttingDown else { return }
             restorationError = "Triage could not open its encrypted account data."
         }
     }
@@ -1977,6 +1984,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     private func activateSelectedOrganization() {
+        guard !isShuttingDown else { return }
         guard !usesInMemoryUITestFixture else {
             presentCachedWorkItems()
             return

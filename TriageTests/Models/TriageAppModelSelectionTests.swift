@@ -352,6 +352,51 @@ final class TriageAppModelSelectionTests: XCTestCase {
         XCTAssertNil(model.selectedWorkItemID)
     }
 
+    func testDelayedRestoreCannotReactivateWorkspaceAfterShutdown() async throws {
+        let accountID = AccountID.make()
+        let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
+        let barrier = ActivationBarrier()
+        let coordinator = CountingCoordinator()
+        let snapshot = try AccountSessionSnapshot(
+            accounts: [],
+            organizationsByAccount: [:],
+            organizationAccessesByAccount: [:],
+            accountCapabilitiesByAccount: [:]
+        )
+        let model = try makeModel(
+            accountSession: DelayedRestorationSessionSpy(barrier: barrier, snapshot: snapshot),
+            workspaceCoordinator: coordinator
+        )
+        model.install(
+            accounts: [account(accountID, suffix: "restore-shutdown")],
+            organizations: [organization(organizationID, suffix: "restore-shutdown")],
+            organizationAccesses: [organizationID: access(account: accountID, organization: organizationID)],
+            for: accountID
+        )
+
+        let restoration = Task { await model.restoreAccounts() }
+        await barrier.waitForArrival()
+        await model.shutdown()
+        await barrier.release()
+        await restoration.value
+
+        // Shutdown owns the single cancellation. A late restoration must not
+        // schedule activation/recheck work that cancels this account again.
+        let cancelAllCount = await coordinator.cancelAllCount()
+        XCTAssertEqual(cancelAllCount, 1)
+    }
+
+    func testLifecycleLaunchDoesNothingAfterShutdown() async throws {
+        let lifecycle = CountingLifecycle()
+        let model = try makeModel(refreshLifecycle: lifecycle)
+
+        await model.shutdown()
+        await model.launchOrganizationRefreshLifecycle()
+
+        let launchCount = await lifecycle.launchCount()
+        XCTAssertEqual(launchCount, 0)
+    }
+
     func testNotificationRouteDoesNotChangeFixtureSelectionDuringAccountRemoval() async throws {
         let accountID = AccountID.make()
         let organizationID = OrganizationID(rawValue: UUID().uuidString.lowercased())!
@@ -401,6 +446,8 @@ final class TriageAppModelSelectionTests: XCTestCase {
 
     private func makeModel(
         accountSession: any AccountSessionServing = CacheSessionSpy(),
+        workspaceCoordinator: any WorkspaceCoordinating = CacheCoordinatorSpy(),
+        refreshLifecycle: any OrganizationRefreshLifecycleHandling = CacheLifecycleSpy(),
         workspaceObservationLifecycle: any WorkspaceObservationLifecycleHandling = NoopWorkspaceObservationLifecycle(),
         workspaceAccessibility: WorkspaceAccessibilityCoordinator? = nil,
         purgeAccountNavigationState: @escaping AccountNavigationStatePurging = { _ in },
@@ -412,8 +459,8 @@ final class TriageAppModelSelectionTests: XCTestCase {
         return TriageAppModel(
             dependencies: TriageApplicationDependencies(
                 accountSession: accountSession,
-                workspaceCoordinator: CacheCoordinatorSpy(),
-                refreshLifecycle: CacheLifecycleSpy(),
+                workspaceCoordinator: workspaceCoordinator,
+                refreshLifecycle: refreshLifecycle,
                 workspaceObserver: CacheObserverSpy(),
                 workspaceObservationLifecycle: workspaceObservationLifecycle,
                 workspaceMutator: CacheMutatorSpy(),
@@ -627,6 +674,27 @@ private actor SequencedRestorationSessionSpy: AccountSessionServing {
     func removeAccount(_: AccountID) async throws {}
 }
 
+private actor DelayedRestorationSessionSpy: AccountSessionServing {
+    private let barrier: ActivationBarrier
+    private let snapshot: AccountSessionSnapshot
+
+    init(barrier: ActivationBarrier, snapshot: AccountSessionSnapshot) {
+        self.barrier = barrier
+        self.snapshot = snapshot
+    }
+
+    func restoreAccounts() async throws -> AccountSessionSnapshot {
+        await barrier.wait()
+        return snapshot
+    }
+
+    func connectOAuth(_: AuthBrokerExchangeRequest) async throws -> AccountSessionSnapshot { snapshot }
+    func connectPersonalAccessToken(_: PersonalAccessToken, resourceOwnerOrganization _: String?) async throws -> AccountSessionSnapshot { snapshot }
+    func reconnectOAuth(_: AuthBrokerExchangeRequest, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { snapshot }
+    func replacePersonalAccessToken(_: PersonalAccessToken, replacing _: GitHubAccount) async throws -> AccountSessionSnapshot { snapshot }
+    func removeAccount(_: AccountID) async throws {}
+}
+
 private actor RecoveryReplacingSessionSpy: AccountSessionServing {
     private let restoration: AccountSessionSnapshot
     private let replacement: AccountSessionSnapshot
@@ -666,12 +734,38 @@ private actor CacheCoordinatorSpy: WorkspaceCoordinating {
     func shutdown() async {}
 }
 
+private actor CountingCoordinator: WorkspaceCoordinating {
+    private var cancelAllCalls = 0
+
+    func select(_: SynchronizationScope) async throws -> AccountOrganizationCoordinatorState? { nil }
+    func refresh(_: SynchronizationScope, priority _: AccountOrganizationRefreshPriority) async throws -> AccountOrganizationCoordinatorState? { nil }
+    func cancel(_: SynchronizationScope) async throws {}
+    func cancelAll(for _: AccountID) async throws { cancelAllCalls += 1 }
+    func shutdown() async {}
+
+    func cancelAllCount() -> Int { cancelAllCalls }
+}
+
 private actor CacheLifecycleSpy: OrganizationRefreshLifecycleHandling {
     func launch(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
     func applicationDidBecomeActive(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
     func wake(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
     func scheduleOpportunisticBackgroundRefresh(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
     func stop() async {}
+}
+
+private actor CountingLifecycle: OrganizationRefreshLifecycleHandling {
+    private var launches = 0
+
+    func launch(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {
+        launches += 1
+    }
+    func applicationDidBecomeActive(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func wake(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func scheduleOpportunisticBackgroundRefresh(synchronizationScopes _: [SynchronizationScope], activeAccountID _: AccountID?) async {}
+    func stop() async {}
+
+    func launchCount() -> Int { launches }
 }
 
 private actor CacheObserverSpy: WorkspaceObserving {

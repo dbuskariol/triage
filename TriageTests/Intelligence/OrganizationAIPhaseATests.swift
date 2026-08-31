@@ -316,6 +316,48 @@ final class OrganizationAIPhaseATests: XCTestCase {
         XCTAssertFalse(didStart)
     }
 
+    func testAccountCancellationDrainsNonCooperativeOperation() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let controller = OrganizationAIController(vault: fixture.vault) { _, _ in
+            .init(
+                isRuntimeAvailable: true,
+                isAuthenticatedIdentityMatch: true,
+                isEntitled: true,
+                supportsAutoModel: true,
+                availableModelIDs: [],
+                hasAvailableBudget: true
+            )
+        }
+        try await controller.recordConsent(.init(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            isEnabled: true,
+            selectedModelID: nil,
+            updatedAt: fixture.date
+        ), at: fixture.date)
+        let gate = AnalysisGate()
+        let operation = Task {
+            try await controller.performAuthorizedAnalysis(
+                for: fixture.scope,
+                account: fixture.account,
+                at: fixture.date
+            ) { _ in
+                await gate.wait()
+                return nil
+            }
+        }
+        await gate.waitUntilEntered()
+        let cancellation = Task { await controller.cancelAll() }
+        await Task.yield()
+        await gate.open()
+        await cancellation.value
+        let result = await operation.result
+        guard case .failure = result else {
+            return XCTFail("Account cancellation must invalidate the active operation.")
+        }
+    }
+
     func testStaleSynchronizationScopeFailsBeforeExternalPolicyWork() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

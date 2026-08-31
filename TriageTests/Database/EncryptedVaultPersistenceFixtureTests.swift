@@ -216,7 +216,12 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             )
         ])
         XCTAssertEqual(upgradedMigrations.count, TriageDatabaseMigrator.migrationCount)
-        let upgradedSchema = try await upgradedVault.read { database -> (tables: Set<String>, indexes: Set<String>, triggers: Set<String>) in
+        let upgradedSchema = try await upgradedVault.read { database -> (
+            tables: Set<String>,
+            indexes: Set<String>,
+            triggers: Set<String>,
+            projectItemRawProvenanceColumns: Set<String>
+        ) in
             let tables = Set(try String.fetchAll(
                 database,
                 sql: "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -229,7 +234,13 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
                 database,
                 sql: "SELECT name FROM sqlite_master WHERE type = 'trigger'"
             ))
-            return (tables, indexes, triggers)
+            let projectItemRawProvenanceColumns = Set(try Row.fetchAll(
+                database,
+                sql: "PRAGMA table_info(project_item_raw_provenance)"
+            ).map { row in
+                row["name"] as String
+            })
+            return (tables, indexes, triggers, projectItemRawProvenanceColumns)
         }
         XCTAssertTrue(upgradedSchema.tables.isSuperset(of: Set([
             "review_candidate_failure_envelopes",
@@ -260,6 +271,17 @@ final class EncryptedVaultPersistenceFixtureTests: XCTestCase {
             "repository_ranking_preferences_scope",
             "notification_preferences_scope",
             "project_item_raw_provenance_current_scope"
+        ])))
+        XCTAssertTrue(upgradedSchema.projectItemRawProvenanceColumns.isSuperset(of: Set([
+            "project_item_node_id",
+            "account_id",
+            "organization_id",
+            "project_node_id",
+            "raw_snapshot_id",
+            "credential_revision",
+            "capability_revision",
+            "source_revision",
+            "observed_at_ms"
         ])))
         XCTAssertTrue(upgradedSchema.triggers.isSuperset(of: Set([
             "account_organization_inventory_replay_protect_snapshot_delete",
