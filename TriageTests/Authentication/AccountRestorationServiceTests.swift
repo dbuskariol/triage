@@ -82,6 +82,53 @@ final class AccountRestorationServiceTests: XCTestCase {
         XCTAssertEqual(result.unavailableAccountIDs, [malformedAccountID])
     }
 
+    func testAccessTokenReadFailureDoesNotMasqueradeAsUnavailableVaultKey() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let accountID = AccountID(rawValue: "account-token-read-failure")!
+        let credentialID = CredentialID(rawValue: "credential-token-read-failure")!
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let vault = try await registry.open(accountID: accountID, vaultKey: vaultKey)
+        let account = account(
+            id: accountID,
+            credentialID: credentialID,
+            authenticationKind: .oauth,
+            now: Date(timeIntervalSinceReferenceDate: 1_000)
+        )
+        try await AccountRepository(vault: vault).save(
+            account,
+            credentialRevision: CredentialRevision(rawValue: "credential-revision-token-read-failure")!
+        )
+
+        let tokenKey = InMemorySecretStore.Key(
+            kind: .oauthAccessToken,
+            accountID: accountID,
+            credentialID: credentialID
+        )
+        let secrets = InMemorySecretStore(
+            accountIDs: [accountID],
+            values: [
+                .init(kind: .vaultKey, accountID: accountID, credentialID: nil): vaultKey.data
+            ],
+            failingReadKey: tokenKey
+        )
+
+        do {
+            _ = try await AccountRestorationService(
+                secretStore: secrets,
+                vaultRegistry: registry
+            ).restore()
+            XCTFail("A token-read failure must remain retryable, not become a keyless-vault account.")
+        } catch let error as InMemorySecretStore.Failure {
+            XCTAssertEqual(error, .configuredReadFailure)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     private func account(
         id: AccountID,
         credentialID: CredentialID,
@@ -111,12 +158,22 @@ private actor InMemorySecretStore: SecretStore {
         let credentialID: CredentialID?
     }
 
+    enum Failure: Error, Equatable, Sendable {
+        case configuredReadFailure
+    }
+
     private let knownAccountIDs: [AccountID]
     private var values: [Key: Data]
+    private let failingReadKey: Key?
 
-    init(accountIDs: [AccountID], values: [Key: Data]) {
+    init(
+        accountIDs: [AccountID],
+        values: [Key: Data],
+        failingReadKey: Key? = nil
+    ) {
         knownAccountIDs = accountIDs
         self.values = values
+        self.failingReadKey = failingReadKey
     }
 
     func read(
@@ -124,7 +181,11 @@ private actor InMemorySecretStore: SecretStore {
         accountID: AccountID,
         credentialID: CredentialID?
     ) async throws -> Data? {
-        values[Key(kind: kind, accountID: accountID, credentialID: credentialID)]
+        let key = Key(kind: kind, accountID: accountID, credentialID: credentialID)
+        if key == failingReadKey {
+            throw Failure.configuredReadFailure
+        }
+        return values[key]
     }
 
     func write(

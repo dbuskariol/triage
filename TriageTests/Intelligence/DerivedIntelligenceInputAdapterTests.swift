@@ -10,6 +10,7 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         try await fixture.saveCoverage(feature: .pullRequests, revision: fixture.scope.credentialRevision)
         try await fixture.saveCoverage(feature: .reviews, revision: fixture.scope.credentialRevision)
         try await fixture.insertReview(sourceRevision: "review-r1")
+        try await fixture.saveReviewTraversalReceipt()
 
         let snapshot = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
             for: fixture.scope,
@@ -175,6 +176,87 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         }
     }
 
+    func testLoadsVaultBackedRepositoryPreferenceAndReturnsTheCurrentPublicationMarker() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let preferences = RepositoryRankingPreferenceRepository(vault: fixture.vault)
+        try await preferences.save(
+            37,
+            for: fixture.repositoryID,
+            scope: fixture.scope,
+            at: fixture.now
+        )
+
+        let adapter = DerivedIntelligenceInputAdapter(vault: fixture.vault)
+        let snapshot = try await adapter.snapshot(
+            for: fixture.scope,
+            aiPolicy: fixture.aiPolicy,
+            evaluatedAt: fixture.now
+        )
+        let currentMarker = try await adapter.currentSourceRevisionMarker(
+            for: fixture.scope,
+            evaluatedAt: fixture.now
+        )
+
+        XCTAssertEqual(snapshot.input.repositoryPreferences, [fixture.repositoryID: 37])
+        XCTAssertEqual(snapshot.publicationMarker.scope, fixture.scope)
+        XCTAssertEqual(snapshot.publicationMarker.sourceRevision, snapshot.aggregateSourceRevision)
+        XCTAssertEqual(currentMarker, snapshot.publicationMarker)
+
+        try await preferences.save(38, for: fixture.repositoryID, scope: fixture.scope, at: fixture.now)
+        let changedMarker = try await adapter.currentSourceRevisionMarker(
+            for: fixture.scope,
+            evaluatedAt: fixture.now
+        )
+        XCTAssertNotEqual(changedMarker, snapshot.publicationMarker)
+    }
+
+    func testAIAnalysisCacheUsesTheExactSelectedModelInItsFingerprintAndKey() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        let selectedPolicy = DerivedAIPolicy(
+            isOrganizationConsentActive: true,
+            isAuthenticationValid: true,
+            isEntitled: true,
+            hasAvailableBudget: true,
+            selectedModelID: "selected-model"
+        )
+        let key = try fixture.aiCacheKey(selectedModelID: "selected-model")
+        try await AIAnalysisRepository(vault: fixture.vault).save(
+            .init(
+                id: "selected-model-analysis",
+                key: key,
+                modelID: "selected-model",
+                resultJSON: Data("{}".utf8),
+                createdAt: fixture.now
+            ),
+            for: fixture.scope
+        )
+
+        let cached = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: selectedPolicy,
+            evaluatedAt: fixture.now
+        )
+        XCTAssertFalse(cached.input.items[0].hasChangedAIFingerprint)
+        XCTAssertTrue(cached.input.items[0].hasValidCachedAIAnalysis)
+
+        let differentModelPolicy = DerivedAIPolicy(
+            isOrganizationConsentActive: true,
+            isAuthenticationValid: true,
+            isEntitled: true,
+            hasAvailableBudget: true,
+            selectedModelID: "different-model"
+        )
+        let uncached = try await DerivedIntelligenceInputAdapter(vault: fixture.vault).snapshot(
+            for: fixture.scope,
+            aiPolicy: differentModelPolicy,
+            evaluatedAt: fixture.now
+        )
+        XCTAssertTrue(uncached.input.items[0].hasChangedAIFingerprint)
+        XCTAssertFalse(uncached.input.items[0].hasValidCachedAIAnalysis)
+    }
+
     private final class Fixture: @unchecked Sendable {
         let directory: URL
         let accountID = AccountID(rawValue: "derived-adapter-account")!
@@ -186,6 +268,7 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
         let now = Date(timeIntervalSinceReferenceDate: 100_000)
         let vault: AccountVault
         let workItemID: WorkItemID
+        let repositoryID: RepositoryID
 
         var scope: SynchronizationScope {
             SynchronizationScope(
@@ -253,11 +336,38 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                 ),
                 observedAt: now
             )
+            let repositories = try await RepositoryInventoryRepository(vault: vault).replace(
+                [
+                    GitHubRepositoryDTO(
+                        id: 3,
+                        nodeID: "derived-adapter-repository",
+                        name: "repo",
+                        isPrivate: true,
+                        isArchived: false,
+                        hasDiscussions: true,
+                        htmlURL: URL(string: "https://github.com/acme/repo")!,
+                        updatedAt: now,
+                        owner: .init(login: "acme")
+                    )
+                ],
+                accountID: accountID,
+                organization: GitHubOrganization(
+                    id: organizationID,
+                    githubOrganizationID: 2,
+                    nodeID: GitHubNodeID(rawValue: "derived-adapter-org-node")!,
+                    login: "acme"
+                ),
+                observedAt: now
+            )
+            guard let persistedRepositoryID = repositories.first?.id else {
+                throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+            }
+            repositoryID = persistedRepositoryID
             let pullRequest = NormalizedGitHubNode(
                 nodeID: pullRequestNodeID,
                 accountID: accountID,
                 organizationID: organizationID,
-                repositoryID: nil,
+                repositoryID: repositoryID,
                 kind: .pullRequest,
                 numericID: "17",
                 number: 17,
@@ -366,6 +476,76 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
             }
         }
 
+        func saveReviewTraversalReceipt() async throws {
+            let streamID = SyncStreamID(rawValue: "pull-request-reviews-\(organizationID.rawValue)")!
+            let review = GitHubPullRequestReviewDTO(
+                id: 18,
+                nodeID: reviewNodeID.rawValue,
+                state: "CHANGES_REQUESTED",
+                body: "Please revise this.",
+                submittedAt: now
+            )
+            let requestedReviewers = GitHubRequestedReviewersDTO(users: [], teams: [])
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let reviewPayload = try encoder.encode([review])
+            let requestedReviewerPayload = try encoder.encode(requestedReviewers)
+            func page(
+                endpoint: String,
+                payload: Data
+            ) -> ReviewCandidateTraversalPage {
+                let requestKey = "GET /repos/acme/repo/pulls/17/\(endpoint)"
+                    + (endpoint == "reviews" ? "?per_page=100" : "")
+                return ReviewCandidateTraversalPage(
+                    ordinal: 1,
+                    rawSnapshotID: .make(),
+                    requestIdentity: .init(
+                        scope: scope,
+                        feature: .reviews,
+                        streamID: streamID,
+                        requestKey: requestKey
+                    ),
+                    endpoint: requestKey,
+                    payload: payload,
+                    isTerminal: true
+                )
+            }
+            _ = try await ReviewCandidateCompleteTraversalReceiptRepository(vault: vault).persist(
+                .init(
+                    scope: scope,
+                    feature: .reviews,
+                    streamID: streamID,
+                    candidate: .init(
+                        nodeID: pullRequestNodeID,
+                        repositoryID: repositoryID,
+                        repository: try GitHubRepositoryPath(owner: "acme", repository: "repo"),
+                        number: 17,
+                        sourceRevision: "pull-request-r1"
+                    ),
+                    candidateSourceRevision: "pull-request-r1",
+                    parserVersion: 1,
+                    observedAt: now,
+                    normalizedDigest: PullRequestReviewReplacementProof.normalizedDigest(
+                        reviews: [review],
+                        requestedReviewers: requestedReviewers
+                    ),
+                    segments: [
+                        .init(
+                            kind: .reviewHistory,
+                            pages: [page(endpoint: "reviews", payload: reviewPayload)]
+                        ),
+                        .init(
+                            kind: .requestedReviewers,
+                            pages: [page(
+                                endpoint: "requested_reviewers",
+                                payload: requestedReviewerPayload
+                            )]
+                        )
+                    ]
+                )
+            )
+        }
+
         func saveTimelineCandidateCoverage(status: CoverageStatus) async throws {
             try await CoverageRepository(vault: vault).save(
                 CoverageRecord(
@@ -430,6 +610,32 @@ final class DerivedIntelligenceInputAdapterTests: XCTestCase {
                     ]
                 )
             }
+        }
+
+        func aiCacheKey(selectedModelID: String?) throws -> AIAnalysisCacheKey {
+            let input = CopilotAnalysisInput(
+                candidateID: AIRequestID(rawValue: "derived-\(workItemID.rawValue)")!,
+                workItemTitle: "Adapter pull request",
+                workItemState: WorkItemState.active.rawValue,
+                deterministicReasons: ["derived-input"],
+                body: "Current body",
+                conversation: [],
+                evidenceIDs: []
+            )
+            return .init(
+                workItemID: workItemID,
+                fingerprint: try AIFingerprint.make(
+                    scope: scope,
+                    input: input,
+                    sourceRevision: "pull-request-r1",
+                    selectedModelID: selectedModelID,
+                    promptVersion: 1,
+                    outputSchemaVersion: 1
+                ),
+                selectedModelID: selectedModelID,
+                promptVersion: 1,
+                outputSchemaVersion: 1
+            )
         }
 
         func remove() {

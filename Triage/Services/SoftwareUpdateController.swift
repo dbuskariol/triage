@@ -13,9 +13,12 @@ enum AppUpdateCheckInterval: TimeInterval, CaseIterable, Identifiable {
 final class SoftwareUpdateController: ObservableObject {
     private let updaterController: SPUStandardUpdaterController
 
-    init() {
+    /// Fixture launches construct the controller only to satisfy the shared
+    /// SwiftUI environment; they must not start Sparkle's updater or its
+    /// automatic update schedule.
+    init(startingUpdater: Bool = true) {
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: startingUpdater,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )

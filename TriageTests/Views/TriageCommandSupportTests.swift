@@ -26,9 +26,10 @@ final class TriageCommandSupportTests: XCTestCase {
         XCTAssertLessThanOrEqual(label.count, 30)
     }
 
-    func testFocusedValuesRouteSearchAndInspectorBindingsIndependently() {
+    func testFocusedValuesRouteSearchInspectorAndSidebarBindingsIndependently() {
         var searchIsFocused = false
         var inspectorIsVisible = false
+        var sidebarIsVisible = true
         let searchBinding = Binding(
             get: { searchIsFocused },
             set: { searchIsFocused = $0 }
@@ -37,19 +38,28 @@ final class TriageCommandSupportTests: XCTestCase {
             get: { inspectorIsVisible },
             set: { inspectorIsVisible = $0 }
         )
+        let sidebarBinding = Binding(
+            get: { sidebarIsVisible },
+            set: { sidebarIsVisible = $0 }
+        )
 
         TriageFocusedCommandRouting.focusSearch(searchBinding)
         TriageFocusedCommandRouting.toggleInspector(inspectorBinding)
+        TriageFocusedCommandRouting.toggleSidebar(sidebarBinding)
 
         XCTAssertTrue(searchIsFocused)
         XCTAssertTrue(inspectorIsVisible)
+        XCTAssertFalse(sidebarIsVisible)
 
         TriageFocusedCommandRouting.toggleInspector(inspectorBinding)
+        TriageFocusedCommandRouting.toggleSidebar(sidebarBinding)
         TriageFocusedCommandRouting.focusSearch(nil)
         TriageFocusedCommandRouting.toggleInspector(nil)
+        TriageFocusedCommandRouting.toggleSidebar(nil)
 
         XCTAssertTrue(searchIsFocused)
         XCTAssertFalse(inspectorIsVisible)
+        XCTAssertTrue(sidebarIsVisible)
     }
 
     func testExternalNavigationRequiresHTTPSConfirmationBeforeOpening() {

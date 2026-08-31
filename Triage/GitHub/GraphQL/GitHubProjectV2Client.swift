@@ -47,6 +47,7 @@ struct GitHubProjectV2Items: Sendable {
 
 actor GitHubProjectV2Client {
     private static let maximumPages = 100
+    private static let maximumNodesPerConnectionPage = 50
     private static let maximumQueryCost = 500
     private let client: GitHubGraphQLClient
 
@@ -66,6 +67,7 @@ actor GitHubProjectV2Client {
         var projects = [GitHubProjectV2InventoryPayload.Project]()
         var after: String?
         var cursors = Set<String>()
+        var seenProjectNodeIDs = Set<GitHubNodeID>()
         var budget = AggregateBudget()
         while true {
             try await validateScope()
@@ -99,9 +101,13 @@ actor GitHubProjectV2Client {
             guard let organization = payload.node, organization.id == organizationNodeID.rawValue else {
                 throw GitHubProjectV2ClientError.missingRequestedNode(pages)
             }
-            guard !organization.projectsV2.nodes.contains(where: { $0 == nil }) else {
+            guard let pageProjectNodeIDs = Self.connectionNodeIDs(
+                organization.projectsV2.nodes.map { $0?.id }
+            ), seenProjectNodeIDs.isDisjoint(with: pageProjectNodeIDs)
+            else {
                 throw GitHubProjectV2ClientError.incompleteConnection(pages)
             }
+            seenProjectNodeIDs.formUnion(pageProjectNodeIDs)
             projects.append(contentsOf: organization.projectsV2.nodes.compactMap { $0 })
             guard organization.projectsV2.pageInfo.hasNextPage else { break }
             guard pages.count < Self.maximumPages,
@@ -133,6 +139,7 @@ actor GitHubProjectV2Client {
         var items = [GitHubProjectV2ItemPayload.Item]()
         var after: String?
         var cursors = Set<String>()
+        var seenItemNodeIDs = Set<GitHubNodeID>()
         var budget = AggregateBudget()
         while true {
             try await validateScope()
@@ -166,9 +173,12 @@ actor GitHubProjectV2Client {
             guard let project = payload.node, project.id == projectNodeID.rawValue else {
                 throw GitHubProjectV2ClientError.missingRequestedNode(rawPages)
             }
-            guard !project.items.nodes.contains(where: { $0 == nil }) else {
+            guard let pageItemNodeIDs = Self.connectionNodeIDs(project.items.nodes.map { $0?.id }),
+                  seenItemNodeIDs.isDisjoint(with: pageItemNodeIDs)
+            else {
                 throw GitHubProjectV2ClientError.incompleteConnection(rawPages)
             }
+            seenItemNodeIDs.formUnion(pageItemNodeIDs)
             items.append(contentsOf: project.items.nodes.compactMap { $0 })
             guard project.items.pageInfo.hasNextPage else { break }
             guard rawPages.count < Self.maximumPages,
@@ -254,7 +264,8 @@ actor GitHubProjectV2Client {
             guard let item = payload.node, item.id == itemNodeID.rawValue else {
                 throw GitHubProjectV2ClientError.missingRequestedNode(rawPages)
             }
-            guard !item.fieldValues.nodes.contains(where: { $0 == nil }) else {
+            guard Self.fieldValueConnectionIsValid(item.fieldValues.nodes)
+            else {
                 throw GitHubProjectV2ClientError.incompleteConnection(rawPages)
             }
             values.append(contentsOf: item.fieldValues.nodes.compactMap { $0 })
@@ -395,6 +406,37 @@ actor GitHubProjectV2Client {
     private nonisolated static func cursorComponent(_ cursor: String?) -> String {
         guard let cursor else { return "none" }
         return Data(cursor.utf8).base64EncodedString()
+    }
+
+    /// Verify a GraphQL `first: 50` connection before its values can cause
+    /// field traversal or normalization. Node identities must be present and
+    /// unique within each page; callers additionally reject repeats across
+    /// pages for the same connection.
+    private nonisolated static func connectionNodeIDs(_ identifiers: [String?]) -> Set<GitHubNodeID>? {
+        guard identifiers.count <= maximumNodesPerConnectionPage else { return nil }
+        let nodeIDs = identifiers.compactMap { $0 }.compactMap(GitHubNodeID.init(rawValue:))
+        guard nodeIDs.count == identifiers.count,
+              Set(nodeIDs).count == nodeIDs.count
+        else { return nil }
+        return Set(nodeIDs)
+    }
+
+    private nonisolated static func fieldValueConnectionIsValid(
+        _ values: [GitHubProjectV2FieldValuePayload.Value?]
+    ) -> Bool {
+        guard values.count <= maximumNodesPerConnectionPage else { return false }
+        var fieldIDs = Set<GitHubNodeID>()
+        for value in values {
+            guard let value else { return false }
+            // Unknown unions intentionally retain explicit diagnostic context
+            // and need not expose a field configuration. Every supplied field
+            // ID, however, must be valid and unique within its connection page.
+            guard let rawFieldID = value.field?.id else { continue }
+            guard let fieldID = GitHubNodeID(rawValue: rawFieldID),
+                  fieldIDs.insert(fieldID).inserted
+            else { return false }
+        }
+        return true
     }
 
     private static let maximumPayloadBytes = 4 * 1_024 * 1_024

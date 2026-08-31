@@ -32,6 +32,40 @@ final class OnboardingPresentationStateTests: XCTestCase {
         )
     }
 
+    func testUnavailableVaultKeyUsesRecoveryRouteBeforeConnection() {
+        let state = makeState(
+            accounts: [],
+            localAccountRecovery: .unavailableVaultKey
+        )
+
+        XCTAssertEqual(
+            state.route(completedSteps: []),
+            .localAccountRecovery(.unavailableVaultKey)
+        )
+        XCTAssertEqual(
+            OnboardingRoute.localAccountRecovery(.unavailableVaultKey).accessibilityLabel,
+            "Local account recovery required before setup"
+        )
+        XCTAssertEqual(
+            LocalAccountRecoveryPresentation.unavailableVaultKey.detail,
+            "Triage cannot open encrypted local data for one or more saved accounts. In Account Settings, remove each unavailable account’s local data. This removes data stored on this Mac only; it does not change GitHub. Then reconnect to GitHub to resync."
+        )
+    }
+
+    func testGenericEncryptedLocalDataFailureKeepsRecoveryCopySanitized() {
+        let recovery = LocalAccountRecoveryPresentation.encryptedLocalDataUnavailable
+
+        XCTAssertFalse(recovery.detail.contains("/"))
+        XCTAssertFalse(recovery.detail.localizedCaseInsensitiveContains("keychain"))
+        XCTAssertTrue(recovery.detail.contains("Try again"))
+        XCTAssertFalse(recovery.detail.localizedCaseInsensitiveContains("remove"))
+        XCTAssertFalse(recovery.canOpenAccountSettings)
+    }
+
+    func testUnavailableVaultRecoveryExposesTheReachableSettingsRemovalPath() {
+        XCTAssertTrue(LocalAccountRecoveryPresentation.unavailableVaultKey.canOpenAccountSettings)
+    }
+
     func testAccessRecoveryTakesPrecedenceOverWorkflowAndHasAccessibleStatus() {
         let state = makeState(access: makeAccess(state: .ssoAuthorizationRequired))
         let route = state.route(completedSteps: [.identity, .organization])
@@ -44,6 +78,62 @@ final class OnboardingPresentationStateTests: XCTestCase {
         XCTAssertEqual(
             OnboardingAccessRecovery.ssoRequired(isPartial: false).accessibilityLabel,
             "Authorize organization access. Authorize this account with your organization before Triage can refresh its work."
+        )
+    }
+
+    func testSSOAuthorizationControlRequiresGitHubAuthorizationURL() {
+        let recovery = OnboardingAccessRecovery.ssoRequired(isPartial: true)
+        let withoutURL = makeState(access: makeAccess(state: .partialSSOAuthorization))
+        let withURL = OnboardingPresentationState(
+            accounts: [makeAccount()],
+            selectedAccountID: accountID,
+            organizations: [makeOrganization()],
+            selectedOrganizationID: organizationID,
+            organizationAccess: makeAccess(state: .partialSSOAuthorization),
+            isConnecting: false,
+            isSynchronizing: false,
+            connectionError: nil,
+            refreshError: nil,
+            aiAccess: .consentRequired,
+            hasSSOAuthorizationURL: true
+        )
+
+        XCTAssertFalse(withoutURL.shouldOfferSSOAuthorization(for: recovery))
+        XCTAssertTrue(withURL.shouldOfferSSOAuthorization(for: recovery))
+        XCTAssertFalse(withURL.shouldOfferSSOAuthorization(for: .approvalRequired))
+    }
+
+    func testAIConsentDisclosureCoversTheRequiredPrivacyDecisions() {
+        let disclosure = AIConsentPresentation.disclosure(
+            account: makeAccount(),
+            organization: makeOrganization()
+        )
+
+        XCTAssertTrue(disclosure.contains("octocat"))
+        XCTAssertTrue(disclosure.contains("github"))
+        XCTAssertTrue(disclosure.contains("GitHub Copilot"))
+        XCTAssertTrue(disclosure.contains("GitHub"))
+        XCTAssertTrue(disclosure.contains("Model selection"))
+        XCTAssertTrue(disclosure.contains("conversation excerpts"))
+        XCTAssertTrue(disclosure.contains("AI caches"))
+        XCTAssertTrue(disclosure.contains("dashboard works without AI"))
+    }
+
+    func testPATSheetSuppressesAParentOAuthConfigurationError() {
+        let oauthError = "GitHub sign-in is not configured in this build."
+
+        XCTAssertNil(
+            PersonalAccessTokenErrorPresentation.sharedConnectionError(
+                oauthError,
+                isPresentingPersonalAccessToken: true
+            )
+        )
+        XCTAssertEqual(
+            PersonalAccessTokenErrorPresentation.sharedConnectionError(
+                oauthError,
+                isPresentingPersonalAccessToken: false
+            ),
+            oauthError
         )
     }
 
@@ -100,7 +190,8 @@ final class OnboardingPresentationStateTests: XCTestCase {
         accounts: [GitHubAccount]? = nil,
         access: OrganizationAccess? = nil,
         isSynchronizing: Bool = false,
-        refreshError: String? = nil
+        refreshError: String? = nil,
+        localAccountRecovery: LocalAccountRecoveryPresentation? = nil
     ) -> OnboardingPresentationState {
         let accounts = accounts ?? [makeAccount()]
         return OnboardingPresentationState(
@@ -113,7 +204,8 @@ final class OnboardingPresentationStateTests: XCTestCase {
             isSynchronizing: isSynchronizing,
             connectionError: nil,
             refreshError: refreshError,
-            aiAccess: .unavailable("Copilot analysis has not been enabled for this organization.")
+            aiAccess: .unavailable("Copilot analysis has not been enabled for this organization."),
+            localAccountRecovery: localAccountRecovery
         )
     }
 

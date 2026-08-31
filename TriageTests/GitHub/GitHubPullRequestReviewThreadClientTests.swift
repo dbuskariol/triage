@@ -85,6 +85,90 @@ final class GitHubPullRequestReviewThreadClientTests: XCTestCase {
         }
     }
 
+    func testRejectsOverlargeOrDuplicateRootConnectionBeforeCommentRequests() async throws {
+        for nodes in [
+            (1 ... 51).map { "{\"id\":\"T_\($0)\",\"isResolved\":false,\"isOutdated\":false}" }.joined(separator: ","),
+            "{\"id\":\"T_1\",\"isResolved\":false,\"isOutdated\":false},{\"id\":\"T_1\",\"isResolved\":false,\"isOutdated\":false}"
+        ] {
+            let session = ReviewThreadPagingSession(responses: [
+                "TriagePullRequestReviewThreads": [
+                    response(node: "{\"id\":\"PR_1\",\"reviewThreads\":{\"nodes\":[\(nodes)],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}")
+                ]
+            ])
+            let client = GitHubPullRequestReviewThreadClient(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            )
+
+            await XCTAssertThrowsErrorAsync {
+                _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
+            } verify: { error in
+                let failure = error as? GitHubPullRequestReviewThreadTraversalFailure
+                XCTAssertEqual(failure?.reason, .incompleteConnection)
+                XCTAssertEqual(failure?.rawPages.count, 1)
+            }
+            let commentRequestAfters = await session.commentRequestAfters()
+            XCTAssertTrue(commentRequestAfters.isEmpty)
+        }
+    }
+
+    func testOversizedPersistedRootCheckpointFallsBackToOneFreshBoundedTraversal() async throws {
+        let session = ReviewThreadPagingSession(responses: [
+            "TriagePullRequestReviewThreads": [
+                response(node: "{\"id\":\"PR_1\",\"reviewThreads\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}")
+            ]
+        ])
+        let client = GitHubPullRequestReviewThreadClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+        let checkpoint = ReviewThreadRootCheckpoint(
+            rootCursor: "corrupt-checkpoint",
+            rawPrefix: (1 ... 101).map { index in
+                GitHubPullRequestReviewThreadRawPage(
+                    endpoint: "corrupt-root-page=\(index)",
+                    requestKey: "corrupt-root-request=\(index)",
+                    payload: Data()
+                )
+            }
+        )
+
+        let inventory = try await client.allReviewThreads(
+            pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!,
+            observedAt: Date(timeIntervalSince1970: 1_000),
+            rootCheckpoint: checkpoint
+        )
+
+        XCTAssertTrue(inventory.records.isEmpty)
+        XCTAssertEqual(inventory.rawPages.count, 1)
+        XCTAssertEqual(inventory.metrics.pageCount, 1)
+        XCTAssertEqual(
+            inventory.rawPages.first?.requestKey,
+            "graphql:TriagePullRequestReviewThreads/pull-request=PR_1/after=none"
+        )
+    }
+
+    func testRejectsOverlargeCommentConnectionAtSourceBoundary() async throws {
+        let comments = (1 ... 51).map { comment(id: "C_\($0)", author: "U_2") }.joined(separator: ",")
+        let session = ReviewThreadPagingSession(responses: [
+            "TriagePullRequestReviewThreads": [
+                response(node: "{\"id\":\"PR_1\",\"reviewThreads\":{\"nodes\":[{\"id\":\"T_1\",\"isResolved\":false,\"isOutdated\":false}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}")
+            ],
+            "TriagePullRequestReviewThreadComments": [
+                response(node: "{\"id\":\"T_1\",\"comments\":{\"nodes\":[\(comments)],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}")
+            ]
+        ])
+        let client = GitHubPullRequestReviewThreadClient(
+            client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await client.allReviewThreads(pullRequestNodeID: GitHubNodeID(rawValue: "PR_1")!)
+        } verify: { error in
+            let failure = error as? GitHubPullRequestReviewThreadTraversalFailure
+            XCTAssertEqual(failure?.reason, .incompleteConnection)
+            XCTAssertEqual(failure?.rawPages.count, 2)
+        }
+    }
+
     func testRejectsAggregateQueryCostAcrossThreadAndCommentPages() async throws {
         let session = ReviewThreadPagingSession(responses: [
             "TriagePullRequestReviewThreads": [

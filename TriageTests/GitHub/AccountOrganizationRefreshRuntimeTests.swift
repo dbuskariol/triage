@@ -202,6 +202,52 @@ final class AccountOrganizationRefreshRuntimeTests: XCTestCase {
         XCTAssertNil(currentDurable)
     }
 
+    func testRevisionQualifiedRuntimeRefreshCancelsBeforeDispatchForObsoleteCredential() async throws {
+        let fixture = try await RuntimeRefreshFixture()
+        defer { fixture.remove() }
+        let obsoleteScope = try await fixture.scope()
+        try await fixture.setCredentialRevision(CredentialRevision(rawValue: "credential-new")!)
+        let operation = RuntimeInvocationCountingOperation()
+        let runtime = AccountOrganizationRefreshRuntime(
+            accountID: fixture.account.id,
+            vault: fixture.vault,
+            refreshOperation: operation
+        )
+
+        do {
+            _ = try await runtime.refresh(obsoleteScope, priority: .manual)
+            XCTFail("An obsolete credential scope must cancel before dispatch.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let invocationCount = await operation.invocationCount()
+        XCTAssertEqual(invocationCount, 0)
+    }
+
+    func testRevisionQualifiedRuntimeSelectCancelsBeforeDispatchForObsoleteCapability() async throws {
+        let fixture = try await RuntimeRefreshFixture()
+        defer { fixture.remove() }
+        let obsoleteScope = try await fixture.scope()
+        try await fixture.setCapabilityRevision(CapabilityRevision(rawValue: "capability-new")!)
+        let operation = RuntimeInvocationCountingOperation()
+        let runtime = AccountOrganizationRefreshRuntime(
+            accountID: fixture.account.id,
+            vault: fixture.vault,
+            refreshOperation: operation
+        )
+
+        do {
+            _ = try await runtime.select(obsoleteScope)
+            XCTFail("An obsolete capability scope must cancel before dispatch.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let invocationCount = await operation.invocationCount()
+        XCTAssertEqual(invocationCount, 0)
+    }
+
     func testOperationUsesPersistedAccountAndOrganizationInsteadOfCallerScopeValues() async throws {
         let fixture = try await RuntimeRefreshFixture()
         defer { fixture.remove() }

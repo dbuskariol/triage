@@ -36,12 +36,16 @@ struct WorkspaceSidebar: View {
                 }
             }
 
-            Section("Synchronization") {
-                SynchronizationStatusLabel(
-                    status: presentation.synchronizationStatus,
-                    detail: presentation.synchronizationDetail,
-                    lastSuccessfulSyncAt: presentation.lastSuccessfulSyncAt
-                )
+            if WorkspaceSidebarPresentation.showsSynchronizationStatus(
+                presentation.synchronizationStatus
+            ) {
+                Section("Synchronization") {
+                    SynchronizationStatusLabel(
+                        status: presentation.synchronizationStatus,
+                        detail: presentation.synchronizationDetail,
+                        lastSuccessfulSyncAt: presentation.lastSuccessfulSyncAt
+                    )
+                }
             }
         }
         .listStyle(.sidebar)
@@ -102,6 +106,23 @@ struct WorkspaceSidebar: View {
     }
 }
 
+enum WorkspaceSidebarPresentation {
+    /// Keep the source list focused on navigation during healthy or actively
+    /// refreshing operation. Persistent status is reserved for states that
+    /// require an explicit user decision or explain incomplete local work.
+    static func showsSynchronizationStatus(
+        _ status: WorkspacePresentationState.SynchronizationStatus
+    ) -> Bool {
+        switch status {
+        case .upToDate, .refreshing:
+            false
+        case .noAccount, .noOrganization, .initialSynchronization, .partial,
+             .ssoRequired, .approvalRequired, .offline, .signInRequired, .unavailable:
+            true
+        }
+    }
+}
+
 struct SynchronizationStatusLabel: View {
     let status: WorkspacePresentationState.SynchronizationStatus
     let detail: String?
@@ -122,16 +143,10 @@ struct SynchronizationStatusLabel: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(status.title)
                     .lineLimit(1)
-                if let detail {
-                    Text(detail)
+                if let secondaryText {
+                    Text(secondaryText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                if let lastSuccessfulSyncAt {
-                    Text("Last successful sync \(lastSuccessfulSyncAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
             }
@@ -139,17 +154,27 @@ struct SynchronizationStatusLabel: View {
             Image(systemName: status.systemImage)
                 .foregroundStyle(tint)
         }
-        .help(detail ?? status.title)
+        .help(accessibilityLabel)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Synchronization and coverage status for the selected organization.")
     }
 
-    private var accessibilityLabel: String {
+    var accessibilityLabel: String {
         [status.title, detail, lastSuccessfulSyncAt.map {
             "Last successful sync \($0.formatted(date: .abbreviated, time: .shortened))"
         }]
         .compactMap { $0 }
         .joined(separator: ". ")
+    }
+
+    /// Source-list rows remain compact during degraded states. VoiceOver and
+    /// the Help tooltip retain the complete status, including the timestamp.
+    var secondaryText: String? {
+        if let detail, !detail.isEmpty {
+            return detail
+        }
+        guard let lastSuccessfulSyncAt else { return nil }
+        return "Last successful sync \(lastSuccessfulSyncAt.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private var tint: Color {

@@ -3,6 +3,18 @@ import Foundation
 enum AccountConnectionError: Error, Equatable, Sendable {
     case invalidGitHubIdentity
     case missingOAuthBroker
+    case missingFineGrainedResourceOwnerOrganization
+
+    var recoveryDescription: String {
+        switch self {
+        case .invalidGitHubIdentity:
+            "Try connecting again."
+        case .missingOAuthBroker:
+            "Use a build configured with the GitHub sign-in service, or connect with a personal access token."
+        case .missingFineGrainedResourceOwnerOrganization:
+            "Enter the resource-owner organization selected when you created this fine-grained personal access token."
+        }
+    }
 }
 
 struct AccountConnectionResult: Sendable {
@@ -14,7 +26,8 @@ struct AccountConnectionResult: Sendable {
 
 actor AccountConnectionService {
     private let brokerURL: URL?
-    private let secretStore: KeychainSecretStore
+    private let secretStore: any SecretStore
+    private let removeAllSecrets: @Sendable (AccountID) async throws -> Void
     private let vaultRegistry: VaultRegistry
 
     init(
@@ -24,12 +37,32 @@ actor AccountConnectionService {
     ) {
         self.brokerURL = brokerURL
         self.secretStore = secretStore
+        removeAllSecrets = { accountID in
+            try await secretStore.removeAllSecrets(for: accountID)
+        }
         self.vaultRegistry = vaultRegistry
     }
 
     init(secretStore: KeychainSecretStore, vaultRegistry: VaultRegistry) {
         brokerURL = nil
         self.secretStore = secretStore
+        removeAllSecrets = { accountID in
+            try await secretStore.removeAllSecrets(for: accountID)
+        }
+        self.vaultRegistry = vaultRegistry
+    }
+
+    /// Keeps the service boundary independently testable without giving tests a
+    /// real Keychain. Production construction continues to use the concrete
+    /// Keychain-backed initializers above.
+    init(
+        secretStore: any SecretStore,
+        vaultRegistry: VaultRegistry,
+        removeAllSecrets: @escaping @Sendable (AccountID) async throws -> Void
+    ) {
+        brokerURL = nil
+        self.secretStore = secretStore
+        self.removeAllSecrets = removeAllSecrets
         self.vaultRegistry = vaultRegistry
     }
 
@@ -54,8 +87,10 @@ actor AccountConnectionService {
         personalAccessToken: PersonalAccessToken,
         resourceOwnerOrganization: String? = nil
     ) async throws -> AccountConnectionResult {
-        let owner = resourceOwnerOrganization?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let owner = try Self.resourceOwnerOrganization(
+            for: personalAccessToken,
+            suppliedValue: resourceOwnerOrganization
+        )
         return try await establishAccount(
             accessToken: personalAccessToken.value,
             refreshToken: nil,
@@ -64,6 +99,25 @@ actor AccountConnectionService {
             refreshTokenLifetime: nil,
             resourceOwnerOrganization: personalAccessToken.kind == .fineGrained ? owner : nil
         )
+    }
+
+    /// Fine-grained tokens cannot safely infer their accessible organization
+    /// from `/user/orgs`: GitHub may return an empty inventory for a valid
+    /// token. Require the explicitly selected resource owner before constructing
+    /// a transport, generating a vault key, or writing any credential.
+    static func resourceOwnerOrganization(
+        for personalAccessToken: PersonalAccessToken,
+        suppliedValue: String?
+    ) throws -> String? {
+        guard personalAccessToken.kind == .fineGrained else { return nil }
+        guard let suppliedValue else {
+            throw AccountConnectionError.missingFineGrainedResourceOwnerOrganization
+        }
+        let normalized = suppliedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw AccountConnectionError.missingFineGrainedResourceOwnerOrganization
+        }
+        return normalized
     }
 
     private func establishAccount(
@@ -207,7 +261,7 @@ actor AccountConnectionService {
                 accountCapabilities: accountCapabilities
             )
         } catch {
-            try await secretStore.removeAllSecrets(for: accountID)
+            try await removeAllSecrets(accountID)
             try await vaultRegistry.remove(accountID: accountID)
             throw error
         }

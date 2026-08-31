@@ -12,11 +12,23 @@ struct OrganizationRefreshCompletionCoordinator: Sendable {
         DerivedAIPolicy,
         Date
     ) async throws -> OrganizationDerivedIntelligenceProjectionOutcome
+    typealias AIPolicyResolution = @Sendable (SynchronizationScope, GitHubAccount, Date) async throws -> DerivedAIPolicy
 
     private let validateScope: ScopeValidation
     private let project: Projection
+    private let resolveAIPolicy: AIPolicyResolution
 
-    init(vault: AccountVault) {
+    init(
+        vault: AccountVault,
+        resolveAIPolicy: @escaping AIPolicyResolution = { _, _, _ in
+            DerivedAIPolicy(
+                isOrganizationConsentActive: false,
+                isAuthenticationValid: false,
+                isEntitled: false,
+                hasAvailableBudget: false
+            )
+        }
+    ) {
         let projectionService = OrganizationDerivedIntelligenceProjectionService(vault: vault)
         self.init(
             validateScope: { scope in
@@ -44,16 +56,21 @@ struct OrganizationRefreshCompletionCoordinator: Sendable {
                     aiPolicy: aiPolicy,
                     evaluatedAt: evaluatedAt
                 )
-            }
+            },
+            resolveAIPolicy: resolveAIPolicy
         )
     }
 
     init(
         validateScope: @escaping ScopeValidation,
-        project: @escaping Projection
+        project: @escaping Projection,
+        resolveAIPolicy: @escaping AIPolicyResolution = { _, _, _ in
+            DerivedAIPolicy(isOrganizationConsentActive: false, isAuthenticationValid: false, isEntitled: false, hasAvailableBudget: false)
+        }
     ) {
         self.validateScope = validateScope
         self.project = project
+        self.resolveAIPolicy = resolveAIPolicy
     }
 
     /// Builds the durable projection only after the caller has committed all
@@ -62,12 +79,21 @@ struct OrganizationRefreshCompletionCoordinator: Sendable {
     /// derivation; it never creates AI candidates by implication.
     func finalizeAfterNormalizedCommit(
         for scope: SynchronizationScope,
+        account: GitHubAccount? = nil,
         evaluatedAt: Date,
-        aiPolicy: DerivedAIPolicy = Self.coreOnlyAIPolicy
+        aiPolicy: DerivedAIPolicy? = nil
     ) async throws -> OrganizationDerivedIntelligenceProjectionOutcome {
         try await validateScope(scope)
         try Task.checkCancellation()
-        let outcome = try await project(scope, aiPolicy, evaluatedAt)
+        let resolvedPolicy: DerivedAIPolicy
+        if let aiPolicy {
+            resolvedPolicy = aiPolicy
+        } else if let account {
+            resolvedPolicy = try await resolveAIPolicy(scope, account, evaluatedAt)
+        } else {
+            resolvedPolicy = Self.coreOnlyAIPolicy
+        }
+        let outcome = try await project(scope, resolvedPolicy, evaluatedAt)
         try Task.checkCancellation()
         try await validateScope(scope)
         try Task.checkCancellation()

@@ -88,6 +88,10 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertEqual(values.0, "Ready")
         XCTAssertTrue(values.1.contains("provisional collection observation"))
         XCTAssertTrue(values.1.contains("unsupported union"))
+        let provenanceCount = try await fixture.vault.read { database in
+            try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM project_item_raw_provenance")!
+        }
+        XCTAssertEqual(provenanceCount, 0, "Partial or unreceipted project items must not authorize wrapper grouping.")
     }
 
     func testCompleteProjectReplacementRejectsAnEmptyRawTraversal() async throws {
@@ -257,6 +261,58 @@ final class DiscussionRepositoryTests: XCTestCase {
         XCTAssertEqual(counts.0, 0)
         XCTAssertEqual(counts.1, 0)
         XCTAssertEqual(counts.2, 0)
+    }
+
+    func testCompleteProjectItemsPersistExactItemToRawProvenance() async throws {
+        let fixture = try await DiscussionFixture()
+        defer { fixture.remove() }
+        let repository = ProjectV2Repository(vault: fixture.vault)
+        let project = fixture.project()
+        try await repository.replaceProjects(
+            [project], rawPages: [], scope: fixture.scope, accountID: fixture.account.id,
+            organization: fixture.organization, streamID: SyncStreamID(rawValue: "projects-acme")!, observedAt: fixture.date
+        )
+        let coverage = CoverageRecord(
+            accountID: fixture.account.id, organizationID: fixture.organization.id, repositoryID: nil,
+            feature: .projectItems, streamID: SyncStreamID(rawValue: "project-items-P_1")!,
+            intervalStart: fixture.date, intervalEnd: fixture.date,
+            credentialRevision: fixture.scope.credentialRevision, capabilityRevision: fixture.scope.capabilityRevision,
+            status: .complete, lastSuccessfulAt: fixture.date, failureDetail: nil
+        )
+        try await repository.replaceItems(
+            [fixture.projectItem(project: project)], project: project,
+            rawPages: [
+                .init(
+                    endpoint: "graphql:TriageProjectV2Items/project=P_1/page=1",
+                    requestKey: "graphql:TriageProjectV2Items/project=P_1/after=none",
+                    payload: projectItemsRawPayload(nodeIDs: ["PVTI_1"])
+                ),
+                .init(
+                    endpoint: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/page=1",
+                    requestKey: "graphql:TriageProjectV2ItemFieldValues/item=PVTI_1/after=none",
+                    payload: projectFieldRawPayload()
+                )
+            ],
+            scope: fixture.scope, accountID: fixture.account.id, organization: fixture.organization,
+            streamID: SyncStreamID(rawValue: "project-items-P_1")!, observedAt: fixture.date,
+            coverageRecords: [coverage]
+        )
+        let persisted = try await fixture.vault.read { database in
+            try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT project_item_node_id, project_node_id, source_revision, raw_snapshot_id
+                    FROM project_item_raw_provenance
+                    """
+            ).map { row in
+                (row["project_item_node_id"] as String?, row["project_node_id"] as String?,
+                 row["source_revision"] as String?, row["raw_snapshot_id"] as String?)
+            }
+        }
+        XCTAssertEqual(persisted?.0, "PVTI_1")
+        XCTAssertEqual(persisted?.1, "P_1")
+        XCTAssertEqual(persisted?.2, fixture.date.ISO8601Format())
+        XCTAssertNotNil(persisted?.3)
     }
 
     func testCompleteDiscussionReplacementRejectsAnEmptyRawTraversalAndPreservesPriorContentAndCoverage() async throws {

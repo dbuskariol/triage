@@ -75,11 +75,17 @@ actor ProjectV2Repository {
             guard redactedItemNodeIDs.isSubset(of: Set(items.map(\.nodeID))) else {
                 throw ProjectV2RepositoryError.invalidRawAuthority
             }
-            try Self.saveRaw(rawPages, scope: scope, feature: .projectItems, streamID: streamID,
-                             sourceNodeID: project.nodeID, accountID: accountID,
-                             normalizedRootNodeIDs: Set(items.map(\.nodeID)),
-                             requiresCompleteTraversal: coverageRecords.contains { $0.status == .complete },
-                             observedAt: observedAt, parserVersion: parserVersion, in: database)
+            let completeTraversal = coverageRecords.contains { $0.status == .complete }
+            let preparedRawPages = try Self.preparedRaw(
+                rawPages, scope: scope, feature: .projectItems, streamID: streamID,
+                sourceNodeID: project.nodeID, accountID: accountID,
+                normalizedRootNodeIDs: Set(items.map(\.nodeID)),
+                requiresCompleteTraversal: completeTraversal,
+                observedAt: observedAt, parserVersion: parserVersion
+            )
+            for snapshot in preparedRawPages {
+                try Self.save(snapshot, rejectingConflictAt: observedAt, in: database)
+            }
             for item in items {
                 let isRedacted = redactedItemNodeIDs.contains(item.nodeID)
                 let linkedContentNodeID = isRedacted ? nil : try Self.linkedContentNodeID(
@@ -162,6 +168,17 @@ actor ProjectV2Repository {
             // A successful page collection can still omit inaccessible or
             // redacted items; omission must not physically delete cached work.
             try Self.resolveContentReferences(accountID: accountID, organizationID: organization.id, in: database)
+            if completeTraversal {
+                try Self.replaceItemRawProvenance(
+                    items: items,
+                    rawPages: rawPages,
+                    snapshots: preparedRawPages,
+                    scope: scope,
+                    projectNodeID: project.nodeID,
+                    observedAt: observedAt,
+                    in: database
+                )
+            }
             try Self.saveCoverage(coverageRecords, accountID: accountID, attemptedAt: observedAt, in: database)
         }
     }
@@ -338,6 +355,61 @@ actor ProjectV2Repository {
                 GitHubContentKind.issue.rawValue, GitHubContentKind.pullRequest.rawValue,
                 GitHubContentKind.projectDraftIssue.rawValue
             ])
+    }
+
+    private nonisolated static func replaceItemRawProvenance(
+        items: [GitHubProjectV2ItemRecord],
+        rawPages: [GitHubProjectV2RawPage],
+        snapshots: [RawAPISnapshot],
+        scope: SynchronizationScope,
+        projectNodeID: GitHubNodeID,
+        observedAt: Date,
+        in database: Database
+    ) throws {
+        guard rawPages.count == snapshots.count else {
+            throw ProjectV2RepositoryError.invalidRawAuthority
+        }
+        var snapshotIDByItem = [GitHubNodeID: RawAPISnapshotID]()
+        for (page, snapshot) in zip(rawPages, snapshots) {
+            let request = try projectRawRequest(page.requestKey)
+            guard request.operation == .items, request.target == projectNodeID else { continue }
+            let info = try projectRawPageInfo(
+                page.payload, operation: .items, expectedTarget: projectNodeID
+            )
+            guard let itemNodeIDs = info.connectionNodeIDs else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
+            for itemNodeID in itemNodeIDs {
+                guard snapshotIDByItem[itemNodeID] == nil else {
+                    throw ProjectV2RepositoryError.invalidRawAuthority
+                }
+                snapshotIDByItem[itemNodeID] = snapshot.id
+            }
+        }
+        guard Set(snapshotIDByItem.keys) == Set(items.map(\.nodeID)) else {
+            throw ProjectV2RepositoryError.invalidRawAuthority
+        }
+        try database.execute(
+            sql: "DELETE FROM project_item_raw_provenance WHERE account_id = ? AND organization_id = ? AND project_node_id = ?",
+            arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, projectNodeID.rawValue]
+        )
+        for item in items.sorted(by: { $0.nodeID.rawValue < $1.nodeID.rawValue }) {
+            guard let rawSnapshotID = snapshotIDByItem[item.nodeID] else {
+                throw ProjectV2RepositoryError.invalidRawAuthority
+            }
+            try database.execute(sql: """
+                INSERT INTO project_item_raw_provenance (
+                    project_item_node_id, account_id, organization_id, project_node_id,
+                    raw_snapshot_id, credential_revision, capability_revision,
+                    source_revision, observed_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [
+                    item.nodeID.rawValue, scope.accountID.rawValue, scope.organizationID.rawValue,
+                    projectNodeID.rawValue, rawSnapshotID.rawValue,
+                    scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue,
+                    item.updatedAt.ISO8601Format(), milliseconds(observedAt)
+                ])
+        }
     }
 
     private nonisolated static func validateOrganization(accountID: AccountID, organization: GitHubOrganization, in database: Database) throws {

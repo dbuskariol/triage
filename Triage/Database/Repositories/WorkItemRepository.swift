@@ -19,9 +19,14 @@ actor WorkItemRepository {
 
     func fetch(
         accountID: AccountID,
-        organizationID: OrganizationID
+        organizationID: OrganizationID,
+        authorityScope: SynchronizationScope? = nil
     ) async throws -> [WorkItem] {
         try ensureAccountScope(accountID)
+        if let authorityScope,
+           authorityScope.accountID != accountID || authorityScope.organizationID != organizationID {
+            throw WorkItemRepositoryError.accountScopeMismatch
+        }
         try Task.checkCancellation()
         let queryObserver = self.queryObserver
         let items: [WorkItem] = try await vault.read { database -> [WorkItem] in
@@ -54,10 +59,20 @@ actor WorkItemRepository {
                         attention_scores.breakdown_json AS score_breakdown_json
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                        AND github_nodes.account_id = work_items.account_id
+                        AND github_nodes.organization_id = work_items.organization_id
                     LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
                     LEFT JOIN workflow_states ON workflow_states.work_item_id = work_items.id
                     LEFT JOIN attention_scores ON attention_scores.work_item_id = work_items.id
+                    LEFT JOIN work_item_group_memberships
+                      ON work_item_group_memberships.constituent_work_item_id = work_items.id
+                     AND work_item_group_memberships.account_id = work_items.account_id
+                     AND work_item_group_memberships.organization_id = work_items.organization_id
                     WHERE work_items.account_id = ? AND work_items.organization_id = ?
+                      AND (
+                          work_item_group_memberships.constituent_work_item_id IS NULL
+                          OR work_item_group_memberships.canonical_work_item_id = work_items.id
+                      )
                     ORDER BY work_items.last_relevant_activity_at_ms DESC, work_items.id
                 """,
                 arguments: [accountID.rawValue, organizationID.rawValue]
@@ -82,13 +97,24 @@ actor WorkItemRepository {
             )
             try Task.checkCancellation()
             let memberReferences = try Self.memberReferences(
-                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+                in: database,
+                workItemIDs: workItemIDs,
+                authorityScope: authorityScope,
+                onQuery: queryObserver
             )
             let contextReferences = try Self.contextReferences(
-                in: database, workItemIDs: workItemIDs, onQuery: queryObserver
+                in: database,
+                workItemIDs: workItemIDs,
+                authorityScope: authorityScope,
+                onQuery: queryObserver
             )
             let relatedNodeIDs = Set(memberReferences.map(\.nodeID) + contextReferences.map(\.nodeID))
-            let content = try Self.content(in: database, nodeIDs: relatedNodeIDs, onQuery: queryObserver)
+            let content = try Self.content(
+                in: database,
+                nodeIDs: relatedNodeIDs,
+                authorityScope: authorityScope,
+                onQuery: queryObserver
+            )
             let members = try Self.members(memberReferences, contentByNodeID: content)
             let contextLinks = try Self.contextLinks(contextReferences, contentByNodeID: content)
             try Task.checkCancellation()
@@ -96,6 +122,7 @@ actor WorkItemRepository {
                 in: database,
                 accountID: accountID,
                 workItemIDs: workItemIDs,
+                authorityScope: authorityScope,
                 onQuery: queryObserver
             )
             try Task.checkCancellation()
@@ -477,13 +504,21 @@ actor WorkItemRepository {
             rows += try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT work_item_id, id, title, detail, origin, state, priority, due_at_ms, source_fingerprint,
+                    SELECT action_items.work_item_id,
+                           COALESCE(work_item_group_memberships.canonical_work_item_id, action_items.work_item_id)
+                             AS canonical_work_item_id,
+                           action_items.id, action_items.title, action_items.detail, action_items.origin,
+                           action_items.state, action_items.priority, action_items.due_at_ms, action_items.source_fingerprint,
                            created_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
                     FROM action_items
-                    WHERE work_item_id IN (\(placeholders(for: batch)))
-                    ORDER BY work_item_id, state, due_at_ms, id
+                    LEFT JOIN work_item_group_memberships
+                      ON work_item_group_memberships.constituent_work_item_id = action_items.work_item_id
+                    WHERE action_items.work_item_id IN (\(placeholders(for: batch)))
+                       OR work_item_group_memberships.canonical_work_item_id IN (\(placeholders(for: batch)))
+                    ORDER BY canonical_work_item_id, action_items.work_item_id, action_items.state,
+                             action_items.due_at_ms, action_items.id
                     """,
-                arguments: StatementArguments(batch)
+                arguments: StatementArguments(batch + batch)
             )
         }
         let evidence = try actionEvidence(
@@ -500,6 +535,7 @@ actor WorkItemRepository {
         for (index, row) in rows.enumerated() {
             if index.isMultiple(of: 64) { try Task.checkCancellation() }
             guard let workItemID: String = row["work_item_id"],
+                  let canonicalWorkItemID: String = row["canonical_work_item_id"],
                   let typedWorkItemID = WorkItemID(rawValue: workItemID),
                   let id = ActionItemID(rawValue: row["id"]),
                   let origin = ActionItemOrigin(rawValue: row["origin"]),
@@ -510,7 +546,7 @@ actor WorkItemRepository {
             else {
                 throw WorkItemRepositoryError.invalidPersistedData
             }
-            result[workItemID, default: []].append(
+            result[canonicalWorkItemID, default: []].append(
                 ActionItem(
                     id: id,
                     workItemID: typedWorkItemID,
@@ -567,21 +603,40 @@ actor WorkItemRepository {
     private nonisolated static func memberReferences(
         in database: Database,
         workItemIDs: [String],
+        authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [MemberReference] {
         var result: [MemberReference] = []
         for batch in batches(workItemIDs) {
             try Task.checkCancellation()
             onQuery?()
+            let scopeFilter: String
+            let arguments: StatementArguments
+            if let authorityScope {
+                scopeFilter = "AND github_nodes.account_id = ? AND github_nodes.organization_id = ?"
+                arguments = StatementArguments(
+                    batch + [authorityScope.accountID.rawValue, authorityScope.organizationID.rawValue]
+                )
+            } else {
+                scopeFilter = ""
+                arguments = StatementArguments(batch)
+            }
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT work_item_id, github_node_id, role
+                    SELECT work_item_members.work_item_id AS work_item_id,
+                           work_item_members.github_node_id AS github_node_id,
+                           work_item_members.role AS role
                     FROM work_item_members
-                    WHERE work_item_id IN (\(placeholders(for: batch)))
-                    ORDER BY work_item_id, role, github_node_id
+                    JOIN github_nodes
+                      ON github_nodes.github_node_id = work_item_members.github_node_id
+                    WHERE work_item_members.work_item_id IN (\(placeholders(for: batch)))
+                    \(scopeFilter)
+                    ORDER BY work_item_members.work_item_id,
+                             work_item_members.role,
+                             work_item_members.github_node_id
                     """,
-                arguments: StatementArguments(batch)
+                arguments: arguments
             )
             for row in rows {
                 guard let workItemID: String = row["work_item_id"],
@@ -599,21 +654,40 @@ actor WorkItemRepository {
     private nonisolated static func contextReferences(
         in database: Database,
         workItemIDs: [String],
+        authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [ContextReference] {
         var result: [ContextReference] = []
         for batch in batches(workItemIDs) {
             try Task.checkCancellation()
             onQuery?()
+            let scopeFilter: String
+            let arguments: StatementArguments
+            if let authorityScope {
+                scopeFilter = "AND github_nodes.account_id = ? AND github_nodes.organization_id = ?"
+                arguments = StatementArguments(
+                    batch + [authorityScope.accountID.rawValue, authorityScope.organizationID.rawValue]
+                )
+            } else {
+                scopeFilter = ""
+                arguments = StatementArguments(batch)
+            }
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT work_item_id, github_node_id, relation
+                    SELECT work_item_context_links.work_item_id AS work_item_id,
+                           work_item_context_links.github_node_id AS github_node_id,
+                           work_item_context_links.relation AS relation
                     FROM work_item_context_links
-                    WHERE work_item_id IN (\(placeholders(for: batch)))
-                    ORDER BY work_item_id, relation, github_node_id
+                    JOIN github_nodes
+                      ON github_nodes.github_node_id = work_item_context_links.github_node_id
+                    WHERE work_item_context_links.work_item_id IN (\(placeholders(for: batch)))
+                    \(scopeFilter)
+                    ORDER BY work_item_context_links.work_item_id,
+                             work_item_context_links.relation,
+                             work_item_context_links.github_node_id
                     """,
-                arguments: StatementArguments(batch)
+                arguments: arguments
             )
             for row in rows {
                 guard let workItemID: String = row["work_item_id"],
@@ -666,6 +740,7 @@ actor WorkItemRepository {
         in database: Database,
         accountID: AccountID,
         workItemIDs: [String],
+        authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [String: [WorkRelation]] {
         var references: [RelationReference] = []
@@ -718,18 +793,24 @@ actor WorkItemRepository {
         let evidence = try relationEvidence(
             in: database,
             relationIDs: references.map(\.relationID),
+            authorityScope: authorityScope,
             onQuery: onQuery
         )
         var result: [String: [WorkRelation]] = [:]
         for (index, reference) in references.enumerated() {
             if index.isMultiple(of: 64) { try Task.checkCancellation() }
+            let relationEvidence = evidence[reference.relationID] ?? []
+            // Account-only relation rows are not sufficient authority. When
+            // presentation has an active scope, a relation must carry at
+            // least one exact current-scope GitHub or local-workflow proof.
+            if authorityScope != nil, relationEvidence.isEmpty { continue }
             result[reference.workItemID, default: []].append(
                 WorkRelation(
                     kind: reference.kind,
                     subjectNodeID: reference.subjectNodeID,
                     objectNodeID: reference.objectNodeID,
                     confidence: reference.confidence,
-                    evidence: evidence[reference.relationID] ?? [],
+                    evidence: relationEvidence,
                     observedAt: reference.observedAt
                 )
             )
@@ -740,6 +821,7 @@ actor WorkItemRepository {
     private nonisolated static func relationEvidence(
         in database: Database,
         relationIDs: [String],
+        authorityScope: SynchronizationScope?,
         onQuery: (@Sendable () -> Void)?
     ) throws -> [String: [EvidenceReference]] {
         guard !relationIDs.isEmpty else { return [:] }
@@ -766,7 +848,11 @@ actor WorkItemRepository {
                 guard let relationID: String = row["relation_id"] else {
                     throw WorkItemRepositoryError.invalidPersistedData
                 }
-                result[relationID, default: []].append(try evidenceReference(from: row))
+                let evidence = try evidenceReference(from: row)
+                guard isAuthorizedForPresentation(evidence, scope: authorityScope) else {
+                    continue
+                }
+                result[relationID, default: []].append(evidence)
             }
         }
         return result
@@ -919,9 +1005,25 @@ actor WorkItemRepository {
         }
     }
 
+    private nonisolated static func isAuthorizedForPresentation(
+        _ evidence: EvidenceReference,
+        scope: SynchronizationScope?
+    ) -> Bool {
+        guard let scope else { return true }
+        return switch evidence.authority {
+        case let .github(evidenceScope, _, _):
+            evidenceScope == scope
+        case let .localWorkflow(accountID, organizationID):
+            accountID == scope.accountID && organizationID == scope.organizationID
+        case .legacyUnverified:
+            false
+        }
+    }
+
         private nonisolated static func content(
             in database: Database,
             nodeIDs: Set<GitHubNodeID>,
+            authorityScope: SynchronizationScope?,
             onQuery: (@Sendable () -> Void)?
         ) throws -> [GitHubNodeID: GitHubContentSummary] {
             guard !nodeIDs.isEmpty else { return [:] }
@@ -929,6 +1031,17 @@ actor WorkItemRepository {
             for batch in batches(nodeIDs.map(\.rawValue).sorted()) {
                 try Task.checkCancellation()
                 onQuery?()
+                let scopeFilter: String
+                let arguments: StatementArguments
+                if let authorityScope {
+                    scopeFilter = "AND github_nodes.account_id = ? AND github_nodes.organization_id = ?"
+                    arguments = StatementArguments(
+                        batch + [authorityScope.accountID.rawValue, authorityScope.organizationID.rawValue]
+                    )
+                } else {
+                    scopeFilter = ""
+                    arguments = StatementArguments(batch)
+                }
                 let rows = try Row.fetchAll(
                     database,
                     sql: """
@@ -953,8 +1066,9 @@ actor WorkItemRepository {
                         LEFT JOIN repositories ON repositories.id = github_nodes.repository_id
                         LEFT JOIN actors ON actors.id = github_nodes.author_id
                         WHERE github_nodes.github_node_id IN (\(placeholders(for: batch)))
+                        \(scopeFilter)
                         """,
-                    arguments: StatementArguments(batch)
+                    arguments: arguments
                 )
                 for row in rows {
                     guard let nodeID = GitHubNodeID(rawValue: row["github_node_id"]) else {

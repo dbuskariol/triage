@@ -14,6 +14,7 @@ struct WorkDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         DetailHeader(item: item)
+                        DetailSourceBodySection(item: item)
                         DetailFreshnessSection(freshness: item.freshness)
                         DetailAttentionSection(reasons: item.attentionReasons)
                         DetailActionItemsSection(item: item)
@@ -112,6 +113,9 @@ private struct DetailHeader: View {
     let item: WorkItem
 
     var body: some View {
+        let primaryContent = item.members.first(where: { $0.id == item.primaryNodeID })?.content
+        let actors = WorkDetailPresentation.actorNames(for: item)
+        let labels = WorkDetailPresentation.labelTitles(for: item)
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Label(WorkDetailPresentation.sourceTitle(item.sourceKind), systemImage: sourceSymbol)
@@ -129,8 +133,16 @@ private struct DetailHeader: View {
                 LabeledContent("Repository", value: repository.fullName)
                     .foregroundStyle(.secondary)
             }
-            if let author = item.members.first(where: { $0.id == item.primaryNodeID })?.content.author {
-                LabeledContent("Author", value: author.displayName ?? author.login)
+            if let number = primaryContent?.number {
+                LabeledContent("Number", value: "#\(number)")
+                    .foregroundStyle(.secondary)
+            }
+            if !actors.isEmpty {
+                LabeledContent("Actors", value: actors.joined(separator: ", "))
+                    .foregroundStyle(.secondary)
+            }
+            if !labels.isEmpty {
+                LabeledContent("Labels", value: labels.joined(separator: ", "))
                     .foregroundStyle(.secondary)
             }
             if let sourceURL = item.sourceURL {
@@ -148,6 +160,54 @@ private struct DetailHeader: View {
         case .discussion: "bubble.left.and.bubble.right"
         default: "circle"
         }
+    }
+}
+
+private struct DetailSourceBodySection: View {
+    @EnvironmentObject private var appModel: TriageAppModel
+    let item: WorkItem
+    @State private var source: WorkDetailSource?
+    @State private var didLoad = false
+
+    var body: some View {
+        DetailSection("Source", systemImage: "doc.plaintext") {
+            if let body = source?.bodyMarkdown,
+               let conciseBody = WorkDetailPresentation.conciseSourceBody(body) {
+                SafeGitHubMarkdown(source: conciseBody.markdown)
+                    .textSelection(.enabled)
+                if conciseBody.isTruncated {
+                    Text("The locally stored source body is abbreviated here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if didLoad {
+                Text("No source body is available in this normalized local record.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView("Loading locally stored source")
+                    .controlSize(.small)
+            }
+
+            if let source {
+                LabeledContent("Source updated", value: timestamp(source.updatedAt))
+                LabeledContent("Observed locally", value: timestamp(source.observedAt))
+                LabeledContent("Evidence revision", value: source.sourceRevision)
+                    .textSelection(.enabled)
+            }
+            Text("This untrusted Markdown is rendered from encrypted, normalized local data. It does not fetch content from GitHub.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .task(id: item.primaryNodeID) {
+            didLoad = false
+            source = await appModel.localDetailSource(for: item)
+            guard !Task.isCancelled else { return }
+            didLoad = true
+        }
+    }
+
+    private func timestamp(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -206,7 +266,10 @@ private struct DetailAttentionSection: View {
 
 private struct DetailActionItemsSection: View {
     @EnvironmentObject private var appModel: TriageAppModel
+    @Environment(\.undoManager) private var undoManager
     let item: WorkItem
+    @State private var actionItemBeingEdited: ActionItem?
+    @StateObject private var actionUndo = LocalActionItemUndoCoordinator()
 
     var body: some View {
         DetailSection("Action items", systemImage: "checklist") {
@@ -224,6 +287,11 @@ private struct DetailActionItemsSection: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityHint("Marks this local action item complete. It does not change GitHub.")
+                            Button("Edit") {
+                                actionItemBeingEdited = action
+                            }
+                            .accessibilityLabel("Edit local action item: \(action.title)")
+                            .accessibilityHint("Edits only the encrypted local action item. It does not change GitHub.")
                             Spacer(minLength: 12)
                             Text(priorityTitle(action.priority))
                                 .font(.caption)
@@ -244,6 +312,25 @@ private struct DetailActionItemsSection: View {
             Text("Action items and their completion state are stored locally and do not modify GitHub.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let feedback = actionUndo.feedback {
+                Text(feedback)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(feedback)
+            }
+        }
+        .sheet(item: $actionItemBeingEdited) { action in
+            LocalActionItemEditor(actionItem: action) { edit in
+                Task {
+                    await actionUndo.perform(
+                        edit,
+                        actionItem: action,
+                        in: item,
+                        appModel: appModel,
+                        undoManager: undoManager
+                    )
+                }
+            }
         }
     }
 
@@ -256,30 +343,127 @@ private struct DetailActionItemsSection: View {
     }
 }
 
+private struct LocalActionItemEditor: View {
+    let actionItem: ActionItem
+    let save: (LocalActionItemEdit) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var detail: String
+    @State private var priority: WorkPriority
+    @State private var hasDueDate: Bool
+    @State private var dueAt: Date
+
+    init(actionItem: ActionItem, save: @escaping (LocalActionItemEdit) -> Void) {
+        self.actionItem = actionItem
+        self.save = save
+        _title = State(initialValue: actionItem.title)
+        _detail = State(initialValue: actionItem.detail ?? "")
+        _priority = State(initialValue: actionItem.priority)
+        _hasDueDate = State(initialValue: actionItem.dueAt != nil)
+        _dueAt = State(initialValue: actionItem.dueAt ?? .now)
+    }
+
+    var body: some View {
+        Form {
+            Section("Local action item") {
+                TextField("Title", text: $title)
+                    .accessibilityIdentifier("work-detail-action-title")
+                TextEditor(text: $detail)
+                    .frame(minHeight: 96)
+                    .accessibilityLabel("Detail")
+                    .accessibilityIdentifier("work-detail-action-detail")
+                Picker("Priority", selection: $priority) {
+                    ForEach(WorkPriority.allCases, id: \.self) { priority in
+                        Text(priorityTitle(priority)).tag(priority)
+                    }
+                }
+                Toggle("Due date", isOn: $hasDueDate)
+                if hasDueDate {
+                    DatePicker("Due", selection: $dueAt, displayedComponents: [.date, .hourAndMinute])
+                }
+            }
+            Section {
+                Text("These changes are stored only in Triage’s encrypted local workflow and do not modify GitHub.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(minWidth: 420, minHeight: 360)
+        .navigationTitle("Edit Action Item")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    guard let edit = LocalActionItemEdit(
+                        title: title,
+                        detail: detail,
+                        priority: priority,
+                        dueAt: hasDueDate ? dueAt : nil
+                    ) else { return }
+                    save(edit)
+                    dismiss()
+                }
+                .disabled(LocalActionItemEdit(title: title, detail: detail, priority: priority, dueAt: hasDueDate ? dueAt : nil) == nil)
+            }
+        }
+    }
+
+    private func priorityTitle(_ priority: WorkPriority) -> String {
+        switch priority {
+        case .low: "Low"
+        case .normal: "Normal"
+        case .high: "High"
+        }
+    }
+}
+
 private struct DetailRelatedContentSection: View {
     let item: WorkItem
 
     var body: some View {
         DetailSection("Related content", systemImage: "rectangle.3.group") {
-            let related = item.members.filter { $0.id != item.primaryNodeID }.map(\.content) + item.contextLinks.map(\.content)
-            if related.isEmpty {
+            let groups = WorkDetailPresentation.relatedContentGroups(for: item)
+            if groups.isEmpty {
                 Text("No related normalized nodes are available in this local record.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(related) { content in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(content.title)
-                        Text(WorkDetailPresentation.sourceTitle(content.kind))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                ForEach(groups) { group in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(group.title)
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(group.contents) { content in
+                            DetailRelatedContentRow(content: content)
+                        }
                     }
-                    .accessibilityElement(children: .combine)
                 }
             }
             Text("Timeline and review entries appear only after their source stream has normalized them. Missing entries are not treated as an empty history.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct DetailRelatedContentRow: View {
+    let content: GitHubContentSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(content.title)
+            HStack(spacing: 6) {
+                Text(WorkDetailPresentation.sourceTitle(content.kind))
+                if let number = content.number {
+                    Text("#\(number)")
+                }
+                Text(content.state.rawValue.capitalized)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -333,7 +517,11 @@ private struct DetailReviewStateSection: View {
         DetailSection("Review state", systemImage: "checkmark.seal") {
             if hasNormalizedReviewContext {
                 Text("Normalized review-context evidence is available.")
-                Text("This local record does not include a complete review-state summary, so Triage does not infer approval or change-request status.")
+                ForEach(WorkDetailPresentation.reviewStateSummaries(for: item), id: \.self) { summary in
+                    Text(summary)
+                        .font(.callout)
+                }
+                Text("Triage shows only normalized review relationships and does not infer approval or any review state that is absent from this local record.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -371,7 +559,7 @@ private struct DetailProjectContextSection: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(projectLinks) { link in
-                    Text(link.content.title)
+                    DetailRelatedContentRow(content: link.content)
                 }
             }
         }
@@ -379,42 +567,90 @@ private struct DetailProjectContextSection: View {
 }
 
 private struct DetailTimelineSection: View {
+    @EnvironmentObject private var appModel: TriageAppModel
     let item: WorkItem
+    @State private var entries: [WorkDetailTimelineEntry] = []
+    @State private var nextCursor: WorkDetailTimelineCursor?
+    @State private var isLoading = false
+    @State private var didLoad = false
+    @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
         DetailSection("Timeline", systemImage: "clock.arrow.circlepath") {
-            let evidence = WorkDetailPresentation.allEvidence(for: item)
-            if evidence.isEmpty {
+            if entries.isEmpty, didLoad {
                 Text("No normalized chronology is available in this local record.")
                     .foregroundStyle(.secondary)
+            } else if entries.isEmpty {
+                ProgressView("Loading locally stored timeline")
+                    .controlSize(.small)
             } else {
-                ForEach(evidence.prefix(20)) { reference in
+                ForEach(entries) { entry in
                     HStack(alignment: .firstTextBaseline) {
-                        Text(reference.observedAt.formatted(date: .abbreviated, time: .shortened))
+                        Text(entry.event.occurredAt.formatted(date: .abbreviated, time: .shortened))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(timelineTitle(for: reference))
+                        Text(WorkDetailPresentation.timelineTitle(for: entry.event))
                             .lineLimit(2)
                     }
                     .accessibilityElement(children: .combine)
-                }
-                if evidence.count > 20 {
-                    Text("Showing the 20 most recent normalized observations.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .accessibilityLabel(WorkDetailPresentation.timelineAccessibilityLabel(for: entry.event))
                 }
             }
-            Text("A complete GitHub timeline is shown only after its source stream is synchronized; missing entries are not interpreted as an empty history.")
+            if nextCursor != nil {
+                Button("Show More Timeline") { loadNextPage() }
+                    .disabled(isLoading)
+                    .accessibilityHint("Loads another bounded page of already synchronized local timeline evidence. It does not contact GitHub.")
+            }
+            if isLoading, didLoad {
+                ProgressView("Loading more locally stored timeline")
+                    .controlSize(.small)
+            }
+            Text("Timeline pages are read incrementally from synchronized local evidence and cancel when this detail changes. Missing entries are not interpreted as an empty history.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .onAppear { loadFirstPage() }
+        .onChange(of: item.id) { _, _ in
+            loadFirstPage()
+        }
+        .onDisappear { loadTask?.cancel() }
     }
 
-    private func timelineTitle(for reference: EvidenceReference) -> String {
-        guard let excerpt = reference.excerpt, !excerpt.isEmpty else {
-            return reference.source.rawValue
+    private func loadFirstPage() {
+        loadTask?.cancel()
+        entries = []
+        nextCursor = nil
+        didLoad = false
+        loadPage(after: nil, replacing: true)
+    }
+
+    private func loadNextPage() {
+        guard let nextCursor, !isLoading else { return }
+        loadPage(after: nextCursor, replacing: false)
+    }
+
+    private func loadPage(after cursor: WorkDetailTimelineCursor?, replacing: Bool) {
+        loadTask?.cancel()
+        isLoading = true
+        let requestedItem = item
+        loadTask = Task { @MainActor in
+            let page = await appModel.localTimelinePage(
+                for: requestedItem,
+                after: cursor,
+                limit: WorkDetailPresentation.timelinePageSize
+            )
+            guard !Task.isCancelled else { return }
+            isLoading = false
+            didLoad = true
+            guard let page else { return }
+            if replacing {
+                entries = page.entries
+            } else {
+                let existingIDs = Set(entries.map(\.id))
+                entries += page.entries.filter { !existingIDs.contains($0.id) }
+            }
+            nextCursor = page.nextCursor
         }
-        return excerpt
     }
 }
 
@@ -534,6 +770,23 @@ private struct WorkInspectorView: View {
                     LabeledContent("Last sync", value: timestamp(lastSuccessfulAt))
                 } else {
                     LabeledContent("Last sync", value: "Unavailable")
+                }
+            }
+
+            Section("Why this is here") {
+                if item.attentionReasons.isEmpty {
+                    Text("No current deterministic attention reason is attached to this item.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(item.attentionReasons) { reason in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(reason.title)
+                            Text(reason.explanation)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
                 }
             }
 

@@ -13,6 +13,7 @@ enum GitHubNodeHydrationNormalizationError: Error, Equatable, Sendable {
     case invalidDates
     case invalidIssueDetails
     case invalidRelatedNodeID
+    case duplicateRelatedNodeID
     case incompleteConnection
 }
 
@@ -208,33 +209,31 @@ enum GitHubNodeHydrationNormalizer {
             guard let locked = node.locked, let comments = node.comments, comments.totalCount >= 0 else {
                 throw GitHubNodeHydrationNormalizationError.invalidIssueDetails
             }
-            try validateCompleteCommonConnections(node)
+            let assigneeNodeIDs = try validatedAssigneeNodeIDs(node.assignees)
+            let labelNodeIDs = try validatedLabelNodeIDs(node.labels)
             return .issue(
                 isLocked: locked,
                 commentsCount: comments.totalCount,
-                assigneeNodeIDs: try node.assignees.nodes.compactMap(\.?).map(validNodeID),
-                labelNodeIDs: try node.labels.nodes.compactMap(\.?).map(validNodeID),
+                assigneeNodeIDs: assigneeNodeIDs,
+                labelNodeIDs: labelNodeIDs,
                 labelNames: node.labels.nodes.compactMap(\.?).map(\.name).sorted()
             )
         case .pullRequest:
             guard let isDraft = node.isDraft else {
                 throw GitHubNodeHydrationNormalizationError.invalidIssueDetails
             }
-            try validateCompleteCommonConnections(node)
-            if node.reviewRequests?.pageInfo.hasNextPage == true {
-                throw GitHubNodeHydrationNormalizationError.incompleteConnection
-            }
-            if node.closingIssuesReferences?.pageInfo.hasNextPage == true {
-                throw GitHubNodeHydrationNormalizationError.incompleteConnection
-            }
+            let assigneeNodeIDs = try validatedAssigneeNodeIDs(node.assignees)
+            let labelNodeIDs = try validatedLabelNodeIDs(node.labels)
+            try validateReviewRequests(node.reviewRequests)
+            try validateClosingReferences(node.closingIssuesReferences)
             return .pullRequest(
                 isDraft: isDraft,
                 mergeableState: node.mergeable,
                 headRef: node.headRefName,
                 baseRef: node.baseRefName,
                 reviewDecision: node.reviewDecision,
-                assigneeNodeIDs: try node.assignees.nodes.compactMap(\.?).map(validNodeID),
-                labelNodeIDs: try node.labels.nodes.compactMap(\.?).map(validNodeID),
+                assigneeNodeIDs: assigneeNodeIDs,
+                labelNodeIDs: labelNodeIDs,
                 labelNames: node.labels.nodes.compactMap(\.?).map(\.name).sorted()
             )
         default:
@@ -243,16 +242,59 @@ enum GitHubNodeHydrationNormalizer {
 
     }
 
-    private static func validateCompleteCommonConnections(
-        _ node: GitHubNodeHydrationPayload.Node
+    private static func validatedAssigneeNodeIDs(
+        _ connection: GitHubNodeHydrationPayload.Connection<GitHubNodeHydrationPayload.Actor>
+    ) throws -> [GitHubNodeID] {
+        let nodeIDs = try validatedConnection(connection, identifier: validNodeID)
+        return nodeIDs
+    }
+
+    private static func validatedLabelNodeIDs(
+        _ connection: GitHubNodeHydrationPayload.Connection<GitHubNodeHydrationPayload.Label>
+    ) throws -> [GitHubNodeID] {
+        try validatedConnection(connection, identifier: validNodeID)
+    }
+
+    private static func validateReviewRequests(
+        _ connection: GitHubNodeHydrationPayload.Connection<GitHubNodeHydrationPayload.ReviewRequest>?
     ) throws {
-        guard !node.assignees.pageInfo.hasNextPage,
-              !node.labels.pageInfo.hasNextPage,
-              !node.assignees.nodes.contains(where: { $0 == nil }),
-              !node.labels.nodes.contains(where: { $0 == nil })
-        else {
-            throw GitHubNodeHydrationNormalizationError.incompleteConnection
+        guard let connection else { return }
+        _ = try validatedConnection(connection) { request in
+            guard let id = request.requestedReviewer?.id,
+                  let nodeID = GitHubNodeID(rawValue: id)
+            else { throw GitHubNodeHydrationNormalizationError.invalidRelatedNodeID }
+            return nodeID
         }
+    }
+
+    private static func validateClosingReferences(
+        _ connection: GitHubNodeHydrationPayload.Connection<GitHubNodeHydrationPayload.NodeReference>?
+    ) throws {
+        guard let connection else { return }
+        _ = try validatedConnection(connection) { reference in
+            guard let nodeID = GitHubNodeID(rawValue: reference.id) else {
+                throw GitHubNodeHydrationNormalizationError.invalidRelatedNodeID
+            }
+            return nodeID
+        }
+    }
+
+    private static func validatedConnection<Value>(
+        _ connection: GitHubNodeHydrationPayload.Connection<Value>,
+        identifier: (Value) throws -> GitHubNodeID
+    ) throws -> [GitHubNodeID] where Value: Codable & Sendable {
+        guard !connection.pageInfo.hasNextPage,
+              connection.nodes.count <= 50,
+              !connection.nodes.contains(where: { $0 == nil })
+        else { throw GitHubNodeHydrationNormalizationError.incompleteConnection }
+        let identifiers = try connection.nodes.map { node -> GitHubNodeID in
+            guard let node else { throw GitHubNodeHydrationNormalizationError.incompleteConnection }
+            return try identifier(node)
+        }
+        guard Set(identifiers).count == identifiers.count else {
+            throw GitHubNodeHydrationNormalizationError.duplicateRelatedNodeID
+        }
+        return identifiers
     }
 
     private static func validNodeID(_ value: GitHubNodeHydrationPayload.Actor) throws -> GitHubNodeID {

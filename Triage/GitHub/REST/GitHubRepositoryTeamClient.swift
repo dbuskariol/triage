@@ -7,6 +7,7 @@ enum GitHubRepositoryTeamClientError: Error, Equatable, Sendable {
     case paginationLimitExceeded
     case invalidPaginationLink
     case pageObjectLimitExceeded
+    case aggregatePayloadLimitExceeded
     case notModifiedWithoutCachedState
     case partialResults
     case ambiguousMembershipVisibility
@@ -67,7 +68,39 @@ enum GitHubTeamMembership: Sendable {
 
 actor GitHubRepositoryTeamClient {
     private static let maximumPages = 100
+    /// Raw pages are retained until one complete inventory can be reconciled.
+    /// Keep that atomic snapshot bounded even when every individual response
+    /// satisfies the transport's per-response cap.
+    private static let maximumAggregatePayloadBytes = 4 * 1_024 * 1_024
     private let client: GitHubRESTClient
+
+    private enum InventoryPagination: Sendable {
+        case repositories(organization: String)
+        case teams(organization: String)
+
+        var path: String {
+            switch self {
+            case let .repositories(organization):
+                "/orgs/\(organization)/repos"
+            case let .teams(organization):
+                "/orgs/\(organization)/teams"
+            }
+        }
+
+        var queryItemCount: Int {
+            switch self {
+            case .repositories: 3
+            case .teams: 2
+            }
+        }
+
+        var requiresAllRepositoryType: Bool {
+            if case .repositories = self {
+                return true
+            }
+            return false
+        }
+    }
 
     init(client: GitHubRESTClient) {
         self.client = client
@@ -96,7 +129,7 @@ actor GitHubRepositoryTeamClient {
                 URLQueryItem(name: "per_page", value: "100")
             ],
             validators: validators,
-            repositoryPaginationOrganization: organization,
+            pagination: .repositories(organization: organization),
             validator: { try Self.validate($0, organization: organization) }
         )
         switch result {
@@ -132,6 +165,7 @@ actor GitHubRepositoryTeamClient {
             path: "/orgs/\(organization)/teams",
             query: [URLQueryItem(name: "per_page", value: "100")],
             validators: validators,
+            pagination: .teams(organization: organization),
             validator: Self.validate
         )
         switch result {
@@ -176,7 +210,7 @@ actor GitHubRepositoryTeamClient {
         path: String,
         query: [URLQueryItem],
         validators: GitHubHTTPValidators?,
-        repositoryPaginationOrganization: String? = nil,
+        pagination: InventoryPagination,
         validator: (Value) throws -> Void
     ) async throws -> GitHubRepositoryTeamFetch<Value> {
         var endpoint = Self.endpoint(path: path, query: query)
@@ -194,6 +228,9 @@ actor GitHubRepositoryTeamClient {
             // precedence, and the single unconditional retry policy.
             return .notModified(ssoHeader: failure.ssoHeader)
         }
+        try Self.validatePageObjectCount(page.values)
+        var aggregatePayloadBytes = 0
+        try Self.consumePayload(page.payload, aggregatePayloadBytes: &aggregatePayloadBytes)
         var pages = [GitHubRepositoryTeamPage(page: page, endpoint: endpoint)]
         var values = [Value]()
         var ssoHeaders = [page.ssoHeader].compactMap { $0 }
@@ -202,27 +239,16 @@ actor GitHubRepositoryTeamClient {
 
         try append(page.values, to: &values, validator: validator)
         while true {
-            let nextPageURL: URL?
-            let nextPageNumber: Int?
-            if let repositoryPaginationOrganization {
-                nextPageNumber = try Self.validateRepositoryPaginationLink(
-                    page.nextPageURL,
-                    rawLinkHeader: page.linkHeader,
-                    organization: repositoryPaginationOrganization,
-                    currentPageNumber: currentPageNumber
-                )
-                nextPageURL = page.nextPageURL
-            } else {
-                nextPageNumber = nil
-                nextPageURL = page.nextPageURL
-            }
+            let nextPageNumber = try Self.validatePaginationLink(
+                page.nextPageURL,
+                rawLinkHeader: page.linkHeader,
+                pagination: pagination,
+                currentPageNumber: currentPageNumber
+            )
+            let nextPageURL = page.nextPageURL
             guard let nextPageURL else { break }
             try Task.checkCancellation()
-            guard nextPageURL.path == path,
-                  nextPageURL.scheme == "https",
-                  nextPageURL.host == "api.github.com",
-                  visitedPageURLs.insert(nextPageURL.absoluteString).inserted
-            else {
+            guard visitedPageURLs.insert(nextPageURL.absoluteString).inserted else {
                 throw GitHubRepositoryTeamClientError.paginationLoop
             }
             guard pages.count < Self.maximumPages else {
@@ -233,15 +259,15 @@ actor GitHubRepositoryTeamClient {
                 type,
                 request: try GitHubRESTRequest(nextPageURL: nextPageURL)
             )
+            try Self.validatePageObjectCount(page.values)
+            try Self.consumePayload(page.payload, aggregatePayloadBytes: &aggregatePayloadBytes)
             endpoint = nextPageURL.path + (nextPageURL.query.map { "?\($0)" } ?? "")
             pages.append(GitHubRepositoryTeamPage(page: page, endpoint: endpoint))
             try append(page.values, to: &values, validator: validator)
             if let ssoHeader = page.ssoHeader {
                 ssoHeaders.append(ssoHeader)
             }
-            if let nextPageNumber {
-                currentPageNumber = nextPageNumber
-            }
+            currentPageNumber = nextPageNumber ?? currentPageNumber
         }
         return .modified(
             GitHubRepositoryTeamInventory(values: values, pages: pages, ssoHeaders: ssoHeaders)
@@ -253,12 +279,18 @@ actor GitHubRepositoryTeamClient {
         to values: inout [Value],
         validator: (Value) throws -> Void
     ) throws {
-        guard pageValues.count <= 100 else {
-            throw GitHubRepositoryTeamClientError.pageObjectLimitExceeded
-        }
+        try Self.validatePageObjectCount(pageValues)
         for value in pageValues {
             try validator(value)
             values.append(value)
+        }
+    }
+
+    private nonisolated static func validatePageObjectCount<Value>(
+        _ pageValues: [Value]
+    ) throws {
+        guard pageValues.count <= 100 else {
+            throw GitHubRepositoryTeamClientError.pageObjectLimitExceeded
         }
     }
 
@@ -311,10 +343,10 @@ actor GitHubRepositoryTeamClient {
         }
     }
 
-    private nonisolated static func validateRepositoryPaginationLink(
+    private nonisolated static func validatePaginationLink(
         _ url: URL?,
         rawLinkHeader: String?,
-        organization: String,
+        pagination: InventoryPagination,
         currentPageNumber: Int
     ) throws -> Int? {
         if let rawLinkHeader,
@@ -334,17 +366,15 @@ actor GitHubRepositoryTeamClient {
               components.user == nil,
               components.password == nil,
               components.fragment == nil,
-              components.percentEncodedPath == "/orgs/\(organization)/repos"
+              components.percentEncodedPath == pagination.path
         else {
             throw GitHubRepositoryTeamClientError.invalidPaginationLink
         }
 
         let items = components.queryItems ?? []
-        let typeValues = items.filter { $0.name == "type" }.map(\.value)
         let perPageValues = items.filter { $0.name == "per_page" }.map(\.value)
         let pageValues = items.filter { $0.name == "page" }.map(\.value)
-        guard items.count == 3,
-              typeValues == ["all"],
+        guard items.count == pagination.queryItemCount,
               perPageValues == ["100"],
               pageValues.count == 1,
               let pageValue = pageValues[0],
@@ -356,6 +386,12 @@ actor GitHubRepositoryTeamClient {
         else {
             throw GitHubRepositoryTeamClientError.invalidPaginationLink
         }
+        if pagination.requiresAllRepositoryType {
+            let typeValues = items.filter { $0.name == "type" }.map(\.value)
+            guard typeValues == ["all"] else {
+                throw GitHubRepositoryTeamClientError.invalidPaginationLink
+            }
+        }
         guard pageNumber <= maximumPages else {
             throw GitHubRepositoryTeamClientError.paginationLimitExceeded
         }
@@ -363,6 +399,16 @@ actor GitHubRepositoryTeamClient {
             throw GitHubRepositoryTeamClientError.paginationLoop
         }
         return pageNumber
+    }
+
+    private nonisolated static func consumePayload(
+        _ payload: Data,
+        aggregatePayloadBytes: inout Int
+    ) throws {
+        guard payload.count <= maximumAggregatePayloadBytes - aggregatePayloadBytes else {
+            throw GitHubRepositoryTeamClientError.aggregatePayloadLimitExceeded
+        }
+        aggregatePayloadBytes += payload.count
     }
 
     private nonisolated static func isGitHubLogin(_ value: String) -> Bool {

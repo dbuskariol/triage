@@ -144,6 +144,29 @@ final class GitHubIssueSearchTests: XCTestCase {
         XCTAssertEqual(response.ssoHeader, .partialResults(Set([1])))
     }
 
+    func testSearchRejectsMoreThanOneHundredDecodedItemsBeforePublication() async throws {
+        let items = (1 ... 101).map { index in
+            """
+            {"id":\(index),"node_id":"I_\(index)","number":\(index),"title":"Issue \(index)","state":"open","html_url":"https://github.com/github/triage/issues/\(index)","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","closed_at":null,"pull_request":null,"repository_url":"https://api.github.com/repos/github/triage"}
+            """
+        }.joined(separator: ",")
+        let client = GitHubIssueSearchClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: SearchSession(
+                body: Data("{\"total_count\":101,\"incomplete_results\":false,\"items\":[\(items)]}".utf8),
+                headers: [:]
+            )),
+            credential: SecretValue("token")
+        ))
+        let query = try GitHubIssueSearchQuery(
+            organizationLogin: "github", userLogin: "octocat", state: .open, relationship: .involves
+        )
+        await XCTAssertThrowsErrorAsync {
+            _ = try await client.searchResponse(query)
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIssueSearchError, .pageObjectLimitExceeded)
+        }
+    }
+
     func testConditionalSearchSendsETagOnlyAndReturnsSSOBearingNotModified() async throws {
         let session = SearchSession(
             body: Data(),
@@ -359,6 +382,16 @@ final class GitHubIssueSearchTests: XCTestCase {
 
         XCTAssertEqual(serverTime, expected)
     }
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @escaping () async throws -> Void,
+    verify: (Error) -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do { try await expression(); XCTFail("Expected an error.", file: file, line: line) }
+    catch { verify(error) }
 }
 
 private actor SearchSession: HTTPSession {

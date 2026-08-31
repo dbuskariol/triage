@@ -28,6 +28,10 @@ enum PostAccountIdentityReplayReceiptRepositoryError: Error, Equatable, Sendable
     case invalidRawEvidence
     case invalidOrganization
     case ssoEvidencePreventsReplay
+    /// A transport 304 may still carry GitHub's SSO recovery evidence. Keep
+    /// that evidence intact so callers can distinguish required, partial, and
+    /// malformed SSO state instead of treating it as receipt corruption.
+    case ssoRequirement(GitHubSSOHeader)
 }
 
 actor PostAccountIdentityReplayReceiptRepository {
@@ -85,6 +89,31 @@ actor PostAccountIdentityReplayReceiptRepository {
                 """, arguments: [identity.accountID.rawValue, identity.credentialRevision.rawValue, AccountOrganizationInventoryReplayIdentity.requestKey])
             else { return nil }
             return try? Self.validators(eTag: row["etag"], lastModified: row["last_modified"])
+        }
+    }
+
+    /// A failed inventory attempt must not advance the successful-receipt
+    /// timestamp, otherwise daily identity validation could hide incomplete
+    /// organization visibility for a full cadence interval.
+    func inventoryValidatedAt(
+        for identity: AccountOrganizationInventoryReplayIdentity
+    ) async throws -> Date? {
+        guard identity.accountID == vault.accountID else {
+            throw PostAccountIdentityReplayReceiptRepositoryError.accountScopeMismatch
+        }
+        return try await vault.read { database in
+            try Self.validateInventoryAuthority(identity, in: database)
+            guard let milliseconds: Int64 = try Int64.fetchOne(database, sql: """
+                SELECT validated_at_ms FROM account_organization_inventory_replay_receipts
+                WHERE account_id = ? AND credential_revision = ? AND request_key = ?
+                """, arguments: [
+                    identity.accountID.rawValue,
+                    identity.credentialRevision.rawValue,
+                    AccountOrganizationInventoryReplayIdentity.requestKey
+                ]) else {
+                return nil
+            }
+            return Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
         }
     }
 
@@ -515,11 +544,12 @@ actor PostAccountIdentityReplayReceiptRepository {
     private nonisolated static func validateOrganizations(_ values: [GitHubOrganizationDTO]) throws {
         var numeric = Set<UInt64>(); var nodes = Set<String>(); var logins = Set<String>()
         for value in values {
-            guard numeric.insert(value.id).inserted,
+            guard value.id > 0,
+                  GitHubNodeID(rawValue: value.nodeID) != nil,
+                  RepositoryInventoryReplayReceiptRepository.validGitHubLogin(value.login),
+                  numeric.insert(value.id).inserted,
                   nodes.insert(value.nodeID).inserted,
-                  logins.insert(value.login.lowercased()).inserted,
-                  !value.nodeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !value.login.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  logins.insert(value.login.lowercased()).inserted
             else { throw PostAccountIdentityReplayReceiptRepositoryError.invalidReceipt }
         }
     }
@@ -581,15 +611,18 @@ actor PostAccountIdentityReplayReceiptRepository {
 actor PostAccountOrganizationMetadataReplayService {
     private let client: GitHubIdentityClient
     private let receipts: PostAccountIdentityReplayReceiptRepository
+    private let rawSnapshots: RawAPISnapshotRepository?
     private let clock: @Sendable () -> Date
 
     init(
         client: GitHubIdentityClient,
         receipts: PostAccountIdentityReplayReceiptRepository,
+        rawSnapshots: RawAPISnapshotRepository? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
         self.receipts = receipts
+        self.rawSnapshots = rawSnapshots
         self.clock = clock
     }
 
@@ -611,12 +644,14 @@ actor PostAccountOrganizationMetadataReplayService {
         switch result {
         case let .modified(response):
             try Task.checkCancellation()
-            try await receipts.replaceMetadata(response, for: identity, organization: organization, observedAt: clock())
+            let observedAt = clock()
+            try await receipts.replaceMetadata(response, for: identity, organization: organization, observedAt: observedAt)
+            try await compactUnpinnedSnapshots(for: scope.accountID, at: observedAt)
             try Task.checkCancellation()
             return response
         case let .notModified(ssoHeader):
-            guard ssoHeader == nil else {
-                throw PostAccountIdentityReplayReceiptRepositoryError.ssoEvidencePreventsReplay
+            if let ssoHeader {
+                throw PostAccountIdentityReplayReceiptRepositoryError.ssoRequirement(ssoHeader)
             }
             if let replay = try await receipts.validatedMetadata(for: identity, organization: organization, validatedAt: clock()) {
                 try Task.checkCancellation()
@@ -624,14 +659,30 @@ actor PostAccountOrganizationMetadataReplayService {
             }
             let retry = try await client.fetchOrganization(named: organization.login, validators: nil)
             try Task.checkCancellation()
-            guard case let .modified(response) = retry else {
+            switch retry {
+            case let .modified(response):
+                try Task.checkCancellation()
+                let observedAt = clock()
+                try await receipts.replaceMetadata(response, for: identity, organization: organization, observedAt: observedAt)
+                try await compactUnpinnedSnapshots(for: scope.accountID, at: observedAt)
+                try Task.checkCancellation()
+                return response
+            case let .notModified(ssoHeader?):
+                throw PostAccountIdentityReplayReceiptRepositoryError.ssoRequirement(ssoHeader)
+            case .notModified:
                 throw PostAccountIdentityReplayReceiptRepositoryError.invalidReceipt
             }
-            try Task.checkCancellation()
-            try await receipts.replaceMetadata(response, for: identity, organization: organization, observedAt: clock())
-            try Task.checkCancellation()
-            return response
         }
+    }
+
+    private func compactUnpinnedSnapshots(for accountID: AccountID, at date: Date) async throws {
+        guard let rawSnapshots else { return }
+        try Task.checkCancellation()
+        _ = try await rawSnapshots.compact(
+            accountID: accountID,
+            retainingMostRecentPerSource: 1,
+            before: date
+        )
     }
 }
 
@@ -641,15 +692,18 @@ actor PostAccountOrganizationMetadataReplayService {
 actor PostAccountOrganizationInventoryReplayService {
     private let client: GitHubIdentityClient
     private let receipts: PostAccountIdentityReplayReceiptRepository
+    private let rawSnapshots: RawAPISnapshotRepository?
     private let clock: @Sendable () -> Date
 
     init(
         client: GitHubIdentityClient,
         receipts: PostAccountIdentityReplayReceiptRepository,
+        rawSnapshots: RawAPISnapshotRepository? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
         self.receipts = receipts
+        self.rawSnapshots = rawSnapshots
         self.clock = clock
     }
 
@@ -668,12 +722,14 @@ actor PostAccountOrganizationInventoryReplayService {
         switch result {
         case let .modified(inventory):
             try Task.checkCancellation()
-            try await receipts.replaceInventory(inventory, for: identity, observedAt: clock())
+            let observedAt = clock()
+            try await receipts.replaceInventory(inventory, for: identity, observedAt: observedAt)
+            try await compactUnpinnedSnapshots(for: accountID, at: observedAt)
             try Task.checkCancellation()
             return inventory
         case let .notModified(ssoHeader):
-            guard ssoHeader == nil else {
-                throw PostAccountIdentityReplayReceiptRepositoryError.ssoEvidencePreventsReplay
+            if let ssoHeader {
+                throw PostAccountIdentityReplayReceiptRepositoryError.ssoRequirement(ssoHeader)
             }
             if let replay = try await receipts.validatedInventory(for: identity, validatedAt: clock()) {
                 try Task.checkCancellation()
@@ -681,13 +737,29 @@ actor PostAccountOrganizationInventoryReplayService {
             }
             let retry = try await client.fetchAllOrganizations(validators: nil)
             try Task.checkCancellation()
-            guard case let .modified(inventory) = retry else {
+            switch retry {
+            case let .modified(inventory):
+                try Task.checkCancellation()
+                let observedAt = clock()
+                try await receipts.replaceInventory(inventory, for: identity, observedAt: observedAt)
+                try await compactUnpinnedSnapshots(for: accountID, at: observedAt)
+                try Task.checkCancellation()
+                return inventory
+            case let .notModified(ssoHeader?):
+                throw PostAccountIdentityReplayReceiptRepositoryError.ssoRequirement(ssoHeader)
+            case .notModified:
                 throw PostAccountIdentityReplayReceiptRepositoryError.invalidReceipt
             }
-            try Task.checkCancellation()
-            try await receipts.replaceInventory(inventory, for: identity, observedAt: clock())
-            try Task.checkCancellation()
-            return inventory
         }
+    }
+
+    private func compactUnpinnedSnapshots(for accountID: AccountID, at date: Date) async throws {
+        guard let rawSnapshots else { return }
+        try Task.checkCancellation()
+        _ = try await rawSnapshots.compact(
+            accountID: accountID,
+            retainingMostRecentPerSource: 1,
+            before: date
+        )
     }
 }

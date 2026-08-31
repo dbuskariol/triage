@@ -35,10 +35,15 @@ actor DailyActiveAccountIdentityRefreshService {
         AccountID,
         CredentialRevision
     ) async throws -> GitHubOrganizationInventory
+    typealias OrganizationInventoryValidationLoading = @Sendable (
+        AccountID,
+        CredentialRevision
+    ) async throws -> Date?
 
     private let vault: AccountVault
     private let loadAuthenticatedUser: AuthenticatedUserLoading
     private let loadOrganizationInventory: OrganizationInventoryLoading
+    private let loadOrganizationInventoryValidatedAt: OrganizationInventoryValidationLoading
     private let cadence: RefreshCadence
     private let clock: @Sendable () -> Date
     private let newCredentialRevision: @Sendable () -> CredentialRevision
@@ -47,6 +52,7 @@ actor DailyActiveAccountIdentityRefreshService {
         vault: AccountVault,
         loadAuthenticatedUser: @escaping AuthenticatedUserLoading,
         loadOrganizationInventory: @escaping OrganizationInventoryLoading,
+        loadOrganizationInventoryValidatedAt: @escaping OrganizationInventoryValidationLoading = { _, _ in nil },
         cadence: RefreshCadence = .dailyCapabilityProbe,
         clock: @escaping @Sendable () -> Date = Date.init,
         newCredentialRevision: @escaping @Sendable () -> CredentialRevision = {
@@ -56,6 +62,7 @@ actor DailyActiveAccountIdentityRefreshService {
         self.vault = vault
         self.loadAuthenticatedUser = loadAuthenticatedUser
         self.loadOrganizationInventory = loadOrganizationInventory
+        self.loadOrganizationInventoryValidatedAt = loadOrganizationInventoryValidatedAt
         self.cadence = cadence
         self.clock = clock
         self.newCredentialRevision = newCredentialRevision
@@ -71,24 +78,53 @@ actor DailyActiveAccountIdentityRefreshService {
         else {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         }
+        let credentialRevision = try await repository.credentialRevision(for: persistedAccount.id)
         let now = clock()
-        guard isDue(account: persistedAccount, at: now) else {
+        let lastInventoryValidatedAt: Date?
+        do {
+            lastInventoryValidatedAt = try await loadOrganizationInventoryValidatedAt(
+                persistedAccount.id,
+                credentialRevision
+            )
+        } catch DailyActiveAccountIdentityRefreshError.staleAccountAuthority {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        } catch AccountRepositoryError.staleCredentialRevision {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        } catch PostAccountIdentityReplayReceiptRepositoryError.staleAuthority {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        } catch {
+            // If receipt freshness cannot be read, do not allow a recent
+            // identity-only success to suppress visibility recovery.
+            lastInventoryValidatedAt = nil
+        }
+        guard isDue(
+            account: persistedAccount,
+            lastInventoryValidatedAt: lastInventoryValidatedAt,
+            at: now
+        ) else {
             return .notDue
         }
-        let credentialRevision = try await repository.credentialRevision(for: persistedAccount.id)
-        let user = try await loadAuthenticatedUser()
+        let user: GitHubUserDTO
+        do {
+            user = try await loadAuthenticatedUser()
+        } catch AuthenticatedUserReplayReceiptRepositoryError.immutableIdentityMismatch {
+            return try await revoke(
+                persistedAccount,
+                credentialRevision: credentialRevision,
+                repository: repository
+            )
+        } catch AuthenticatedUserReplayReceiptRepositoryError.staleAuthority {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        }
         try Task.checkCancellation()
         guard user.id == persistedAccount.githubUserID,
               user.nodeID == persistedAccount.nodeID.rawValue
         else {
-            try await requireCurrentCredentialRevision(
-                credentialRevision,
-                accountID: persistedAccount.id,
+            return try await revoke(
+                persistedAccount,
+                credentialRevision: credentialRevision,
                 repository: repository
             )
-            let revoked = persistedAccount.replacingCredentialStatus(.revoked)
-            try await repository.save(revoked, credentialRevision: newCredentialRevision())
-            return .credentialRevoked(revoked)
         }
 
         let refreshed = GitHubAccount(
@@ -111,7 +147,15 @@ actor DailyActiveAccountIdentityRefreshService {
             accountID: persistedAccount.id,
             repository: repository
         )
-        try await repository.save(refreshed, credentialRevision: credentialRevision)
+        do {
+            try await repository.save(
+                refreshed,
+                credentialRevision: credentialRevision,
+                expectedCredentialRevision: credentialRevision
+            )
+        } catch AccountRepositoryError.staleCredentialRevision {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        }
 
         do {
             let inventory = try await loadOrganizationInventory(
@@ -137,6 +181,10 @@ actor DailyActiveAccountIdentityRefreshService {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         } catch AccountRepositoryError.staleCredentialRevision {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        } catch PostAccountIdentityReplayReceiptRepositoryError.staleAuthority {
+            // A stale `/user/orgs` receipt is a canceled authority, never an
+            // inventory failure that may publish the profile snapshot.
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         } catch {
             // A failed, partial, or receipt-invalid inventory is never removal
             // evidence. Return the current rows so the caller preserves them.
@@ -144,9 +192,18 @@ actor DailyActiveAccountIdentityRefreshService {
         }
     }
 
-    private func isDue(account: GitHubAccount, at date: Date) -> Bool {
-        guard let lastValidatedAt = account.lastValidatedAt else { return true }
-        return date.timeIntervalSince(lastValidatedAt) >= cadence.baseInterval
+    private func isDue(
+        account: GitHubAccount,
+        lastInventoryValidatedAt: Date?,
+        at date: Date
+    ) -> Bool {
+        let identityDue = account.lastValidatedAt.map {
+            date.timeIntervalSince($0) >= cadence.baseInterval
+        } ?? true
+        let inventoryDue = lastInventoryValidatedAt.map {
+            date.timeIntervalSince($0) >= cadence.baseInterval
+        } ?? true
+        return identityDue || inventoryDue
     }
 
     private func requireCurrentCredentialRevision(
@@ -157,6 +214,29 @@ actor DailyActiveAccountIdentityRefreshService {
         guard try await repository.credentialRevision(for: accountID) == expected else {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         }
+    }
+
+    private func revoke(
+        _ account: GitHubAccount,
+        credentialRevision: CredentialRevision,
+        repository: AccountRepository
+    ) async throws -> DailyActiveAccountIdentityRefreshOutcome {
+        try await requireCurrentCredentialRevision(
+            credentialRevision,
+            accountID: account.id,
+            repository: repository
+        )
+        let revoked = account.replacingCredentialStatus(.revoked)
+        do {
+            try await repository.save(
+                revoked,
+                credentialRevision: newCredentialRevision(),
+                expectedCredentialRevision: credentialRevision
+            )
+        } catch AccountRepositoryError.staleCredentialRevision {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        }
+        return .credentialRevoked(revoked)
     }
 
     private func snapshot(

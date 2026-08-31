@@ -253,6 +253,44 @@ actor AccountRepository {
         }
     }
 
+    /// Updates an existing account only while the caller's credential
+    /// authority is still current. This is the mutation boundary for async
+    /// identity validation and OAuth refresh, where an account may be removed
+    /// or a credential replaced while network work is in flight.
+    func save(
+        _ account: GitHubAccount,
+        credentialRevision: CredentialRevision,
+        expectedCredentialRevision: CredentialRevision
+    ) async throws {
+        try ensureAccountScope(account.id)
+        try await vault.writeTransaction { database in
+            try database.execute(
+                sql: """
+                    UPDATE accounts
+                    SET github_user_id = ?, github_node_id = ?, login = ?,
+                        display_name = ?, avatar_url = ?, authentication_kind = ?,
+                        credential_id = ?, credential_status = ?, credential_revision = ?,
+                        access_token_expires_at_ms = ?, refresh_token_expires_at_ms = ?,
+                        last_validated_at_ms = ?, disabled_at_ms = NULL
+                    WHERE id = ? AND credential_revision = ? AND disabled_at_ms IS NULL
+                    """,
+                arguments: [
+                    String(account.githubUserID), account.nodeID.rawValue, account.login,
+                    account.displayName, account.avatarURL?.absoluteString,
+                    account.authenticationKind.rawValue, account.credentialID.rawValue,
+                    account.credentialStatus.rawValue, credentialRevision.rawValue,
+                    account.accessTokenExpiresAt.map(Self.milliseconds),
+                    account.refreshTokenExpiresAt.map(Self.milliseconds),
+                    account.lastValidatedAt.map(Self.milliseconds), account.id.rawValue,
+                    expectedCredentialRevision.rawValue
+                ]
+            )
+            guard database.changesCount == 1 else {
+                throw AccountRepositoryError.staleCredentialRevision
+            }
+        }
+    }
+
     func save(
         _ organization: GitHubOrganization,
         access: OrganizationAccess,

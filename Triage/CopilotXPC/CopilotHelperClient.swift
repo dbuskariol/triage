@@ -38,6 +38,12 @@ actor CopilotHelperClient: TriageCopilotHelping {
       timeout: timeout
     )
     try response.validate(against: request.input)
+    // A selected model is an authorization and cache boundary. Auto may
+    // accept the runtime-selected model, but an explicit selection must not
+    // silently accept a response from another model.
+    guard request.modelID == nil || response.modelID == request.modelID else {
+      throw CopilotXPCError.invalidAnalysis
+    }
     return response
   }
 
@@ -99,6 +105,11 @@ actor CopilotHelperClient: TriageCopilotHelping {
     guard payload.count <= CopilotIPC.maximumRequestBytes else {
       throw CopilotFrameError.payloadTooLarge
     }
+    // The cancellation handler is a sending closure. Capture only the
+    // concrete Sendable header and actor reference, never the generic request
+    // or the current actor-isolated region.
+    let requestHeader = request.header
+    let client = self
 
     do {
       return try await withTaskCancellationHandler {
@@ -109,8 +120,8 @@ actor CopilotHelperClient: TriageCopilotHelping {
           timeout: timeout
         )
       } onCancel: {
-        Task {
-          await self.cancelRunningProcess()
+        Task { [client, requestHeader] in
+          await client.cancelRunningProcess(for: requestHeader)
         }
       }
     } catch is CancellationError {
@@ -146,7 +157,7 @@ actor CopilotHelperClient: TriageCopilotHelping {
         } catch {
           group.cancelAll()
           if error as? CopilotXPCError == .operationTimedOut {
-            await self.cancelRunningProcess()
+            await self.cancelRunningProcess(for: request)
           }
           throw error
         }
@@ -184,7 +195,17 @@ actor CopilotHelperClient: TriageCopilotHelping {
     }
   }
 
-  private func cancelRunningProcess() async {
+  /// Terminates only the operation whose cancellation or deadline triggered
+  /// this request. The XPC transport cannot be reopened after termination, so
+  /// a current-operation cancellation is terminal; a delayed stale handler is
+  /// a no-op and cannot shut down a newer operation.
+  func cancelRunningProcess(for request: CopilotRequestHeader) async {
+    guard activeOperation?.requestID == request.requestID,
+      activeOperation?.organizationID == request.organizationID,
+      activeOperation?.operation == request.operation
+    else {
+      return
+    }
     isShutDown = true
     await transport.terminate()
   }

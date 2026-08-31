@@ -40,13 +40,52 @@ final class AttentionRankerTests: XCTestCase {
         )
     }
 
+    func testEarlierDueDateBreaksEqualScoreBeforeActivity() {
+        let ranker = AttentionRanker()
+        let laterDue = makeWorkItem(
+            id: "later-due",
+            dueAt: now.addingTimeInterval(2 * 86_400),
+            activity: now.addingTimeInterval(10)
+        )
+        let earlierDue = makeWorkItem(
+            id: "earlier-due",
+            dueAt: now.addingTimeInterval(86_400),
+            activity: now
+        )
+
+        XCTAssertEqual(
+            ranker.sort([laterDue, earlierDue], at: now).map(\.id.rawValue),
+            ["earlier-due", "later-due"]
+        )
+    }
+
+    func testPresentationSortUsesThePersistedScoreInsteadOfRecomputingWithoutPreferences() {
+        let ranker = AttentionRanker()
+        let locallyRanked = makeWorkItem(
+            id: "persisted-high",
+            reasonStrength: nil,
+            persistedScore: 90
+        )
+        let staleRuleInputs = makeWorkItem(
+            id: "would-win-if-recomputed",
+            reasonStrength: 1_000,
+            persistedScore: 0
+        )
+
+        XCTAssertEqual(
+            ranker.sortPersisted([staleRuleInputs, locallyRanked]).map(\.id.rawValue),
+            ["persisted-high", "would-win-if-recomputed"]
+        )
+    }
+
     private func makeWorkItem(
         id: String,
         pinned: Bool = false,
         priority: WorkPriority = .normal,
         reasonStrength: Int? = nil,
         dueAt: Date? = nil,
-        activity: Date? = nil
+        activity: Date? = nil,
+        persistedScore: Int = 0
     ) -> WorkItem {
         let itemID = WorkItemID(rawValue: id)!
         let reasons = reasonStrength.map {
@@ -95,7 +134,7 @@ final class AttentionRankerTests: XCTestCase {
             workflow: WorkflowState(isPinned: pinned, priority: priority, updatedAt: now),
             freshness: FreshnessState(status: .fresh),
             lastRelevantActivityAt: activity ?? now,
-            score: AttentionScore(value: 0, breakdown: [:])
+            score: AttentionScore(value: persistedScore, breakdown: [:])
         )
     }
 }

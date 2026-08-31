@@ -32,6 +32,7 @@ final class WorkspaceObservationServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.menuCounts.snoozed, 1)
         XCTAssertEqual(snapshot.menuCounts.allWork, 3)
         XCTAssertEqual(snapshot.freshness.status, FreshnessStatus.partial)
+        XCTAssertEqual(snapshot.organizationVisibilityFreshness.status, .partial)
         XCTAssertFalse(snapshot.isRefreshing)
         XCTAssertEqual(snapshot.selectedItemEvidence?.workItemID, fixture.inboxWorkItemID)
         XCTAssertEqual(
@@ -143,6 +144,105 @@ final class WorkspaceObservationServiceTests: XCTestCase {
             refreshed.revision.coverageFingerprint,
             initial.revision.coverageFingerprint
         )
+    }
+
+    func testGRDBObservationPublishesCurrentCredentialVisibilityReceiptChange() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspace()
+
+        let service = WorkspaceDatabaseObservationService(
+            bridge: WorkspaceDatabaseObservationService.bridge(
+                in: fixture.pool,
+                accountID: fixture.accountID
+            )
+        )
+        var iterator = service.values(for: fixture.scope, selectedWorkItemID: nil).makeAsyncIterator()
+        let initialValue = try await iterator.next()
+        let initial = try XCTUnwrap(initialValue)
+        XCTAssertEqual(initial.organizationVisibilityFreshness.status, .partial)
+        XCTAssertNil(initial.revision.organizationVisibilityValidatedAt)
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO account_organization_inventory_replay_receipts (
+                        id, account_id, credential_revision, request_key, etag, last_modified,
+                        parser_version, source_revision, normalized_digest, page_count,
+                        organization_count, observed_at_ms, committed_at_ms, validated_at_ms,
+                        receipt_version
+                    ) VALUES (
+                        'visibility-receipt', ?, ?, 'GET /user/orgs?per_page=100', '"etag"', NULL,
+                        1, 'revision', zeroblob(32), 1, 1, 4_000, 4_000, 4_000, 1
+                    )
+                    """,
+                arguments: [fixture.accountID.rawValue, fixture.credentialRevision.rawValue]
+            )
+        }
+
+        let refreshedValue = try await iterator.next()
+        let refreshed = try XCTUnwrap(refreshedValue)
+        XCTAssertEqual(refreshed.organizationVisibilityFreshness.status, .fresh)
+        XCTAssertEqual(
+            refreshed.revision.organizationVisibilityValidatedAt,
+            Date(timeIntervalSince1970: 4)
+        )
+    }
+
+    func testGRDBObservationDoesNotDeduplicateFullGraphDetailEdits() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        try fixture.seedWorkspace()
+
+        let service = WorkspaceDatabaseObservationService(
+            bridge: WorkspaceDatabaseObservationService.bridge(
+                in: fixture.pool,
+                accountID: fixture.accountID
+            )
+        )
+        var iterator = service.values(for: fixture.scope, selectedWorkItemID: nil).makeAsyncIterator()
+        _ = try await iterator.next()
+
+        try await fixture.pool.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE workflow_states
+                    SET local_note = 'Private local note', follow_up_at_ms = 9_000
+                    WHERE work_item_id = ?
+                    """,
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO attention_scores (work_item_id, score, breakdown_json, evaluated_at_ms)
+                    VALUES (?, 100, ?, 9_000)
+                    """,
+                arguments: [fixture.inboxWorkItemID.rawValue, Data("{\"direct\":100}".utf8)]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO work_item_members (work_item_id, github_node_id, role)
+                    VALUES (?, 'node-waiting', 'linkedIssue')
+                    """,
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO work_item_context_links (work_item_id, github_node_id, relation)
+                    VALUES (?, 'node-snoozed', 'crossReferences')
+                    """,
+                arguments: [fixture.inboxWorkItemID.rawValue]
+            )
+        }
+
+        let refreshedValue = try await iterator.next()
+        let refreshed = try XCTUnwrap(refreshedValue)
+        let inbox = try XCTUnwrap(refreshed.workItems.first { $0.id == fixture.inboxWorkItemID })
+        XCTAssertEqual(inbox.workflowLocalNote, "Private local note")
+        XCTAssertEqual(inbox.workflowFollowUpAt, Date(timeIntervalSince1970: 9))
+        XCTAssertEqual(inbox.scoreBreakdown, Data("{\"direct\":100}".utf8))
+        XCTAssertTrue(inbox.nestedReferenceFingerprint.contains("node-waiting:linkedIssue"))
+        XCTAssertTrue(inbox.nestedReferenceFingerprint.contains("node-snoozed:crossReferences"))
     }
 
     func testTerminationCancelsTheVaultOwnedSubscription() async throws {

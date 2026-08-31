@@ -150,6 +150,97 @@ final class GitHubPullRequestClientTests: XCTestCase {
         else { return XCTFail("Expected noncanonical host to fail closed.") }
         XCTAssertEqual(failure.rawPages.count, 1)
     }
+
+    func testRequestedReviewersStopsAtIts256KiBTransportBudget() async throws {
+        let payload = Data(
+            ("{\"users\":[],\"teams\":[],\"padding\":\""
+                + String(repeating: "x", count: 256 * 1_024)
+                + "\"}").utf8
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PullRequestPagingSession(responses: [
+                    "/repos/acme/widget/pulls/42/requested_reviewers": (payload, [:])
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await GitHubPullRequestClient(client: client).requestedReviewers(
+                repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+                number: 42
+            )
+            XCTFail("Expected the transport payload budget to fail closed.")
+        } catch {
+            XCTAssertEqual(error as? GitHubTransportError, .responseTooLarge)
+        }
+    }
+
+    func testDirectReviewsRejectsA101ObjectPage() async throws {
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PullRequestPagingSession(responses: [
+                    "/repos/acme/widget/pulls/42/reviews?per_page=100": (reviewPayload(count: 101), [:])
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        do {
+            _ = try await GitHubPullRequestClient(client: client).reviews(
+                repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+                number: 42
+            )
+            XCTFail("Expected an over-limit review page to fail closed.")
+        } catch {
+            XCTAssertEqual(error as? GitHubPullRequestClientError, .pageObjectLimitExceeded)
+        }
+    }
+
+    func testReviewTraversalRejectsA101ObjectPageAndRetainsRawEvidence() async throws {
+        let secondPage = URL(
+            string: "https://api.github.com/repos/acme/widget/pulls/42/reviews?per_page=100&page=2"
+        )!
+        let payload = reviewPayload(count: 101)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(
+                session: PullRequestPagingSession(responses: [
+                    "/repos/acme/widget/pulls/42/reviews?per_page=100": (
+                        reviewPayload(count: 1),
+                        ["Link": "<\(secondPage.absoluteString)>; rel=\"next\""]
+                    ),
+                    "/repos/acme/widget/pulls/42/reviews?per_page=100&page=2": (
+                        payload,
+                        ["ETag": "review-etag"]
+                    )
+                ])
+            ),
+            credential: SecretValue("token")
+        )
+
+        let result = try await GitHubPullRequestClient(client: client).allReviewsPreservingFailure(
+            repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"),
+            number: 42
+        )
+
+        guard case let .failure(failure) = result else {
+            return XCTFail("Expected an over-limit review traversal to fail closed.")
+        }
+        guard case .malformedResponse = failure.terminalFailure else {
+            return XCTFail("Expected malformed-response failure classification.")
+        }
+        XCTAssertEqual(failure.rawPages.count, 2)
+        XCTAssertEqual(failure.rawPages[1].payload, payload)
+        XCTAssertEqual(failure.rawPages[1].eTag, "review-etag")
+    }
+
+    private func reviewPayload(count: Int) -> Data {
+        let reviews = (0 ..< count).map { index in
+            "{\"id\":\(index + 1),\"node_id\":\"R_\(index + 1)\",\"state\":\"APPROVED\",\"body\":null,\"submitted_at\":\"2025-01-01T00:00:00Z\"}"
+        }.joined(separator: ",")
+        return Data(("[" + reviews + "]").utf8)
+    }
 }
 
 private actor PullRequestPagingSession: HTTPSession {

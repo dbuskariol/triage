@@ -216,7 +216,10 @@ enum NotificationResponseRouter {
 
     return NotificationLocalActionPolicy.action(
       identifier: response.actionIdentifier,
-      route: payload.route,
+      route: payload.route.authorizingAction(
+        reason: payload.reason,
+        evidenceVersion: payload.evidenceVersion
+      ),
       now: now
     )
   }

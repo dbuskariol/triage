@@ -22,8 +22,10 @@ enum GitHubHydrationBatchPlanner {
         responseBytes: Int
     ) -> Int {
         precondition((initialBatchSize ... maximumBatchSize).contains(batchSize))
-        precondition(queryCost >= 0)
-        precondition(responseBytes > 0)
+        // The service validates untrusted GraphQL cost/size before reaching
+        // the planner. Keep this defensive fallback non-trapping so a future
+        // caller cannot turn hostile telemetry into a process crash.
+        guard queryCost >= 0, responseBytes > 0 else { return initialBatchSize }
 
         if queryCost >= maximumQueryCost * 3 / 4 ||
             responseBytes >= maximumResponseBytes * 3 / 4 {

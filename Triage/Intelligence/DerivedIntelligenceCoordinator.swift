@@ -13,22 +13,27 @@ enum DerivedAICandidateExclusionReason: Equatable, Sendable {
     case cachedAnalysis
 }
 
-struct DerivedAIPolicy: Sendable {
+struct DerivedAIPolicy: Equatable, Sendable {
     let isOrganizationConsentActive: Bool
     let isAuthenticationValid: Bool
     let isEntitled: Bool
     let hasAvailableBudget: Bool
+    /// The exact persisted selection authorized for this derived run. `nil`
+    /// means Auto and remains distinct from any explicit runtime model.
+    let selectedModelID: String?
 
     init(
         isOrganizationConsentActive: Bool,
         isAuthenticationValid: Bool,
         isEntitled: Bool,
-        hasAvailableBudget: Bool
+        hasAvailableBudget: Bool,
+        selectedModelID: String? = nil
     ) {
         self.isOrganizationConsentActive = isOrganizationConsentActive
         self.isAuthenticationValid = isAuthenticationValid
         self.isEntitled = isEntitled
         self.hasAvailableBudget = hasAvailableBudget
+        self.selectedModelID = selectedModelID
     }
 
     var permitsCandidates: Bool {
@@ -73,6 +78,9 @@ struct DerivedIntelligenceInput: Sendable {
     let businessDayPolicy: BusinessDayPolicy
     let calendar: Calendar
     let aiPolicy: DerivedAIPolicy
+    /// Callers provide persisted local repository preferences; an absent
+    /// repository deliberately has the neutral score contribution.
+    let repositoryPreferences: [RepositoryID: Int]
     /// Indicates that one or more scoped source inputs were unavailable or
     /// excluded. Rule results remain useful, but AI work must not be queued
     /// from an incomplete source snapshot.
@@ -89,6 +97,7 @@ struct DerivedIntelligenceInput: Sendable {
         businessDayPolicy: BusinessDayPolicy = .init(),
         calendar: Calendar,
         aiPolicy: DerivedAIPolicy,
+        repositoryPreferences: [RepositoryID: Int] = [:],
         isProvisional: Bool = false,
         evaluatedAt: Date,
         items: [DerivedIntelligenceItemInput]
@@ -101,6 +110,7 @@ struct DerivedIntelligenceInput: Sendable {
         self.businessDayPolicy = businessDayPolicy
         self.calendar = calendar
         self.aiPolicy = aiPolicy
+        self.repositoryPreferences = repositoryPreferences
         self.isProvisional = isProvisional
         self.evaluatedAt = evaluatedAt
         self.items = items
@@ -165,6 +175,14 @@ struct DerivedIntelligenceOutput: Sendable {
     }
 }
 
+/// Couples a deterministic output to the exact source marker that authorized
+/// it. Consumers which observe durable projections can use the marker as a
+/// publication gate instead of deriving a second, time-dependent result.
+struct DerivedIntelligencePublicationResult: Sendable {
+    let output: DerivedIntelligenceOutput
+    let sourceRevisionMarker: DerivedIntelligenceSourceRevisionMarker
+}
+
 enum DerivedIntelligenceCoordinatorError: Error, Equatable, Sendable {
     case invalidScope
     case duplicateWorkItem
@@ -207,6 +225,15 @@ struct DerivedIntelligenceCoordinator: Sendable {
             menuCounts: counts,
             aiCandidates: candidates.candidates,
             aiCandidateExclusions: candidates.exclusions
+        )
+    }
+
+    func recompute(
+        snapshot: DerivedIntelligenceInputSnapshot
+    ) throws -> DerivedIntelligencePublicationResult {
+        DerivedIntelligencePublicationResult(
+            output: try recompute(snapshot.input),
+            sourceRevisionMarker: snapshot.publicationMarker
         )
     }
 
@@ -365,6 +392,9 @@ struct DerivedIntelligenceCoordinator: Sendable {
         let score = ranker.score(
             for: rankedWorkItem,
             at: input.evaluatedAt,
+            repositoryPreference: workItem.repository.map {
+                input.repositoryPreferences[$0.id] ?? 0
+            } ?? 0,
             hasNewRelevantActivity: hasNewRelevantActivity
         )
         let finalWorkItem = replacing(rankedWorkItem, score: score)

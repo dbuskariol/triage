@@ -335,12 +335,176 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         XCTAssertEqual(ssoHeader, GitHubSSOHeader.partialResults(Set([1, 2])))
     }
 
+    func testTeamInventoryPaginatesWithTheExactForwardGrammarAndRetainsRawPages() async throws {
+        let secondPage = "https://api.github.com/orgs/acme/teams?page=2&per_page=100"
+        let firstPayload = Data("[\(team(id: 1, nodeID: "T_1", slug: "engineering"))]".utf8)
+        let secondPayload = Data("[\(team(id: 2, nodeID: "T_2", slug: "design"))]".utf8)
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (
+                firstPayload,
+                [
+                    "Link": "<\(secondPage)>; rel=\"next\"",
+                    "X-GitHub-SSO": "partial-results; organizations=1"
+                ],
+                200
+            ),
+            "/orgs/acme/teams?page=2&per_page=100": (
+                secondPayload,
+                ["X-GitHub-SSO": "partial-results; organizations=2"],
+                200
+            )
+        ])
+        let client = try repositoryClient(session: session)
+
+        let inventory = try await client.allTeams(in: "acme")
+
+        XCTAssertEqual(inventory.values.map(\.slug), ["engineering", "design"])
+        XCTAssertEqual(inventory.pages.map(\.endpoint), [
+            "/orgs/acme/teams?per_page=100",
+            "/orgs/acme/teams?page=2&per_page=100"
+        ])
+        XCTAssertEqual(inventory.pages.map(\.page.payload), [firstPayload, secondPayload])
+        XCTAssertEqual(inventory.ssoHeader, .partialResults(Set([1, 2])))
+        let requestedURLs = await session.requestedURLs()
+        XCTAssertEqual(requestedURLs.map(\.absoluteString), [
+            "https://api.github.com/orgs/acme/teams?per_page=100",
+            secondPage
+        ])
+    }
+
+    func testTeamPaginationRejectsHostileURLsQueriesAndMalformedTerminalLink() async throws {
+        let invalidLinks: [(String, GitHubRepositoryTeamClientError)] = [
+            ("https://api.github.com/orgs/other/teams?page=2&per_page=100", .invalidPaginationLink),
+            ("https://api.github.com:443/orgs/acme/teams?page=2&per_page=100", .invalidPaginationLink),
+            ("https://user@api.github.com/orgs/acme/teams?page=2&per_page=100", .invalidPaginationLink),
+            ("https://api.github.com/orgs/acme/teams?page=2&per_page=100#private", .invalidPaginationLink),
+            ("https://api.github.com/orgs/acme/teams?page=2&per_page=100&type=all", .invalidPaginationLink),
+            ("https://api.github.com/orgs/acme/teams?per_page=100", .invalidPaginationLink),
+            ("https://api.github.com/orgs/acme/teams?page=02&per_page=100", .invalidPaginationLink),
+            ("https://api.github.com/orgs/acme/teams?page=3&per_page=100", .paginationLoop),
+            ("https://api.github.com/orgs/acme/teams?page=101&per_page=100", .paginationLimitExceeded)
+        ]
+        for (link, expectedError) in invalidLinks {
+            try await assertInvalidTeamNextLink(link, expectedError: expectedError)
+        }
+
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (Data("[]".utf8), ["Link": "not a link"], 200)
+        ])
+        let client = try repositoryClient(session: session)
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.allTeams(in: "acme"),
+            expectedError: .invalidPaginationLink
+        )
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testTeamPaginationRejectsMoreThanOneHundredObjectsWithoutReturningPartialInventory() async throws {
+        let teams = (1...101).map { team(id: UInt64($0), nodeID: "T_\($0)", slug: "team-\($0)") }
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (Data("[\(teams.joined(separator: ","))]".utf8), [:], 200)
+        ])
+        let client = try repositoryClient(session: session)
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.allTeams(in: "acme"),
+            expectedError: .pageObjectLimitExceeded
+        )
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testTeamPaginationRejectsAnOverLimitLaterPageBeforeReturningPartialInventory() async throws {
+        let secondPage = "https://api.github.com/orgs/acme/teams?page=2&per_page=100"
+        let teams = (1...101).map { team(id: UInt64($0), nodeID: "T_\($0)", slug: "team-\($0)") }
+        let firstPayload = Data(("[" + team(id: 1, nodeID: "T_first", slug: "first") + "]").utf8)
+        let overLimitPayload = Data(("[" + teams.joined(separator: ",") + "]").utf8)
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (
+                firstPayload,
+                ["Link": "<\(secondPage)>; rel=\"next\""],
+                200
+            ),
+            "/orgs/acme/teams?page=2&per_page=100": (
+                overLimitPayload,
+                [:],
+                200
+            )
+        ])
+        let client = try repositoryClient(session: session)
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.allTeams(in: "acme"),
+            expectedError: .pageObjectLimitExceeded
+        )
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testTeamPaginationRejectsAggregatePayloadOverBudgetWithoutReturningPartialInventory() async throws {
+        let maximumPage = GitHubRESTTransport.maximumResponseBodyBytes
+        let secondPage = "https://api.github.com/orgs/acme/teams?page=2&per_page=100"
+        let thirdPage = "https://api.github.com/orgs/acme/teams?page=3&per_page=100"
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (
+                paddedEmptyJSONPage(byteCount: maximumPage),
+                ["Link": "<\(secondPage)>; rel=\"next\""],
+                200
+            ),
+            "/orgs/acme/teams?page=2&per_page=100": (
+                paddedEmptyJSONPage(byteCount: maximumPage),
+                ["Link": "<\(thirdPage)>; rel=\"next\""],
+                200
+            ),
+            "/orgs/acme/teams?page=3&per_page=100": (Data("[]".utf8), [:], 200)
+        ])
+        let client = try repositoryClient(session: session)
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.allTeams(in: "acme"),
+            expectedError: .aggregatePayloadLimitExceeded
+        )
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 3)
+    }
+
+    func testTeamPaginationPropagatesCancellationBeforeReturningAnIncompleteInventory() async throws {
+        let secondPage = "https://api.github.com/orgs/acme/teams?page=2&per_page=100"
+        let session = CancellingTeamPagingSession(nextPageURL: secondPage)
+        let client = GitHubRepositoryTeamClient(
+            client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: session),
+                credential: SecretValue("token")
+            )
+        )
+
+        do {
+            _ = try await client.allTeams(in: "acme")
+            XCTFail("A cancelled traversal must not return its first page as complete.")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
     private func repository(id: UInt64, nodeID: String, name: String) -> String {
         """
         {"id":\(id),"node_id":"\(nodeID)","name":"\(name)","private":true,"archived":false,
         "has_discussions":true,"html_url":"https://github.com/acme/\(name)",
         "updated_at":"2025-01-01T00:00:00Z","owner":{"login":"acme"}}
         """
+    }
+
+    private func team(id: UInt64, nodeID: String, slug: String) -> String {
+        "{\"id\":\(id),\"node_id\":\"\(nodeID)\",\"name\":\"\(slug)\",\"slug\":\"\(slug)\",\"privacy\":\"closed\"}"
+    }
+
+    private func paddedEmptyJSONPage(byteCount: Int) -> Data {
+        precondition(byteCount >= 2)
+        return Data("[]".utf8) + Data(repeating: 0x20, count: byteCount - 2)
     }
 
     private func assertInvalidRepositoryNextLink(
@@ -376,6 +540,45 @@ final class GitHubRepositoryTeamClientTests: XCTestCase {
         }
         let requestCount = await session.requestCount()
         XCTAssertEqual(requestCount, 1, file: file, line: line)
+    }
+
+    private func assertInvalidTeamNextLink(
+        _ nextLink: String,
+        expectedError: GitHubRepositoryTeamClientError,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let session = RepositoryTeamPagingSession(responses: [
+            "/orgs/acme/teams?per_page=100": (
+                Data("[]".utf8),
+                ["Link": "<\(nextLink)>; rel=\"next\""],
+                200
+            )
+        ])
+        let client = try repositoryClient(session: session)
+
+        await XCTAssertThrowsErrorAsync(
+            try await client.allTeams(in: "acme"),
+            expectedError: expectedError,
+            file: file,
+            line: line
+        )
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 1, file: file, line: line)
+    }
+
+    private func XCTAssertThrowsErrorAsync<T>(
+        _ expression: @autoclosure () async throws -> T,
+        expectedError: GitHubRepositoryTeamClientError,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await expression()
+            XCTFail("Expected \(expectedError).", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? GitHubRepositoryTeamClientError, expectedError, file: file, line: line)
+        }
     }
 
     private func repositoryClient(
@@ -431,5 +634,37 @@ private actor RepositoryTeamPagingSession: HTTPSession {
 
     func requestedURLs() -> [URL] {
         capturedURLs
+    }
+}
+
+private actor CancellingTeamPagingSession: HTTPSession {
+    private let nextPageURL: String
+    private var requests = 0
+
+    init(nextPageURL: String) {
+        self.nextPageURL = nextPageURL
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        requests += 1
+        guard let url = request.url else {
+            throw URLError(.badURL)
+        }
+        if requests == 1 {
+            return (
+                Data("[]".utf8),
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Link": "<\(nextPageURL)>; rel=\"next\""]
+                )!
+            )
+        }
+        throw CancellationError()
+    }
+
+    func requestCount() -> Int {
+        requests
     }
 }

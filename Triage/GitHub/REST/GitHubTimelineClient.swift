@@ -137,6 +137,7 @@ enum GitHubTimelineClientError: Error, Equatable, Sendable {
     case paginationLimitExceeded
     case unexpectedNotModified
     case invalidPaginationLink
+    case pageObjectLimitExceeded
 }
 
 struct GitHubTimelineUndecodablePageError: Error, Equatable, Sendable {
@@ -211,11 +212,15 @@ actor GitHubTimelineClient {
                 }
                 throw GitHubRESTClientError.invalidJSON
             }
+            guard result.values.count <= 100 else {
+                throw GitHubTimelineClientError.pageObjectLimitExceeded
+            }
             try Self.validatePaginationLink(
                 result.nextPageURL,
                 rawLinkHeader: result.linkHeader,
                 repository: repository,
-                issueOrPullRequestNumber: issueOrPullRequestNumber
+                issueOrPullRequestNumber: issueOrPullRequestNumber,
+                currentPage: max(page, 1)
             )
             return .page(result)
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
@@ -246,11 +251,15 @@ actor GitHubTimelineClient {
             }
             throw GitHubRESTClientError.invalidJSON
         }
+        guard result.values.count <= 100 else {
+            throw GitHubTimelineClientError.pageObjectLimitExceeded
+        }
         try Self.validatePaginationLink(
             result.nextPageURL,
             rawLinkHeader: result.linkHeader,
             repository: repository,
-            issueOrPullRequestNumber: issueOrPullRequestNumber
+            issueOrPullRequestNumber: issueOrPullRequestNumber,
+            currentPage: try Self.pageNumber(from: url)
         )
         return result
     }
@@ -314,7 +323,8 @@ actor GitHubTimelineClient {
         _ url: URL?,
         rawLinkHeader: String? = nil,
         repository: GitHubRepositoryPath,
-        issueOrPullRequestNumber: Int
+        issueOrPullRequestNumber: Int,
+        currentPage: Int? = nil
     ) throws {
         if let rawLinkHeader, !rawLinkHeader.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard let parsed = GitHubLinkHeader(rawLinkHeader),
@@ -338,16 +348,27 @@ actor GitHubTimelineClient {
         }
         let allowedNames: Set<String> = ["page", "per_page"]
         let items = components.queryItems ?? []
-        let perPage = items.first(where: { $0.name == "per_page" })?.value.flatMap(Int.init) ?? 100
         guard !items.isEmpty,
               Set(items.map(\.name)).count == items.count,
               items.allSatisfy({ allowedNames.contains($0.name) }),
-              let page = items.first(where: { $0.name == "page" })?.value.flatMap(Int.init),
+              items.count == 2,
+              let rawPage = items.first(where: { $0.name == "page" })?.value,
+              rawPage.unicodeScalars.allSatisfy({ $0.isASCII && $0.properties.numericType != nil }),
+              let page = Int(rawPage),
               page > 0,
-              perPage > 0,
-              perPage <= 100
+              String(page) == rawPage,
+              items.first(where: { $0.name == "per_page" })?.value == "100",
+              currentPage.map({ page == $0 + 1 }) ?? true
         else {
             throw GitHubTimelineClientError.invalidPaginationLink
         }
+    }
+
+    private nonisolated static func pageNumber(from url: URL) throws -> Int {
+        guard let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "page" })?.value,
+              let page = Int(raw), page > 0, String(page) == raw
+        else { throw GitHubTimelineClientError.invalidPaginationLink }
+        return page
     }
 }

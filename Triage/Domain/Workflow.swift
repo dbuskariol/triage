@@ -30,6 +30,33 @@ enum ActionItemState: String, Codable, Sendable {
     case invalidated
 }
 
+/// The deliberately small set of fields a person may change on an action
+/// item. Provenance, evidence, origin, and completion state stay owned by
+/// Triage's normalized/local workflow records and cannot be rewritten from
+/// the inspector.
+struct LocalActionItemEdit: Equatable, Sendable {
+    let title: String
+    let detail: String?
+    let priority: WorkPriority
+    let dueAt: Date?
+
+    init?(
+        title: String,
+        detail: String?,
+        priority: WorkPriority,
+        dueAt: Date?
+    ) {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty, normalizedTitle.count <= 500 else { return nil }
+        let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedDetail?.count ?? 0 <= 10_000 else { return nil }
+        self.title = normalizedTitle
+        self.detail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
+        self.priority = priority
+        self.dueAt = dueAt
+    }
+}
+
 struct WorkflowState: Codable, Equatable, Sendable {
     let status: LocalWorkStatus
     let isPinned: Bool
@@ -128,5 +155,28 @@ struct ActionItem: Codable, Equatable, Sendable, Identifiable {
             completedAt: date,
             dismissedAt: dismissedAt
         )
+    }
+
+    func applying(_ edit: LocalActionItemEdit, at date: Date) -> ActionItem {
+        ActionItem(
+            id: id,
+            workItemID: workItemID,
+            title: edit.title,
+            detail: edit.detail,
+            origin: origin,
+            state: state,
+            priority: edit.priority,
+            dueAt: edit.dueAt,
+            evidenceIDs: evidenceIDs,
+            sourceFingerprint: sourceFingerprint,
+            createdAt: createdAt,
+            updatedAt: date,
+            completedAt: completedAt,
+            dismissedAt: dismissedAt
+        )
+    }
+
+    var localEdit: LocalActionItemEdit? {
+        LocalActionItemEdit(title: title, detail: detail, priority: priority, dueAt: dueAt)
     }
 }

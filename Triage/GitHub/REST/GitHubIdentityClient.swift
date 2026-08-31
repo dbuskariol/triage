@@ -1,14 +1,20 @@
 import Foundation
 
 enum GitHubIdentityClientError: Error, Equatable, Sendable {
+    case authenticatedUserResponseTooLarge
     case invalidOrganizationLogin
     case paginationLoop
     case paginationLimitExceeded
     case invalidPaginationLink
+    case pageObjectLimitExceeded
     case duplicateOrganization
+    case duplicateRepository
+    case invalidRepository
+    case repositoryOutsideOrganization
     case notModifiedWithoutCachedState
     case organizationInventoryResponseTooLarge
     case organizationResponseTooLarge
+    case repositoryInventoryResponseTooLarge
 }
 
 /// A conditional identity response preserves a 304 as transport evidence. The
@@ -65,10 +71,17 @@ struct GitHubRepositoryInventory: Sendable {
 }
 
 actor GitHubIdentityClient {
+    private static let maximumAuthenticatedUserResponseBytes = 256 * 1_024
     /// `/user/orgs` is a complete-inventory authority only within this decoded
     /// response budget, including all traversed pages.
     private static let maximumOrganizationInventoryResponseBytes = 1 * 1_024 * 1_024
     private static let maximumOrganizationResponseBytes = 256 * 1_024
+    /// Repository inventory retains a complete in-memory traversal until it
+    /// has passed all validation. Bound that aggregate separately from the
+    /// REST contract's 2 MiB per-page ceiling.
+    private static let maximumRepositoryInventoryResponseBytes = 4 * 1_024 * 1_024
+    private static let maximumRepositoryInventoryPageBytes = 2 * 1_024 * 1_024
+    private static let maximumInventoryPages = 100
 
     private let client: GitHubRESTClient
 
@@ -87,10 +100,21 @@ actor GitHubIdentityClient {
     func fetchAuthenticatedUser(
         validators: GitHubHTTPValidators?
     ) async throws -> GitHubIdentityFetch<GitHubUserDTO> {
-        try await conditionalResponse(
-            GitHubUserDTO.self,
-            request: try GitHubRESTRequest(path: "/user", validators: validators)
-        )
+        do {
+            return .modified(try await client.getResponse(
+                GitHubUserDTO.self,
+                request: try GitHubRESTRequest(
+                    path: "/user",
+                    validators: validators,
+                    maximumResponseBodyBytes: Self.maximumAuthenticatedUserResponseBytes
+                ),
+                maximumPayloadBytes: Self.maximumAuthenticatedUserResponseBytes
+            ))
+        } catch GitHubRESTClientError.responseTooLarge, GitHubTransportError.responseTooLarge {
+            throw GitHubIdentityClientError.authenticatedUserResponseTooLarge
+        } catch let failure as GitHubFailure where failure.statusCode == 304 {
+            return .notModified(ssoHeader: failure.ssoHeader)
+        }
     }
 
     func organizations() async throws -> GitHubPage<GitHubOrganizationDTO> {
@@ -105,18 +129,14 @@ actor GitHubIdentityClient {
         validators: GitHubHTTPValidators?
     ) async throws -> GitHubOrganizationPageFetch {
         do {
-            let page = try await client.getPage(
-                GitHubOrganizationDTO.self,
+            return .modified(try await organizationInventoryPage(
                 request: try GitHubRESTRequest(
                     path: "/user/orgs",
                     query: [URLQueryItem(name: "per_page", value: "100")],
-                    validators: validators
+                    validators: validators,
+                    maximumResponseBodyBytes: Self.maximumOrganizationInventoryResponseBytes
                 )
-            )
-            guard page.payload.count <= Self.maximumOrganizationInventoryResponseBytes else {
-                throw GitHubIdentityClientError.organizationInventoryResponseTooLarge
-            }
-            return .modified(page)
+            ))
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
             return .notModified(ssoHeader: failure.ssoHeader)
         }
@@ -133,6 +153,7 @@ actor GitHubIdentityClient {
     func fetchAllOrganizations(
         validators: GitHubHTTPValidators?
     ) async throws -> GitHubOrganizationInventoryFetch {
+        try Task.checkCancellation()
         let initial = try await fetchOrganizations(validators: validators)
         let initialPage: GitHubPage<GitHubOrganizationDTO>
         switch initial {
@@ -162,6 +183,9 @@ actor GitHubIdentityClient {
         var pageCount = 1
 
         func append(_ values: [GitHubOrganizationDTO]) throws {
+            guard values.count <= 100 else {
+                throw GitHubIdentityClientError.pageObjectLimitExceeded
+            }
             for organization in values {
                 guard organizationIDs.insert(organization.id).inserted,
                       organizationNodeIDs.insert(organization.nodeID).inserted,
@@ -172,6 +196,7 @@ actor GitHubIdentityClient {
                 organizations.append(organization)
             }
         }
+        try Task.checkCancellation()
         try append(page.values)
 
         while let nextPageURL = page.nextPageURL {
@@ -184,13 +209,15 @@ actor GitHubIdentityClient {
             guard visitedPageURLs.insert(nextPageURL.absoluteString).inserted else {
                 throw GitHubIdentityClientError.paginationLoop
             }
-            guard pageCount < 100 else {
+            guard pageCount < Self.maximumInventoryPages else {
                 throw GitHubIdentityClientError.paginationLimitExceeded
             }
 
-            page = try await client.getPage(
-                GitHubOrganizationDTO.self,
-                request: try GitHubRESTRequest(nextPageURL: nextPageURL)
+            page = try await organizationInventoryPage(
+                request: try GitHubRESTRequest(
+                    nextPageURL: nextPageURL,
+                    maximumResponseBodyBytes: Self.maximumOrganizationInventoryResponseBytes
+                )
             )
             try Self.consumeOrganizationInventoryPayload(
                 page.payload,
@@ -198,6 +225,7 @@ actor GitHubIdentityClient {
             )
             pageCount += 1
             currentRequestKey = Self.canonicalInventoryRequestKey(for: nextPageURL) ?? "GET /invalid-user-orgs-page"
+            try Task.checkCancellation()
             try append(page.values)
             pages.append(GitHubOrganizationInventoryPage(
                 page: page,
@@ -209,6 +237,7 @@ actor GitHubIdentityClient {
             }
         }
         try Self.validateTerminalLinkHeader(page.nextPageURL, rawLinkHeader: page.linkHeader)
+        try Task.checkCancellation()
 
         return .modified(GitHubOrganizationInventory(
             organizations: organizations,
@@ -233,12 +262,18 @@ actor GitHubIdentityClient {
         do {
             let response = try await client.getResponse(
                 GitHubOrganizationDTO.self,
-                request: try GitHubRESTRequest(path: "/orgs/\(login)", validators: validators)
+                request: try GitHubRESTRequest(
+                    path: "/orgs/\(login)",
+                    validators: validators,
+                    maximumResponseBodyBytes: Self.maximumOrganizationResponseBytes
+                )
             )
             guard response.payload.count <= Self.maximumOrganizationResponseBytes else {
                 throw GitHubIdentityClientError.organizationResponseTooLarge
             }
             return .modified(response)
+        } catch GitHubTransportError.responseTooLarge {
+            throw GitHubIdentityClientError.organizationResponseTooLarge
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
             return .notModified(ssoHeader: failure.ssoHeader)
         }
@@ -246,33 +281,78 @@ actor GitHubIdentityClient {
 
     func repositories(in organization: String) async throws -> GitHubPage<GitHubRepositoryDTO> {
         try validateOrganizationLogin(organization)
-        return try await client.getPage(
-            GitHubRepositoryDTO.self,
+        return try await repositoryInventoryPage(
             request: try GitHubRESTRequest(
                 path: "/orgs/\(organization)/repos",
                 query: [
                     URLQueryItem(name: "type", value: "all"),
                     URLQueryItem(name: "per_page", value: "100")
-                ]
+                ],
+                maximumResponseBodyBytes: Self.maximumRepositoryInventoryPageBytes
             )
         )
     }
 
     func allRepositories(in organization: String) async throws -> GitHubRepositoryInventory {
+        try validateOrganizationLogin(organization)
+        try Task.checkCancellation()
         var page = try await repositories(in: organization)
-        var repositories = page.values
+        var totalPayloadBytes = 0
+        try Self.consumeRepositoryInventoryPayload(page.payload, totalPayloadBytes: &totalPayloadBytes)
+        var repositories = [GitHubRepositoryDTO]()
+        var repositoryIDs = Set<UInt64>()
+        var repositoryNodeIDs = Set<String>()
         var ssoHeaders = [page.ssoHeader].compactMap { $0 }
+        var visitedPageURLs = Set<String>()
+        var currentPageNumber = 1
+
+        func append(_ values: [GitHubRepositoryDTO]) throws {
+            guard values.count <= 100 else {
+                throw GitHubIdentityClientError.pageObjectLimitExceeded
+            }
+            for repository in values {
+                try Self.validate(repository, organization: organization)
+                guard repositoryIDs.insert(repository.id).inserted,
+                      repositoryNodeIDs.insert(repository.nodeID).inserted
+                else {
+                    throw GitHubIdentityClientError.duplicateRepository
+                }
+                repositories.append(repository)
+            }
+        }
+
+        try Task.checkCancellation()
+        try append(page.values)
         while let nextPageURL = page.nextPageURL {
             try Task.checkCancellation()
-            page = try await client.getPage(
-                GitHubRepositoryDTO.self,
-                request: GitHubRESTRequest(nextPageURL: nextPageURL)
+            try Self.validateRepositoryPaginationLink(
+                nextPageURL,
+                rawLinkHeader: page.linkHeader,
+                organization: organization,
+                currentPage: currentPageNumber
             )
-            repositories.append(contentsOf: page.values)
+            guard visitedPageURLs.insert(nextPageURL.absoluteString).inserted else {
+                throw GitHubIdentityClientError.paginationLoop
+            }
+            guard currentPageNumber < Self.maximumInventoryPages else {
+                throw GitHubIdentityClientError.paginationLimitExceeded
+            }
+            page = try await repositoryInventoryPage(
+                request: try GitHubRESTRequest(
+                    nextPageURL: nextPageURL,
+                    maximumResponseBodyBytes: Self.maximumRepositoryInventoryPageBytes
+                )
+            )
+            try Self.consumeRepositoryInventoryPayload(page.payload, totalPayloadBytes: &totalPayloadBytes)
+            currentPageNumber += 1
+            try Task.checkCancellation()
+            try append(page.values)
             if let ssoHeader = page.ssoHeader {
                 ssoHeaders.append(ssoHeader)
             }
         }
+        try Self.validateTerminalLinkHeader(page.nextPageURL, rawLinkHeader: page.linkHeader)
+        try Task.checkCancellation()
         return GitHubRepositoryInventory(
             repositories: repositories,
             ssoHeaders: ssoHeaders
@@ -314,8 +394,8 @@ actor GitHubIdentityClient {
     ) throws {
         try validateTerminalLinkHeader(url, rawLinkHeader: rawLinkHeader)
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.caseInsensitiveCompare("https") == .orderedSame,
-              components.host?.caseInsensitiveCompare("api.github.com") == .orderedSame,
+              components.scheme == "https",
+              components.host == "api.github.com",
               components.port == nil,
               components.user == nil,
               components.password == nil,
@@ -341,6 +421,43 @@ actor GitHubIdentityClient {
         }
     }
 
+    private nonisolated static func validateRepositoryPaginationLink(
+        _ url: URL,
+        rawLinkHeader: String?,
+        organization: String,
+        currentPage: Int
+    ) throws {
+        try validateTerminalLinkHeader(url, rawLinkHeader: rawLinkHeader)
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "https",
+              components.host == "api.github.com",
+              components.port == nil,
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              components.percentEncodedPath == "/orgs/\(organization)/repos"
+        else {
+            throw GitHubIdentityClientError.invalidPaginationLink
+        }
+        let items = components.queryItems ?? []
+        let pages = items.filter { $0.name == "page" }.map(\.value)
+        let perPage = items.filter { $0.name == "per_page" }.map(\.value)
+        let types = items.filter { $0.name == "type" }.map(\.value)
+        guard items.count == 3,
+              pages.count == 1,
+              let rawPage = pages[0],
+              rawPage.unicodeScalars.allSatisfy({ $0.isASCII && $0.properties.numericType != nil }),
+              let page = Int(rawPage),
+              page > 0,
+              String(page) == rawPage,
+              page == currentPage + 1,
+              perPage == ["100"],
+              types == ["all"]
+        else {
+            throw GitHubIdentityClientError.invalidPaginationLink
+        }
+    }
+
     private nonisolated static func canonicalInventoryRequestKey(for url: URL) -> String? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.percentEncodedPath == "/user/orgs",
@@ -358,6 +475,89 @@ actor GitHubIdentityClient {
             throw GitHubIdentityClientError.organizationInventoryResponseTooLarge
         }
         totalPayloadBytes += payload.count
+    }
+
+    private func organizationInventoryPage(
+        request: GitHubRESTRequest
+    ) async throws -> GitHubPage<GitHubOrganizationDTO> {
+        do {
+            let page = try await client.getPage(GitHubOrganizationDTO.self, request: request)
+            guard page.values.count <= 100 else {
+                throw GitHubIdentityClientError.pageObjectLimitExceeded
+            }
+            return page
+        } catch GitHubTransportError.responseTooLarge {
+            throw GitHubIdentityClientError.organizationInventoryResponseTooLarge
+        }
+    }
+
+    private func repositoryInventoryPage(
+        request: GitHubRESTRequest
+    ) async throws -> GitHubPage<GitHubRepositoryDTO> {
+        do {
+            let page = try await client.getPage(GitHubRepositoryDTO.self, request: request)
+            guard page.values.count <= 100 else {
+                throw GitHubIdentityClientError.pageObjectLimitExceeded
+            }
+            return page
+        } catch GitHubTransportError.responseTooLarge {
+            throw GitHubIdentityClientError.repositoryInventoryResponseTooLarge
+        }
+    }
+
+    private nonisolated static func consumeRepositoryInventoryPayload(
+        _ payload: Data,
+        totalPayloadBytes: inout Int
+    ) throws {
+        guard payload.count <= maximumRepositoryInventoryResponseBytes - totalPayloadBytes else {
+            throw GitHubIdentityClientError.repositoryInventoryResponseTooLarge
+        }
+        totalPayloadBytes += payload.count
+    }
+
+    private nonisolated static func validate(
+        _ repository: GitHubRepositoryDTO,
+        organization: String
+    ) throws {
+        guard repository.owner.login.caseInsensitiveCompare(organization) == .orderedSame else {
+            throw GitHubIdentityClientError.repositoryOutsideOrganization
+        }
+        guard repository.id > 0,
+              GitHubNodeID(rawValue: repository.nodeID) != nil,
+              isRepositoryName(repository.name),
+              isGitHubLogin(repository.owner.login),
+              isGitHubURL(repository.htmlURL, owner: repository.owner.login, repository: repository.name)
+        else {
+            throw GitHubIdentityClientError.invalidRepository
+        }
+    }
+
+    private nonisolated static func isGitHubLogin(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 39 && value.unicodeScalars.allSatisfy {
+            $0.isASCII && ($0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "-")
+        }
+    }
+
+    private nonisolated static func isRepositoryName(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 100 && !value.contains("/") && !value.contains(where: \.isWhitespace)
+    }
+
+    private nonisolated static func isGitHubURL(
+        _ url: URL,
+        owner: String,
+        repository: String
+    ) -> Bool {
+        guard url.scheme == "https",
+              url.host == "github.com",
+              url.port == nil,
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              url.query == nil
+        else {
+            return false
+        }
+        return url.path == "/\(owner)/\(repository)"
     }
 
     private func conditionalResponse<Value: Decodable & Sendable>(

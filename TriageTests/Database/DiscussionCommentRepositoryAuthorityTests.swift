@@ -71,6 +71,53 @@ final class DiscussionCommentRepositoryAuthorityTests: XCTestCase {
         let state = try await fixture.persistedState()
         XCTAssertEqual(state, .init(commentBodies: [], rawCount: 1, coverageCount: 2))
     }
+
+    func testSynchronizationFailurePreservesPriorCommentsAndRecordsIncompleteLeafCoverage() async throws {
+        let fixture = try await DiscussionCommentAuthorityFixture()
+        defer { fixture.remove() }
+        let repository = DiscussionCommentRepository(vault: fixture.vault)
+        try await fixture.replace(fixture.inventory(rawPages: fixture.completePages()), using: repository)
+        let before = try await fixture.persistedState()
+        let failurePages = [fixture.rootPage(commentIDs: ["DC_1"])]
+        let service = DiscussionCommentSynchronizationService(
+            client: FailingDiscussionCommentFetcher(error: .partialResponse(.comments, failurePages)),
+            repository: repository
+        )
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await service.refresh(
+                discussionNodeID: fixture.discussionNodeID,
+                scope: fixture.scope,
+                organization: fixture.organization,
+                repositoryID: fixture.repositoryID,
+                commentStreamID: SyncStreamID(rawValue: "discussion-comments-acme-R_1-D_1")!,
+                replyStreamID: SyncStreamID(rawValue: "discussion-replies-acme-R_1-D_1")!,
+                previousCommentHighWater: fixture.observedAt,
+                previousReplyHighWater: fixture.observedAt,
+                observedAt: fixture.observedAt.addingTimeInterval(60)
+            )
+        }, verify: { error in
+            guard case .partialResponse = error as? GitHubDiscussionCommentClientError else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        })
+
+        let after = try await fixture.persistedState()
+        XCTAssertEqual(after.commentBodies, before.commentBodies)
+        let hasIncompleteCoverage = try await fixture.hasIncompleteCommentCoverage()
+        XCTAssertTrue(hasIncompleteCoverage)
+    }
+}
+
+private struct FailingDiscussionCommentFetcher: DiscussionCommentFetching {
+    let error: GitHubDiscussionCommentClientError
+    func allCommentsAndReplies(
+        discussionNodeID: GitHubNodeID,
+        githubOrganizationID: UInt64,
+        validateScope: @escaping @Sendable () async throws -> Void
+    ) async throws -> GitHubDiscussionCommentInventory {
+        throw error
+    }
 }
 
 private final class DiscussionCommentAuthorityFixture: @unchecked Sendable {
@@ -218,6 +265,15 @@ private final class DiscussionCommentAuthorityFixture: @unchecked Sendable {
                 rawCount: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM raw_api_snapshots") ?? 0,
                 coverageCount: try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM coverage_records") ?? 0
             )
+        }
+    }
+
+    func hasIncompleteCommentCoverage() async throws -> Bool {
+        try await vault.read { database in
+            try Int.fetchOne(database, sql: """
+                SELECT COUNT(*) FROM coverage_records
+                WHERE feature = 'discussionComments' AND status != 'complete'
+                """) ?? 0 > 0
         }
     }
 

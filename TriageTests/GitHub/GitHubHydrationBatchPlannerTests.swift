@@ -57,4 +57,15 @@ final class GitHubHydrationBatchPlannerTests: XCTestCase {
         XCTAssertNil(GitHubHydrationBatchPlanner.retryBatchSize(for: 25))
         XCTAssertNil(GitHubHydrationBatchPlanner.retryBatchSize(for: 1))
     }
+
+    func testPlannerDoesNotTrapOnInvalidUntrustedTelemetry() {
+        XCTAssertEqual(
+            GitHubHydrationBatchPlanner.nextBatchSize(
+                after: 40,
+                queryCost: -1,
+                responseBytes: 100
+            ),
+            GitHubHydrationBatchPlanner.initialBatchSize
+        )
+    }
 }

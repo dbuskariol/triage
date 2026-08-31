@@ -11,6 +11,10 @@ private struct TriageInspectorVisibilityKey: FocusedValueKey {
     typealias Value = Binding<Bool>
 }
 
+private struct TriageSidebarVisibilityKey: FocusedValueKey {
+    typealias Value = Binding<Bool>
+}
+
 extension FocusedValues {
     var triageSearchFocus: Binding<Bool>? {
         get { self[TriageSearchFocusKey.self] }
@@ -20,6 +24,11 @@ extension FocusedValues {
     var triageInspectorVisibility: Binding<Bool>? {
         get { self[TriageInspectorVisibilityKey.self] }
         set { self[TriageInspectorVisibilityKey.self] = newValue }
+    }
+
+    var triageSidebarVisibility: Binding<Bool>? {
+        get { self[TriageSidebarVisibilityKey.self] }
+        set { self[TriageSidebarVisibilityKey.self] = newValue }
     }
 }
 
@@ -41,6 +50,14 @@ enum TriageFocusedCommandRouting {
 
     static func toggleInspector(_ inspectorVisible: Binding<Bool?>) {
         inspectorVisible.wrappedValue = !(inspectorVisible.wrappedValue ?? false)
+    }
+
+    static func toggleSidebar(_ sidebarVisible: Binding<Bool>?) {
+        sidebarVisible?.wrappedValue.toggle()
+    }
+
+    static func toggleSidebar(_ sidebarVisible: Binding<Bool?>) {
+        sidebarVisible.wrappedValue = !(sidebarVisible.wrappedValue ?? false)
     }
 }
 
@@ -158,8 +175,17 @@ struct TriageWorkspaceCommands: Commands {
     @ObservedObject var externalNavigation: ExternalNavigationConfirmationCoordinator
     @FocusedBinding(\.triageSearchFocus) private var searchFocus
     @FocusedBinding(\.triageInspectorVisibility) private var inspectorVisible
+    @FocusedBinding(\.triageSidebarVisibility) private var sidebarVisible
 
     var body: some Commands {
+        CommandGroup(replacing: .sidebar) {
+            Button("Toggle Sidebar") {
+                TriageFocusedCommandRouting.toggleSidebar($sidebarVisible)
+            }
+            .keyboardShortcut("s", modifiers: [.command, .control])
+            .disabled(sidebarVisible == nil)
+        }
+
         CommandGroup(after: .toolbar) {
             Button("Refresh GitHub Work") {
                 Task {

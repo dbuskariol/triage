@@ -75,6 +75,29 @@ final class WorkspaceNotificationDeliveryAdapterTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
     }
 
+    func testPartialOrganizationVisibilityNeverSchedulesFromOtherwiseFreshWorkspace() async throws {
+        let center = RecordingWorkspaceNotificationScheduler()
+        let scheduler = NotificationScheduler(
+            preferences: .init(isEnabled: true),
+            scheduling: center,
+            deliveryLedger: InMemoryNotificationDeliveryLedger()
+        )
+        let fixture = NotificationDeliveryFixture()
+
+        let result = try await WorkspaceNotificationDeliveryAdapter(scheduler: scheduler).deliver(
+            candidate: fixture.candidate,
+            from: fixture.snapshot(
+                origin: .observed,
+                organizationVisibility: .partial
+            ),
+            at: fixture.date
+        )
+
+        XCTAssertEqual(result, .suppressedStaleOrPartial(.partial))
+        let requests = await center.requests()
+        XCTAssertTrue(requests.isEmpty)
+    }
+
     @MainActor
     func testResponseAdapterForwardsOnlyLocalActionToRouteHandler() async {
         let fixture = NotificationDeliveryFixture()
@@ -136,7 +159,8 @@ private struct NotificationDeliveryFixture {
     func snapshot(
         origin: WorkspacePresentationSnapshot.Origin,
         isComplete: Bool = true,
-        durableFreshness: FreshnessStatus = .fresh
+        durableFreshness: FreshnessStatus = .fresh,
+        organizationVisibility: FreshnessStatus = .fresh
     ) throws -> WorkspacePresentationSnapshot {
         let requirements = isComplete
             ? []
@@ -154,6 +178,7 @@ private struct NotificationDeliveryFixture {
             ),
             coverageRequirements: requirements,
             coverageRecords: [],
+            organizationVisibilityFreshness: FreshnessState(status: organizationVisibility),
             menuCounts: nil,
             derivedEvaluatedAt: date,
             origin: origin

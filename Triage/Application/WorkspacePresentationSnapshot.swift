@@ -15,6 +15,9 @@ struct AccountSessionSnapshot: Equatable, Sendable {
     let organizationsByAccount: [AccountID: [GitHubOrganization]]
     let organizationAccessesByAccount: [AccountID: [OrganizationID: OrganizationAccess]]
     let accountCapabilitiesByAccount: [AccountID: AccountCapabilitySnapshot]
+    /// Opaque account identities whose vault cannot be opened. They are kept
+    /// separate from usable accounts so the UI can offer local crypto-erasure
+    /// without manufacturing GitHub profile data from a missing vault.
     let unavailableAccountIDs: Set<AccountID>
     /// Non-secret remediation notice produced after a successful credential
     /// replacement whose retired Keychain entry could not be erased.
@@ -35,7 +38,7 @@ struct AccountSessionSnapshot: Equatable, Sendable {
         guard Set(organizationsByAccount.keys).isSubset(of: accountIDs),
               Set(organizationAccessesByAccount.keys).isSubset(of: accountIDs),
               Set(accountCapabilitiesByAccount.keys).isSubset(of: accountIDs),
-              unavailableAccountIDs.isSubset(of: accountIDs)
+              unavailableAccountIDs.isDisjoint(with: accountIDs)
         else {
             throw AccountSessionSnapshotError.unknownAccountReference
         }
@@ -88,6 +91,10 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
     let durableState: AccountOrganizationDurableState
     let coverageRequirements: [CoverageRequirement]
     let coverageRecords: [CoverageRecord]
+    /// Account-scoped organization inventory authority. A workspace can have
+    /// complete work coverage while the set of organizations visible to the
+    /// credential is incomplete; that is not safe notification authority.
+    let organizationVisibilityFreshness: FreshnessState
     let menuCounts: DerivedMenuCounts?
     let derivedEvaluatedAt: Date?
     let origin: Origin
@@ -98,6 +105,7 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
         durableState: AccountOrganizationDurableState,
         coverageRequirements: [CoverageRequirement],
         coverageRecords: [CoverageRecord],
+        organizationVisibilityFreshness: FreshnessState = .init(status: .fresh),
         menuCounts: DerivedMenuCounts?,
         derivedEvaluatedAt: Date?,
         origin: Origin
@@ -134,6 +142,7 @@ struct WorkspacePresentationSnapshot: Equatable, Sendable {
         self.durableState = durableState
         self.coverageRequirements = coverageRequirements
         self.coverageRecords = coverageRecords
+        self.organizationVisibilityFreshness = organizationVisibilityFreshness
         self.menuCounts = menuCounts
         self.derivedEvaluatedAt = derivedEvaluatedAt
         self.origin = origin

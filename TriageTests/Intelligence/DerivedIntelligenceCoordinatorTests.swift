@@ -78,6 +78,38 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         )
     }
 
+    func testPersistedRepositoryPreferenceContributesToDerivedRanking() throws {
+        let repositoryID = RepositoryID(rawValue: "repository-preference")!
+        let output = try DerivedIntelligenceCoordinator().recompute(
+            input(
+                items: [item(id: "repository-preference", repositoryID: repositoryID)],
+                repositoryPreferences: [repositoryID: 42]
+            )
+        )
+
+        XCTAssertEqual(output.items.first?.score.breakdown["repositoryPreference"], 42)
+    }
+
+    func testSnapshotRecomputeReturnsTheExactSourceMarkerForPublicationGating() throws {
+        let input = input(items: [item(id: "marker")])
+        let marker = DerivedIntelligenceSourceRevisionMarker(
+            scope: synchronizationScope,
+            sourceRevision: "derived-source-r1"
+        )
+        let snapshot = DerivedIntelligenceInputSnapshot(
+            input: input,
+            sourceStates: [],
+            sourceRevisions: [WorkItemID(rawValue: "marker")!: "primary-r1"],
+            aggregateSourceRevision: marker.sourceRevision,
+            publicationMarker: marker
+        )
+
+        let result = try DerivedIntelligenceCoordinator().recompute(snapshot: snapshot)
+
+        XCTAssertEqual(result.sourceRevisionMarker, marker)
+        XCTAssertEqual(result.output.items.map(\.workItemID.rawValue), ["marker"])
+    }
+
     func testLegacyUnverifiedRelationsCannotDriveCurrentOwnershipOrConversationReasons() throws {
         let output = try DerivedIntelligenceCoordinator().recompute(
             input(items: [item(id: "legacy", trustRelations: false)])
@@ -207,7 +239,8 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
         items: [DerivedIntelligenceItemInput],
         requirements: [CoverageRequirement]? = nil,
         records: [CoverageRecord]? = nil,
-        isProvisional: Bool = false
+        isProvisional: Bool = false,
+        repositoryPreferences: [RepositoryID: Int] = [:]
     ) -> DerivedIntelligenceInput {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -230,6 +263,7 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
                 isEntitled: true,
                 hasAvailableBudget: true
             ),
+            repositoryPreferences: repositoryPreferences,
             isProvisional: isProvisional,
             evaluatedAt: now,
             items: items
@@ -239,7 +273,8 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
     private func item(
         id: String,
         trustRelations: Bool = true,
-        relationScope: SynchronizationScope? = nil
+        relationScope: SynchronizationScope? = nil,
+        repositoryID: RepositoryID? = nil
     ) -> DerivedIntelligenceItemInput {
         let workItemID = WorkItemID(rawValue: id)!
         let nodeID = GitHubNodeID(rawValue: "node-\(id)")!
@@ -270,7 +305,18 @@ final class DerivedIntelligenceCoordinatorTests: XCTestCase {
             state: .active,
             sourceKind: .pullRequest,
             sourceURL: nil,
-            repository: nil,
+            repository: repositoryID.map {
+                RepositorySummary(
+                    id: $0,
+                    nodeID: GitHubNodeID(rawValue: "repository-node-\($0.rawValue)")!,
+                    ownerLogin: "octocat",
+                    name: "triage",
+                    isPrivate: false,
+                    isArchived: false,
+                    hasDiscussions: false,
+                    url: URL(string: "https://github.com/octocat/triage")!
+                )
+            },
             members: [],
             contextLinks: [],
             relations: [

@@ -83,8 +83,14 @@ struct GitHubPullRequestReviewThreadInventory: Sendable {
     let metrics: GitHubPullRequestReviewThreadMetrics
 }
 
+private struct StoredGraphQLResponse<Value: Decodable>: Decodable {
+    let data: Value?
+    let errors: [GitHubGraphQLPartialError]?
+}
+
 actor GitHubPullRequestReviewThreadClient {
     private static let maximumPages = 100
+    private static let maximumNodesPerConnectionPage = 50
     private static let maximumQueryCost = 500
     private static let maximumResponseBytes = 4 * 1_024 * 1_024
 
@@ -98,14 +104,69 @@ actor GitHubPullRequestReviewThreadClient {
         pullRequestNodeID: GitHubNodeID,
         observedAt: Date = .now
     ) async throws -> GitHubPullRequestReviewThreadInventory {
+        try await allReviewThreads(
+            pullRequestNodeID: pullRequestNodeID, observedAt: observedAt, rootCheckpoint: nil
+        )
+    }
+
+    func allReviewThreads(
+        pullRequestNodeID: GitHubNodeID,
+        observedAt: Date,
+        rootCheckpoint: ReviewThreadRootCheckpoint?
+    ) async throws -> GitHubPullRequestReviewThreadInventory {
         let threadsQuery = try GitHubGraphQLQueries.pullRequestReviewThreads()
         let commentsQuery = try GitHubGraphQLQueries.pullRequestReviewThreadComments()
-        var rawPages = [GitHubPullRequestReviewThreadRawPage]()
+        // A checkpoint is only a bounded optimization. A corrupt or oversized
+        // persisted prefix cannot become a new source of review-thread facts;
+        // start a fresh root traversal instead.
+        let boundedRootCheckpoint = rootCheckpoint.flatMap {
+            $0.rawPrefix.count <= Self.maximumPages ? $0 : nil
+        }
+        var rawPages = boundedRootCheckpoint?.rawPrefix ?? []
         var budget = AggregateBudget()
-        var threadPages = 0
-        var after: String?
+        var threadPages = boundedRootCheckpoint?.rawPrefix.count ?? 0
+        var after: String? = boundedRootCheckpoint?.rootCursor
         var visitedCursors = Set<String>()
+        var seenThreadNodeIDs = Set<GitHubNodeID>()
         var threads = [GitHubPullRequestReviewThreadPayload.Thread]()
+
+        if let rootCheckpoint = boundedRootCheckpoint {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            var expectedAfter: String?
+            for (offset, rawPage) in rootCheckpoint.rawPrefix.enumerated() {
+                guard rawPage.endpoint == "graphql:TriagePullRequestReviewThreads/page=\(offset + 1)",
+                      rawPage.requestKey == Self.threadRequestKey(
+                        pullRequestNodeID: pullRequestNodeID, after: expectedAfter
+                      ),
+                      let response = try? decoder.decode(
+                        StoredGraphQLResponse<GitHubPullRequestReviewThreadPayload>.self, from: rawPage.payload
+                      ), response.errors?.isEmpty != false, let payload = response.data,
+                      let pullRequest = payload.node, pullRequest.id == pullRequestNodeID.rawValue,
+                      let pageIDs = Self.connectionNodeIDs(pullRequest.reviewThreads.nodes.map { $0?.id }),
+                      seenThreadNodeIDs.isDisjoint(with: pageIDs)
+                else {
+                    // A persisted prefix is never trusted as a new source.
+                    // Fall back to a complete fresh root traversal.
+                    rawPages.removeAll()
+                    threadPages = 0
+                    after = nil
+                    seenThreadNodeIDs.removeAll()
+                    threads.removeAll()
+                    break
+                }
+                try budget.consume(cost: try Self.validatedCost(payload.rateLimit.cost), responseBytes: rawPage.payload.count)
+                seenThreadNodeIDs.formUnion(pageIDs)
+                threads.append(contentsOf: pullRequest.reviewThreads.nodes.compactMap { $0 })
+                expectedAfter = pullRequest.reviewThreads.pageInfo.endCursor
+                guard pullRequest.reviewThreads.pageInfo.hasNextPage,
+                      expectedAfter == rootCheckpoint.rootCursor || offset + 1 < rootCheckpoint.rawPrefix.count
+                else {
+                    rawPages.removeAll(); threadPages = 0; after = nil; seenThreadNodeIDs.removeAll(); threads.removeAll()
+                    break
+                }
+            }
+        }
 
         while true {
             try Task.checkCancellation()
@@ -205,9 +266,14 @@ actor GitHubPullRequestReviewThreadClient {
             guard let pullRequest = payload.node, pullRequest.id == pullRequestNodeID.rawValue else {
                 throw Self.failure(.missingRequestedPullRequest, rawPages: rawPages, terminalRequestKey: requestKey)
             }
-            guard !pullRequest.reviewThreads.nodes.contains(where: { $0 == nil }) else {
+            guard let pageThreadNodeIDs = Self.connectionNodeIDs(
+                pullRequest.reviewThreads.nodes.map { $0?.id }
+            ), pageThreadNodeIDs.count <= Self.maximumNodesPerConnectionPage,
+               seenThreadNodeIDs.isDisjoint(with: pageThreadNodeIDs)
+            else {
                 throw Self.failure(.incompleteConnection, rawPages: rawPages, terminalRequestKey: requestKey)
             }
+            seenThreadNodeIDs.formUnion(pageThreadNodeIDs)
             threads.append(contentsOf: pullRequest.reviewThreads.nodes.compactMap { $0 })
             threadPages += 1
             guard pullRequest.reviewThreads.pageInfo.hasNextPage else { break }
@@ -234,6 +300,7 @@ actor GitHubPullRequestReviewThreadClient {
             try Task.checkCancellation()
             var thread = threads[index]
             var comments = [GitHubPullRequestReviewThreadPayload.Comment?]()
+            var seenCommentNodeIDs = Set<GitHubNodeID>()
             var commentPages = 0
             var commentCursor: String?
             var visitedCommentCursors = Set<String>()
@@ -332,6 +399,14 @@ actor GitHubPullRequestReviewThreadClient {
                 else {
                     throw Self.failure(.missingRequestedThread, rawPages: rawPages, terminalRequestKey: requestKey)
                 }
+                guard let pageCommentNodeIDs = Self.connectionNodeIDs(
+                    returnedThread.comments.nodes.map { $0?.id }
+                ), pageCommentNodeIDs.count <= Self.maximumNodesPerConnectionPage,
+                   seenCommentNodeIDs.isDisjoint(with: pageCommentNodeIDs)
+                else {
+                    throw Self.failure(.incompleteConnection, rawPages: rawPages, terminalRequestKey: requestKey)
+                }
+                seenCommentNodeIDs.formUnion(pageCommentNodeIDs)
                 comments.append(contentsOf: returnedThread.comments.nodes)
                 commentPages += 1
                 guard returnedThread.comments.pageInfo.hasNextPage else { break }
@@ -392,6 +467,18 @@ actor GitHubPullRequestReviewThreadClient {
             throw GitHubPullRequestReviewThreadClientError.duplicateThread
         }
         return identifiers
+    }
+
+    /// Validate a GraphQL connection before its members can trigger follow-up
+    /// requests. A malformed server response must not amplify into arbitrary
+    /// descendant traversal work.
+    private nonisolated static func connectionNodeIDs(_ identifiers: [String?]) -> Set<GitHubNodeID>? {
+        guard identifiers.count <= maximumNodesPerConnectionPage else { return nil }
+        let nodeIDs = identifiers.compactMap { $0 }.compactMap(GitHubNodeID.init(rawValue:))
+        guard nodeIDs.count == identifiers.count,
+              Set(nodeIDs).count == nodeIDs.count
+        else { return nil }
+        return Set(nodeIDs)
     }
 
     private struct AggregateBudget {

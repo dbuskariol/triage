@@ -37,6 +37,61 @@ final class ReviewCandidateCompleteTraversalReceiptRepositoryTests: XCTestCase {
         }
     }
 
+    func testCompactionPinsReviewThreadRootCheckpointSnapshot() async throws {
+        let fixture = try await ReviewTraversalReceiptFixture()
+        defer { fixture.remove() }
+        let rawSnapshots = RawAPISnapshotRepository(vault: fixture.vault)
+
+        try await fixture.vault.write { database in
+            try ReviewCandidateIncrementalStateRepository.saveThreadCheckpoint(
+                .init(
+                    rootCursor: "root-cursor",
+                    rawPrefix: [
+                        .init(
+                            endpoint: "graphql/review-thread-checkpoint",
+                            requestKey: "graphql:TriagePullRequestReviewThreads/pull-request=RECEIPT_PR/after=none",
+                            payload: Data("{}".utf8)
+                        )
+                    ]
+                ),
+                scope: fixture.scope,
+                streamID: fixture.threadStreamID,
+                candidate: fixture.candidate,
+                observedAt: fixture.date.addingTimeInterval(-120),
+                in: database
+            )
+        }
+        let pinnedID = try await fixture.vault.read { database in
+            guard let rawID = try String.fetchOne(
+                database,
+                sql: "SELECT raw_snapshot_id FROM review_candidate_thread_checkpoint_pages"
+            ), let snapshotID = RawAPISnapshotID(rawValue: rawID) else {
+                throw RawAPISnapshotRepositoryError.invalidPersistedData
+            }
+            return snapshotID
+        }
+        try await rawSnapshots.save(.init(
+            id: RawAPISnapshotID(rawValue: "review-thread-checkpoint-newer")!,
+            accountID: fixture.accountID,
+            githubNodeID: fixture.candidate.nodeID,
+            endpoint: "graphql/review-thread-checkpoint",
+            eTag: nil,
+            parserVersion: 1,
+            observedAt: fixture.date.addingTimeInterval(-60),
+            payload: Data("{}".utf8)
+        ))
+
+        let removed = try await rawSnapshots.compact(
+            accountID: fixture.accountID,
+            retainingMostRecentPerSource: 1,
+            before: fixture.date
+        )
+
+        XCTAssertEqual(removed, 0)
+        let remaining = Set(try await rawSnapshots.snapshots(for: fixture.accountID).map(\.id))
+        XCTAssertTrue(remaining.contains(pinnedID))
+    }
+
     func testRejectsMalformedOrDigestMismatchedRESTReceiptPayloads() async throws {
         let fixture = try await ReviewTraversalReceiptFixture()
         defer { fixture.remove() }

@@ -15,6 +15,12 @@ enum AccountRemovalPresentation {
     }
 
     static let unavailableVaultRecoveryMessage = "This removes encrypted local Triage data whose vault key is unavailable. GitHub content is not changed. Afterward, reconnect to GitHub to resync. \(externalBackupDisclosure)"
+
+    static func removalFailureMessage(isUnavailableVault: Bool) -> String {
+        isUnavailableVault
+            ? "The unavailable account’s encrypted local data were not removed. Try again after resolving the local storage issue."
+            : "The account and its encrypted local data were not removed. Try again after resolving the local storage issue."
+    }
 }
 
 enum NotificationAuthorizationAction: Equatable {
@@ -69,6 +75,11 @@ struct SettingsView: View {
     @State private var unavailableAccountPendingRemoval: AccountID?
     @State private var accountRemovalError: String?
     @State private var notificationSettingsOpenError: String?
+    @State private var selectedNotificationConsentScope: NotificationScope?
+    @State private var isSelectedOrganizationNotificationsEnabled = false
+    @State private var isLoadingSelectedOrganizationNotificationConsent = false
+    @State private var isSavingSelectedOrganizationNotificationConsent = false
+    @State private var notificationConsentError: String?
 
     var body: some View {
         NavigationSplitView {
@@ -304,7 +315,10 @@ struct SettingsView: View {
                     }
                 }
             }
-            if let error = appModel.connectionError {
+            if let error = PersonalAccessTokenErrorPresentation.sharedConnectionError(
+                appModel.connectionError,
+                isPresentingPersonalAccessToken: accountReplacingToken != nil
+            ) {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
@@ -454,21 +468,49 @@ struct SettingsView: View {
             }
 
             SettingsCard(title: "Selected Organization") {
-                if let organization = appModel.selectedOrganization {
+                if let accountID = appModel.selectedAccountID,
+                   let organization = appModel.selectedOrganization
+                {
+                    let scope = NotificationScope(
+                        accountID: accountID,
+                        organizationID: organization.id
+                    )
                     let organizationName = NotificationSettingsPresentation.organizationScopeName(
                         displayName: organization.displayName,
                         login: organization.login
                     )
-                    Toggle("Allow notifications for \(organizationName)", isOn: Binding(
-                        get: { notificationSettings.isEnabled(for: organization.id) },
-                        set: { notificationSettings.setEnabled($0, for: organization.id) }
-                    ))
+                    Toggle(
+                        "Allow notifications for \(organizationName)",
+                        isOn: selectedOrganizationNotificationConsentBinding(for: scope)
+                    )
                     .accessibilityLabel("Allow notifications for \(organizationName)")
                     .accessibilityHint("Permits Triage notifications for \(organizationName) only. It does not change GitHub notification settings.")
+                    .disabled(
+                        isLoadingSelectedOrganizationNotificationConsent
+                            || isSavingSelectedOrganizationNotificationConsent
+                    )
+                    if isLoadingSelectedOrganizationNotificationConsent {
+                        ProgressView("Loading notification permission…")
+                            .controlSize(.small)
+                    }
+                    if let notificationConsentError {
+                        Label(notificationConsentError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 } else {
                     Text("Select an available organization before enabling its notifications.")
                         .foregroundStyle(.secondary)
                 }
+            }
+            .task(id: selectedNotificationScope) {
+                guard let scope = selectedNotificationScope else {
+                    selectedNotificationConsentScope = nil
+                    isSelectedOrganizationNotificationsEnabled = false
+                    isLoadingSelectedOrganizationNotificationConsent = false
+                    return
+                }
+                await loadSelectedOrganizationNotificationConsent(for: scope)
             }
 
             SettingsCard(title: "Quiet Hours") {
@@ -516,6 +558,64 @@ struct SettingsView: View {
         )
     }
 
+    private var selectedNotificationScope: NotificationScope? {
+        guard let accountID = appModel.selectedAccountID,
+              let organizationID = appModel.selectedOrganizationID
+        else { return nil }
+        return NotificationScope(accountID: accountID, organizationID: organizationID)
+    }
+
+    private func selectedOrganizationNotificationConsentBinding(
+        for scope: NotificationScope
+    ) -> Binding<Bool> {
+        Binding(
+            get: {
+                selectedNotificationConsentScope == scope
+                    && isSelectedOrganizationNotificationsEnabled
+            },
+            set: { isEnabled in
+                guard !isLoadingSelectedOrganizationNotificationConsent,
+                      !isSavingSelectedOrganizationNotificationConsent
+                else { return }
+                Task {
+                    await setSelectedOrganizationNotificationConsent(isEnabled, for: scope)
+                }
+            }
+        )
+    }
+
+    private func loadSelectedOrganizationNotificationConsent(
+        for scope: NotificationScope
+    ) async {
+        selectedNotificationConsentScope = nil
+        isSelectedOrganizationNotificationsEnabled = false
+        isLoadingSelectedOrganizationNotificationConsent = true
+        notificationConsentError = nil
+        let isEnabled = await notificationSettings.isEnabled(for: scope)
+        guard selectedNotificationScope == scope else { return }
+        selectedNotificationConsentScope = scope
+        isSelectedOrganizationNotificationsEnabled = isEnabled
+        isLoadingSelectedOrganizationNotificationConsent = false
+    }
+
+    private func setSelectedOrganizationNotificationConsent(
+        _ isEnabled: Bool,
+        for scope: NotificationScope
+    ) async {
+        isSavingSelectedOrganizationNotificationConsent = true
+        defer { isSavingSelectedOrganizationNotificationConsent = false }
+        notificationConsentError = nil
+        let didPersist = await notificationSettings.setEnabled(isEnabled, for: scope)
+        guard selectedNotificationScope == scope else { return }
+        guard didPersist else {
+            await loadSelectedOrganizationNotificationConsent(for: scope)
+            notificationConsentError = "Triage could not update this organization’s local notification permission."
+            return
+        }
+        selectedNotificationConsentScope = scope
+        isSelectedOrganizationNotificationsEnabled = isEnabled
+    }
+
     @ViewBuilder
     private var notificationAuthorizationControl: some View {
         switch NotificationSettingsPresentation.action(for: notificationAuthorization.status) {
@@ -559,12 +659,45 @@ struct SettingsView: View {
 
     private var aiSettings: some View {
         SettingsCard(title: "Copilot") {
-            SettingsValueRow(
-                title: "Organization consent",
-                detail: "Copilot analysis remains disabled until you explicitly enable it for an organization.",
-                systemImage: "sparkles"
-            ) {
-                Text("Not enabled")
+            if let organization = appModel.selectedOrganization {
+                let organizationName = NotificationSettingsPresentation.organizationScopeName(
+                    displayName: organization.displayName,
+                    login: organization.login
+                )
+                let state = appModel.selectedOrganizationAISettings
+                Toggle("Allow AI analysis for \(organizationName)", isOn: Binding(
+                    get: { state?.consent.isEnabled ?? false },
+                    set: { enabled in
+                        Task { await appModel.recordSelectedOrganizationAIConsent(enabled) }
+                    }
+                ))
+                .accessibilityHint("AI authorization is local and organization-specific. Turning it off cancels analysis and erases only this organization's stored AI prompts, outputs, model cache, and AI action candidates.")
+                Text(AIConsentPresentation.disclosure(
+                    account: appModel.accounts.first(where: { $0.id == appModel.selectedAccountID }),
+                    organization: organization
+                ))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Selected model",
+                    detail: "The current selection is persisted for this organization only.",
+                    systemImage: "cpu"
+                ) {
+                    Text(state?.selectedModelTitle ?? "Auto")
+                        .foregroundStyle(.secondary)
+                }
+                SettingsDivider()
+                SettingsValueRow(
+                    title: "Effective availability",
+                    detail: state?.status ?? "Checking this organization's local AI authorization.",
+                    systemImage: state?.isEffectivelyAvailable == true ? "checkmark.shield" : "xmark.shield"
+                ) {
+                    Text(state?.isEffectivelyAvailable == true ? "Available" : "Blocked")
+                        .foregroundStyle(state?.isEffectivelyAvailable == true ? Color.secondary : Color.orange)
+                }
+            } else {
+                Text("Select an available organization before configuring AI analysis.")
                     .foregroundStyle(.secondary)
             }
             if let capabilities = appModel.selectedAccountCapabilities {
@@ -578,6 +711,9 @@ struct SettingsView: View {
                         .foregroundStyle(capabilityTint(capabilities.status(for: .copilot)))
                 }
             }
+        }
+        .task(id: appModel.selectedOrganizationID) {
+            await appModel.refreshSelectedOrganizationAIStatus()
         }
     }
 
@@ -719,7 +855,9 @@ struct SettingsView: View {
             do {
                 try await appModel.removeAccount(account.id)
             } catch {
-                accountRemovalError = "The account and its encrypted local data were not removed. \(error.localizedDescription)"
+                accountRemovalError = AccountRemovalPresentation.removalFailureMessage(
+                    isUnavailableVault: false
+                )
             }
         }
     }
@@ -731,7 +869,9 @@ struct SettingsView: View {
             do {
                 try await appModel.removeAccount(accountID)
             } catch {
-                accountRemovalError = "The unavailable account's encrypted local data were not removed. \(error.localizedDescription)"
+                accountRemovalError = AccountRemovalPresentation.removalFailureMessage(
+                    isUnavailableVault: true
+                )
             }
         }
     }
@@ -917,6 +1057,8 @@ private struct SettingsToggleRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
+                .accessibilityLabel(title)
+                .accessibilityHint(detail)
         }
     }
 }

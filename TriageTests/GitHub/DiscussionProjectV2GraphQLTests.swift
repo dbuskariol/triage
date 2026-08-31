@@ -126,6 +126,34 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertEqual(callCount, 3)
     }
 
+    func testDiscussionClientRejectsOverfullAndDuplicateConnectionPagesBeforeNormalization() async throws {
+        for nodes in [
+            discussionNodes(count: 51),
+            discussionNodes(count: 2, duplicateID: true)
+        ] {
+            let session = DiscussionProjectSession(responses: [
+                discussionResponse(nodes: nodes, hasNextPage: false, cursor: nil)
+            ])
+            let client = GitHubDiscussionClient(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            )
+
+            do {
+                _ = try await client.allDiscussions(
+                    repositoryNodeID: GitHubNodeID(rawValue: "R_1")!,
+                    githubOrganizationID: 1,
+                    validateScope: {}
+                )
+                XCTFail("Expected malformed discussion connection rejection.")
+            } catch let error as GitHubDiscussionClientError {
+                guard case let .incompleteConnection(pages) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(pages.count, 1)
+            }
+        }
+    }
+
     func testDiscussionNormalizerRejectsMalformedDiscussion() {
         let value = GitHubDiscussionPayload.Discussion(
             id: "D_1", number: 0, title: "", body: nil, url: URL(string: "https://github.com/acme/repo/discussions/1")!,
@@ -189,6 +217,20 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         let normalized = try GitHubProjectV2Normalizer.fields(values)
         XCTAssertTrue(normalized.allSatisfy { !$0.isAuthoritative })
         XCTAssertTrue(normalized.allSatisfy { $0.context == "nested connection incomplete" })
+        for (index, value) in values.enumerated() {
+            let item = try GitHubProjectV2Normalizer.item(
+                .init(
+                    id: "PVTI_nested_\(index)",
+                    type: "ISSUE",
+                    updatedAt: .now,
+                    content: .init(typeName: "Issue", id: "I_nested_\(index)")
+                ),
+                projectNodeID: GitHubNodeID(rawValue: "P_1")!,
+                fieldValues: [value]
+            )
+            XCTAssertFalse(item.fieldValuesComplete)
+            XCTAssertFalse(item.fieldValues[0].isAuthoritative)
+        }
     }
 
     func testProjectDateFieldsUseStrictUTCDates() throws {
@@ -236,6 +278,106 @@ final class DiscussionProjectV2GraphQLTests: XCTestCase {
         XCTAssertEqual(try variableKeys(in: bodies[1]), ["projectID"])
         XCTAssertEqual(try variableKeys(in: bodies[2]), ["itemID"])
         XCTAssertFalse(bodies.contains { String(decoding: $0, as: UTF8.self).contains("\"nodeID\"") })
+    }
+
+    func testProjectInventoryRejectsOverfullAndDuplicateConnectionPagesBeforeNormalization() async throws {
+        for nodes in [
+            projectInventoryNodes(count: 51),
+            projectInventoryNodes(count: 2, duplicateID: true)
+        ] {
+            let session = DiscussionProjectSession(responses: [projectInventoryResponse(nodes: nodes)])
+            let client = GitHubProjectV2Client(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            )
+
+            do {
+                _ = try await client.allProjects(
+                    organizationNodeID: GitHubNodeID(rawValue: "O_1")!,
+                    githubOrganizationID: 1,
+                    validateScope: {}
+                )
+                XCTFail("Expected malformed project inventory rejection.")
+            } catch let error as GitHubProjectV2ClientError {
+                guard case let .incompleteConnection(pages) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(pages.count, 1)
+            }
+        }
+    }
+
+    func testProjectItemsRejectOverfullAndDuplicateConnectionPagesBeforeFieldTraversal() async throws {
+        for nodes in [
+            projectItemNodes(count: 51),
+            projectItemNodes(count: 2, duplicateID: true)
+        ] {
+            let session = DiscussionProjectSession(responses: [projectItemsResponse(nodes: nodes)])
+            let client = GitHubProjectV2Client(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            )
+
+            do {
+                _ = try await client.allItems(
+                    projectNodeID: GitHubNodeID(rawValue: "P_1")!,
+                    githubOrganizationID: 1,
+                    validateScope: {}
+                )
+                XCTFail("Expected malformed project item connection rejection.")
+            } catch let error as GitHubProjectV2ClientError {
+                guard case let .incompleteConnection(pages) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(pages.count, 1)
+            }
+            let requestBodies = await session.requestBodies()
+            XCTAssertEqual(requestBodies.count, 1, "Malformed items must not trigger field-value traversal.")
+        }
+    }
+
+    func testProjectFieldValuesRejectOverfullAndDuplicateConnectionPagesBeforeNormalization() async throws {
+        for nodes in [
+            projectFieldValueNodes(count: 51),
+            projectFieldValueNodes(count: 2, duplicateID: true)
+        ] {
+            let session = DiscussionProjectSession(responses: [
+                projectItemsResponse(),
+                projectFieldValuesResponse(nodes: nodes)
+            ])
+            let client = GitHubProjectV2Client(
+                client: GitHubGraphQLClient(session: session, credential: SecretValue("token"))
+            )
+
+            do {
+                _ = try await client.allItems(
+                    projectNodeID: GitHubNodeID(rawValue: "P_1")!,
+                    githubOrganizationID: 1,
+                    validateScope: {}
+                )
+                XCTFail("Expected malformed field-value connection rejection.")
+            } catch let error as GitHubProjectV2ClientError {
+                guard case let .incompleteConnection(pages) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(pages.count, 2)
+            }
+        }
+    }
+
+    func testProjectNestedCollectionsRejectOverfullAndDuplicateNodes() throws {
+        let pageInfo = GitHubProjectV2FieldValuePayload.NestedPageInfo(hasNextPage: false)
+        let overfullNodes = nestedNodes(count: 51)
+        let duplicateNodes = nestedNodes(count: 2, duplicateID: true)
+
+        for (name, value) in nestedCollectionValues(nodes: overfullNodes, pageInfo: pageInfo) {
+            XCTAssertThrowsError(try GitHubProjectV2Normalizer.fields([value])) { error in
+                XCTAssertEqual(error as? GitHubProjectV2NormalizationError, .malformedNestedConnection(name))
+            }
+        }
+        for (name, value) in nestedCollectionValues(nodes: duplicateNodes, pageInfo: pageInfo) {
+            XCTAssertThrowsError(try GitHubProjectV2Normalizer.fields([value])) { error in
+                XCTAssertEqual(error as? GitHubProjectV2NormalizationError, .duplicateNestedNodeID(name))
+            }
+        }
     }
 
     func testProjectClientRetainsDraftAndRedactedItemsAsDistinctSourceFacts() async throws {
@@ -382,9 +524,30 @@ private func variableKeys(in body: Data) throws -> Set<String> {
 }
 
 private func discussionResponse(id: String, hasNextPage: Bool, cursor: String?, cost: Int = 1) -> Data {
+    discussionResponse(
+        nodes: discussionNodes(ids: [id]),
+        hasNextPage: hasNextPage,
+        cursor: cursor,
+        cost: cost
+    )
+}
+
+private func discussionResponse(nodes: String, hasNextPage: Bool, cursor: String?, cost: Int = 1) -> Data {
     Data("""
-    {"data":{"node":{"id":"R_1","discussions":{"nodes":[{"id":"\(id)","number":1,"title":"Title","body":null,"url":"https://github.com/acme/repo/discussions/1","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","closedAt":null,"isAnswered":false,"category":null,"answer":null,"comments":{"totalCount":0}}],"pageInfo":{"hasNextPage":\(hasNextPage),"endCursor":\(cursor.map { "\"\($0)\"" } ?? "null")}}},"rateLimit":{"cost":\(cost),"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
+    {"data":{"node":{"id":"R_1","discussions":{"nodes":\(nodes),"pageInfo":{"hasNextPage":\(hasNextPage),"endCursor":\(cursor.map { "\"\($0)\"" } ?? "null")}}},"rateLimit":{"cost":\(cost),"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
     """.utf8)
+}
+
+private func discussionNodes(count: Int, duplicateID: Bool = false) -> String {
+    discussionNodes(ids: (0..<count).map { index in duplicateID ? "D_1" : "D_\(index + 1)" })
+}
+
+private func discussionNodes(ids: [String]) -> String {
+    "[" + ids.enumerated().map { index, id in
+        """
+        {"id":"\(id)","number":\(index + 1),"title":"Title \(index + 1)","body":null,"url":"https://github.com/acme/repo/discussions/\(index + 1)","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","closedAt":null,"isAnswered":false,"category":null,"answer":null,"comments":{"totalCount":0}}
+        """
+    }.joined(separator: ",") + "]"
 }
 
 private func projectDateField(_ date: String) -> GitHubProjectV2FieldValuePayload.Value {
@@ -396,10 +559,20 @@ private func projectDateField(_ date: String) -> GitHubProjectV2FieldValuePayloa
     )
 }
 
-private func projectInventoryResponse() -> Data {
+private func projectInventoryResponse(nodes: String = projectInventoryNodes(count: 1)) -> Data {
     Data("""
-    {"data":{"node":{"id":"O_1","projectsV2":{"nodes":[{"id":"P_1","number":1,"title":"Roadmap","shortDescription":null,"closed":false,"url":"https://github.com/orgs/acme/projects/1","updatedAt":"2026-01-01T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
+    {"data":{"node":{"id":"O_1","projectsV2":{"nodes":\(nodes),"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4999,"resetAt":"2026-01-02T00:00:00Z"}}}
     """.utf8)
+}
+
+private func projectInventoryNodes(count: Int, duplicateID: Bool = false) -> String {
+    "[" + (0..<count).map { index in
+        let number = index + 1
+        let id = duplicateID ? "P_1" : "P_\(number)"
+        return """
+        {"id":"\(id)","number":\(number),"title":"Roadmap \(number)","shortDescription":null,"closed":false,"url":"https://github.com/orgs/acme/projects/\(number)","updatedAt":"2026-01-01T00:00:00Z"}
+        """
+    }.joined(separator: ",") + "]"
 }
 
 private func projectItemsResponse(nodes: String = """
@@ -410,10 +583,80 @@ private func projectItemsResponse(nodes: String = """
     """.utf8)
 }
 
-private func projectFieldValuesResponse(itemID: String = "PVTI_1") -> Data {
+private func projectItemNodes(count: Int, duplicateID: Bool = false) -> String {
+    "[" + (0..<count).map { index in
+        let number = index + 1
+        let id = duplicateID ? "PVTI_1" : "PVTI_\(number)"
+        return """
+        {"id":"\(id)","type":"ISSUE","updatedAt":"2026-01-01T00:00:00Z","content":{"__typename":"Issue","id":"I_\(number)"}}
+        """
+    }.joined(separator: ",") + "]"
+}
+
+private func projectFieldValuesResponse(itemID: String = "PVTI_1", nodes: String = "[]") -> Data {
     Data("""
-    {"data":{"node":{"id":"\(itemID)","fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4997,"resetAt":"2026-01-02T00:00:00Z"}}}
+    {"data":{"node":{"id":"\(itemID)","fieldValues":{"nodes":\(nodes),"pageInfo":{"hasNextPage":false,"endCursor":null}}},"rateLimit":{"cost":1,"remaining":4997,"resetAt":"2026-01-02T00:00:00Z"}}}
     """.utf8)
+}
+
+private func projectFieldValueNodes(count: Int, duplicateID: Bool = false) -> String {
+    "[" + (0..<count).map { index in
+        let number = index + 1
+        let fieldID = duplicateID ? "F_1" : "F_\(number)"
+        return """
+        {"__typename":"ProjectV2ItemFieldTextValue","text":"value \(number)","field":{"id":"\(fieldID)","name":"Field \(number)","dataType":"TEXT"}}
+        """
+    }.joined(separator: ",") + "]"
+}
+
+private func nestedNodes(count: Int, duplicateID: Bool = false) -> [GitHubProjectV2FieldValuePayload.NamedNode?] {
+    (0..<count).map { index in
+        let number = index + 1
+        return .init(
+            id: duplicateID ? "N_1" : "N_\(number)",
+            name: "Name \(number)",
+            title: nil,
+            nameWithOwner: nil
+        )
+    }
+}
+
+private func nestedCollectionValues(
+    nodes: [GitHubProjectV2FieldValuePayload.NamedNode?],
+    pageInfo: GitHubProjectV2FieldValuePayload.NestedPageInfo
+) -> [(String, GitHubProjectV2FieldValuePayload.Value)] {
+    [
+        (
+            "users",
+            .init(
+                typeName: "ProjectV2ItemFieldUserValue",
+                field: .init(id: "F_users", name: "Users", dataType: "USER"),
+                text: nil, number: nil, date: nil, name: nil, title: nil,
+                users: .init(nodes: nodes, pageInfo: pageInfo), labels: nil,
+                milestone: nil, repository: nil, pullRequests: nil, issue: nil
+            )
+        ),
+        (
+            "labels",
+            .init(
+                typeName: "ProjectV2ItemFieldLabelValue",
+                field: .init(id: "F_labels", name: "Labels", dataType: "LABEL"),
+                text: nil, number: nil, date: nil, name: nil, title: nil,
+                users: nil, labels: .init(nodes: nodes, pageInfo: pageInfo),
+                milestone: nil, repository: nil, pullRequests: nil, issue: nil
+            )
+        ),
+        (
+            "pullRequests",
+            .init(
+                typeName: "ProjectV2ItemFieldPullRequestValue",
+                field: .init(id: "F_pullRequests", name: "Pull requests", dataType: "PULL_REQUEST"),
+                text: nil, number: nil, date: nil, name: nil, title: nil,
+                users: nil, labels: nil, milestone: nil, repository: nil,
+                pullRequests: .init(nodes: nodes, pageInfo: pageInfo), issue: nil
+            )
+        )
+    ]
 }
 
 private actor DiscussionProjectSession: HTTPSession {

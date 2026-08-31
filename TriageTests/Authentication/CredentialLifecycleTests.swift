@@ -34,6 +34,9 @@ final class CredentialLifecycleTests: XCTestCase {
             CredentialLifecycle.failureStatus(for: OAuthCredentialRefreshError.vaultKeyUnavailable),
             .missing
         )
+        XCTAssertNil(
+            CredentialLifecycle.failureStatus(for: OAuthCredentialRefreshError.staleAccountAuthority)
+        )
         XCTAssertEqual(
             CredentialLifecycle.failureStatus(
                 for: GitHubFailure(kind: .unauthorized, statusCode: 401)

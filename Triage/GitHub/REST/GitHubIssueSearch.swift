@@ -8,6 +8,7 @@ enum GitHubIssueSearchError: Error, Equatable, Sendable {
     case conflictingUpdatedConstraints
     case invalidPage
     case unexpectedNotModified
+    case pageObjectLimitExceeded
 }
 
 enum GitHubIssueSearchState: String, Sendable {
@@ -358,9 +359,14 @@ actor GitHubIssueSearchClient: GitHubIssueSearchExecuting {
                 GitHubIssueSearchPage.self,
                 request: try Self.request(query, page: page, validators: validators)
             )
-            return switch result {
-            case let .response(response): .response(response)
-            case let .undecodable(response): .undecodable(response)
+            switch result {
+            case let .response(response):
+                guard response.value.items.count <= 100 else {
+                    throw GitHubIssueSearchError.pageObjectLimitExceeded
+                }
+                return .response(response)
+            case let .undecodable(response):
+                return .undecodable(response)
             }
         } catch let failure as GitHubFailure where failure.statusCode == 304 {
             return .notModified(ssoHeader: failure.ssoHeader)

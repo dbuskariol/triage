@@ -222,6 +222,43 @@ final class AppNavigationModel: ObservableObject {
         persistSelectedWorkItems()
     }
 
+    /// Erases all presentation-only navigation state for a deleted account.
+    /// This runs independently of workspace restoration so a later account
+    /// cannot inherit selections or history from a removed opaque account ID.
+    func purgeSelectionState(for accountID: AccountID) {
+        let scopes = Set(selectedWorkItems.keys).union(selectionHistories.keys)
+        purgeSelectionState(in: scopes.filter { $0.accountID == accountID })
+    }
+
+    /// Erases one deleted organization scope while preserving every other
+    /// organization selection and its independent back/forward history.
+    func purgeSelectionState(
+        for accountID: AccountID,
+        organizationID: OrganizationID
+    ) {
+        let scope = WorkspaceSelectionScope(accountID: accountID, organizationID: organizationID)
+        purgeSelectionState(in: [scope])
+    }
+
+    /// Erases a deleted work item from exactly one workspace scope, including
+    /// a current selection and every ephemeral back/forward history entry.
+    func purgeSelectionState(
+        for workItemID: WorkItemID,
+        accountID: AccountID,
+        organizationID: OrganizationID
+    ) {
+        let scope = WorkspaceSelectionScope(accountID: accountID, organizationID: organizationID)
+        if selectedWorkItems[scope] == workItemID {
+            selectedWorkItems[scope] = nil
+        }
+        if var history = selectionHistories[scope] {
+            history.back.removeAll { $0 == workItemID }
+            history.forward.removeAll { $0 == workItemID }
+            selectionHistories[scope] = history
+        }
+        persistSelectedWorkItems()
+    }
+
     func canNavigateSelectionBack(
         accountID: AccountID?,
         organizationID: OrganizationID?,
@@ -378,5 +415,18 @@ final class AppNavigationModel: ObservableObject {
             }
         guard let data = try? JSONEncoder().encode(storedSelections) else { return }
         defaults.set(data, forKey: PreferenceKey.selectedWorkItems)
+    }
+
+    private func purgeSelectionState(in scopes: [WorkspaceSelectionScope]) {
+        var didRemovePersistedSelection = false
+        for scope in scopes {
+            if selectedWorkItems.removeValue(forKey: scope) != nil {
+                didRemovePersistedSelection = true
+            }
+            selectionHistories[scope] = nil
+        }
+        if didRemovePersistedSelection {
+            persistSelectedWorkItems()
+        }
     }
 }

@@ -79,9 +79,80 @@ final class WorkDetailPresentationTests: XCTestCase {
         )
     }
 
+    func testTimelinePaginationAdvancesWithoutExceedingAvailableEvidence() {
+        XCTAssertEqual(WorkDetailPresentation.nextTimelineVisibleCount(current: 20, total: 41), 40)
+        XCTAssertEqual(WorkDetailPresentation.nextTimelineVisibleCount(current: 40, total: 41), 41)
+        XCTAssertEqual(WorkDetailPresentation.nextTimelineVisibleCount(current: 41, total: 41), 41)
+    }
+
+    func testRelatedContentGroupsAndHeaderMetadataUseOnlyNormalizedMembers() {
+        let primary = member(id: "node", role: .primary, title: "Primary", kind: .issue, actor: "author")
+        let issue = member(id: "issue", role: .linkedIssue, title: "Related issue", kind: .issue, actor: "author")
+        let review = member(id: "review", role: .review, title: "Review", kind: .pullRequestReview, actor: "reviewer")
+        let label = member(id: "label", role: .comment, title: "needs-review", kind: .label, actor: nil)
+        let item = makeWorkItem(members: [primary, issue, review, label])
+
+        XCTAssertEqual(
+            WorkDetailPresentation.relatedContentGroups(for: item).map(\.title),
+            ["Linked issues", "Pull request reviews", "Comments"]
+        )
+        XCTAssertEqual(WorkDetailPresentation.actorNames(for: item), ["author", "reviewer"])
+        XCTAssertEqual(WorkDetailPresentation.labelTitles(for: item), ["needs-review"])
+    }
+
+    func testReviewStateSummariesReflectOnlyRecordedRelationsAndMembers() {
+        let item = makeWorkItem(
+            relations: [relation(kind: .changesRequested), relation(kind: .reviewRequestedDirectly)],
+            members: [member(id: "thread", role: .reviewThread, title: "Thread", kind: .pullRequestReviewThread, actor: nil)]
+        )
+
+        XCTAssertEqual(
+            WorkDetailPresentation.reviewStateSummaries(for: item),
+            ["Changes requested", "Your review requested", "Review threads available"]
+        )
+    }
+
+    func testConciseSourceBodyTrimsAndMarksOnlyOversizedBodies() throws {
+        XCTAssertEqual(
+            WorkDetailPresentation.conciseSourceBody("\n  Local body  \n"),
+            ConciseSourceBody(markdown: "Local body", isTruncated: false)
+        )
+        XCTAssertNil(WorkDetailPresentation.conciseSourceBody(" \n "))
+
+        let source = String(repeating: "x", count: WorkDetailPresentation.maximumConciseSourceBodyCharacters + 20)
+        let concise = try XCTUnwrap(WorkDetailPresentation.conciseSourceBody(source))
+        XCTAssertTrue(concise.isTruncated)
+        XCTAssertLessThanOrEqual(concise.markdown.count, WorkDetailPresentation.maximumConciseSourceBodyCharacters)
+    }
+
+    func testTimelineAccessibilityIncludesActorContentAndTimestamp() {
+        let actor = ActorSummary(
+            id: ActorID(rawValue: "actor")!,
+            nodeID: GitHubNodeID(rawValue: "actor-node")!,
+            login: "octo",
+            displayName: "Octo Cat",
+            avatarURL: nil
+        )
+        let event = TimelineEventSummary(
+            id: GitHubEventID(rawValue: "event")!,
+            subjectNodeID: GitHubNodeID(rawValue: "node")!,
+            kind: .commented,
+            actor: actor,
+            occurredAt: Date(timeIntervalSinceReferenceDate: 1_000),
+            url: nil,
+            body: "Normalized comment"
+        )
+
+        let label = WorkDetailPresentation.timelineAccessibilityLabel(for: event)
+
+        XCTAssertTrue(label.contains("Octo Cat"))
+        XCTAssertTrue(label.contains("Normalized comment"))
+    }
+
     private func makeWorkItem(
         reasons: [AttentionReason] = [],
         relations: [WorkRelation] = [],
+        members: [WorkItemMember] = [],
         freshness: FreshnessState = FreshnessState(status: .fresh)
     ) -> WorkItem {
         let accountID = AccountID(rawValue: "account")!
@@ -96,7 +167,7 @@ final class WorkDetailPresentationTests: XCTestCase {
             sourceKind: .issue,
             sourceURL: nil,
             repository: nil,
-            members: [],
+            members: members,
             contextLinks: [],
             relations: relations,
             attentionReasons: reasons,
@@ -105,6 +176,44 @@ final class WorkDetailPresentationTests: XCTestCase {
             freshness: freshness,
             lastRelevantActivityAt: .now,
             score: AttentionScore(value: 0, breakdown: [:])
+        )
+    }
+
+    private func member(
+        id: String,
+        role: WorkItemMemberRole,
+        title: String,
+        kind: GitHubContentKind,
+        actor: String?
+    ) -> WorkItemMember {
+        let nodeID = GitHubNodeID(rawValue: id)!
+        let actorSummary = actor.map {
+            ActorSummary(
+                id: ActorID(rawValue: "actor-\($0)")!,
+                nodeID: GitHubNodeID(rawValue: "actor-node-\($0)")!,
+                login: $0,
+                displayName: nil,
+                avatarURL: nil
+            )
+        }
+        return WorkItemMember(
+            id: nodeID,
+            role: role,
+            content: GitHubContentSummary(
+                id: nodeID,
+                kind: kind,
+                repository: nil,
+                number: kind == .issue ? 1 : nil,
+                title: title,
+                state: .open,
+                author: actorSummary,
+                url: URL(string: "https://github.com/example/\(id)")!,
+                createdAt: .now,
+                updatedAt: .now,
+                closedAt: nil,
+                mergedAt: nil
+            ),
+            evidence: []
         )
     }
 
@@ -138,8 +247,15 @@ final class WorkDetailPresentationTests: XCTestCase {
     }
 
     private func relation(evidence: [EvidenceReference]) -> WorkRelation {
+        relation(kind: .mentioned, evidence: evidence)
+    }
+
+    private func relation(
+        kind: WorkRelationKind,
+        evidence: [EvidenceReference] = []
+    ) -> WorkRelation {
         WorkRelation(
-            kind: .mentioned,
+            kind: kind,
             subjectNodeID: GitHubNodeID(rawValue: "node")!,
             objectNodeID: nil,
             confidence: .confirmed,

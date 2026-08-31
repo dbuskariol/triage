@@ -33,4 +33,20 @@ final class GitHubMarkdownPolicyTests: XCTestCase {
         let source = String(repeating: "a", count: GitHubMarkdownPolicy.maximumSourceCharacters + 5)
         XCTAssertEqual(GitHubMarkdownPolicy.sanitizedSource(source).count, GitHubMarkdownPolicy.maximumSourceCharacters)
     }
+
+    func testSanitizerStripsHTMLDestinationsButPreservesMarkdownLinksAndTaskState() {
+        let source = """
+        <a href="https://tracker.example/click">tracked</a> [safe](https://github.com/openai)
+        - [ ] review
+        - [x] shipped
+        """
+
+        let sanitized = GitHubMarkdownPolicy.sanitizedSource(source)
+
+        XCTAssertFalse(sanitized.contains("tracker.example"))
+        XCTAssertTrue(sanitized.contains("tracked"))
+        XCTAssertTrue(sanitized.contains("[safe](https://github.com/openai)"))
+        XCTAssertTrue(sanitized.contains("To do: review"))
+        XCTAssertTrue(sanitized.contains("Completed: shipped"))
+    }
 }

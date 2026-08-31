@@ -11,7 +11,8 @@ final class DailyActiveAccountIdentityRefreshServiceTests: XCTestCase {
             calls: calls,
             now: fixture.observedAt.addingTimeInterval(60),
             user: fixture.user(),
-            inventory: fixture.inventory()
+            inventory: fixture.inventory(),
+            inventoryLastValidatedAt: fixture.observedAt
         )
 
         let outcome = try await service.refreshIfDue(for: fixture.account)
@@ -84,6 +85,34 @@ final class DailyActiveAccountIdentityRefreshServiceTests: XCTestCase {
         XCTAssertEqual(inventoryCalls, 1)
     }
 
+    func testInventoryFailurePreservesUserValidationButRemainsDueForVisibilityRetry() async throws {
+        let fixture = try await DailyIdentityFixture()
+        defer { fixture.remove() }
+        let calls = DailyIdentityCallRecorder()
+        let now = fixture.observedAt.addingTimeInterval(RefreshCadence.dailyCapabilityProbe.baseInterval)
+        let service = fixture.service(
+            calls: calls,
+            now: now,
+            user: fixture.user(),
+            inventoryFails: true,
+            inventoryLastValidatedAt: fixture.observedAt
+        )
+
+        let first = try await service.refreshIfDue(for: fixture.account)
+        let persistedAccounts = try await AccountRepository(vault: fixture.vault).accounts()
+        let persisted = try XCTUnwrap(persistedAccounts.first)
+        let second = try await service.refreshIfDue(for: persisted)
+
+        guard case .inventoryUnavailable = first, case .inventoryUnavailable = second else {
+            return XCTFail("A failed inventory must remain incomplete and retryable.")
+        }
+        XCTAssertEqual(persisted.lastValidatedAt, now)
+        let userCalls = await calls.userCalls()
+        let inventoryCalls = await calls.inventoryCalls()
+        XCTAssertEqual(userCalls, 2)
+        XCTAssertEqual(inventoryCalls, 2)
+    }
+
     func testCrossAccountRequestIsRejectedBeforeNetworkWork() async throws {
         let fixture = try await DailyIdentityFixture()
         defer { fixture.remove() }
@@ -153,6 +182,54 @@ final class DailyActiveAccountIdentityRefreshServiceTests: XCTestCase {
         XCTAssertEqual(userCalls, 1)
         XCTAssertEqual(inventoryCalls, 1)
         XCTAssertEqual(persistedOrganizations, [fixture.organization])
+    }
+
+    func testStaleAuthenticatedUserReceiptAuthorityIsNeverPublished() async throws {
+        let fixture = try await DailyIdentityFixture()
+        defer { fixture.remove() }
+        let service = DailyActiveAccountIdentityRefreshService(
+            vault: fixture.vault,
+            loadAuthenticatedUser: {
+                throw AuthenticatedUserReplayReceiptRepositoryError.staleAuthority
+            },
+            loadOrganizationInventory: { _, _ in
+                throw CancellationError()
+            },
+            clock: {
+                fixture.observedAt.addingTimeInterval(RefreshCadence.dailyCapabilityProbe.baseInterval)
+            }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await service.refreshIfDue(for: fixture.account)
+        } verify: { error in
+            XCTAssertEqual(error as? DailyActiveAccountIdentityRefreshError, .staleAccountAuthority)
+        }
+        let persisted = try await AccountRepository(vault: fixture.vault).accounts()
+        XCTAssertEqual(persisted, [fixture.account])
+    }
+
+    func testStaleOrganizationInventoryReceiptAuthorityIsNeverPublished() async throws {
+        let fixture = try await DailyIdentityFixture()
+        defer { fixture.remove() }
+        let service = DailyActiveAccountIdentityRefreshService(
+            vault: fixture.vault,
+            loadAuthenticatedUser: { fixture.user() },
+            loadOrganizationInventory: { _, _ in
+                throw PostAccountIdentityReplayReceiptRepositoryError.staleAuthority
+            },
+            clock: {
+                fixture.observedAt.addingTimeInterval(RefreshCadence.dailyCapabilityProbe.baseInterval)
+            }
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await service.refreshIfDue(for: fixture.account)
+        } verify: { error in
+            XCTAssertEqual(error as? DailyActiveAccountIdentityRefreshError, .staleAccountAuthority)
+        }
+        let persisted = try await AccountRepository(vault: fixture.vault).accounts()
+        XCTAssertEqual(persisted, [fixture.account])
     }
 }
 
@@ -247,7 +324,8 @@ private final class DailyIdentityFixture: @unchecked Sendable {
         now: Date,
         user: GitHubUserDTO,
         inventory: GitHubOrganizationInventory? = nil,
-        inventoryFails: Bool = false
+        inventoryFails: Bool = false,
+        inventoryLastValidatedAt: Date? = nil
     ) -> DailyActiveAccountIdentityRefreshService {
         DailyActiveAccountIdentityRefreshService(
             vault: vault,
@@ -260,6 +338,7 @@ private final class DailyIdentityFixture: @unchecked Sendable {
                 if inventoryFails { throw URLError(.notConnectedToInternet) }
                 return inventory!
             },
+            loadOrganizationInventoryValidatedAt: { _, _ in inventoryLastValidatedAt },
             clock: { now },
             newCredentialRevision: { CredentialRevision(rawValue: "daily-revoked-revision")! }
         )

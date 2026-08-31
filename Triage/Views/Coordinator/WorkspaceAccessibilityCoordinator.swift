@@ -42,6 +42,7 @@ final class WorkspaceAccessibilityCoordinator: ObservableObject {
     @Published private(set) var requestedFocus: WorkspaceAccessibilityFocusTarget?
 
     private let poster: any WorkspaceAccessibilityAnnouncementPosting
+    private var hasCachedWork = false
 
     init(poster: any WorkspaceAccessibilityAnnouncementPosting = AppKitWorkspaceAccessibilityAnnouncementPoster()) {
         self.poster = poster
@@ -55,7 +56,26 @@ final class WorkspaceAccessibilityCoordinator: ObservableObject {
     /// It is deliberately ignored to keep private failure details out of the
     /// VoiceOver announcement queue.
     func refreshFailed(diagnostic _: String? = nil) {
-        post("Triage could not refresh local work. Cached work remains available.")
+        if hasCachedWork {
+            post("Triage could not refresh local work. Cached work remains available.")
+        } else {
+            post("Triage could not refresh local work. No local work is available yet.")
+        }
+    }
+
+    /// Records only whether the current workspace has local rows. It never
+    /// retains or announces their titles, identifiers, or source content.
+    func workspaceContentAvailabilityChanged(hasCachedWork: Bool) {
+        self.hasCachedWork = hasCachedWork
+    }
+
+    func actionItemsInserted(count: Int) {
+        guard count > 0 else { return }
+        if count == 1 {
+            post("A new local action item is available in Triage.")
+        } else {
+            post("\(count) new local action items are available in Triage.")
+        }
     }
 
     func workspaceRestorationUnavailable() {

@@ -32,6 +32,25 @@ final class GitHubIdentityClientTests: XCTestCase {
         XCTAssertEqual(malformedPaths, ["/user"])
     }
 
+    func testAuthenticatedUserEnforces256KiBBeforeDecode() async throws {
+        let boundarySession = IdentityFixtureSession(responses: [
+            "/user": .init(statusCode: 200, body: authenticatedUserPayload(totalBytes: 256 * 1_024))
+        ])
+        let boundary = try await GitHubIdentityClient(client: try identityClient(session: boundarySession))
+            .authenticatedUser()
+        XCTAssertEqual(boundary.payload.count, 256 * 1_024)
+
+        let overflowSession = IdentityFixtureSession(responses: [
+            "/user": .init(statusCode: 200, body: authenticatedUserPayload(totalBytes: 256 * 1_024 + 1))
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: overflowSession))
+                .authenticatedUser()
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .authenticatedUserResponseTooLarge)
+        }
+    }
+
     func testEmptyOrganizationPageIsASuccessfulInventoryRatherThanNegativeEvidence() async throws {
         let session = IdentityFixtureSession(responses: [
             "/user/orgs?per_page=100": .init(statusCode: 200, body: Data("[]".utf8))
@@ -45,6 +64,25 @@ final class GitHubIdentityClientTests: XCTestCase {
         XCTAssertNil(page.ssoHeader)
         let requestedPaths = await session.requestedPaths()
         XCTAssertEqual(requestedPaths, ["/user/orgs?per_page=100"])
+    }
+
+    func testOrganizationInventoryRejectsMoreThanOneHundredObjectsBeforeItCanPublish() async throws {
+        let organizations = (1...101).map {
+            "{\"id\":\($0),\"node_id\":\"O_\($0)\",\"login\":\"organization-\($0)\"}"
+        }
+        let session = IdentityFixtureSession(responses: [
+            "/user/orgs?per_page=100": .init(
+                statusCode: 200,
+                body: Data("[\(organizations.joined(separator: ","))]".utf8)
+            )
+        ])
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: session))
+                .allOrganizations()
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .pageObjectLimitExceeded)
+        }
     }
 
     func testSelectedOrganizationSSOAndApprovalFailuresRemainScopedToThatOrganization() async throws {
@@ -356,10 +394,15 @@ final class GitHubIdentityClientTests: XCTestCase {
     }
 
     func testRepositoryInventoryRetainsSSOHeadersAcrossPages() async throws {
-        let secondPage = URL(string: "https://api.github.com/orgs/acme/repos?page=2")!
+        let secondPage = URL(string: "https://api.github.com/orgs/acme/repos?type=all&page=2&per_page=100")!
         let repository = """
         {"id":1,"node_id":"R_1","name":"one","private":true,"archived":false,"has_discussions":true,
         "html_url":"https://github.com/acme/one","updated_at":"2025-01-01T00:00:00Z",
+        "owner":{"login":"acme"}}
+        """
+        let secondRepository = """
+        {"id":2,"node_id":"R_2","name":"two","private":true,"archived":false,"has_discussions":true,
+        "html_url":"https://github.com/acme/two","updated_at":"2025-01-01T00:00:00Z",
         "owner":{"login":"acme"}}
         """
         let client = GitHubRESTClient(
@@ -372,8 +415,8 @@ final class GitHubIdentityClientTests: XCTestCase {
                             "X-GitHub-SSO": "partial-results; organizations=1"
                         ]
                     ),
-                    "/orgs/acme/repos?page=2": (
-                        Data("[\(repository.replacingOccurrences(of: "\"R_1\"", with: "\"R_2\""))]".utf8),
+                    "/orgs/acme/repos?type=all&page=2&per_page=100": (
+                        Data("[\(secondRepository)]".utf8),
                         ["X-GitHub-SSO": "partial-results; organizations=2"]
                     )
                 ])
@@ -408,6 +451,158 @@ final class GitHubIdentityClientTests: XCTestCase {
         XCTAssertEqual(inventory.repositories.map(\.hasDiscussions), [nil])
     }
 
+    func testRepositoryInventoryUsesOnlyTheExactGitHubAuthorityPathAndPageQuery() async throws {
+        let secondPage = "https://api.github.com/orgs/acme/repos?type=all&page=2&per_page=100"
+        let firstRepository = repository(id: 1, nodeID: "R_1", name: "one")
+        let secondRepository = repository(id: 2, nodeID: "R_2", name: "two")
+        let session = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(
+                statusCode: 200,
+                body: Data("[\(firstRepository)]".utf8),
+                headers: ["Link": "<\(secondPage)>; rel=\"next\""]
+            ),
+            "/orgs/acme/repos?type=all&page=2&per_page=100": .init(
+                statusCode: 200,
+                body: Data("[\(secondRepository)]".utf8)
+            )
+        ])
+
+        let inventory = try await GitHubIdentityClient(client: try identityClient(session: session))
+            .allRepositories(in: "acme")
+
+        XCTAssertEqual(inventory.repositories.map(\.id), [1, 2])
+        let requestedPaths = await session.requestedPaths()
+        XCTAssertEqual(requestedPaths, [
+            "/orgs/acme/repos?type=all&per_page=100",
+            "/orgs/acme/repos?type=all&page=2&per_page=100"
+        ])
+    }
+
+    func testRepositoryInventoryRejectsHostilePaginationWithoutFollowingIt() async throws {
+        let hostileLinks = [
+            "https://api.github.com/orgs/acme/repos?page=2&per_page=100",
+            "https://api.github.com/orgs/acme/repos?type=all&page=3&per_page=100",
+            "https://api.github.com/orgs/other/repos?type=all&page=2&per_page=100",
+            "https://github.com/orgs/acme/repos?type=all&page=2&per_page=100"
+        ]
+
+        for link in hostileLinks {
+            let session = IdentityFixtureSession(responses: [
+                "/orgs/acme/repos?type=all&per_page=100": .init(
+                    statusCode: 200,
+                    body: Data("[]".utf8),
+                    headers: ["Link": "<\(link)>; rel=\"next\""]
+                )
+            ])
+
+            await XCTAssertThrowsErrorAsync {
+                _ = try await GitHubIdentityClient(client: try self.identityClient(session: session))
+                    .allRepositories(in: "acme")
+            } verify: { error in
+                XCTAssertEqual(error as? GitHubIdentityClientError, .invalidPaginationLink)
+            }
+            let requestedPaths = await session.requestedPaths()
+            XCTAssertEqual(requestedPaths, ["/orgs/acme/repos?type=all&per_page=100"])
+        }
+    }
+
+    func testRepositoryInventoryRejectsOversizedPagesAndAggregatePayloadsBeforePublication() async throws {
+        let oversizedSession = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(
+                statusCode: 200,
+                body: paddedEmptyJSONPage(totalBytes: 2 * 1_024 * 1_024 + 1)
+            )
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: oversizedSession))
+                .allRepositories(in: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .repositoryInventoryResponseTooLarge)
+        }
+
+        let secondPage = "https://api.github.com/orgs/acme/repos?type=all&page=2&per_page=100"
+        let thirdPage = "https://api.github.com/orgs/acme/repos?type=all&page=3&per_page=100"
+        let aggregateSession = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(
+                statusCode: 200,
+                body: paddedEmptyJSONPage(totalBytes: 2 * 1_024 * 1_024),
+                headers: ["Link": "<\(secondPage)>; rel=\"next\""]
+            ),
+            "/orgs/acme/repos?type=all&page=2&per_page=100": .init(
+                statusCode: 200,
+                body: paddedEmptyJSONPage(totalBytes: 2 * 1_024 * 1_024),
+                headers: ["Link": "<\(thirdPage)>; rel=\"next\""]
+            ),
+            "/orgs/acme/repos?type=all&page=3&per_page=100": .init(statusCode: 200, body: Data("[]".utf8))
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: aggregateSession))
+                .allRepositories(in: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .repositoryInventoryResponseTooLarge)
+        }
+    }
+
+    func testRepositoryInventoryRejectsOversizedDuplicateAndMalformedPages() async throws {
+        let repositories = (1...101).map {
+            repository(id: UInt64($0), nodeID: "R_\($0)", name: "repository-\($0)")
+        }
+        let objectLimitSession = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(
+                statusCode: 200,
+                body: Data("[\(repositories.joined(separator: ","))]".utf8)
+            )
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: objectLimitSession))
+                .allRepositories(in: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .pageObjectLimitExceeded)
+        }
+
+        let duplicate = repository(id: 1, nodeID: "R_1", name: "one")
+        let duplicateSession = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(
+                statusCode: 200,
+                body: Data("[\(duplicate),\(duplicate)]".utf8)
+            )
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: duplicateSession))
+                .allRepositories(in: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubIdentityClientError, .duplicateRepository)
+        }
+
+        let nullSession = IdentityFixtureSession(responses: [
+            "/orgs/acme/repos?type=all&per_page=100": .init(statusCode: 200, body: Data("[null]".utf8))
+        ])
+        await XCTAssertThrowsErrorAsync {
+            _ = try await GitHubIdentityClient(client: try self.identityClient(session: nullSession))
+                .allRepositories(in: "acme")
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubRESTClientError, .invalidJSON)
+        }
+    }
+
+    func testRepositoryInventoryPropagatesCancellationRatherThanPublishingTheFirstPage() async throws {
+        let secondPage = "https://api.github.com/orgs/acme/repos?type=all&page=2&per_page=100"
+        let session = CancellingRepositoryInventorySession(nextPageURL: secondPage)
+        let client = GitHubIdentityClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token")
+        ))
+
+        do {
+            _ = try await client.allRepositories(in: "acme")
+            XCTFail("A cancelled repository traversal must not publish its first page.")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
     private func identityClient(session: IdentityFixtureSession) throws -> GitHubRESTClient {
         GitHubRESTClient(
             transport: try GitHubRESTTransport(session: session),
@@ -429,6 +624,31 @@ final class GitHubIdentityClientTests: XCTestCase {
         let paddingLength = totalBytes - Data((prefix + suffix).utf8).count
         precondition(paddingLength >= 0)
         let payload = Data((prefix + String(repeating: "x", count: paddingLength) + suffix).utf8)
+        precondition(payload.count == totalBytes)
+        return payload
+    }
+
+    private func authenticatedUserPayload(totalBytes: Int) -> Data {
+        let prefix = #"{"id":1,"node_id":"U_1","login":"octocat","padding":""#
+        let suffix = #""}"#
+        let paddingLength = totalBytes - Data((prefix + suffix).utf8).count
+        precondition(paddingLength >= 0)
+        let payload = Data((prefix + String(repeating: "x", count: paddingLength) + suffix).utf8)
+        precondition(payload.count == totalBytes)
+        return payload
+    }
+
+    private func repository(id: UInt64, nodeID: String, name: String) -> String {
+        """
+        {"id":\(id),"node_id":"\(nodeID)","name":"\(name)","private":true,"archived":false,
+        "has_discussions":true,"html_url":"https://github.com/acme/\(name)",
+        "updated_at":"2025-01-01T00:00:00Z","owner":{"login":"acme"}}
+        """
+    }
+
+    private func paddedEmptyJSONPage(totalBytes: Int) -> Data {
+        precondition(totalBytes >= 2)
+        let payload = Data(("[]" + String(repeating: " ", count: totalBytes - 2)).utf8)
         precondition(payload.count == totalBytes)
         return payload
     }
@@ -505,6 +725,38 @@ private actor PagingSession: HTTPSession {
                 headerFields: response.1
             )!
         )
+    }
+}
+
+private actor CancellingRepositoryInventorySession: HTTPSession {
+    private let nextPageURL: String
+    private var requests = 0
+
+    init(nextPageURL: String) {
+        self.nextPageURL = nextPageURL
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        requests += 1
+        guard let url = request.url else {
+            throw URLError(.badURL)
+        }
+        if requests == 1 {
+            return (
+                Data("[]".utf8),
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Link": "<\(nextPageURL)>; rel=\"next\""]
+                )!
+            )
+        }
+        throw CancellationError()
+    }
+
+    func requestCount() -> Int {
+        requests
     }
 }
 

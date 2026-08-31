@@ -37,6 +37,7 @@ struct GitHubDiscussionInventory: Sendable {
 
 actor GitHubDiscussionClient {
     private static let maximumPages = 100
+    private static let maximumNodesPerConnectionPage = 50
     private static let maximumQueryCost = 500
     private let client: GitHubGraphQLClient
 
@@ -56,6 +57,7 @@ actor GitHubDiscussionClient {
         var cursors = Set<String>()
         var pages = [GitHubDiscussionRawPage]()
         var collected = [GitHubDiscussionPayload.Discussion]()
+        var seenDiscussionNodeIDs = Set<GitHubNodeID>()
         var totalCost = 0
         var totalBytes = 0
 
@@ -114,9 +116,13 @@ actor GitHubDiscussionClient {
             guard let repository = payload.node, repository.id == repositoryNodeID.rawValue else {
                 throw GitHubDiscussionClientError.missingRequestedRepository(pages)
             }
-            guard !repository.discussions.nodes.contains(where: { $0 == nil }) else {
+            guard let pageDiscussionNodeIDs = Self.connectionNodeIDs(
+                repository.discussions.nodes.map { $0?.id }
+            ), seenDiscussionNodeIDs.isDisjoint(with: pageDiscussionNodeIDs)
+            else {
                 throw GitHubDiscussionClientError.incompleteConnection(pages)
             }
+            seenDiscussionNodeIDs.formUnion(pageDiscussionNodeIDs)
             collected.append(contentsOf: repository.discussions.nodes.compactMap { $0 })
             guard repository.discussions.pageInfo.hasNextPage else { break }
             guard let cursor = repository.discussions.pageInfo.endCursor,
@@ -149,6 +155,18 @@ actor GitHubDiscussionClient {
     private nonisolated static func cursorComponent(_ cursor: String?) -> String {
         guard let cursor else { return "none" }
         return Data(cursor.utf8).base64EncodedString()
+    }
+
+    /// A GraphQL `first: 50` connection is authoritative only when its
+    /// decoded page has exactly valid, non-duplicated node identities. This
+    /// check occurs before the normalizer can publish any page members.
+    private nonisolated static func connectionNodeIDs(_ identifiers: [String?]) -> Set<GitHubNodeID>? {
+        guard identifiers.count <= maximumNodesPerConnectionPage else { return nil }
+        let nodeIDs = identifiers.compactMap { $0 }.compactMap(GitHubNodeID.init(rawValue:))
+        guard nodeIDs.count == identifiers.count,
+              Set(nodeIDs).count == nodeIDs.count
+        else { return nil }
+        return Set(nodeIDs)
     }
 
     private static let maximumPayloadBytes = 4 * 1_024 * 1_024

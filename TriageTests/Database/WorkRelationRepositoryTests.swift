@@ -43,6 +43,71 @@ final class WorkRelationRepositoryTests: XCTestCase {
         XCTAssertEqual(evidenceCount, 0)
     }
 
+    func testScopedWorkItemPresentationExcludesMixedRevisionAndCrossOrganizationEvidence() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.remove() }
+        _ = try await WorkItemRepository(vault: fixture.vault).ensureWorkItem(for: fixture.node)
+        try await WorkRelationRepository(vault: fixture.vault).replace(
+            [fixture.relation],
+            accountID: fixture.accountID,
+            subjectNodeID: fixture.node.nodeID,
+            authority: fixture.authority
+        )
+
+        let current = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertEqual(current.first?.relations, [fixture.relation])
+
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: "UPDATE relation_evidence SET authority_credential_revision = 'retired-credential'"
+            )
+        }
+        let retiredCredential = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertTrue(retiredCredential.first?.relations.isEmpty ?? false)
+
+        let otherOrganizationID = OrganizationID(rawValue: "another-organization")!
+        try await AccountRepository(vault: fixture.vault).save(
+            GitHubOrganization(
+                id: otherOrganizationID,
+                githubOrganizationID: 3,
+                nodeID: GitHubNodeID(rawValue: "MDEyOk9yZ2FuaXphdGlvbjI=")!,
+                login: "another-organization"
+            ),
+            access: OrganizationAccess(
+                accountID: fixture.accountID,
+                organizationID: otherOrganizationID,
+                state: .available,
+                capabilityRevision: CapabilityRevision(rawValue: "another-capability")!,
+                capabilities: [],
+                checkedAt: fixture.date
+            ),
+            selectedAt: nil
+        )
+        try await fixture.vault.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE relation_evidence
+                    SET authority_credential_revision = ?, authority_organization_id = ?
+                    """,
+                arguments: [fixture.scope.credentialRevision.rawValue, otherOrganizationID.rawValue]
+            )
+        }
+        let crossOrganization = try await WorkItemRepository(vault: fixture.vault).fetch(
+            accountID: fixture.accountID,
+            organizationID: fixture.organizationID,
+            authorityScope: fixture.scope
+        )
+        XCTAssertTrue(crossOrganization.first?.relations.isEmpty ?? false)
+    }
+
     func testRejectsRelationsForAnotherVaultAccount() async throws {
         let fixture = try await Fixture()
         defer { fixture.remove() }

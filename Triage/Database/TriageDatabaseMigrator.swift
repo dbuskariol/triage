@@ -2796,6 +2796,267 @@ enum TriageDatabaseMigrator {
                 )
                 BEGIN SELECT RAISE(ABORT, 'organization metadata replay provenance is immutable'); END
                 """)
+        },
+        TriageDatabaseMigration(
+            id: "047-work-item-graph-revision-v1",
+            checksum: "f149203a03a55c374e285177e05b7d13b80bf12d9104ddedc653666c5ef4a9e7"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE work_item_graph_runs (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64),
+                    projected_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "048-review-candidate-incremental-state-v1",
+            checksum: "ad313bbe07cfc7c98d3783a006db26aea26637edbda5e8a87801c3101d5a8902"
+        ) { database in
+            // Mutable per-candidate scheduling/replay state remains separate
+            // from append-only traversal receipts. It cannot itself authorize
+            // a 304 replacement.
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_incremental_states (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    feature TEXT NOT NULL CHECK (feature IN ('reviews', 'reviewThreads')),
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    candidate_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    first_page_request_key TEXT NOT NULL CHECK (length(first_page_request_key) BETWEEN 1 AND 2048),
+                    high_water_ms INTEGER NOT NULL,
+                    root_cursor TEXT,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        account_id, organization_id, feature, stream_id,
+                        candidate_node_id, credential_revision, capability_revision
+                    ),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_incremental_states_lookup
+                ON review_candidate_incremental_states (
+                    account_id, organization_id, feature, stream_id,
+                    candidate_node_id, credential_revision, capability_revision,
+                    updated_at_ms DESC
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "049-authenticated-user-replay-receipts-v1",
+            checksum: "79113d268c469caf4c7b2641c443768e8aced6ec4956a64248887e5a08c5d209"
+        ) { database in
+            // `/user` is account-scoped and credential-revision-bound. It
+            // deliberately has no invented organization or capability scope.
+            try database.execute(sql: """
+                CREATE TABLE authenticated_user_replay_receipts (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 512),
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL CHECK (length(credential_revision) BETWEEN 1 AND 512),
+                    request_key TEXT NOT NULL CHECK (request_key = 'GET /user'),
+                    etag TEXT, last_modified TEXT,
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    raw_payload_digest BLOB NOT NULL CHECK (length(raw_payload_digest) = 32),
+                    normalized_digest BLOB NOT NULL CHECK (length(normalized_digest) = 32),
+                    parser_version INTEGER NOT NULL CHECK (parser_version > 0),
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64),
+                    observed_at_ms INTEGER NOT NULL, committed_at_ms INTEGER NOT NULL,
+                    validated_at_ms INTEGER NOT NULL, receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+                    CHECK (etag IS NOT NULL OR last_modified IS NOT NULL),
+                    UNIQUE (account_id, credential_revision, request_key)
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX authenticated_user_replay_receipts_scope
+                ON authenticated_user_replay_receipts (
+                    account_id, credential_revision, request_key, validated_at_ms DESC
+                )
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER authenticated_user_replay_protect_snapshot_delete
+                BEFORE DELETE ON raw_api_snapshots WHEN EXISTS (
+                    SELECT 1 FROM authenticated_user_replay_receipts
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                BEGIN SELECT RAISE(ABORT, 'authenticated user replay provenance is durable'); END
+                """)
+            try database.execute(sql: """
+                CREATE TRIGGER authenticated_user_replay_protect_snapshot_update
+                BEFORE UPDATE ON raw_api_snapshots
+                WHEN EXISTS (
+                    SELECT 1 FROM authenticated_user_replay_receipts
+                    WHERE raw_snapshot_id = OLD.id
+                ) AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id)
+                AND (
+                    OLD.id IS NOT NEW.id OR OLD.account_id IS NOT NEW.account_id
+                    OR OLD.github_node_id IS NOT NEW.github_node_id OR OLD.endpoint IS NOT NEW.endpoint
+                    OR OLD.etag IS NOT NEW.etag OR OLD.last_modified IS NOT NEW.last_modified
+                    OR OLD.authority_organization_id IS NOT NEW.authority_organization_id
+                    OR OLD.authority_feature IS NOT NEW.authority_feature
+                    OR OLD.authority_stream_id IS NOT NEW.authority_stream_id
+                    OR OLD.authority_request_key IS NOT NEW.authority_request_key
+                    OR OLD.authority_credential_revision IS NOT NEW.authority_credential_revision
+                    OR OLD.authority_capability_revision IS NOT NEW.authority_capability_revision
+                    OR OLD.parser_version IS NOT NEW.parser_version OR OLD.observed_at_ms IS NOT NEW.observed_at_ms
+                    OR OLD.payload IS NOT NEW.payload
+                )
+                BEGIN SELECT RAISE(ABORT, 'authenticated user replay provenance is immutable'); END
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "050-review-thread-root-checkpoints-v1",
+            checksum: "5ce9b7c173f946abfd8f4fbbfdc663401a8d4a77ed673d36787da2ce4f5939b6"
+        ) { database in
+            try database.execute(sql: """
+                CREATE TABLE review_candidate_thread_checkpoint_pages (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    stream_id TEXT NOT NULL REFERENCES sync_streams(id) ON DELETE CASCADE,
+                    candidate_node_id TEXT NOT NULL REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    page_ordinal INTEGER NOT NULL CHECK (page_ordinal > 0),
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    PRIMARY KEY (account_id, organization_id, stream_id, candidate_node_id,
+                                 credential_revision, capability_revision, page_ordinal),
+                    UNIQUE (raw_snapshot_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX review_candidate_thread_checkpoint_lookup
+                ON review_candidate_thread_checkpoint_pages (
+                    account_id, organization_id, stream_id, candidate_node_id,
+                    credential_revision, capability_revision, page_ordinal
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "051-work-item-canonical-groups-v1",
+            checksum: "7e5c14941fd63d377605b07c96a19d923715a5119774120c1cb470156ee382d7"
+        ) { database in
+            // A Work Item keeps its own durable identity, workflow, actions,
+            // and notification history even while it is represented by another
+            // Work Item in a strong graph component. Reconciliation replaces
+            // this complete mapping, making a later split reversible without
+            // recreating donor records.
+            try database.execute(sql: """
+                CREATE TABLE work_item_group_memberships (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    constituent_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    canonical_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) = 64),
+                    projected_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (constituent_work_item_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX work_item_group_memberships_canonical_scope
+                ON work_item_group_memberships (
+                    account_id, organization_id, canonical_work_item_id,
+                    credential_revision, capability_revision
+                )
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "052-repository-ranking-preferences-v1",
+            checksum: "84b477e7573f5fe89d48f412aefca3146b7794dcd3f474f2bfd59bb7fc9222bb"
+        ) { database in
+            // Ranking preference is deliberately account and organization
+            // scoped even though repository identity is organization-owned:
+            // a user may prioritize the same repository differently through
+            // different connected GitHub accounts.
+            try database.execute(sql: """
+                CREATE TABLE repository_ranking_preferences (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                    preference INTEGER NOT NULL CHECK (preference BETWEEN -100 AND 100),
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id, repository_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX repository_ranking_preferences_scope
+                ON repository_ranking_preferences (account_id, organization_id, repository_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "053-notification-preferences-v1",
+            checksum: "2be45e4714b196a094c3f8d8f68d1d1ca5490f8604c899aad50b63977b5dc690"
+        ) { database in
+            // Organization consent is private account-vault state. A globally
+            // shared GitHub organization must never carry consent between
+            // distinct local accounts.
+            try database.execute(sql: """
+                CREATE TABLE notification_preferences (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    is_enabled INTEGER NOT NULL CHECK (is_enabled IN (0, 1)),
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, organization_id),
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX notification_preferences_scope
+                ON notification_preferences (account_id, organization_id)
+                """)
+        },
+        TriageDatabaseMigration(
+            id: "054-project-item-raw-provenance-v1",
+            checksum: "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
+        ) { database in
+            // A project-items page is scoped to its project root. This map is
+            // the explicit bridge that proves an individual item was present
+            // on that exact raw page; it must not be inferred from current
+            // normalized rows alone.
+            try database.execute(sql: """
+                CREATE TABLE project_item_raw_provenance (
+                    project_item_node_id TEXT PRIMARY KEY
+                        REFERENCES github_nodes(github_node_id) ON DELETE CASCADE,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    project_node_id TEXT NOT NULL REFERENCES projects(github_node_id) ON DELETE CASCADE,
+                    raw_snapshot_id TEXT NOT NULL REFERENCES raw_api_snapshots(id) ON DELETE RESTRICT,
+                    credential_revision TEXT NOT NULL,
+                    capability_revision TEXT NOT NULL,
+                    source_revision TEXT NOT NULL CHECK (length(source_revision) BETWEEN 1 AND 500),
+                    observed_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY (account_id, organization_id)
+                        REFERENCES account_organizations(account_id, organization_id) ON DELETE CASCADE
+                )
+                """)
+            try database.execute(sql: """
+                CREATE INDEX project_item_raw_provenance_current_scope
+                ON project_item_raw_provenance (
+                    account_id, organization_id, project_node_id,
+                    credential_revision, capability_revision, source_revision
+                )
+                """)
         }
     ]
 }

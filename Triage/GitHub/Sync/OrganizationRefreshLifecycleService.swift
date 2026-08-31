@@ -167,6 +167,21 @@ actor OrganizationRefreshLifecycleService {
         try await trigger(.opportunisticBackground)
     }
 
+    /// Removes one account's retained runtime after credential replacement or
+    /// account deletion. Advancing the generation prevents an already-running
+    /// lifecycle pass from resolving and caching a runtime after the caller
+    /// has begun teardown. The background callback remains installed; its next
+    /// run resolves only current scopes and therefore constructs a fresh
+    /// runtime when the account remains connected.
+    func evictRuntime(for accountID: AccountID) async {
+        _ = advanceGeneration()
+        activeTask?.cancel()
+        activeTask = nil
+        activeGeneration = nil
+        guard let runtime = runtimes.removeValue(forKey: accountID) else { return }
+        try? await runtime.cancelAll()
+    }
+
     /// Installs only an opportunistic callback. The embedding app should call
     /// this after launch and cancel it during process termination.
     func scheduleOpportunisticBackgroundRefresh() async {
@@ -322,9 +337,19 @@ actor OrganizationRefreshLifecycleService {
         }
         let resolved = try await resolveRuntime(accountID)
         guard isCurrent(expectedGeneration) else {
+            // Resolution may have opened an account vault while an account
+            // replacement/removal evicted this lifecycle pass. A runtime that
+            // loses that generation must be torn down before it can escape
+            // this service, even when the resolver is not the production
+            // coordinator's own post-factory fence.
+            try? await resolved.cancelAll()
             throw CancellationError()
         }
         if let retained = runtimes[accountID] {
+            // A concurrent lifecycle pass retained a different runtime while
+            // this resolution was suspended. Do not leave the surplus runtime
+            // alive with an open vault.
+            try? await resolved.cancelAll()
             return retained
         }
         runtimes[accountID] = resolved

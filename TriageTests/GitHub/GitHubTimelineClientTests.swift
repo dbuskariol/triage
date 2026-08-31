@@ -75,7 +75,7 @@ final class GitHubTimelineClientTests: XCTestCase {
 
     func testAllTimelineUsesLinkPaginationAndPreservesEvents() async throws {
         let secondPage = URL(
-            string: "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2"
+            string: "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2&per_page=100"
         )!
         let client = GitHubTimelineClient(client: GitHubRESTClient(
             transport: try GitHubRESTTransport(session: TimelinePagingSession(responses: [
@@ -83,7 +83,7 @@ final class GitHubTimelineClientTests: XCTestCase {
                     Data(#"[{"id":1,"event":"assigned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
                     ["Link": "<\(secondPage)>; rel=\"next\"", "ETag": "\"timeline-v1\""]
                 ),
-                "/repos/acme/widget/issues/42/timeline?page=2": (
+                "/repos/acme/widget/issues/42/timeline?page=2&per_page=100": (
                     Data(#"[{"id":"2","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                     [:]
                 )
@@ -103,7 +103,7 @@ final class GitHubTimelineClientTests: XCTestCase {
 
     func testAllTimelineRejectsLinkPaginationLoop() async throws {
         let loopingPage = URL(
-            string: "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2"
+            string: "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2&per_page=100"
         )!
         let client = GitHubTimelineClient(client: GitHubRESTClient(
             transport: try GitHubRESTTransport(session: TimelinePagingSession(responses: [
@@ -111,7 +111,7 @@ final class GitHubTimelineClientTests: XCTestCase {
                     Data(#"[{"id":1,"event":"assigned","created_at":"2026-01-01T00:00:00Z"}]"#.utf8),
                     ["Link": "<\(loopingPage)>; rel=\"next\""]
                 ),
-                "/repos/acme/widget/issues/42/timeline?page=2": (
+                "/repos/acme/widget/issues/42/timeline?page=2&per_page=100": (
                     Data(#"[{"id":2,"event":"assigned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                     ["Link": "<\(loopingPage)>; rel=\"next\""]
                 )
@@ -125,12 +125,12 @@ final class GitHubTimelineClientTests: XCTestCase {
                 issueOrPullRequestNumber: 42
             )
         } verify: { error in
-            XCTAssertEqual(error as? GitHubTimelineClientError, .paginationLoop)
+            XCTAssertEqual(error as? GitHubTimelineClientError, .invalidPaginationLink)
         }
     }
 
     func testAllTimelineRejectsCrossRepositoryPaginationLink() async throws {
-        let foreignPage = "https://api.github.com/repos/acme/other/issues/42/timeline?page=2"
+        let foreignPage = "https://api.github.com/repos/acme/other/issues/42/timeline?page=2&per_page=100"
         let client = GitHubTimelineClient(client: GitHubRESTClient(
             transport: try GitHubRESTTransport(session: TimelinePagingSession(responses: [
                 "/repos/acme/widget/issues/42/timeline?per_page=100&page=1": (
@@ -148,6 +148,42 @@ final class GitHubTimelineClientTests: XCTestCase {
             )
         } verify: { error in
             XCTAssertEqual(error as? GitHubTimelineClientError, .invalidPaginationLink)
+        }
+    }
+
+    func testTimelineRejectsMoreThanOneHundredDecodedEvents() async throws {
+        let events = (1 ... 101).map { index in
+            "{\"id\":\(index),\"event\":\"assigned\",\"created_at\":\"2026-01-01T00:00:00Z\"}"
+        }.joined(separator: ",")
+        let client = GitHubTimelineClient(client: GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: TimelinePagingSession(responses: [
+                "/repos/acme/widget/issues/42/timeline?per_page=100&page=1": (Data("[\(events)]".utf8), [:])
+            ])),
+            credential: SecretValue("token")
+        ))
+        await XCTAssertThrowsErrorAsync {
+            _ = try await client.timeline(repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"), issueOrPullRequestNumber: 42)
+        } verify: { error in
+            XCTAssertEqual(error as? GitHubTimelineClientError, .pageObjectLimitExceeded)
+        }
+    }
+
+    func testTimelineRejectsMissingOrSkippedPaginationControlsBeforeFollowingLink() async throws {
+        for link in [
+            "https://api.github.com/repos/acme/widget/issues/42/timeline?page=2",
+            "https://api.github.com/repos/acme/widget/issues/42/timeline?page=3&per_page=100"
+        ] {
+            let client = GitHubTimelineClient(client: GitHubRESTClient(
+                transport: try GitHubRESTTransport(session: TimelinePagingSession(responses: [
+                    "/repos/acme/widget/issues/42/timeline?per_page=100&page=1": (Data("[]".utf8), ["Link": "<\(link)>; rel=\"next\""])
+                ])),
+                credential: SecretValue("token")
+            ))
+            await XCTAssertThrowsErrorAsync {
+                _ = try await client.allTimeline(repository: try GitHubRepositoryPath(owner: "acme", repository: "widget"), issueOrPullRequestNumber: 42)
+            } verify: { error in
+                XCTAssertEqual(error as? GitHubTimelineClientError, .invalidPaginationLink)
+            }
         }
     }
 }

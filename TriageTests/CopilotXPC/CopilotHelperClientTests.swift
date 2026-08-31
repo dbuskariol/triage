@@ -85,6 +85,53 @@ final class CopilotHelperClientTests: XCTestCase {
     }
   }
 
+  func testAnalysisRejectsResponseFromDifferentSelectedModel() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
+    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
+    let requestID = UUID()
+    let request = CopilotAnalyzeRequest(
+      organizationID: organizationID,
+      input: CopilotAnalysisInput(
+        candidateID: candidateID,
+        workItemTitle: "Title",
+        workItemState: "open",
+        deterministicReasons: ["mention"],
+        body: "Body",
+        conversation: [],
+        evidenceIDs: [evidenceID]
+      ),
+      modelID: "selected-model",
+      deadline: .now.addingTimeInterval(60),
+      requestID: requestID
+    )
+    let response = CopilotAnalysisResponse(
+      header: responseHeader(
+        requestID: requestID,
+        organizationID: organizationID,
+        status: .analysis
+      ),
+      summary: "Summary",
+      state: "needs_response",
+      confidence: 0.95,
+      evidenceIDs: [evidenceID],
+      actionItems: [],
+      nextAction: nil,
+      modelID: "different-model",
+      promptProvenance: "v1"
+    )
+    let client = CopilotHelperClient(
+      transport: FakeFrameTransport(responses: [try encode(response)])
+    )
+
+    do {
+      _ = try await client.analyze(request)
+      XCTFail("A selected model must match the model that produced the response.")
+    } catch {
+      XCTAssertEqual(error as? CopilotXPCError, .invalidAnalysis)
+    }
+  }
+
   func testSingleFlightRejectsSecondOperation() async throws {
     let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
     let transport = BlockingFrameTransport()
@@ -107,7 +154,7 @@ final class CopilotHelperClientTests: XCTestCase {
     await transport.waitUntilTerminated()
   }
 
-  func testCancellationTerminatesTransportAndShutsDownClient() async throws {
+  func testCancellationTerminatesCurrentTransportOperationAndShutsDownClient() async throws {
     let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
     let transport = BlockingFrameTransport()
     let client = CopilotHelperClient(transport: transport)
@@ -127,6 +174,48 @@ final class CopilotHelperClientTests: XCTestCase {
     } catch {
       XCTAssertEqual(error as? CopilotXPCError, .shutDown)
     }
+  }
+
+  func testDelayedCancellationForOldRequestCannotTerminateNewExchange() async throws {
+    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
+    let healthRequest = CopilotHealthRequest(organizationID: organizationID)
+    let modelsRequest = CopilotModelsRequest(organizationID: organizationID)
+    let healthResponse = CopilotHealthResponse(
+      header: responseHeader(
+        requestID: healthRequest.header.requestID,
+        organizationID: organizationID,
+        status: .health
+      ),
+      health: CopilotHealth(
+        helperVersion: "1.0.0",
+        copilotAvailable: false,
+        toolPolicy: "deny_all"
+      )
+    )
+    let modelsResponse = CopilotModelsResponse(
+      header: responseHeader(
+        requestID: modelsRequest.header.requestID,
+        organizationID: organizationID,
+        status: .models
+      ),
+      models: []
+    )
+    let transport = StaleCancellationInterleavingFrameTransport(
+      firstResponse: try encode(healthResponse),
+      secondResponse: try encode(modelsResponse)
+    )
+    let client = CopilotHelperClient(transport: transport)
+
+    _ = try await client.health(healthRequest)
+    let nextOperation = Task { try await client.models(modelsRequest) }
+    await transport.waitUntilSecondReadStarted()
+
+    await client.cancelRunningProcess(for: healthRequest.header)
+    let terminations = await transport.terminationCount()
+    XCTAssertEqual(terminations, 0)
+
+    await transport.releaseSecondResponse()
+    _ = try await nextOperation.value
   }
 
   func testCancelRequestTerminatesMatchingAnalysis() async throws {
@@ -296,5 +385,49 @@ private actor BlockingFrameTransport: CopilotFrameTransport {
     while !terminated {
       await Task.yield()
     }
+  }
+}
+
+private actor StaleCancellationInterleavingFrameTransport: CopilotFrameTransport {
+  private let firstResponse: Data
+  private let secondResponse: Data
+  private var readCount = 0
+  private var secondReadStarted = false
+  private var shouldReleaseSecondResponse = false
+  private var terminated = 0
+
+  init(firstResponse: Data, secondResponse: Data) {
+    self.firstResponse = firstResponse
+    self.secondResponse = secondResponse
+  }
+
+  func writeFrame(_ payload: Data) async throws {}
+
+  func readFrame(maximumBytes: Int) async throws -> Data {
+    defer { readCount += 1 }
+    guard readCount == 1 else { return firstResponse }
+    secondReadStarted = true
+    while !shouldReleaseSecondResponse {
+      await Task.yield()
+    }
+    return secondResponse
+  }
+
+  func terminate() async {
+    terminated += 1
+  }
+
+  func waitUntilSecondReadStarted() async {
+    while !secondReadStarted {
+      await Task.yield()
+    }
+  }
+
+  func releaseSecondResponse() {
+    shouldReleaseSecondResponse = true
+  }
+
+  func terminationCount() -> Int {
+    terminated
   }
 }

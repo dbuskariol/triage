@@ -38,39 +38,71 @@ actor GitHubNotificationSourceRepository: GitHubNotificationSourcePersisting {
         }
     }
 
-    func hasValidatedUnchangedReceipt(
+    func persistValidatedUnchanged(
         for validator: ConditionalRequestValidator,
+        coverage: CoverageRecord,
         observedAt: Date
     ) async throws -> Bool {
         let identity = validator.identity
-        guard identity.scope.accountID == vault.accountID, identity.feature == .notifications else {
+        guard identity.scope.accountID == vault.accountID,
+              identity.feature == .notifications,
+              coverage.accountID == identity.scope.accountID,
+              coverage.organizationID == identity.scope.organizationID,
+              coverage.repositoryID == nil,
+              coverage.feature == .notifications,
+              coverage.streamID == identity.streamID,
+              coverage.credentialRevision == identity.scope.credentialRevision,
+              coverage.capabilityRevision == identity.scope.capabilityRevision,
+              coverage.status == .complete
+        else {
             throw GitHubNotificationSourceRepositoryError.accountScopeMismatch
         }
-        return try await vault.read { database in
+        return try await vault.writeTransaction { database in
             try Self.validateCurrentScope(identity.scope, in: database)
-            guard let receipt = try Row.fetchOne(database, sql: """
+            guard try Self.hasValidatedUnchangedReceipt(
+                for: validator,
+                in: database
+            ) else {
+                return false
+            }
+            try CoverageRepository.save(
+                coverage,
+                attemptedAt: observedAt,
+                expectedAccountID: identity.scope.accountID,
+                in: database
+            )
+            return true
+        }
+    }
+
+    private nonisolated static func hasValidatedUnchangedReceipt(
+        for validator: ConditionalRequestValidator,
+        in database: Database
+    ) throws -> Bool {
+        let identity = validator.identity
+        guard let receipt = try Row.fetchOne(database, sql: """
                 SELECT etag, last_modified, parser_version, source_revision,
                        notification_count, notification_digest
                 FROM notification_replay_receipts
                 WHERE account_id = ? AND organization_id = ? AND feature = ? AND stream_id = ?
                   AND request_key = ? AND credential_revision = ? AND capability_revision = ?
-                """, arguments: Self.identityArguments(identity)) else {
-                return false
-            }
-            let receiptETag: String? = receipt["etag"]
-            let receiptLastModified: String? = receipt["last_modified"]
-            guard receiptETag == validator.eTag,
-                  receiptLastModified == validator.lastModified,
-                  (receipt["parser_version"] as Int?) == Self.parserVersion,
-                  let sourceRevision: String = receipt["source_revision"],
-                  let expectedCount: Int = receipt["notification_count"],
-                  let expectedDigest: String = receipt["notification_digest"],
-                  expectedCount >= 0,
-                  Self.isDigest(expectedDigest)
-            else { return false }
-            let pages = try Self.currentPageRows(identity: identity, sourceRevision: sourceRevision, in: database)
-            guard !pages.isEmpty, pages.last?.isTerminal == true else { return false }
-            let rows = try Row.fetchAll(database, sql: """
+            """, arguments: Self.identityArguments(identity)) else {
+            return false
+        }
+        let receiptETag: String? = receipt["etag"]
+        let receiptLastModified: String? = receipt["last_modified"]
+        guard receiptETag == validator.eTag,
+              receiptLastModified == validator.lastModified,
+              (receipt["parser_version"] as Int?) == Self.parserVersion,
+              let sourceRevision: String = receipt["source_revision"],
+              let expectedCount: Int = receipt["notification_count"],
+              let expectedDigest: String = receipt["notification_digest"],
+              expectedCount >= 0,
+              Self.isDigest(expectedDigest)
+        else { return false }
+        let pages = try Self.currentPageRows(identity: identity, sourceRevision: sourceRevision, in: database)
+        guard !pages.isEmpty, pages.last?.isTerminal == true else { return false }
+        let rows = try Row.fetchAll(database, sql: """
                 SELECT notification_id, repository_node_id, reason, is_unread, subject_type,
                        subject_title, subject_url, updated_at_ms, last_read_at_ms, source_revision,
                        raw_snapshot_id
@@ -79,18 +111,16 @@ actor GitHubNotificationSourceRepository: GitHubNotificationSourcePersisting {
                   AND credential_revision = ? AND capability_revision = ?
                   AND source_revision = ?
                 ORDER BY notification_id
-                """, arguments: [
-                    identity.scope.accountID.rawValue, identity.scope.organizationID.rawValue,
-                    identity.scope.credentialRevision.rawValue, identity.scope.capabilityRevision.rawValue,
-                    sourceRevision
-                ])
-            guard rows.count == expectedCount,
-                  Self.digest(rows) == expectedDigest,
-                  Self.allNotificationRowsBindToCurrentPages(rows, pages: pages)
-            else { return false }
-            _ = observedAt // Receipt validation is revision-bound, not age-based.
-            return true
-        }
+            """, arguments: [
+                identity.scope.accountID.rawValue, identity.scope.organizationID.rawValue,
+                identity.scope.credentialRevision.rawValue, identity.scope.capabilityRevision.rawValue,
+                sourceRevision
+            ])
+        guard rows.count == expectedCount,
+              Self.digest(rows) == expectedDigest,
+              Self.allNotificationRowsBindToCurrentPages(rows, pages: pages)
+        else { return false }
+        return true
     }
 
     func persist(

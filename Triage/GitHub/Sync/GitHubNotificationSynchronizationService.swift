@@ -5,8 +5,12 @@ import Foundation
 /// conditional 304; notifications are discovery evidence only.
 protocol GitHubNotificationSourcePersisting: Sendable {
     func validator(for identity: ConditionalRequestIdentity) async throws -> ConditionalRequestValidator?
-    func hasValidatedUnchangedReceipt(
+    /// Atomically validates a receipt-bound conditional response and records
+    /// the successful unchanged interval. A `true` result therefore means
+    /// both replay authority and durable freshness were established.
+    func persistValidatedUnchanged(
         for validator: ConditionalRequestValidator,
+        coverage: CoverageRecord,
         observedAt: Date
     ) async throws -> Bool
     func persist(
@@ -71,6 +75,7 @@ actor GitHubNotificationSynchronizationService {
     func refresh(
         scope: SynchronizationScope,
         organizationLogin: String,
+        githubOrganizationID: UInt64,
         streamID: SyncStreamID,
         previousHighWater: Date?,
         observedAt: Date = .now
@@ -91,10 +96,28 @@ actor GitHubNotificationSynchronizationService {
             let validators = try cachedValidator.map(Self.httpValidators)
             var usedUnconditionalRecovery = false
             var fetched = try await client.fetchNotifications(validators: validators)
-            if case .notModified = fetched {
+            if case let .notModified(ssoHeader) = fetched {
+                if let selectedOrganizationSSO = Self.scopedSSOHeader(
+                    ssoHeader,
+                    githubOrganizationID: githubOrganizationID
+                ) {
+                    throw GitHubNotificationSynchronizationError.ssoRequirement(
+                        selectedOrganizationSSO
+                    )
+                }
+                let coverage = coverage(
+                    scope: scope,
+                    streamID: streamID,
+                    intervalStart: intervalStart,
+                    observedAt: observedAt,
+                    status: .complete,
+                    failureDetail: nil,
+                    successfulAt: observedAt
+                )
                 guard let cachedValidator,
-                      try await repository.hasValidatedUnchangedReceipt(
+                      try await repository.persistValidatedUnchanged(
                         for: cachedValidator,
+                        coverage: coverage,
                         observedAt: observedAt
                       )
                 else {
@@ -110,21 +133,13 @@ actor GitHubNotificationSynchronizationService {
                         fetched,
                         scope: scope,
                         organizationLogin: organizationLogin,
+                        githubOrganizationID: githubOrganizationID,
                         streamID: streamID,
                         intervalStart: intervalStart,
                         observedAt: observedAt,
                         usedUnconditionalRecovery: usedUnconditionalRecovery
                     )
                 }
-                let coverage = coverage(
-                    scope: scope,
-                    streamID: streamID,
-                    intervalStart: intervalStart,
-                    observedAt: observedAt,
-                    status: .complete,
-                    failureDetail: nil,
-                    successfulAt: observedAt
-                )
                 return .init(
                     status: .unchanged,
                     coverage: coverage,
@@ -136,6 +151,7 @@ actor GitHubNotificationSynchronizationService {
                 fetched,
                 scope: scope,
                 organizationLogin: organizationLogin,
+                githubOrganizationID: githubOrganizationID,
                 streamID: streamID,
                 intervalStart: intervalStart,
                 observedAt: observedAt,
@@ -144,7 +160,11 @@ actor GitHubNotificationSynchronizationService {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            let classification = Self.classification(for: error, observedAt: observedAt)
+            let classification = Self.classification(
+                for: error,
+                githubOrganizationID: githubOrganizationID,
+                observedAt: observedAt
+            )
             let failureCoverage = coverage(
                 scope: scope,
                 streamID: streamID,
@@ -164,7 +184,11 @@ actor GitHubNotificationSynchronizationService {
                 observedAt: observedAt
             )
             return .init(
-                status: Self.status(for: classification, sourceError: error),
+                status: Self.status(
+                    for: classification,
+                    sourceError: error,
+                    githubOrganizationID: githubOrganizationID
+                ),
                 coverage: failureCoverage,
                 notificationCount: 0,
                 usedUnconditionalRecovery: false
@@ -176,6 +200,7 @@ actor GitHubNotificationSynchronizationService {
         _ result: GitHubNotificationFetch,
         scope: SynchronizationScope,
         organizationLogin: String,
+        githubOrganizationID: UInt64,
         streamID: SyncStreamID,
         intervalStart: Date,
         observedAt: Date,
@@ -184,7 +209,10 @@ actor GitHubNotificationSynchronizationService {
         guard case let .modified(inventory) = result else {
             throw GitHubNotificationSynchronizationError.unconditionalNotModified
         }
-        let selectedOrganizationSSO = inventory.ssoHeader
+        let selectedOrganizationSSO = Self.scopedSSOHeader(
+            inventory.ssoHeader,
+            githubOrganizationID: githubOrganizationID
+        )
         if let selectedOrganizationSSO {
             throw GitHubNotificationSynchronizationError.ssoRequirement(selectedOrganizationSSO)
         }
@@ -249,6 +277,7 @@ actor GitHubNotificationSynchronizationService {
 
     private nonisolated static func classification(
         for error: Error,
+        githubOrganizationID: UInt64,
         observedAt: Date
     ) -> GitHubNotificationFailureClassification {
         if let error = error as? GitHubNotificationSynchronizationError {
@@ -264,7 +293,12 @@ actor GitHubNotificationSynchronizationService {
                 ? .integrity
                 : .transient
         }
-        if failure.ssoHeader != nil { return .ssoRequired }
+        if scopedSSOHeader(
+            failure.ssoHeader,
+            githubOrganizationID: githubOrganizationID
+        ) != nil {
+            return .ssoRequired
+        }
         if failure.accessRestriction != nil { return .approvalRequired }
         switch failure.kind {
         case .unauthorized:
@@ -318,7 +352,8 @@ actor GitHubNotificationSynchronizationService {
 
     private nonisolated static func status(
         for classification: GitHubNotificationFailureClassification,
-        sourceError: Error
+        sourceError: Error,
+        githubOrganizationID: UInt64
     ) -> GitHubNotificationRefreshStatus {
         switch classification {
         case .ssoRequired:
@@ -327,7 +362,10 @@ actor GitHubNotificationSynchronizationService {
                 return .ssoRequired(header)
             }
             if let failure = sourceError as? GitHubFailure,
-               let header = failure.ssoHeader {
+               let header = scopedSSOHeader(
+                    failure.ssoHeader,
+                    githubOrganizationID: githubOrganizationID
+               ) {
                 return .ssoRequired(header)
             }
             return .failed
@@ -342,6 +380,13 @@ actor GitHubNotificationSynchronizationService {
         case .integrity, .transient:
             return .failed
         }
+    }
+
+    private nonisolated static func scopedSSOHeader(
+        _ header: GitHubSSOHeader?,
+        githubOrganizationID: UInt64
+    ) -> GitHubSSOHeader? {
+        header?.scoped(to: githubOrganizationID)
     }
 }
 

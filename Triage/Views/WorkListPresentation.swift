@@ -34,6 +34,44 @@ extension WorkspaceListFilter {
 /// SwiftUI hierarchy so accessibility semantics and stale-search protection
 /// are deterministic and testable.
 enum WorkListPresentation {
+    /// Uses the persisted attention reasons and workflow state that were
+    /// committed by derived intelligence. The only clock-dependent fields are
+    /// explicit local snooze/follow-up deadlines; this never re-runs ranking
+    /// rules in the view layer.
+    static func effectiveDisposition(for item: WorkItem, at now: Date) -> InboxDisposition {
+        InboxEligibilityRule().disposition(for: item, at: now)
+    }
+
+    static func items(
+        from workItems: [WorkItem],
+        section: AppSection,
+        at now: Date
+    ) -> [WorkItem] {
+        let matching = workItems.filter { item in
+            switch section {
+            case .inbox:
+                effectiveDisposition(for: item, at: now) == .inbox
+            case .waiting:
+                effectiveDisposition(for: item, at: now) == .waiting
+            case .snoozed:
+                effectiveDisposition(for: item, at: now) == .snoozed
+            case .myWork:
+                item.relations.contains { $0.kind == .assigned || $0.kind == .authored }
+            case .reviews:
+                item.relations.contains {
+                    $0.kind == .reviewRequestedDirectly || $0.kind == .reviewRequestedFromTeam
+                }
+            case .allWork:
+                true
+            }
+        }
+        return rankedPersisted(matching)
+    }
+
+    static func rankedPersisted(_ workItems: [WorkItem]) -> [WorkItem] {
+        AttentionRanker().sortPersisted(workItems)
+    }
+
     /// Short, model-backed row metadata. The list deliberately omits a field
     /// rather than inventing a placeholder when the cached item has no value.
     static func visibleMetadata(for item: WorkItem, at now: Date) -> [String] {
@@ -125,6 +163,61 @@ enum WorkListPresentation {
         request == currentRequest
     }
 
+    /// `Inbox zero` is an affirmative synchronization claim. Reserve it for
+    /// current workspace coverage, and present the explicit workspace status
+    /// whenever the queue is degraded or still refreshing.
+    static func canPresentSuccessfulEmptyQueue(
+        query: String,
+        isSearching: Bool,
+        searchError: String?,
+        workspaceStatus: WorkspacePresentationState.SynchronizationStatus
+    ) -> Bool {
+        !isSearching
+            && searchError == nil
+            && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && WorkspacePresentationState.emptyQueueCanUseSuccessCopy(for: workspaceStatus)
+    }
+
+    /// Selects the empty-queue surface without letting a failed cache search
+    /// fall through to the benign "no matching work" message.
+    static func emptyQueuePresentation(
+        query: String,
+        isSearching: Bool,
+        searchError: String?,
+        workspaceStatus: WorkspacePresentationState.SynchronizationStatus
+    ) -> WorkListEmptyQueuePresentation? {
+        if searchError != nil {
+            return .searchUnavailable
+        }
+        guard !isSearching else { return nil }
+        if canPresentSuccessfulEmptyQueue(
+            query: query,
+            isSearching: isSearching,
+            searchError: searchError,
+            workspaceStatus: workspaceStatus
+        ) {
+            return .successfulEmptyQueue
+        }
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .noMatchingWork
+        }
+        return .workspaceStatus
+    }
+
+    /// Disclosure is read-only presentation of action-item titles. The list
+    /// deliberately omits details, evidence, and completion controls so it
+    /// cannot expose more content than requested or introduce bulk actions.
+    static func actionDisclosure(for item: WorkItem) -> WorkListActionDisclosure? {
+        let openActionItems = item.openActionItems
+        guard !openActionItems.isEmpty else { return nil }
+        let count = openActionItems.count
+        let title = "\(count) open action \(count == 1 ? "item" : "items")"
+        return WorkListActionDisclosure(
+            title: title,
+            accessibilityLabel: "\(title), stored locally in Triage"
+        )
+    }
+
     private static func sourceTitle(_ kind: GitHubContentKind) -> String {
         switch kind {
         case .issue: "Issue"
@@ -172,6 +265,18 @@ enum WorkListPresentation {
         case .failed: "Refresh failed"
         }
     }
+}
+
+struct WorkListActionDisclosure: Equatable {
+    let title: String
+    let accessibilityLabel: String
+}
+
+enum WorkListEmptyQueuePresentation: Equatable {
+    case searchUnavailable
+    case successfulEmptyQueue
+    case noMatchingWork
+    case workspaceStatus
 }
 
 struct WorkListSearchRequest: Equatable, Hashable {

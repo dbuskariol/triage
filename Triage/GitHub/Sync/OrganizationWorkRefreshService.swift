@@ -7,19 +7,22 @@ actor OrganizationWorkRefreshService {
     private let secretStore: KeychainSecretStore
     private let rateLimitControllers: GitHubRateLimitControllerRegistry
     private let requestPriority: GitHubRequestPriority
+    private let organizationAIController: OrganizationAIController?
 
     init(
         credentialReader: AccountCredentialReader,
         vaultRegistry: VaultRegistry,
         secretStore: KeychainSecretStore,
         rateLimitControllers: GitHubRateLimitControllerRegistry = .shared,
-        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
+        organizationAIController: OrganizationAIController? = nil
     ) {
         self.credentialReader = credentialReader
         self.vaultRegistry = vaultRegistry
         self.secretStore = secretStore
         self.rateLimitControllers = rateLimitControllers
         self.requestPriority = requestPriority
+        self.organizationAIController = organizationAIController
     }
 
     func refresh(
@@ -69,7 +72,8 @@ actor OrganizationWorkRefreshService {
         let identityClient = GitHubIdentityClient(client: restClient)
         _ = try await PostAccountOrganizationMetadataReplayService(
             client: identityClient,
-            receipts: PostAccountIdentityReplayReceiptRepository(vault: vault)
+            receipts: PostAccountIdentityReplayReceiptRepository(vault: vault),
+            rawSnapshots: RawAPISnapshotRepository(vault: vault)
         ).organization(organization, scope: synchronizationScope)
         try await validateCurrentScope(synchronizationScope, vault: vault)
         let searchClient = GitHubIssueSearchClient(client: restClient)
@@ -446,9 +450,19 @@ actor OrganizationWorkRefreshService {
             throw error
         }
         try await validateCurrentScope(synchronizationScope, vault: vault)
-        let derivedOutcome = try await OrganizationRefreshCompletionCoordinator(vault: vault)
+        try await OrganizationWorkItemGraphProjectionService(vault: vault)
+            .projectAfterNormalizedCommit(for: synchronizationScope, at: attemptedAt)
+        try await validateCurrentScope(synchronizationScope, vault: vault)
+        let aiController = organizationAIController ?? OrganizationAIController(vault: vault)
+        let derivedOutcome = try await OrganizationRefreshCompletionCoordinator(
+            vault: vault,
+            resolveAIPolicy: { scope, account, evaluatedAt in
+                try await aiController.policy(for: scope, account: account, at: evaluatedAt).derivedPolicy
+            }
+        )
             .finalizeAfterNormalizedCommit(
                 for: synchronizationScope,
+                account: account,
                 evaluatedAt: attemptedAt
             )
         try await validateCurrentScope(synchronizationScope, vault: vault)
@@ -1047,6 +1061,7 @@ actor OrganizationWorkRefreshService {
         ).refresh(
             scope: scope,
             organizationLogin: organization.login,
+            githubOrganizationID: organization.githubOrganizationID,
             streamID: streamID,
             previousHighWater: previousHighWater,
             observedAt: attemptedAt

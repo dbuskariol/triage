@@ -119,6 +119,35 @@ final class GitHubNotificationClientTests: XCTestCase {
         }
     }
 
+    func testNotificationsRejectAnOverLimitLaterPageBeforeReturningInventory() async throws {
+        let second = "https://api.github.com/notifications?all=true&participating=false&per_page=100&page=2"
+        let overLimitPage = (1 ... 101).map { index in
+            notification(id: "n-\(index)", reason: "comment")
+        }.joined(separator: ",")
+        let firstPayload = Data(("[" + notification(id: "n-first", reason: "comment") + "]").utf8)
+        let session = NotificationPagingSession(responses: [
+            "/notifications?all=true&participating=false&per_page=100": (
+                firstPayload,
+                ["Link": "<\(second)>; rel=\"next\""],
+                200
+            ),
+            "/notifications?all=true&participating=false&per_page=100&page=2": (
+                Data("[\(overLimitPage)]".utf8),
+                [:],
+                200
+            )
+        ])
+
+        do {
+            _ = try await notificationClient(session: session).allNotifications()
+            XCTFail("An over-limit later page must not produce an inventory.")
+        } catch {
+            XCTAssertEqual(error as? GitHubNotificationClientError, .pageObjectLimitExceeded)
+        }
+        let requestCount = await session.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
     func testUnknownServerReasonIsPreservedAsDiscoveryMetadata() async throws {
         let session = NotificationPagingSession(responses: [
             "/notifications?all=true&participating=false&per_page=100": (

@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Triage
 
@@ -91,6 +92,23 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationDetail, "Review-thread coverage is incomplete.")
     }
 
+    func testIncompleteOrganizationVisibilityCannotRenderFreshWorkspaceAsUpToDate() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            workspaceFreshness: FreshnessState(status: .fresh),
+            organizationVisibilityFreshness: FreshnessState(
+                status: .partial,
+                detail: "Organization visibility could not be refreshed. Showing saved organizations."
+            )
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(
+            state.synchronizationDetail,
+            "Organization visibility could not be refreshed. Showing saved organizations."
+        )
+    }
+
     func testCachedPartialItemPreservesItsConcreteCoverageDetail() {
         let state = makeState(
             workItems: [
@@ -139,6 +157,67 @@ final class WorkspacePresentationStateTests: XCTestCase {
         )
 
         XCTAssertEqual(state.synchronizationStatus, .upToDate)
+        XCTAssertTrue(state.canPresentSuccessfulEmptyQueue)
+    }
+
+    func testObservationFailureOverridesPriorFreshWorkspaceWhileKeepingCachedRows() {
+        let state = WorkspacePresentationState(
+            workItems: [makeWorkItem(id: "cached", freshness: .fresh)],
+            selectedAccountID: accountID,
+            selectedOrganizationID: organizationID,
+            organizationAccess: nil,
+            hasSSOAuthorizationHeader: false,
+            isRefreshing: false,
+            refreshError: "Triage could not update this workspace. Cached work remains available.",
+            workspaceFreshness: FreshnessState(status: .fresh),
+            now: now
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(
+            state.synchronizationDetail,
+            "Triage could not update this workspace. Cached work remains available."
+        )
+        XCTAssertFalse(state.canPresentSuccessfulEmptyQueue)
+    }
+
+    func testIncompleteCurrentRevisionCoverageOverridesFreshWorkspaceStatus() {
+        let state = makeState(
+            workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],
+            workspaceFreshness: FreshnessState(status: .fresh),
+            workspaceCoverage: CoverageEvaluation(
+                freshness: FreshnessState(
+                    status: .partial,
+                    detail: "3 coverage requirements incomplete."
+                ),
+                missing: []
+            )
+        )
+
+        XCTAssertEqual(state.synchronizationStatus, .partial)
+        XCTAssertEqual(state.synchronizationDetail, "3 coverage requirements incomplete.")
+        XCTAssertFalse(state.canPresentSuccessfulEmptyQueue)
+    }
+
+    func testEveryNonSuccessfulStatusRejectsSuccessfulEmptyQueueCopy() {
+        for status in [
+            WorkspacePresentationState.SynchronizationStatus.noAccount,
+            .noOrganization,
+            .initialSynchronization,
+            .refreshing,
+            .partial,
+            .ssoRequired,
+            .approvalRequired,
+            .offline,
+            .signInRequired,
+            .unavailable
+        ] {
+            XCTAssertFalse(
+                WorkspacePresentationState.emptyQueueCanUseSuccessCopy(for: status),
+                "\(status) must not present success-empty copy."
+            )
+        }
+        XCTAssertTrue(WorkspacePresentationState.emptyQueueCanUseSuccessCopy(for: .upToDate))
     }
 
     func testSynchronizationPresentationExposesWorkspaceLastSuccessfulSync() {
@@ -154,6 +233,25 @@ final class WorkspacePresentationStateTests: XCTestCase {
 
         XCTAssertEqual(state.lastSuccessfulSyncAt, successfulAt)
         XCTAssertEqual(state.synchronizationDetail, "Review-thread coverage is incomplete.")
+    }
+
+    @MainActor
+    func testSidebarStatusRetainsOnlyOneVisibleSecondaryLine() {
+        let lastSuccessfulSyncAt = now.addingTimeInterval(-3_600)
+        let label = SynchronizationStatusLabel(
+            status: .partial,
+            detail: "Review-thread coverage is incomplete.",
+            lastSuccessfulSyncAt: lastSuccessfulSyncAt
+        )
+
+        let secondaryText = label.secondaryText
+        let accessibilityLabel = label.accessibilityLabel
+
+        XCTAssertEqual(secondaryText, "Review-thread coverage is incomplete.")
+        XCTAssertEqual(
+            accessibilityLabel,
+            "Partial access. Review-thread coverage is incomplete. Last successful sync \(lastSuccessfulSyncAt.formatted(date: .abbreviated, time: .shortened))"
+        )
     }
 
     func testExplicitOrganizationAccessTakesPrecedenceOverWorkspaceFreshness() {
@@ -277,10 +375,37 @@ final class WorkspacePresentationStateTests: XCTestCase {
         XCTAssertEqual(state.synchronizationStatus, .upToDate)
     }
 
+    func testSidebarSynchronizationStatusIsReservedForAttentionStates() {
+        XCTAssertFalse(WorkspaceSidebarPresentation.showsSynchronizationStatus(.upToDate))
+        XCTAssertFalse(WorkspaceSidebarPresentation.showsSynchronizationStatus(.refreshing))
+        XCTAssertTrue(WorkspaceSidebarPresentation.showsSynchronizationStatus(.partial))
+        XCTAssertTrue(WorkspaceSidebarPresentation.showsSynchronizationStatus(.ssoRequired))
+        XCTAssertTrue(WorkspaceSidebarPresentation.showsSynchronizationStatus(.offline))
+    }
+
+    func testSystemDetailOnlySplitStateDoesNotOverwriteSidebarPreference() {
+        var splitState = WorkspaceSplitViewVisibilityState(isSidebarVisible: true)
+
+        splitState.receiveSystemVisibility(.detailOnly)
+
+        XCTAssertEqual(splitState.visibility, .detailOnly)
+        XCTAssertFalse(splitState.isSidebarPresented)
+
+        splitState.applyExplicitSidebarPreference(false)
+        XCTAssertEqual(splitState.visibility, .doubleColumn)
+        XCTAssertFalse(splitState.isSidebarPresented)
+
+        splitState.applyExplicitSidebarPreference(true)
+        XCTAssertEqual(splitState.visibility, .all)
+        XCTAssertTrue(splitState.isSidebarPresented)
+    }
+
     private func makeState(
         workItems: [WorkItem],
         access: OrganizationAccess? = nil,
-        workspaceFreshness: FreshnessState? = nil
+        workspaceFreshness: FreshnessState? = nil,
+        workspaceCoverage: CoverageEvaluation? = nil,
+        organizationVisibilityFreshness: FreshnessState? = nil
     ) -> WorkspacePresentationState {
         WorkspacePresentationState(
             workItems: workItems,
@@ -291,6 +416,8 @@ final class WorkspacePresentationStateTests: XCTestCase {
             isRefreshing: false,
             refreshError: nil,
             workspaceFreshness: workspaceFreshness,
+            workspaceCoverage: workspaceCoverage,
+            organizationVisibilityFreshness: organizationVisibilityFreshness,
             now: now
         )
     }

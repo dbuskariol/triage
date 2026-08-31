@@ -621,7 +621,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let secondPage = URL(
-            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"
         )!
         let service = GitHubTimelineRefreshService(
             client: GitHubTimelineClient(client: GitHubRESTClient(
@@ -670,7 +670,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let secondPage = URL(
-            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"
         )!
         let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
         let firstService = GitHubTimelineRefreshService(
@@ -711,7 +711,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let resumedService = GitHubTimelineRefreshService(
             client: GitHubTimelineClient(client: GitHubRESTClient(
                 transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
-                    "/repos/github/triage/issues/1/timeline?page=2": (
+                    "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (
                         Data(#"[{"id":"second","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                         [:]
                     )
@@ -736,7 +736,9 @@ final class TimelineEventRepositoryTests: XCTestCase {
             .snapshots(for: fixture.accountID)
         XCTAssertEqual(snapshots.count, 2)
         let secondSnapshot = try XCTUnwrap(
-            snapshots.first { $0.requestIdentity?.requestKey.hasSuffix("timeline?page=2") == true }
+            snapshots.first {
+                $0.requestIdentity?.requestKey.hasSuffix("timeline?page=2&per_page=100") == true
+            }
         )
         XCTAssertEqual(secondSnapshot.requestIdentity?.scope, fixture.scope)
         XCTAssertEqual(secondSnapshot.requestIdentity?.feature, .timelines)
@@ -802,7 +804,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let secondPage = URL(
-            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"
         )!
         let eventRepository = TimelineEventRepository(vault: fixture.vault)
         let duplicatePayload = Data(
@@ -815,7 +817,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
                         duplicatePayload,
                         ["Link": "<\(secondPage)>; rel=\"next\""]
                     ),
-                    "/repos/github/triage/issues/1/timeline?page=2": (duplicatePayload, [:])
+                    "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (duplicatePayload, [:])
                 ])),
                 credential: SecretValue("token")
             )),
@@ -844,7 +846,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
                         duplicatePayload,
                         ["Link": "<\(secondPage)>; rel=\"next\""]
                     ),
-                    "/repos/github/triage/issues/1/timeline?page=2": (
+                    "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (
                         Data(#"[{"id":"corrected","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                         [:]
                     )
@@ -1490,7 +1492,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let fixture = try await TimelineFixture()
         defer { fixture.remove() }
         let secondPage = URL(
-            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"
         )!
         let refreshed = try await timelineService(
             fixture: fixture,
@@ -1502,7 +1504,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
                         "Link": "<\(secondPage)>; rel=\"next\""
                     ]
                 ),
-                "/repos/github/triage/issues/1/timeline?page=2": (
+                "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (
                     Data(#"[{"id":"second","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                     [:]
                 )
@@ -1714,7 +1716,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
             observedAt: fixture.observedAt
         )
         let secondPage = URL(
-            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2"
+            string: "https://api.github.com/repos/github/triage/issues/1/timeline?page=2&per_page=100"
         )!
         let restClient = GitHubRESTClient(
             transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
@@ -1725,7 +1727,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
                         "Link": "<\(secondPage)>; rel=\"next\""
                     ]
                 ),
-                "/repos/github/triage/issues/1/timeline?page=2": (
+                "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (
                     Data(#"[{"id":"new-final","event":"mentioned","token":"ghp_rawTimelineSecret"}]"#.utf8),
                     [:]
                 )
@@ -1781,7 +1783,7 @@ final class TimelineEventRepositoryTests: XCTestCase {
         let recoveredService = GitHubTimelineRefreshService(
             client: GitHubTimelineClient(client: GitHubRESTClient(
                 transport: try GitHubRESTTransport(session: TimelineRefreshSession(responses: [
-                    "/repos/github/triage/issues/1/timeline?page=2": (
+                    "/repos/github/triage/issues/1/timeline?page=2&per_page=100": (
                         Data(#"[{"id":"new-final","event":"mentioned","created_at":"2026-01-02T00:00:00Z"}]"#.utf8),
                         [:]
                     )

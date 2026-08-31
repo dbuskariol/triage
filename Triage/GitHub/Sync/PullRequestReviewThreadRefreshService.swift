@@ -9,6 +9,23 @@ protocol PullRequestReviewThreadFetching: Sendable {
         pullRequestNodeID: GitHubNodeID,
         observedAt: Date
     ) async throws -> GitHubPullRequestReviewThreadInventory
+
+    func allReviewThreads(
+        pullRequestNodeID: GitHubNodeID,
+        observedAt: Date,
+        rootCheckpoint: ReviewThreadRootCheckpoint?
+    ) async throws -> GitHubPullRequestReviewThreadInventory
+}
+
+extension PullRequestReviewThreadFetching {
+    func allReviewThreads(
+        pullRequestNodeID: GitHubNodeID,
+        observedAt: Date,
+        rootCheckpoint: ReviewThreadRootCheckpoint?
+    ) async throws -> GitHubPullRequestReviewThreadInventory {
+        _ = rootCheckpoint
+        return try await allReviewThreads(pullRequestNodeID: pullRequestNodeID, observedAt: observedAt)
+    }
 }
 
 extension GitHubPullRequestReviewThreadClient: PullRequestReviewThreadFetching {}
@@ -149,9 +166,16 @@ actor PullRequestReviewThreadRefreshService {
             let threadInventory: GitHubPullRequestReviewThreadInventory
             do {
                 try await validateCurrentScope(scope)
+                let checkpoint = try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                    try Self.validateCurrentScope(scope, in: database)
+                    return try ReviewCandidateIncrementalStateRepository.threadCheckpoint(
+                        scope: scope, streamID: streamID, candidate: candidate, in: database
+                    )
+                }
                 threadInventory = try await fetcher.allReviewThreads(
                     pullRequestNodeID: candidate.nodeID,
-                    observedAt: observedAt
+                    observedAt: observedAt,
+                    rootCheckpoint: checkpoint
                 )
                 try await validateCurrentScope(scope)
             } catch is CancellationError {
@@ -167,6 +191,17 @@ actor PullRequestReviewThreadRefreshService {
                     attemptedAt: observedAt
                 )
                 try await publishFailure(failure, orThrow: error)
+                if let checkpoint = Self.rootCheckpoint(
+                    from: error, candidate: candidate
+                ) {
+                    try await candidateRepository.writeTransaction(accountID: accountID) { database in
+                        try Self.validateCurrentScope(scope, in: database)
+                        try ReviewCandidateIncrementalStateRepository.saveThreadCheckpoint(
+                            checkpoint, scope: scope, streamID: streamID, candidate: candidate,
+                            observedAt: observedAt, in: database
+                        )
+                    }
+                }
                 try await validateCurrentScope(scope)
                 let status = Self.status(
                     for: error,
@@ -213,6 +248,26 @@ actor PullRequestReviewThreadRefreshService {
                         observedAt: observedAt,
                         in: database
                     )
+                    try ReviewCandidateIncrementalStateRepository.save(
+                        .init(
+                            scope: scope,
+                            feature: .reviewThreads,
+                            streamID: streamID,
+                            candidate: candidate,
+                            firstPageRequestKey: "graphql:TriagePullRequestReviewThreads/pull-request=\(candidate.nodeID.rawValue)/after=none",
+                            highWater: observedAt,
+                            rootCursor: nil,
+                            updatedAt: observedAt
+                        ),
+                        in: database
+                    )
+                    try database.execute(sql: """
+                        DELETE FROM review_candidate_thread_checkpoint_pages
+                        WHERE account_id = ? AND organization_id = ? AND stream_id = ? AND candidate_node_id = ?
+                          AND credential_revision = ? AND capability_revision = ?
+                        """, arguments: [scope.accountID.rawValue, scope.organizationID.rawValue,
+                                            streamID.rawValue, candidate.nodeID.rawValue,
+                                            scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue])
                     try PullRequestReviewCandidateRepository.advanceFairSchedule(
                         after: candidate,
                         scope: scope,
@@ -224,6 +279,43 @@ actor PullRequestReviewThreadRefreshService {
                 }
             } catch ReviewCandidateCompleteTraversalReceiptRepositoryError.staleSynchronizationScope {
                 throw CancellationError()
+            } catch ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal,
+                    ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidRawPage {
+                // The completed source inventory contradicts its own raw
+                // membership evidence. Nothing from this candidate—including
+                // a failure envelope or fair-schedule cursor—may commit.
+                throw ReviewCandidateCompleteTraversalReceiptRepositoryError.invalidTraversal
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // The source traversal completed, but no destructive write is
+                // authoritative unless its receipt, replacement, and schedule
+                // commit together. Retain that source evidence as a terminal
+                // normalization failure and advance fairly in the same durable
+                // envelope transaction; prior normalized rows remain intact
+                // because the publication transaction rolled back.
+                let rawPages = threadInventory.rawPages
+                let terminalRequestKey = rawPages.last?.requestKey
+                    ?? "review-thread-publication/\(candidate.nodeID.rawValue)"
+                let failure = GitHubPullRequestReviewThreadTraversalFailure(
+                    reason: .normalizationFailed,
+                    rawPages: rawPages,
+                    terminalRequestKey: terminalRequestKey,
+                    remoteFailure: nil,
+                    ssoHeader: nil
+                )
+                let publication = try Self.failurePublication(
+                    for: failure,
+                    candidate: candidate,
+                    scope: scope,
+                    streamID: streamID,
+                    githubOrganizationID: githubOrganizationID,
+                    attemptedAt: observedAt
+                )
+                try await publishFailure(publication, orThrow: error)
+                try await validateCurrentScope(scope)
+                outcomes.append(outcome(for: candidate, status: .failed))
+                break
             }
             try await validateCurrentScope(scope)
             outcomes.append(outcome(for: candidate, status: .refreshed))
@@ -253,6 +345,44 @@ actor PullRequestReviewThreadRefreshService {
                 OrganizationSchedulerStateRepositoryError.organizationScopeMismatch {
             throw CancellationError()
         }
+    }
+
+    /// Only a nonterminal, contiguous root prefix can be resumed. A completed
+    /// root connection is deliberately not checkpointed: GitHub does not
+    /// guarantee stable connection ordering across later traversals.
+    private nonisolated static func rootCheckpoint(
+        from error: Error,
+        candidate: PullRequestReviewCandidate
+    ) -> ReviewThreadRootCheckpoint? {
+        guard let failure = error as? GitHubPullRequestReviewThreadTraversalFailure else { return nil }
+        let prefix = "graphql:TriagePullRequestReviewThreads/pull-request=\(candidate.nodeID.rawValue)/after="
+        let pages = failure.rawPages.prefix {
+            $0.requestKey.hasPrefix(prefix) && !$0.requestKey.hasSuffix("/terminal")
+        }
+        guard !pages.isEmpty else { return nil }
+        var expectedAfter: String? = nil
+        var nextCursor: String?
+        for (offset, page) in pages.enumerated() {
+            guard page.endpoint == "graphql:TriagePullRequestReviewThreads/page=\(offset + 1)",
+                  page.requestKey == prefix + cursorComponent(expectedAfter),
+                  let root = try? JSONSerialization.jsonObject(with: page.payload) as? [String: Any],
+                  let data = root["data"] as? [String: Any],
+                  let node = data["node"] as? [String: Any], node["id"] as? String == candidate.nodeID.rawValue,
+                  let threads = node["reviewThreads"] as? [String: Any],
+                  let pageInfo = threads["pageInfo"] as? [String: Any],
+                  let hasNext = pageInfo["hasNextPage"] as? Bool,
+                  let endCursor = pageInfo["endCursor"] as? String, !endCursor.isEmpty
+            else { return nil }
+            expectedAfter = endCursor
+            nextCursor = hasNext ? endCursor : nil
+        }
+        guard let nextCursor else { return nil }
+        return .init(rootCursor: nextCursor, rawPrefix: Array(pages))
+    }
+
+    private nonisolated static func cursorComponent(_ cursor: String?) -> String {
+        guard let cursor else { return "none" }
+        return Data(cursor.utf8).base64EncodedString()
     }
 
     /// Builds the complete source topology before any normalized rows are

@@ -6,6 +6,7 @@ enum WorkItemGroupingDecisionRepositoryError: Error, Equatable, Sendable {
     case duplicateDecision
     case invalidDecision
     case nodeScopeMismatch
+    case evidenceAuthorityMismatch
     case invalidPersistedData
 }
 
@@ -38,6 +39,9 @@ actor WorkItemGroupingDecisionRepository {
                 accountID: accountID,
                 in: database
             )
+            for decision in decisions {
+                try Self.validateDecision(decision, accountID: accountID, in: database)
+            }
             try database.execute(
                 sql: """
                     DELETE FROM grouping_decisions
@@ -113,6 +117,60 @@ actor WorkItemGroupingDecisionRepository {
         ) ?? 0
         guard matchingCount == nodeIDs.count else {
             throw WorkItemGroupingDecisionRepositoryError.nodeScopeMismatch
+        }
+    }
+
+    /// Grouping decisions are the one manual override in the graph. They are
+    /// consequently never allowed to masquerade as a GitHub-derived strong
+    /// edge: both endpoint nodes and every proof must be from the same local
+    /// workflow scope.
+    private nonisolated static func validateDecision(
+        _ decision: WorkItemGroupingDecision,
+        accountID: AccountID,
+        in database: Database
+    ) throws {
+        guard decision.strength == .userConfirmed,
+              !decision.evidence.isEmpty,
+              Set(decision.evidence.map(\.id)).count == decision.evidence.count
+        else {
+            throw WorkItemGroupingDecisionRepositoryError.invalidDecision
+        }
+        guard let row = try Row.fetchOne(
+            database,
+            sql: """
+                SELECT source.organization_id AS source_organization_id,
+                       destination.organization_id AS destination_organization_id
+                FROM github_nodes AS source
+                JOIN github_nodes AS destination
+                  ON destination.github_node_id = ?
+                WHERE source.github_node_id = ?
+                  AND source.account_id = ? AND destination.account_id = ?
+                """,
+            arguments: [
+                decision.destinationNodeID.rawValue,
+                decision.sourceNodeID.rawValue,
+                accountID.rawValue,
+                accountID.rawValue
+            ]
+        ),
+        let sourceOrganizationID = OrganizationID(rawValue: row["source_organization_id"]),
+        let destinationOrganizationID = OrganizationID(rawValue: row["destination_organization_id"]),
+        sourceOrganizationID == destinationOrganizationID
+        else {
+            throw WorkItemGroupingDecisionRepositoryError.nodeScopeMismatch
+        }
+        guard decision.evidence.allSatisfy({ evidence in
+            evidence.source == .localWorkflow
+                && evidence.locator == .localWorkflow("grouping-decision")
+                && evidence.authority == .localWorkflow(
+                    accountID: accountID,
+                    organizationID: sourceOrganizationID
+                )
+                && evidence.confidence == .confirmed
+                && evidence.confirmation == .confirmed
+                && evidence.rawSnapshotID == nil
+        }) else {
+            throw WorkItemGroupingDecisionRepositoryError.evidenceAuthorityMismatch
         }
     }
 

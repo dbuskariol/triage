@@ -30,7 +30,20 @@ struct DerivedIntelligenceInputSnapshot: Sendable {
     /// authorities, suitable for binding a durable derived projection.
     let aggregateSourceRevision: String
 
+    /// The exact normalized-source authority that an observation owner must
+    /// compare with its durable derived run before publishing a projection.
+    let publicationMarker: DerivedIntelligenceSourceRevisionMarker
+
     var isProvisional: Bool { input.isProvisional }
+}
+
+/// Revision-qualified hand-off for consumers that publish derived results.
+/// It intentionally contains no database handle or observation state: the
+/// owner can compare it with its observed durable run and suppress stale
+/// publication without recomputing presentation data.
+struct DerivedIntelligenceSourceRevisionMarker: Equatable, Sendable {
+    let scope: SynchronizationScope
+    let sourceRevision: String
 }
 
 enum DerivedIntelligenceInputAdapterError: Error, Equatable, Sendable {
@@ -48,10 +61,14 @@ enum DerivedIntelligenceInputAdapterError: Error, Equatable, Sendable {
 actor DerivedIntelligenceInputAdapter {
     private let vault: AccountVault
     private let workItems: WorkItemRepository
+    private let aiAnalysis: AIAnalysisRepository
+    private let repositoryRankingPreferences: RepositoryRankingPreferenceRepository
 
     init(vault: AccountVault) {
         self.vault = vault
         self.workItems = WorkItemRepository(vault: vault)
+        self.aiAnalysis = AIAnalysisRepository(vault: vault)
+        self.repositoryRankingPreferences = RepositoryRankingPreferenceRepository(vault: vault)
     }
 
     func snapshot(
@@ -96,6 +113,7 @@ actor DerivedIntelligenceInputAdapter {
             workItems: persistedWorkItems,
             fence: after
         )
+        let repositoryPreferences = try await repositoryRankingPreferences.preferences(for: scope)
         // Supplemental timeline, review, thread, and project reads occur in a
         // separate vault read. Re-fence afterward so a normalized commit or
         // authority rotation cannot publish a mixed input snapshot.
@@ -106,16 +124,27 @@ actor DerivedIntelligenceInputAdapter {
         let refreshedItems = persistedWorkItems.map {
             Self.replacing($0, freshness: Self.freshness(for: $0, coverage: fullCoverage, fence: after))
         }
-        let inputItems = refreshedItems.map { workItem in
-            DerivedIntelligenceItemInput(
+        var inputItems: [DerivedIntelligenceItemInput] = []
+        inputItems.reserveCapacity(refreshedItems.count)
+        for workItem in refreshedItems {
+            let document = support.documents[workItem.id] ?? Self.document(for: workItem)
+            let cacheDecision = try await aiCacheDecision(
+                for: workItem,
+                document: document,
+                sourceRevision: after.primarySources.first(where: { $0.workItemID == workItem.id })?.sourceRevision,
+                scope: scope,
+                selectedModelID: aiPolicy.selectedModelID,
+                evaluatedAt: evaluatedAt
+            )
+            inputItems.append(DerivedIntelligenceItemInput(
                 workItem: workItem,
                 timeline: support.timelines[workItem.id] ?? [],
                 pullRequestReviews: support.reviews[workItem.id] ?? [],
                 pullRequestReviewThreads: support.reviewThreads[workItem.id] ?? [],
-                searchDocument: support.documents[workItem.id] ?? Self.document(for: workItem),
-                hasChangedAIFingerprint: true,
-                hasValidCachedAIAnalysis: false
-            )
+                searchDocument: document,
+                hasChangedAIFingerprint: cacheDecision.hasChanged,
+                hasValidCachedAIAnalysis: cacheDecision.hasCachedAnalysis
+            ))
         }
 
         let sourceStates = support.sourceStates.sorted { left, right in
@@ -130,6 +159,14 @@ actor DerivedIntelligenceInputAdapter {
         let isProvisional = !fullCoverage.isComplete
             || after.primarySources.contains(where: { !$0.isCurrent })
             || sourceStates.contains(where: { $0.availability != .trusted })
+        let aggregateSourceRevision = DerivedIntelligenceSourceRevision.aggregate(
+            primaryRevisions: sourceRevisions,
+            supplementalSources: after.supplementalSources
+        )
+        let marker = DerivedIntelligenceSourceRevisionMarker(
+            scope: scope,
+            sourceRevision: aggregateSourceRevision
+        )
         return DerivedIntelligenceInputSnapshot(
             input: DerivedIntelligenceInput(
                 scope: scope,
@@ -140,17 +177,85 @@ actor DerivedIntelligenceInputAdapter {
                 businessDayPolicy: businessDayPolicy,
                 calendar: calendar,
                 aiPolicy: aiPolicy,
+                repositoryPreferences: repositoryPreferences,
                 isProvisional: isProvisional,
                 evaluatedAt: evaluatedAt,
                 items: inputItems
             ),
             sourceStates: sourceStates,
             sourceRevisions: sourceRevisions,
-            aggregateSourceRevision: DerivedIntelligenceSourceRevision.aggregate(
-                primaryRevisions: sourceRevisions,
-                supplementalSources: after.supplementalSources
+            aggregateSourceRevision: aggregateSourceRevision,
+            publicationMarker: marker
+        )
+    }
+
+    /// Returns the current normalized-source marker without building rule or
+    /// AI inputs. Observation owners can call this to gate an already durable
+    /// projection before notifying presentation consumers.
+    func currentSourceRevisionMarker(
+        for scope: SynchronizationScope,
+        evaluatedAt: Date = .now
+    ) async throws -> DerivedIntelligenceSourceRevisionMarker {
+        guard scope.accountID == vault.accountID else {
+            throw DerivedIntelligenceInputAdapterError.accountScopeMismatch
+        }
+        guard evaluatedAt.timeIntervalSinceReferenceDate.isFinite else {
+            throw DerivedIntelligenceInputAdapterError.invalidEvaluationDate
+        }
+        let sourceFence = try await fence(for: scope, evaluatedAt: evaluatedAt)
+        let primaryRevisions = Dictionary(uniqueKeysWithValues: sourceFence.primarySources.map {
+            ($0.workItemID, $0.sourceRevision)
+        })
+        return DerivedIntelligenceSourceRevisionMarker(
+            scope: scope,
+            sourceRevision: DerivedIntelligenceSourceRevision.aggregate(
+                primaryRevisions: primaryRevisions,
+                supplementalSources: sourceFence.supplementalSources
             )
         )
+    }
+
+    private func aiCacheDecision(
+        for workItem: WorkItem,
+        document: SearchDocument,
+        sourceRevision: String?,
+        scope: SynchronizationScope,
+        selectedModelID: String?,
+        evaluatedAt: Date
+    ) async throws -> (hasChanged: Bool, hasCachedAnalysis: Bool) {
+        guard let sourceRevision else {
+            throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+        }
+        let reasons = workItem.attentionReasons.map(\.id).sorted()
+        guard let candidateID = AIRequestID(rawValue: "derived-\(workItem.id.rawValue)") else {
+            throw DerivedIntelligenceInputAdapterError.invalidPersistedData
+        }
+        let input = CopilotAnalysisInput(
+            candidateID: candidateID,
+            workItemTitle: workItem.title,
+            workItemState: workItem.state.rawValue,
+            deterministicReasons: reasons.isEmpty ? ["derived-input"] : reasons,
+            body: document.body,
+            conversation: [],
+            evidenceIDs: []
+        )
+        let fingerprint = try AIFingerprint.make(
+            scope: scope,
+            input: input,
+            sourceRevision: sourceRevision,
+            selectedModelID: selectedModelID,
+            promptVersion: 1,
+            outputSchemaVersion: 1
+        )
+        let key = AIAnalysisCacheKey(
+            workItemID: workItem.id,
+            fingerprint: fingerprint,
+            selectedModelID: selectedModelID,
+            promptVersion: 1,
+            outputSchemaVersion: 1
+        )
+        let analysis = try await aiAnalysis.validAnalysis(for: scope, key: key, at: evaluatedAt)
+        return (analysis == nil, analysis != nil)
     }
 
     private struct PrimarySource: Equatable, Sendable {
@@ -208,10 +313,19 @@ actor DerivedIntelligenceInputAdapter {
 
             let coverage = try CoverageRepository.currentRecords(for: scope, in: database)
             let requirements = try CoverageRequirementProfile.build(for: scope, coverage: coverage, in: database)
-            let supplementalSources = try DerivedIntelligenceSourceRevision.supplementalSources(
+            var supplementalSources = try DerivedIntelligenceSourceRevision.supplementalSources(
                 for: scope,
                 in: database
             )
+            supplementalSources += try RepositoryRankingPreferenceRepository.sourceRevisions(
+                for: scope,
+                in: database
+            )
+            supplementalSources.sort {
+                if $0.kind != $1.kind { return $0.kind < $1.kind }
+                if $0.identity != $1.identity { return $0.identity < $1.identity }
+                return $0.revision < $1.revision
+            }
             let teams = try Row.fetchAll(
                 database,
                 sql: """
@@ -246,8 +360,16 @@ actor DerivedIntelligenceInputAdapter {
                            github_nodes.last_observed_at_ms
                     FROM work_items
                     JOIN github_nodes ON github_nodes.github_node_id = work_items.primary_node_id
+                    LEFT JOIN work_item_group_memberships
+                      ON work_item_group_memberships.constituent_work_item_id = work_items.id
+                     AND work_item_group_memberships.account_id = work_items.account_id
+                     AND work_item_group_memberships.organization_id = work_items.organization_id
                     WHERE work_items.account_id = ? AND work_items.organization_id = ?
                       AND github_nodes.account_id = ? AND github_nodes.organization_id = ?
+                      AND (
+                          work_item_group_memberships.constituent_work_item_id IS NULL
+                          OR work_item_group_memberships.canonical_work_item_id = work_items.id
+                      )
                     ORDER BY work_items.id
                     """,
                 arguments: [
@@ -355,13 +477,20 @@ actor DerivedIntelligenceInputAdapter {
                 }
 
                 let isPullRequest = primary.kind == .pullRequest
-                let reviewsTrusted = isPullRequest && itemTrusted && Self.featureTrusted(
+                let reviewsCoverageTrusted = isPullRequest && itemTrusted && Self.featureTrusted(
                     .reviews,
                     repositoryID: nil,
                     requirements: fence.coverageRequirements,
                     records: fence.coverageRecords,
                     scope: scope
                 )
+                let reviewsReceiptTrusted = try Self.reviewCandidateTrusted(
+                    primary,
+                    feature: .reviews,
+                    scope: scope,
+                    in: database
+                )
+                let reviewsTrusted = reviewsCoverageTrusted && reviewsReceiptTrusted
                 if isPullRequest {
                     states.append(.init(
                         workItemID: workItem.id,
@@ -373,13 +502,20 @@ actor DerivedIntelligenceInputAdapter {
                     }
                 }
 
-                let threadsTrusted = isPullRequest && itemTrusted && Self.featureTrusted(
+                let threadsCoverageTrusted = isPullRequest && itemTrusted && Self.featureTrusted(
                     .reviewThreads,
                     repositoryID: nil,
                     requirements: fence.coverageRequirements,
                     records: fence.coverageRecords,
                     scope: scope
                 )
+                let threadsReceiptTrusted = try Self.reviewCandidateTrusted(
+                    primary,
+                    feature: .reviewThreads,
+                    scope: scope,
+                    in: database
+                )
+                let threadsTrusted = threadsCoverageTrusted && threadsReceiptTrusted
                 if isPullRequest {
                     states.append(.init(
                         workItemID: workItem.id,
@@ -782,6 +918,45 @@ actor DerivedIntelligenceInputAdapter {
                 && $0.status == .complete
                 && $0.lastSuccessfulAt != nil
         }
+    }
+
+    /// Organization-wide review coverage proves that the current batch reached
+    /// an endpoint, not that this pull request's current revision was the one
+    /// safely replaced. Require its immutable complete traversal receipt before
+    /// exposing review-derived facts as trusted input.
+    private nonisolated static func reviewCandidateTrusted(
+        _ primary: PrimarySource,
+        feature: CoverageFeature,
+        scope: SynchronizationScope,
+        in database: Database
+    ) throws -> Bool {
+        guard let repositoryID = primary.repositoryID,
+              feature == .reviews || feature == .reviewThreads
+        else { return false }
+        let streamPrefix = feature == .reviews
+            ? "pull-request-reviews-"
+            : "pull-request-review-threads-"
+        let streamID = "\(streamPrefix)\(scope.organizationID.rawValue)"
+        return try Bool.fetchOne(
+            database,
+            sql: """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM review_candidate_complete_traversal_receipts
+                    WHERE account_id = ? AND organization_id = ?
+                      AND feature = ? AND stream_id = ?
+                      AND candidate_node_id = ? AND repository_id = ?
+                      AND candidate_source_revision = ?
+                      AND credential_revision = ? AND capability_revision = ?
+                )
+                """,
+            arguments: [
+                scope.accountID.rawValue, scope.organizationID.rawValue,
+                feature.rawValue, streamID, primary.nodeID.rawValue,
+                repositoryID.rawValue, primary.sourceRevision,
+                scope.credentialRevision.rawValue, scope.capabilityRevision.rawValue
+            ]
+        ) ?? false
     }
 
     /// Coverage proves the candidate stream completed, while published page

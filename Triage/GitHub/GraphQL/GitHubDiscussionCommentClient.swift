@@ -111,7 +111,9 @@ actor GitHubDiscussionCommentClient {
             let response = try await commentResponse(discussionNodeID: discussionNodeID, after: cursor, page: pages.count + 1, organizationID: githubOrganizationID, existing: pages)
             let page = response.page; try budget.consume(cost: response.payload.rateLimit.cost, bytes: page.payload.count, source: .comments, pages: pages + [page]); pages.append(page)
             guard let discussion = response.payload.node, discussion.id == discussionNodeID.rawValue else { throw GitHubDiscussionCommentClientError.missingRequestedNode(.comments, pages) }
-            guard !discussion.comments.nodes.contains(where: { $0 == nil }) else { throw GitHubDiscussionCommentClientError.incompleteConnection(.comments, pages) }
+            guard discussion.comments.nodes.count <= 50,
+                  !discussion.comments.nodes.contains(where: { $0 == nil })
+            else { throw GitHubDiscussionCommentClientError.incompleteConnection(.comments, pages) }
             comments.append(contentsOf: discussion.comments.nodes.compactMap { $0 })
             guard discussion.comments.pageInfo.hasNextPage else { break }
             guard let next = discussion.comments.pageInfo.endCursor, cursors.insert(next).inserted else { throw GitHubDiscussionCommentClientError.paginationLoop(.comments, pages) }
@@ -128,7 +130,9 @@ actor GitHubDiscussionCommentClient {
                 let response = try await replyResponse(discussionNodeID: discussionNodeID, commentID: commentID, after: replyCursor, page: replyPage + 1, organizationID: githubOrganizationID, existing: pages)
                 let page = response.page; try budget.consume(cost: response.payload.rateLimit.cost, bytes: page.payload.count, source: .replies, pages: pages + [page]); pages.append(page)
                 guard let returned = response.payload.node, returned.id == commentID.rawValue else { throw GitHubDiscussionCommentClientError.missingRequestedNode(.replies, pages) }
-                guard !returned.replies.nodes.contains(where: { $0 == nil }) else { throw GitHubDiscussionCommentClientError.incompleteConnection(.replies, pages) }
+                guard returned.replies.nodes.count <= 50,
+                      !returned.replies.nodes.contains(where: { $0 == nil })
+                else { throw GitHubDiscussionCommentClientError.incompleteConnection(.replies, pages) }
                 replies.append(contentsOf: returned.replies.nodes.compactMap { $0 })
                 replyPage += 1
                 guard returned.replies.pageInfo.hasNextPage else { break }
@@ -146,7 +150,7 @@ actor GitHubDiscussionCommentClient {
     private func commentResponse(discussionNodeID: GitHubNodeID, after: String?, page: Int, organizationID: UInt64, existing: [GitHubDiscussionCommentRawPage]) async throws -> (payload: GitHubDiscussionCommentPagePayload, page: GitHubDiscussionCommentRawPage) {
         let key = "graphql:TriageDiscussionComments/discussion=\(discussionNodeID.rawValue)/after=\(Self.cursorComponent(after))"
         do {
-            let result = try await client.executePreservingUndecodableResponse(commentsQuery, variables: DiscussionCursorVariables(discussionID: discussionNodeID.rawValue, after: after), as: GitHubDiscussionCommentPagePayload.self)
+            let result = try await client.executePreservingFailureResponse(commentsQuery, variables: DiscussionCursorVariables(discussionID: discussionNodeID.rawValue, after: after), as: GitHubDiscussionCommentPagePayload.self)
             try Task.checkCancellation()
             switch result {
             case let .undecodable(value):
@@ -159,6 +163,12 @@ actor GitHubDiscussionCommentClient {
                 guard value.errors.isEmpty else { throw GitHubDiscussionCommentClientError.partialResponse(.comments, existing + [raw]) }
                 guard let payload = value.data else { throw GitHubDiscussionCommentClientError.partialResponse(.comments, existing + [raw]) }
                 return (payload, raw)
+            case let .failed(value):
+                let raw = GitHubDiscussionCommentRawPage(source: .comments, endpoint: "graphql:TriageDiscussionComments/discussion=\(discussionNodeID.rawValue)/page=\(page)", requestKey: key, payload: value.payload)
+                if let sso = value.metadata.ssoHeader?.scoped(to: organizationID) {
+                    throw GitHubDiscussionCommentClientError.ssoResponse(.comments, existing + [raw], sso)
+                }
+                throw GitHubDiscussionCommentClientError.requestFailed(.comments, existing + [raw], .requestFailed(value.failure))
             }
         } catch let error as GitHubDiscussionCommentClientError { throw error }
         catch let error as GitHubGraphQLError { throw GitHubDiscussionCommentClientError.requestFailed(.comments, existing, error) }
@@ -167,7 +177,7 @@ actor GitHubDiscussionCommentClient {
     private func replyResponse(discussionNodeID: GitHubNodeID, commentID: GitHubNodeID, after: String?, page: Int, organizationID: UInt64, existing: [GitHubDiscussionCommentRawPage]) async throws -> (payload: GitHubDiscussionReplyPagePayload, page: GitHubDiscussionCommentRawPage) {
         let key = "graphql:TriageDiscussionCommentReplies/discussion=\(discussionNodeID.rawValue)/comment=\(commentID.rawValue)/after=\(Self.cursorComponent(after))"
         do {
-            let result = try await client.executePreservingUndecodableResponse(repliesQuery, variables: ReplyCursorVariables(commentID: commentID.rawValue, after: after), as: GitHubDiscussionReplyPagePayload.self)
+            let result = try await client.executePreservingFailureResponse(repliesQuery, variables: ReplyCursorVariables(commentID: commentID.rawValue, after: after), as: GitHubDiscussionReplyPagePayload.self)
             try Task.checkCancellation()
             switch result {
             case let .undecodable(value):
@@ -179,6 +189,12 @@ actor GitHubDiscussionCommentClient {
                 if let sso = value.metadata.ssoHeader?.scoped(to: organizationID) { throw GitHubDiscussionCommentClientError.ssoResponse(.replies, existing + [raw], sso) }
                 guard value.errors.isEmpty, let payload = value.data else { throw GitHubDiscussionCommentClientError.partialResponse(.replies, existing + [raw]) }
                 return (payload, raw)
+            case let .failed(value):
+                let raw = GitHubDiscussionCommentRawPage(source: .replies, endpoint: "graphql:TriageDiscussionCommentReplies/discussion=\(discussionNodeID.rawValue)/comment=\(commentID.rawValue)/page=\(page)", requestKey: key, payload: value.payload)
+                if let sso = value.metadata.ssoHeader?.scoped(to: organizationID) {
+                    throw GitHubDiscussionCommentClientError.ssoResponse(.replies, existing + [raw], sso)
+                }
+                throw GitHubDiscussionCommentClientError.requestFailed(.replies, existing + [raw], .requestFailed(value.failure))
             }
         } catch let error as GitHubDiscussionCommentClientError { throw error }
         catch let error as GitHubGraphQLError { throw GitHubDiscussionCommentClientError.requestFailed(.replies, existing, error) }
