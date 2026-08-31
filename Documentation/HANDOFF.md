@@ -469,6 +469,11 @@ not a claim that external or release acceptance has occurred.
 
 ### Known historical results and current blockers
 
+The temporary `.xcresult` bundles named below were inspected and summarized
+before generated build data was removed to reclaim disk space. Their paths
+identify the recorded runs; the bundles are not retained in the checkout or in
+`/private/tmp`.
+
 | Evidence | Status | Scope |
 | --- | --- | --- |
 | Full unit and fail-closed XPC suite | Historical pass: 997/997, zero failures/skips. | Recorded pre-current-worktree result only. |
