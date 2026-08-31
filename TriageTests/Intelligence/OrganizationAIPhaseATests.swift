@@ -707,7 +707,7 @@ final class OrganizationAIPhaseATests: XCTestCase {
         // newer user choice must not be overwritten when that older disable
         // eventually resumes.
         let disable = Task { try await controller.cancelAndDisable(for: fixture.scope, at: fixture.date) }
-        await Task.yield()
+        await gate.waitUntilCancelled()
         let enable = Task {
             try await controller.recordConsent(.init(
                 accountID: fixture.accountID,
@@ -1223,18 +1223,33 @@ private actor ExternalStateBox {
 private actor AnalysisGate {
     private var entered = false
     private var opened = false
+    private var cancellationObserved = false
     private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
     private var operationWaiters: [CheckedContinuation<Void, Never>] = []
     func wait() async {
         entered = true
         entryWaiters.forEach { $0.resume() }
         entryWaiters.removeAll()
         guard !opened else { return }
-        await withCheckedContinuation { operationWaiters.append($0) }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { operationWaiters.append($0) }
+        } onCancel: {
+            Task { await self.observeCancellation() }
+        }
     }
     func waitUntilEntered() async {
         guard !entered else { return }
         await withCheckedContinuation { entryWaiters.append($0) }
+    }
+    func waitUntilCancelled() async {
+        guard !cancellationObserved else { return }
+        await withCheckedContinuation { cancellationWaiters.append($0) }
+    }
+    private func observeCancellation() {
+        cancellationObserved = true
+        cancellationWaiters.forEach { $0.resume() }
+        cancellationWaiters.removeAll()
     }
     func open() {
         opened = true

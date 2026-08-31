@@ -485,11 +485,20 @@ private enum CopilotRuntimeGzip {
             stream.src_ptr = base; stream.src_size = source.count
             repeat {
                 var buffer = [UInt8](repeating: 0, count: 32 * 1_024)
+                let inputBytesBefore = stream.src_size
                 status = try buffer.withUnsafeMutableBytes { destination in
                     stream.dst_ptr = destination.bindMemory(to: UInt8.self).baseAddress!; stream.dst_size = destination.count
                     let result = compression_stream_process(&stream, 0)
-                    output.append(destination.bindMemory(to: UInt8.self).baseAddress!, count: destination.count - stream.dst_size)
+                    let outputBytes = destination.count - stream.dst_size
+                    output.append(destination.bindMemory(to: UInt8.self).baseAddress!, count: outputBytes)
                     guard output.count <= maximumOutputBytes else { throw CopilotRuntimeAcquisitionError.archiveTooLarge }
+                    // A fixed, malformed input can make Compression report
+                    // `OK` while waiting for more bytes. There are no more
+                    // bytes to supply here, so continuing would spin forever.
+                    guard result != COMPRESSION_STATUS_OK
+                        || stream.src_size < inputBytesBefore
+                        || outputBytes > 0
+                    else { throw CopilotRuntimeAcquisitionError.invalidArchive }
                     return result
                 }
             } while status == COMPRESSION_STATUS_OK
