@@ -254,6 +254,28 @@ final class WorkspacePresentationStateTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testSidebarStatusAccessibilitySeparatesFragmentsWithoutDuplicatingTerminalPunctuation() {
+        let lastSuccessfulSyncAt = now.addingTimeInterval(-3_600)
+        let timestamp = lastSuccessfulSyncAt.formatted(date: .abbreviated, time: .shortened)
+
+        for (detail, expected) in [
+            ("Coverage is incomplete", "Partial access. Coverage is incomplete. Last successful sync \(timestamp)"),
+            ("Coverage is incomplete!", "Partial access. Coverage is incomplete! Last successful sync \(timestamp)"),
+            ("Coverage is incomplete?", "Partial access. Coverage is incomplete? Last successful sync \(timestamp)")
+        ] {
+            let label = SynchronizationStatusLabel(
+                status: .partial,
+                detail: detail,
+                lastSuccessfulSyncAt: lastSuccessfulSyncAt
+            )
+            let accessibilityLabel = label.accessibilityLabel
+
+            XCTAssertEqual(accessibilityLabel, expected)
+            XCTAssertFalse(accessibilityLabel.contains(".."))
+        }
+    }
+
     func testExplicitOrganizationAccessTakesPrecedenceOverWorkspaceFreshness() {
         let state = makeState(
             workItems: [makeWorkItem(id: "fresh", freshness: .fresh)],

@@ -231,6 +231,40 @@ final class DailyActiveAccountIdentityRefreshServiceTests: XCTestCase {
         let persisted = try await AccountRepository(vault: fixture.vault).accounts()
         XCTAssertEqual(persisted, [fixture.account])
     }
+
+    func testCancellationRacingAnInventoryFailureNeverPublishesRefreshedUser() async throws {
+        let fixture = try await DailyIdentityFixture()
+        defer { fixture.remove() }
+        let service = DailyActiveAccountIdentityRefreshService(
+            vault: fixture.vault,
+            loadAuthenticatedUser: { fixture.user() },
+            loadOrganizationInventory: { _, _ in
+                withUnsafeCurrentTask { task in
+                    task?.cancel()
+                }
+                throw URLError(.notConnectedToInternet)
+            },
+            clock: {
+                fixture.observedAt.addingTimeInterval(RefreshCadence.dailyCapabilityProbe.baseInterval)
+            }
+        )
+
+        let result = await Task {
+            do {
+                _ = try await service.refreshIfDue(for: fixture.account)
+                return Result<Void, Error>.success(())
+            } catch {
+                return Result<Void, Error>.failure(error)
+            }
+        }.value
+
+        guard case let .failure(error) = result else {
+            return XCTFail("Cancellation must win over fallback profile publication.")
+        }
+        XCTAssertTrue(error is CancellationError)
+        let persisted = try await AccountRepository(vault: fixture.vault).accounts()
+        XCTAssertEqual(persisted, [fixture.account])
+    }
 }
 
 private final class DailyIdentityFixture: @unchecked Sendable {

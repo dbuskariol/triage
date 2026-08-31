@@ -160,11 +160,30 @@ struct SynchronizationStatusLabel: View {
     }
 
     var accessibilityLabel: String {
-        [status.title, detail, lastSuccessfulSyncAt.map {
-            "Last successful sync \($0.formatted(date: .abbreviated, time: .shortened))"
-        }]
-        .compactMap { $0 }
-        .joined(separator: ". ")
+        Self.joinAccessibilitySentences([
+            status.title,
+            detail,
+            lastSuccessfulSyncAt.map {
+                "Last successful sync \($0.formatted(date: .abbreviated, time: .shortened))"
+            }
+        ])
+    }
+
+    /// Details are complete source sentences in most states, while a few
+    /// status inputs are fragments. Join both forms without manufacturing a
+    /// duplicate terminal period for VoiceOver or the Help tooltip.
+    private static func joinAccessibilitySentences(_ components: [String?]) -> String {
+        components
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: "") { result, component in
+                guard !result.isEmpty else {
+                    result = component
+                    return
+                }
+                let separator = result.last.map { ".!?…".contains($0) } == true ? " " : ". "
+                result += separator + component
+            }
     }
 
     /// Source-list rows remain compact during degraded states. VoiceOver and

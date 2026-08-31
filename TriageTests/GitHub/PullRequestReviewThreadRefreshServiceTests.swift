@@ -60,7 +60,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         XCTAssertEqual(result.coverageAssessment.status, .complete)
     }
 
-    func testLocalReplacementValidationFailureDoesNotAdvanceAndCandidateRemainsSelected() async throws {
+    func testDuplicateThreadEvidenceFailsClosedAndCandidateRemainsSelected() async throws {
         let fixture = try await ReviewThreadRefreshFixture()
         defer { fixture.remove() }
         let valid = fixture.inventory(threadID: "THREAD_1", commentID: "COMMENT_1")
@@ -69,19 +69,24 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             rawPages: valid.rawPages,
             metrics: valid.metrics
         )
-        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+        let before = try await fixture.durableState()
+
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
                 fixture.firstPullRequest.nodeID: .inventory(invalid)
             ])).refresh(
                 scope: fixture.scope,
                 githubOrganizationID: fixture.githubOrganizationID,
                 streamID: fixture.streamID
             )
-        XCTAssertEqual(result.outcomes.map(\.status), [.failed])
-        XCTAssertEqual(result.coverageAssessment.status, .failed)
-        let failure = try await fixture.vault.read { database in
-            try String.fetchOne(database, sql: "SELECT classification FROM review_candidate_failure_envelopes")
+        }) { error in
+            XCTAssertEqual(
+                error as? ReviewCandidateCompleteTraversalReceiptRepositoryError,
+                .invalidTraversal
+            )
         }
-        XCTAssertEqual(failure, ReviewCandidateFailureClassification.normalizationFailure.rawValue)
+        let afterRejectedTraversal = try await fixture.durableState()
+        XCTAssertEqual(afterRejectedTraversal, before)
 
         let retry = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
             fixture.firstPullRequest.nodeID: .inventory(valid)
@@ -199,7 +204,8 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
             metrics: .init(pageCount: 1, responseBytes: 116, queryCost: 1)
         )
 
-        let result = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
+        await XCTAssertThrowsErrorAsync({
+            _ = try await fixture.service(fetcher: ReviewThreadFetcher(plans: [
                 fixture.firstPullRequest.nodeID: .inventory(incomplete)
             ])).refresh(
                 scope: fixture.scope,
@@ -207,7 +213,12 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
                 observedAt: fixture.observedAt.addingTimeInterval(1),
                 streamID: fixture.streamID
             )
-        XCTAssertEqual(result.outcomes.map(\.status), [.failed])
+        }) { error in
+            XCTAssertEqual(
+                error as? ReviewCandidateCompleteTraversalReceiptRepositoryError,
+                .invalidTraversal
+            )
+        }
         let persisted = try await fixture.vault.read { database in
             (
                 try String.fetchAll(database, sql: "SELECT github_node_id FROM review_threads ORDER BY github_node_id"),
@@ -221,7 +232,7 @@ final class PullRequestReviewThreadRefreshServiceTests: XCTestCase {
         let failures = try await fixture.vault.read { database in
             try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM review_candidate_failure_envelopes")
         }
-        XCTAssertEqual(failures, 1)
+        XCTAssertEqual(failures, 0)
     }
 
     func testRawCommentMembershipMismatchRollsBackAndDoesNotAdvanceCandidate() async throws {

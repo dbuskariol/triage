@@ -73,10 +73,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(migrations.count, TriageDatabaseMigrator.migrationCount)
         XCTAssertEqual(migrations[0].id, "001-vault-metadata")
         XCTAssertFalse(migrations[0].checksum.isEmpty)
-        XCTAssertEqual(migrations.last?.id, "053-notification-preferences-v1")
+        XCTAssertEqual(migrations.last?.id, "054-project-item-raw-provenance-v1")
         XCTAssertEqual(
             migrations.last?.checksum,
-            "2be45e4714b196a094c3f8d8f68d1d1ca5490f8604c899aad50b63977b5dc690"
+            "c1cf5a86a3ff80f0fcb47bdc1ce8e46579e62a641db686625a4f2b46863b6f2a"
         )
         let timelineMembershipSchema = try await vault.read { database in
             (

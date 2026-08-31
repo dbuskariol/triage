@@ -147,15 +147,6 @@ actor DailyActiveAccountIdentityRefreshService {
             accountID: persistedAccount.id,
             repository: repository
         )
-        do {
-            try await repository.save(
-                refreshed,
-                credentialRevision: credentialRevision,
-                expectedCredentialRevision: credentialRevision
-            )
-        } catch AccountRepositoryError.staleCredentialRevision {
-            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
-        }
 
         do {
             let inventory = try await loadOrganizationInventory(
@@ -166,6 +157,11 @@ actor DailyActiveAccountIdentityRefreshService {
             try await requireCurrentCredentialRevision(
                 credentialRevision,
                 accountID: persistedAccount.id,
+                repository: repository
+            )
+            try await persistRefreshedUser(
+                refreshed,
+                credentialRevision: credentialRevision,
                 repository: repository
             )
             try await repository.reconcilePostCredentialOrganizationInventory(
@@ -187,7 +183,14 @@ actor DailyActiveAccountIdentityRefreshService {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         } catch {
             // A failed, partial, or receipt-invalid inventory is never removal
-            // evidence. Return the current rows so the caller preserves them.
+            // evidence. A successfully authenticated `/user` can still update
+            // its profile, but stale authority and cancellation above must
+            // return before any account publication occurs.
+            try await persistRefreshedUser(
+                refreshed,
+                credentialRevision: credentialRevision,
+                repository: repository
+            )
             return .inventoryUnavailable(try await snapshot(account: refreshed, repository: repository))
         }
     }
@@ -212,6 +215,29 @@ actor DailyActiveAccountIdentityRefreshService {
         repository: AccountRepository
     ) async throws {
         guard try await repository.credentialRevision(for: accountID) == expected else {
+            throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
+        }
+    }
+
+    private func persistRefreshedUser(
+        _ account: GitHubAccount,
+        credentialRevision: CredentialRevision,
+        repository: AccountRepository
+    ) async throws {
+        try Task.checkCancellation()
+        try await requireCurrentCredentialRevision(
+            credentialRevision,
+            accountID: account.id,
+            repository: repository
+        )
+        try Task.checkCancellation()
+        do {
+            try await repository.save(
+                account,
+                credentialRevision: credentialRevision,
+                expectedCredentialRevision: credentialRevision
+            )
+        } catch AccountRepositoryError.staleCredentialRevision {
             throw DailyActiveAccountIdentityRefreshError.staleAccountAuthority
         }
     }
