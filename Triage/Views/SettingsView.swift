@@ -51,7 +51,7 @@ enum SettingsSidebarLayout {
     static let minimumWidth: CGFloat = 240
     static let idealWidth: CGFloat = 260
     static let maximumWidth: CGFloat = 320
-    static let detailHeadingAlignmentInset: CGFloat = 15
+    static let detailHeadingAlignmentInset: CGFloat = 32
     static let minimumWindowWidth: CGFloat = 800
     static let defaultWindowWidth: CGFloat = 860
 }
@@ -72,24 +72,25 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SettingsCategory.allCases, selection: sidebarSelection) { category in
-                Label(categoryTitle(category), systemImage: category.systemImage)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .tag(category)
-            }
-            .listStyle(.sidebar)
-            .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
                 Color.clear
                     .frame(height: SettingsSidebarLayout.detailHeadingAlignmentInset)
                     .accessibilityHidden(true)
+
+                List(SettingsCategory.allCases, selection: sidebarSelection) { category in
+                    Label(categoryTitle(category), systemImage: category.systemImage)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .tag(category)
+                }
+                .listStyle(.sidebar)
+                .accessibilityLabel("Settings sections")
             }
             .navigationSplitViewColumnWidth(
                 min: SettingsSidebarLayout.minimumWidth,
                 ideal: SettingsSidebarLayout.idealWidth,
                 max: SettingsSidebarLayout.maximumWidth
             )
-            .accessibilityLabel("Settings sections")
         } detail: {
             selectedSettingsPage
         }
