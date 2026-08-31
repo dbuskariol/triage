@@ -56,6 +56,20 @@ final class TriageUITestFixture {
             && process.environment["TRIAGE_UI_TEST_MODE"] == "1"
     }
 
+    /// Unit-test bundles are injected into the app host by Xcode. They must
+    /// never start the production restoration task: a locally signed test host
+    /// is not the Developer ID app that owns the user's Keychain items, so
+    /// reading those items would produce one authorization prompt per secret.
+    /// XCUITest launches remain covered by the explicit fixture gate above.
+    nonisolated static var isUnitTestHost: Bool {
+        isUnitTestEnvironment(ProcessInfo.processInfo.environment)
+    }
+
+    nonisolated static func isUnitTestEnvironment(_ environment: [String: String]) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCInjectBundleInto"] != nil
+    }
+
     static func makeIfRequested() throws -> TriageUITestFixture? {
         let process = ProcessInfo.processInfo
         guard isRequested else { return nil }

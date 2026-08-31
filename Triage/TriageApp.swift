@@ -217,6 +217,7 @@ struct TriageApp: App {
                             await uiTestFixture.bootstrap(appModel)
                             return
                         }
+                        guard !TriageUITestFixture.isUnitTestHost else { return }
                         #endif
                         guard let notificationResponseAdapter, let notificationScheduler else { return }
                         notificationResponseAdapter.install(routeHandler: appModel)
