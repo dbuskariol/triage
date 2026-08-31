@@ -349,6 +349,22 @@ enum AccountOrganizationRefreshFailure: Error, Equatable, Sendable {
     case unavailable(detail: String?)
     case failed(detail: String?)
 
+    var presentationDetail: String {
+        let detail: String?
+        switch self {
+        case let .offline(value),
+             let .authenticationRequired(value),
+             let .ssoRequired(value),
+             let .approvalRequired(value),
+             let .unavailable(value),
+             let .failed(value):
+            detail = value
+        case let .rateLimited(_, value):
+            detail = value
+        }
+        return detail ?? freshness.detail ?? "Organization synchronization did not complete."
+    }
+
     var freshness: FreshnessState {
         switch self {
         case .offline:

@@ -7,6 +7,19 @@ private enum CoordinatorTestAwaitError: Error {
 }
 
 final class AccountOrganizationCoordinatorTests: XCTestCase {
+    func testRefreshFailurePresentationRetainsSourceSpecificDetail() {
+        XCTAssertEqual(
+            AccountOrganizationRefreshFailure.failed(
+                detail: "GitHub did not complete one or more Discussion or Projects V2 context streams."
+            ).presentationDetail,
+            "GitHub did not complete one or more Discussion or Projects V2 context streams."
+        )
+        XCTAssertEqual(
+            AccountOrganizationRefreshFailure.unavailable(detail: nil).presentationDetail,
+            "Some GitHub organization resources are unavailable."
+        )
+    }
+
     func testSelectionSupersessionCancelsOnlySupersededScope() async throws {
         let fixture = CoordinatorFixture()
         let first = fixture.scope(account: "account-a", organization: "organization-a")

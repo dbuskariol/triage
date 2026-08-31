@@ -1798,6 +1798,9 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
                 for: initialAccount,
                 organization: organization
             )
+        } catch let error as AccountOrganizationRefreshFailure {
+            guard refreshGeneration == generation else { return }
+            refreshError = error.presentationDetail
         } catch let error as GitHubFailure {
             guard refreshGeneration == generation else { return }
             if let credentialStatus = CredentialLifecycle.failureStatus(for: error) {
