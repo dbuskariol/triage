@@ -96,11 +96,12 @@ for index in "${!rust_targets[@]}"; do
     "CARGO_TARGET_DIR=$architecture_target_dir"
     "RUSTFLAGS=$rustflags"
   )
+  # Do not forward Xcode's deployment target: Cargo also applies it to
+  # host-only proc-macro dylibs. The enclosing app enforces macOS 26, while
+  # compiler plugins must link for the currently running build host.
   [[ -z "${TMPDIR:-}" ]] || cargo_environment+=("TMPDIR=$TMPDIR")
   [[ -z "${CARGO_HOME:-}" ]] || cargo_environment+=("CARGO_HOME=$CARGO_HOME")
   [[ -z "${RUSTUP_HOME:-}" ]] || cargo_environment+=("RUSTUP_HOME=$RUSTUP_HOME")
-  [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]] \
-    || cargo_environment+=("MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET")
   [[ -z "${TRIAGE_TEST_LOG:-}" ]] || cargo_environment+=("TRIAGE_TEST_LOG=$TRIAGE_TEST_LOG")
 
   /usr/bin/env -i "${cargo_environment[@]}" \
