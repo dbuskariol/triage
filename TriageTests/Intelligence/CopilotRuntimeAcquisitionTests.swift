@@ -34,6 +34,25 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         XCTAssertEqual(fixture.validator.calls, 3, "future execution must revalidate")
     }
 
+    func testVerifiedInstalledRuntimeIsDetectedAndRevalidatedAfterRelaunch() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = try fixture.service()
+        let installed = try await first.acquireAtUserRequest()
+        let validationCallsAfterInstall = fixture.validator.calls
+
+        let relaunched = try fixture.service()
+        let state = await relaunched.state()
+
+        XCTAssertEqual(state, .ready(installed))
+        XCTAssertEqual(fixture.downloader.calls, 1, "local detection must never start a download")
+        XCTAssertEqual(
+            fixture.validator.calls,
+            validationCallsAfterInstall + 1,
+            "the persisted executable must be revalidated before it is shown as ready"
+        )
+    }
+
     func testPinnedArchiveAndExecutableDigestsAreDistinctForEachArchitecture() {
         let arm64 = CopilotRuntimeRelease.pinned.archive(for: .arm64)
         XCTAssertEqual(arm64.expectedArchiveSHA256, "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871")

@@ -2588,8 +2588,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         // Stop consuming progress before settling the row. A final URLSession
         // delegate callback may already be queued when cancellation begins;
         // it must not repaint the explicit missing state as Downloading.
-        copilotRuntimeStateObservationTask?.cancel()
-        copilotRuntimeStateObservationTask = nil
+        stopCopilotRuntimeStateObservation()
         // Settle the visible state synchronously. The authorization boundary
         // below invalidates the acquisition generation; its state stream will
         // be observed again only if the user begins a later operation.
@@ -2631,13 +2630,15 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             accountID: accountID
         )
         defer {
-            copilotRuntimeStateObservationTask?.cancel()
-            copilotRuntimeStateObservationTask = nil
+            stopCopilotRuntimeStateObservation()
             isCopilotRuntimeOperationInProgress = false
         }
         do {
             try await operation(authorization)
             try Task.checkCancellation()
+            // Terminal state comes from one authoritative read. Stop the
+            // progress stream first so a queued older byte count cannot win.
+            stopCopilotRuntimeStateObservation()
             await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await invalidateCopilotAuthorityForAllAccounts()
             await refreshSelectedOrganizationAIStatus()
@@ -2646,6 +2647,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         } catch where Task.isCancelled {
             settleCancelledCopilotRuntimeOperation()
         } catch {
+            stopCopilotRuntimeStateObservation()
             copilotRuntimeOperationError = Self.copilotRuntimeOperationFailureMessage(
                 for: error,
                 fallback: failureMessage
@@ -2653,6 +2655,11 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             await publishCopilotRuntimeState(from: authorization, accountID: accountID)
             await refreshSelectedOrganizationAIStatus()
         }
+    }
+
+    private func stopCopilotRuntimeStateObservation() {
+        copilotRuntimeStateObservationTask?.cancel()
+        copilotRuntimeStateObservationTask = nil
     }
 
     private func settleCancelledCopilotRuntimeOperation() {

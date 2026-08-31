@@ -8,12 +8,14 @@ final class TriageAppModelSelectionTests: XCTestCase {
         case missing
         case downloading
         case verifying
+        case ready
 
         var description: String {
             switch self {
             case .missing: "missing"
             case .downloading: "downloading"
             case .verifying: "verifying"
+            case .ready: "ready"
             }
         }
     }
@@ -530,6 +532,12 @@ final class TriageAppModelSelectionTests: XCTestCase {
         await runtimeAuthorization.finishAcquisition()
         await acquisition.value
         XCTAssertFalse(model.isCopilotRuntimeOperationInProgress)
+
+        await runtimeAuthorization.publishLateRuntimeForTest(
+            .downloading(receivedBytes: 50, expectedBytes: 100)
+        )
+        await Task.yield()
+        await assertRuntimeState(model, matches: .ready)
     }
 
     func testCopilotAcquisitionCancellationSettlesBackToMissing() async throws {
@@ -876,7 +884,7 @@ final class TriageAppModelSelectionTests: XCTestCase {
     ) async {
         for _ in 0..<100 {
             switch (expected, model.selectedCopilotAuthorizationState.runtime) {
-            case (.missing, .missing), (.downloading, .downloading), (.verifying, .verifying):
+            case (.missing, .missing), (.downloading, .downloading), (.verifying, .verifying), (.ready, .ready):
                 return
             default:
                 await Task.yield()

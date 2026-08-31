@@ -205,6 +205,23 @@ actor CopilotRuntimeAcquisitionService {
         self.validator = validator
         self.hasher = hasher
         self.files = files
+
+        // Runtime acquisition is explicit, but detection is local and must
+        // survive relaunch. Revalidate the pinned executable before exposing
+        // it as ready; never infer readiness from presence alone.
+        let installed = files.installedExecutable(
+            root: root,
+            release: release,
+            architecture: self.architecture
+        )
+        if files.exists(installed) {
+            do {
+                try validator.validate(installed, architecture: self.architecture)
+                currentState = .ready(installed)
+            } catch {
+                currentState = .corrupt(String(describing: error))
+            }
+        }
     }
 
     /// Canonicalizes only the existing, trusted support-directory boundary.
