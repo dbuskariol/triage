@@ -67,6 +67,24 @@ final class NativeNotificationAccountRemoverTests: XCTestCase {
         XCTAssertEqual(removedDelivered, [selected])
     }
 
+    func testGlobalPrivacyPurgeRemovesTriagePendingAndDeliveredRequests() async {
+        let accountID = AccountID(rawValue: "account")!
+        let triagePending = requestIdentifier(accountID: accountID, suffix: "pending")
+        let triageDelivered = requestIdentifier(accountID: accountID, suffix: "delivered")
+        let requests = RecordingNativeNotificationRequests(
+            pending: [triagePending, "unrelated.notification.pending"],
+            delivered: [triageDelivered, "unrelated.notification.delivered"]
+        )
+        let remover = NativeNotificationAccountRemover(requests: requests)
+
+        await remover.removeAllTriageNotifications()
+
+        let removedPending = await requests.pendingRemovalIDs()
+        let removedDelivered = await requests.deliveredRemovalIDs()
+        XCTAssertEqual(removedPending, [triagePending])
+        XCTAssertEqual(removedDelivered, [triageDelivered])
+    }
+
     func testRemovesOnlyTheSelectedWorkItemRequests() async {
         let accountID = AccountID(rawValue: "account")!
         let organizationID = OrganizationID(rawValue: "organization")!
