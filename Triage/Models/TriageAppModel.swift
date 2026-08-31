@@ -657,7 +657,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         guard !accountsBeingRemoved.contains(account.id) else {
             throw CancellationError()
         }
-        let secretStore = KeychainSecretStore()
+        let secretStore = KeychainSecretStore.shared
         guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
@@ -1114,7 +1114,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             return
         }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultRegistry = try requiredVaultRegistry()
             let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
             let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
@@ -1445,7 +1445,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             }
         }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultRegistry = try requiredVaultRegistry()
             let vaultKey = try await requiredVaultKey(for: initialAccount, secretStore: secretStore)
             let vault = try await vaultRegistry.open(accountID: initialAccount.id, vaultKey: vaultKey)
@@ -1508,7 +1508,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
 
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultRegistry = try requiredVaultRegistry()
             let vaultKey = try await requiredVaultKey(for: initialAccount, secretStore: secretStore)
             let vault = try await vaultRegistry.open(accountID: initialAccount.id, vaultKey: vaultKey)
@@ -1644,7 +1644,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             else {
                 return
             }
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             do {
                 guard canRunInactiveRefresh(
                     for: account.id,
@@ -1737,7 +1737,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
 
         }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultRegistry = try requiredVaultRegistry()
             let account: GitHubAccount
             let lifecycleStatus = CredentialLifecycle.status(for: initialAccount, at: Date())
@@ -2012,7 +2012,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         }
         refreshError = message ?? "Triage could not refresh this organization. Cached work remains available."
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
@@ -2039,7 +2039,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             return
         }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             guard let vaultKey = try await secretStore.readVaultKey(for: account.id) else {
                 throw AccountCredentialReaderError.missingAccessToken
             }
@@ -2336,7 +2336,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               !Task.isCancelled
         else { return nil }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
                 return nil
             }
@@ -2369,7 +2369,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
               !Task.isCancelled
         else { return nil }
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
                 return nil
             }
@@ -2914,7 +2914,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
     }
 
     private func rebuildSearchIndex(for workItem: WorkItem) async throws {
-        let secretStore = KeychainSecretStore()
+        let secretStore = KeychainSecretStore.shared
         guard let vaultKey = try await secretStore.readVaultKey(for: workItem.accountID) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
@@ -3015,7 +3015,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
             checkedAt: checkedAt
         )
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
             let vault = try await requiredVaultRegistry().open(accountID: account.id, vaultKey: vaultKey)
             try await AccountRepository(vault: vault).save(organization, access: access)
@@ -3155,7 +3155,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         accountID: AccountID,
         organizationID: OrganizationID
     ) async throws -> SynchronizationScope {
-        let secretStore = KeychainSecretStore()
+        let secretStore = KeychainSecretStore.shared
         guard let vaultKey = try await secretStore.readVaultKey(for: accountID) else {
             throw AccountCredentialReaderError.missingAccessToken
         }
@@ -3170,7 +3170,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         for account: GitHubAccount,
         organization: GitHubOrganization
     ) async throws -> (scope: SynchronizationScope, controller: OrganizationAIController) {
-        let secretStore = KeychainSecretStore()
+        let secretStore = KeychainSecretStore.shared
         let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
         let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
         let scope = try await AccountRepository(vault: vault).synchronizationScope(
@@ -3189,7 +3189,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         await dependencies.organizationAIControllers.evict(accountID: account.id)
         organizationAISettingsByAccount[account.id] = nil
         do {
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             let vaultKey = try await requiredVaultKey(for: account, secretStore: secretStore)
             let vault = try await vaultRegistry.open(accountID: account.id, vaultKey: vaultKey)
             let controller = await dependencies.organizationAIControllers.controller(for: vault)
@@ -3232,7 +3232,7 @@ final class TriageAppModel: ObservableObject, WorkspacePresentationAdapting, Not
         _ workItemID: WorkItemID,
         in scope: SynchronizationScope
     ) async throws -> WorkItem? {
-        let secretStore = KeychainSecretStore()
+        let secretStore = KeychainSecretStore.shared
         guard let vaultKey = try await secretStore.readVaultKey(for: scope.accountID) else {
             throw AccountCredentialReaderError.missingAccessToken
         }

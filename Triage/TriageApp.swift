@@ -167,7 +167,7 @@ struct TriageApp: App {
                 create: true
             )
             let vaultRegistry = try VaultRegistry()
-            let secretStore = KeychainSecretStore()
+            let secretStore = KeychainSecretStore.shared
             notificationSettings.configureEncryptedConsent(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore

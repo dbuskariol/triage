@@ -381,7 +381,7 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
 
     init(
         applicationSupportDirectory: URL,
-        secretStore: any SecretStore = KeychainSecretStore(),
+        secretStore: any SecretStore = KeychainSecretStore.shared,
         authenticator: any CopilotRuntimeAuthenticating = CopilotXPCAuthenticator(),
         loadAuthenticatedUser: @escaping @Sendable (SecretValue) async throws -> GitHubUserDTO = { credential in
             let client = GitHubRESTClient(transport: try GitHubRESTTransport(), credential: credential)
