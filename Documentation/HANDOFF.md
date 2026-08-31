@@ -1,7 +1,7 @@
 # Triage development handoff
 
-**Handoff state:** `a77fa56` (`Align native Settings sidebar chrome`) is the
-current committed local acceptance checkpoint. The production integration graph,
+**Handoff state:** `main` after `0f80baf` (`Record final local integration
+checkpoint`) is the current committed local acceptance checkpoint. The production integration graph,
 post-account identity replay, GraphQL cardinality closure, native workspace, and
 Settings chrome are complete locally. Combined Debug builds, focused selectors,
 the deterministic unit/XPC suite, runtime accessibility geometry, and the
@@ -25,7 +25,7 @@ boundaries, sequencing, and acceptance criteria.
 - Primary branch: `main`
 - Original handoff commit: `4584275` (`Add synchronization and handoff batch`)
 - Production integration commit: `9d9a566`
-- Current committed local acceptance checkpoint: `a77fa56`
+- Current committed local acceptance checkpoint: `main` after `0f80baf`
 - The configured remote is `https://github.com/dbuskariol/triage`. No push,
   tag, publication, notarization, release finalization, or release-automation
   change was performed during this continuation.
@@ -53,8 +53,8 @@ content, local-repository scanning, or GitHub mutations.
 | Final convergence selectors | Passed | 192/192 across identity replay, daily identity refresh, inventory, GraphQL/Projects V2, review receipts, derived inputs, workspace state/accessibility, work-list selection, and account persistence. |
 | Native Settings layout selector | Passed | 10/10 `AppNavigationModelTests`, including the explicit Settings sidebar width/alignment contract. |
 | Full unit and fail-closed XPC suite | Passed | 997/997, zero failures or skips, from `/tmp/triage-residual-full.xcresult`. |
-| Canonical verifier deterministic phase | Passed | 998 deterministic tests passed with zero skips in `/Users/nftdannyboy/Library/Developer/Xcode/DerivedData/Triage/CI/Logs/Test/Test-Triage-2026.08.31_12-28-59-+1000.xcresult`; its only reported failure is the pre-test UI-runner bootstrap below. |
-| Native Settings runtime geometry | Passed | Live Accessibility inspection on macOS 27 proves one unified full-size titlebar; the system sidebar control occupies y=206--246 beside the traffic lights, and the first sidebar row and detail heading both begin at y=266. PAT presentation was also inspected without an inherited pre-submission OAuth configuration error. |
+| Canonical verifier deterministic phase | Passed | 998 deterministic tests passed with zero skips in `/tmp/triage-verify-final.xcresult`; its only reported failure is the pre-test UI-runner bootstrap below. |
+| Native Settings runtime geometry | Passed | Live Accessibility and Computer Use inspection on macOS 27 proves one unified full-size titlebar; the system sidebar control sits beside the traffic lights, the first sidebar label is optically aligned with the detail heading, and the sidebar defaults wide enough for every section label. PAT presentation was also inspected without an inherited pre-submission OAuth configuration error. |
 | Unsigned universal Release build | Passed | Post-Settings-fix `Triage` and `TriageCopilotXPC` both contain `x86_64 arm64`; app, XPC, and privacy plists pass `plutil`; bundle identifier/version/build/minimum OS are `com.triage.mac` / `0.1.0` / `1` / `26.0`. |
 | `git diff --check` | Passed | No whitespace errors before the handoff documentation update. |
 | Final `scripts/verify-ci.sh` | Environment-blocked | The ad-hoc canonical runner could not load `TriageUITests.xctest` because the sandboxed runner and mapped bundle were treated as different Team IDs. An isolated Apple Development-signed retry cleared that error but hung before XCTest bootstrap in `libsecinit` waiting on its sandbox XPC reply. No UI test method ran and no overall verifier-green claim is made. |
@@ -443,7 +443,8 @@ artifact and release signing identity.
 ## Residual order after local integration
 
 The production integration graph and every repository-local product slice are
-complete through the committed local acceptance checkpoint `a77fa56`; do not
+complete through the committed local acceptance checkpoint on `main` after
+`0f80baf`; do not
 reopen those finished edges merely because the work was originally split across
 tracks. The known remaining work is externally dependent or host-environment
 acceptance, in this required order:
@@ -504,7 +505,7 @@ acceptance, in this required order:
   or failed coverage into an empty list, a complete list, or a fresh timestamp.
 - Do not change committed migration checksums or edit a migration that might
   already have been applied. Append a migration.
-- Focused tests through the committed `a77fa56` checkpoint are recorded above;
+- Focused tests through the committed local acceptance checkpoint are recorded above;
   the independent unit/XPC suite is 997/997 green, the latest canonical verifier
   passed 998 deterministic tests before its sole UI-runner bootstrap failure,
   and the post-fix unsigned universal Release bundle is valid. Full UI/verifier
