@@ -75,7 +75,7 @@ COPILOT_HELPER="$XPC_SERVICE/Contents/Resources/TriageCopilotHelper"
   || triage_fail 'CI release Copilot helper signature is invalid'
 triage_assert_code_identifier \
   "$COPILOT_HELPER" 'com.triage.mac.TriageCopilotHelper' 'CI release Copilot helper'
-grep -Eq '^CodeDirectory .*flags=.*\(runtime\)' <<<"$(triage_codesign_details "$COPILOT_HELPER")" \
+triage_signing_details_enable_hardened_runtime "$(triage_codesign_details "$COPILOT_HELPER")" \
   || triage_fail 'CI release Copilot helper does not enable the hardened runtime'
 triage_assert_safe_signed_entitlements "$COPILOT_HELPER" 'CI release Copilot helper'
 PRIVACY_MANIFEST="$UNSIGNED_APP/Contents/Resources/PrivacyInfo.xcprivacy"
