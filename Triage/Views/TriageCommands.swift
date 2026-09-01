@@ -182,7 +182,7 @@ struct TriageWorkspaceCommands: Commands {
     @ObservedObject var navigation: AppNavigationModel
     @ObservedObject var preferences: AppPreferences
     @ObservedObject var externalNavigation: ExternalNavigationConfirmationCoordinator
-    @FocusedBinding(\.triageSearchFocus) private var searchFocus
+    @ObservedObject var workspaceAccessibility: WorkspaceAccessibilityCoordinator
     @FocusedBinding(\.triageInspectorVisibility) private var inspectorVisible
     @FocusedBinding(\.triageSidebarVisibility) private var sidebarVisible
     @FocusedValue(\.triageWorkflowUndoCoordinator) private var workflowUndo
@@ -227,10 +227,9 @@ struct TriageWorkspaceCommands: Commands {
             navigationCommand("All Work", section: .allWork, key: "6")
             Divider()
             Button("Focus Search") {
-                TriageFocusedCommandRouting.focusSearch($searchFocus)
+                workspaceAccessibility.requestFocus(.search)
             }
             .keyboardShortcut("f", modifiers: .command)
-            .disabled(searchFocus == nil)
             Button("Toggle Inspector") {
                 TriageFocusedCommandRouting.toggleInspector($inspectorVisible)
             }

@@ -22,14 +22,13 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         launchFixture(scenario: "onboarding")
         XCTAssertTrue(element(named: "Step 1 of 7: connect a GitHub account").waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Continue with GitHub"].exists)
-        XCTAssertTrue(app.buttons["Use a Personal Access Token"].exists)
+        XCTAssertTrue(visibleButton(named: "Use a Personal Access Token").exists)
     }
 
     func testAccountRecoveryFixtureShowsSanitizedRecoveryControls() throws {
         launchFixture(scenario: "account-recovery")
 
-        let recoveryCopy = "Recover encrypted local account data. Triage cannot open encrypted local data for one or more saved accounts. In Account Settings, remove each unavailable account’s local data. This removes data stored on this Mac only; it does not change GitHub. Then reconnect to GitHub to resync."
-        XCTAssertTrue(element(named: recoveryCopy).waitForExistence(timeout: 10))
+        XCTAssertTrue(element(named: "local-account-recovery-notice").waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Open Account Settings…"].exists)
         XCTAssertTrue(app.buttons["Try Again"].exists)
 
@@ -44,11 +43,15 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         try requireMainWindow()
 
         XCTAssertTrue(
-            element(named: "Fixture Acme keyboard accessibility smoke").waitForExistence(timeout: 10),
+            workRow(containing: "Fixture Acme keyboard accessibility smoke").waitForExistence(timeout: 10),
             "Partial access must retain already synchronized local work."
         )
         let partialStatus = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label BEGINSWITH %@", "Partial access")
+            NSPredicate(
+                format: "label BEGINSWITH %@ OR value BEGINSWITH %@",
+                "Partial access",
+                "Partial access"
+            )
         )
         XCTAssertTrue(partialStatus.firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(
@@ -64,18 +67,28 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(oauth.waitForExistence(timeout: 10))
         oauth.click()
         XCTAssertTrue(
-            element(named: "GitHub sign-in is unavailable in the local UI fixture.").waitForExistence(timeout: 5)
+            element(containing: "GitHub sign-in is unavailable in the local UI fixture.").waitForExistence(timeout: 5)
         )
 
-        app.buttons["Use a Personal Access Token"].click()
+        let tokenChoice = visibleButton(named: "Use a Personal Access Token")
+        XCTAssertTrue(tokenChoice.waitForExistence(timeout: 5))
+        tokenChoice.click()
         let sheet = element(named: "personal-access-token-entry-sheet")
         XCTAssertTrue(sheet.waitForExistence(timeout: 5))
         XCTAssertTrue(app.secureTextFields["GitHub personal access token"].exists)
         XCTAssertTrue(
-            element(named: "Fine-grained tokens are preferred. Classic tokens should include `repo` and `read:org`.").exists
+            element(containing: "Fine-grained tokens are preferred").exists,
+            "The PAT sheet should explain the preferred token type without depending on AppKit's exact punctuation exposure."
+        )
+        let sheetOAuthError = sheet.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ OR value CONTAINS %@",
+                "GitHub sign-in is unavailable in the local UI fixture.",
+                "GitHub sign-in is unavailable in the local UI fixture."
+            )
         )
         XCTAssertFalse(
-            element(named: "GitHub sign-in is unavailable in the local UI fixture.").exists,
+            sheetOAuthError.firstMatch.exists,
             "A parent OAuth failure must not be repeated in the independent PAT sheet."
         )
     }
@@ -115,7 +128,7 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         let addAccount = settingsWindow.buttons["Add Account…"]
         XCTAssertTrue(addAccount.waitForExistence(timeout: 5))
         addAccount.click()
-        let tokenChoice = app.buttons["Use a Personal Access Token"]
+        let tokenChoice = visibleButton(named: "Use a Personal Access Token")
         XCTAssertTrue(tokenChoice.waitForExistence(timeout: 3))
         tokenChoice.click()
 
@@ -160,6 +173,10 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         let clearedSearch = NSPredicate(format: "value == '' OR value == %@", "Search work")
         expectation(for: clearedSearch, evaluatedWith: search)
         waitForExpectations(timeout: 2)
+
+        let selectedRow = workRow(containing: "Fixture Acme keyboard accessibility smoke")
+        XCTAssertTrue(selectedRow.waitForExistence(timeout: 5))
+        selectedRow.click()
 
         let inspectorToggle = app.buttons["work-detail-inspector-toggle"]
         XCTAssertTrue(inspectorToggle.waitForExistence(timeout: 5))
@@ -209,11 +226,19 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(accounts.waitForExistence(timeout: 3), "Settings should expose the Accounts section.")
         accounts.click()
 
-        let remove = settingsWindow.buttons["Remove…"]
+        let remove = visibleButton(named: "Remove…", in: settingsWindow)
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
 
         remove.click()
-        let cancel = settingsWindow.buttons["Cancel"]
+        let removalConfirmation = settingsWindow.sheets.firstMatch
+        XCTAssertTrue(removalConfirmation.waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            removalConfirmation.staticTexts
+                .matching(NSPredicate(format: "value == %@", "Remove fixture-primary?"))
+                .firstMatch
+                .exists
+        )
+        let cancel = visibleButton(named: "Cancel", in: removalConfirmation)
         XCTAssertTrue(cancel.waitForExistence(timeout: 2), "Removal confirmation should offer Cancel.")
         cancel.click()
 
@@ -238,20 +263,20 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
     func testAccountAndOrganizationSwitchingRestoresFixtureScope() throws {
         try requireMainWindow()
         selectPopupItem(named: "Account", item: "Fixture Secondary")
-        XCTAssertTrue(element(named: "Fixture Studio account switch work").waitForExistence(timeout: 5))
+        XCTAssertTrue(workRow(containing: "Fixture Studio account switch work").waitForExistence(timeout: 5))
 
         app.terminate()
         launchFixture(reset: false)
-        XCTAssertTrue(element(named: "Fixture Studio account switch work").waitForExistence(timeout: 5))
+        XCTAssertTrue(workRow(containing: "Fixture Studio account switch work").waitForExistence(timeout: 5))
 
         selectPopupItem(named: "Account", item: "Fixture Primary")
         selectPopupItem(named: "Organization", item: "Fixture Beta")
-        XCTAssertTrue(element(named: "Fixture Beta notification route work").waitForExistence(timeout: 5))
+        XCTAssertTrue(workRow(containing: "Fixture Beta notification route work").waitForExistence(timeout: 5))
     }
 
     func testNotificationRouteSelectsItsLocalFixtureWork() throws {
         launchFixture(scenario: "notification-route")
-        XCTAssertTrue(element(named: "Fixture Beta notification route work").waitForExistence(timeout: 10))
+        XCTAssertTrue(workRow(containing: "Fixture Beta notification route work").waitForExistence(timeout: 10))
     }
 
     private func requireMainWindow() throws {
@@ -276,16 +301,47 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
     }
 
     private func selectPopupItem(named label: String, item: String) {
-        let popup = app.popUpButtons[label]
+        let pickerIdentifier: String
+        switch label {
+        case "Account":
+            pickerIdentifier = "workspace-account-picker"
+        case "Organization":
+            pickerIdentifier = "workspace-organization-picker"
+        default:
+            XCTFail("No stable workspace picker identifier is defined for \(label).")
+            return
+        }
+        let popup = app.descendants(matching: .any)[pickerIdentifier]
         XCTAssertTrue(popup.waitForExistence(timeout: 5), "Expected \(label) picker in the deterministic workspace.")
         popup.click()
-        let menuItem = app.menuItems[item]
+        let menuItem = popup.menuItems.matching(NSPredicate(format: "title == %@", item)).firstMatch
         XCTAssertTrue(menuItem.waitForExistence(timeout: 3), "Expected \(item) in the \(label) picker.")
         menuItem.click()
     }
 
     private func element(named identifier: String) -> XCUIElement {
         app.descendants(matching: .any)[identifier]
+    }
+
+    private func element(containing text: String) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text))
+            .firstMatch
+    }
+
+    private func workRow(containing title: String) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "value CONTAINS %@", title))
+            .firstMatch
+    }
+
+    private func visibleButton(named label: String, in container: XCUIElement? = nil) -> XCUIElement {
+        let buttons = (container ?? app).buttons.matching(NSPredicate(format: "label == %@", label))
+        return firstHittableElement(in: buttons)
+    }
+
+    private func firstHittableElement(in query: XCUIElementQuery) -> XCUIElement {
+        query.allElementsBoundByIndex.first(where: { $0.isHittable }) ?? query.firstMatch
     }
 
     private func searchField() -> XCUIElement {

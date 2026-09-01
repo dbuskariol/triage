@@ -48,7 +48,7 @@ struct WorkListView: View {
         .controlSize(preferences.appearanceDensity == .compact ? .small : .regular)
         .navigationTitle(navigation.section.title)
         .searchable(text: $searchText, prompt: "Search work")
-        .focused($searchFocus)
+        .searchFocused($searchFocus)
         .focusedSceneValue(
             \.triageSearchFocus,
             Binding(

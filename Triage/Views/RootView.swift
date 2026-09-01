@@ -532,6 +532,7 @@ private struct LocalAccountRecoveryNotice: View {
         .padding(.vertical, 10)
         .background(.bar)
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("local-account-recovery-notice")
         .accessibilityLabel(recovery.accessibilityLabel)
         .accessibilityHint(
             isRetrying

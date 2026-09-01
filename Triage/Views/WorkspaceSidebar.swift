@@ -78,6 +78,7 @@ struct WorkspaceSidebar: View {
             }
             .disabled(accounts.count < 2)
             .accessibilityHint(accounts.count < 2 ? "Only one GitHub account is connected." : "Changes the organization work queue.")
+            .accessibilityIdentifier("workspace-account-picker")
         }
     }
 
@@ -104,6 +105,7 @@ struct WorkspaceSidebar: View {
                 }
             }
             .accessibilityHint("Changes the organization work queue.")
+            .accessibilityIdentifier("workspace-organization-picker")
         }
     }
 }
