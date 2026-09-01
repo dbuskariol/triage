@@ -27,6 +27,21 @@ trap cleanup EXIT
   triage_assert_safe_signed_entitlements /usr/bin/true "system code fixture"
 ' _ "$RELEASE_LIBRARY"
 
+# `codesign` includes the independent `adhoc` flag in unsigned CI builds. The
+# hardened-runtime verifier must recognize `runtime` as a flag-list member in
+# both CI and Developer ID signature renderings, without accepting substrings.
+/bin/bash -c '
+  source "$1"
+  triage_signing_details_enable_hardened_runtime \
+    "CodeDirectory v=20500 flags=0x10002(adhoc,runtime)"
+  triage_signing_details_enable_hardened_runtime \
+    "CodeDirectory v=20500 flags=0x10000(runtime)"
+  ! triage_signing_details_enable_hardened_runtime \
+    "CodeDirectory v=20500 flags=0x2(adhoc)"
+  ! triage_signing_details_enable_hardened_runtime \
+    "CodeDirectory v=20500 flags=0x0(notruntime)"
+' _ "$RELEASE_LIBRARY"
+
 unsafe_entitlements=(
   com.apple.security.get-task-allow
   com.apple.security.cs.disable-library-validation

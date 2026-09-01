@@ -84,6 +84,15 @@ triage_codesign_details() {
   /usr/bin/codesign -dvvv --verbose=4 "$1" 2>&1
 }
 
+triage_signing_details_enable_hardened_runtime() {
+  local signing_details="$1"
+
+  # codesign renders an ad-hoc hardened signature as `(adhoc,runtime)` and a
+  # Developer ID hardened signature as `(runtime)`. Treat `runtime` as one
+  # exact member of the flag list instead of assuming it is the only member.
+  /usr/bin/grep -Eq '^CodeDirectory .*flags=.*\(([^)]*,)?runtime(,[^)]*)?\)' <<<"$signing_details"
+}
+
 triage_signature_team() {
   /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$(triage_codesign_details "$1")"
 }
@@ -132,7 +141,7 @@ triage_assert_developer_id_signature() {
   /usr/bin/grep -Eq '^Timestamp=.+$' <<<"$signing_details" \
     || triage_fail "the signature is missing a trusted timestamp: $signed_path"
   if [[ "$require_hardened_runtime" == "1" ]]; then
-    /usr/bin/grep -Eq '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signing_details" \
+    triage_signing_details_enable_hardened_runtime "$signing_details" \
       || triage_fail "the hardened runtime is not enabled: $signed_path"
   fi
   team="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$signing_details")"
