@@ -409,6 +409,7 @@ struct OnboardingFlowView: View {
         OnboardingPage(title: recovery.title, message: recovery.detail) {
             Label(recovery.title, systemImage: recovery.systemImage)
                 .foregroundStyle(.orange)
+                .accessibilityIdentifier("local-account-recovery-notice")
                 .accessibilityLabel(recovery.accessibilityLabel)
 
             if recovery.canOpenAccountSettings {

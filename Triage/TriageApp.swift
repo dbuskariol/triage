@@ -248,7 +248,8 @@ struct TriageApp: App {
                 appModel: appModel,
                 navigation: navigation,
                 preferences: preferences,
-                externalNavigation: externalNavigation
+                externalNavigation: externalNavigation,
+                workspaceAccessibility: workspaceAccessibility
             )
             TriageSettingsWindowCommands()
         }
