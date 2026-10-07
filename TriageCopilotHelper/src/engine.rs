@@ -662,16 +662,23 @@ impl FailClosedCopilotEngine {
     fn parse_final_triage(
         event: Option<github_copilot_sdk::types::SessionEvent>,
     ) -> Result<Vec<TriageItemDecision>, Failure> {
-        let event = event.ok_or_else(triage_failed)?;
+        let event = event.ok_or_else(|| triage_failure("Copilot returned no final message"))?;
         if event.event_type != "assistant.message" {
-            return Err(triage_failed());
+            return Err(triage_failure("Copilot ended without an answer"));
         }
         let content = event
             .data
             .get("content")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(triage_failed)?;
-        crate::schema::parse_triage_output(content).ok_or_else(triage_failed)
+            .ok_or_else(|| triage_failure("Copilot's answer was empty"))?;
+        crate::schema::parse_triage_output(content).ok_or_else(|| {
+            // Shape only; content may contain GitHub data and is never reported.
+            triage_failure(&format!(
+                "Copilot's answer had no readable decisions ({} bytes, starts with {:?})",
+                content.len(),
+                content.trim_start().chars().next().unwrap_or(' ')
+            ))
+        })
     }
 }
 
@@ -1183,6 +1190,10 @@ fn classify_login_failure(stdout: &[u8], stderr: &[u8]) -> Failure {
         }
     }
     authentication_stage("Copilot browser login exited before authorization completed.")
+}
+
+fn triage_failure(message: &str) -> Failure {
+    Failure::new(FailureCode::ValidationFailed, message)
 }
 
 fn triage_failed() -> Failure {

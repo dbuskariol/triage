@@ -23,7 +23,7 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 flowchart LR
     A[GitHub search<br/>review requests, assigned,<br/>authored, mentions, comments] --> B[(Encrypted local store)]
     B --> C{Changed since<br/>last decision?}
-    C -- yes --> D[Copilot triage<br/>batches of 15]
+    C -- yes --> D[Copilot triage<br/>batches of 10]
     D --> B
     B --> E[Your rules applied]
     E --> F[Inbox · Waiting · No Action · Done]

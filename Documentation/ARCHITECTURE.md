@@ -44,8 +44,8 @@ flowchart TB
 1. **Refresh.** Discovery returns every item involving the user. The store upserts them and deactivates items that no longer match (merged, closed, unassigned). Inactive work is kept for 30 days.
 2. **Select.** The store returns active items whose decision is missing or stale (see *Fingerprints and digests*), excluding items waiting on a retry and items muted by a rule.
 3. **Prioritize.** Items the user has acted on since their last decision go first, then by relationship urgency and recency.
-4. **Analyze.** Batches of up to 15 items (90 KB cap) go to Copilot one at a time; the helper serves one request at a time. Valid decisions are saved as they arrive. Items Copilot skips are retried immediately once, then after 2 minutes.
-5. **Wait** for the configured interval (2 min to hourly, or manual), ⌘R, or app activation if enabled. Interval changes apply live.
+4. **Analyze.** Batches of up to 10 items (90 KB cap) go to Copilot one at a time; the helper serves one request at a time. Valid decisions are saved as they arrive. Items Copilot skips are retried immediately once. A batch that fails is split in half and retried immediately, down to single items, so one problem item never holds back the rest.
+5. **Wait** for the configured interval (2 min to hourly, or manual), ⌘R, or app activation if enabled. Interval changes apply live. If any item failed, the engine also wakes when its retry is due (2 minutes) and re-analyzes without searching GitHub again.
 
 GitHub discovery never waits for Copilot. If Copilot is unavailable (consent off, signed out, runtime missing), analysis pauses and items stay pending instead of failing.
 
@@ -79,7 +79,7 @@ Copilot receives four layers, highest precedence first:
 3. **Per-item hints**: `rule_hints`, and for handled checks `previous_next_action` and `viewer_activity`.
 4. **Untrusted data**: today's date, then the items as JSON.
 
-Output is parsed leniently (Markdown fences tolerated, over-long text clamped, malformed decisions dropped individually) and then validated strictly on both sides of the XPC boundary. A partial response saves the valid decisions and retries the rest.
+Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers are tolerated; every complete decision is salvaged from a truncated or partly malformed reply; over-long text is clamped. Unreadable replies report only their shape (length and first character), never content. Parsed output is then validated strictly on both sides of the XPC boundary. A partial response saves the valid decisions and retries the rest.
 
 ## Copilot boundary
 

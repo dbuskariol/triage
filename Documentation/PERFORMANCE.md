@@ -8,7 +8,7 @@ Measured on Apple silicon with about 215 items of personal work in one large org
 |---|---|
 | Launch to saved list | Immediate (from the local store) |
 | GitHub refresh (all relationships) | 30–45 s, two concurrent searches, 25 results per page |
-| Copilot batch (15 items) | 20–45 s, one batch at a time |
+| Copilot batch (10 items) | 15–35 s, one batch at a time |
 | First full analysis (about 215 items) | 8–10 min, most urgent first; later cycles analyze only changed items |
 | Done, Snooze, Restore | Instant (optimistic UI, saved in the background) |
 

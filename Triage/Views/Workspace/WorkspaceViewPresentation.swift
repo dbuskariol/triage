@@ -56,7 +56,9 @@ enum WorkspaceViewPresentation {
         case .pending:
             "Waiting for Copilot…"
         case .failed(let reason, let retryAt):
-            "\(reason) · Retry \(retryAt.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
+            retryAt <= now
+                ? "\(reason) · Retrying now"
+                : "\(reason) · Retry \(retryAt.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
         case .current:
             nil
         }
