@@ -43,7 +43,7 @@ struct TriageWorkspaceCommands: Commands {
 
             Button("Snooze Until Tomorrow") {
                 guard let entry = appModel.selectedEntry else { return }
-                appModel.snooze(entry, until: Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now)
+                appModel.snooze(entry, until: SnoozeOption.tomorrow.date())
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(appModel.selectedEntry == nil)

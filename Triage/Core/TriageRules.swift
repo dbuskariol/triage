@@ -15,6 +15,21 @@ struct TriageRules: Codable, Equatable, Sendable {
 
     var instructions: String
     var rules: [TriageRule]
+    /// Changed by "Re-analyze All" to make every decision stale.
+    var reanalysisToken = ""
+
+    init(instructions: String, rules: [TriageRule], reanalysisToken: String = "") {
+        self.instructions = instructions
+        self.rules = rules
+        self.reanalysisToken = reanalysisToken
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        instructions = try container.decode(String.self, forKey: .instructions)
+        rules = try container.decode([TriageRule].self, forKey: .rules)
+        reanalysisToken = try container.decodeIfPresent(String.self, forKey: .reanalysisToken) ?? ""
+    }
 
     var trimmedInstructions: String? {
         let value = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -27,11 +42,11 @@ struct TriageRules: Codable, Equatable, Sendable {
     /// older preferences are re-analyzed. Disabled and invalid rules are ignored.
     /// Empty when there are no preferences, so existing decisions stay current.
     var digest: String {
-        guard trimmedInstructions != nil || !enabledRules.isEmpty else { return "" }
-        struct Canonical: Encodable { let instructions: String; let rules: [TriageRule] }
+        guard trimmedInstructions != nil || !enabledRules.isEmpty || !reanalysisToken.isEmpty else { return "" }
+        struct Canonical: Encodable { let instructions: String; let rules: [TriageRule]; let token: String }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = (try? encoder.encode(Canonical(instructions: trimmedInstructions ?? "", rules: enabledRules))) ?? Data()
+        let data = (try? encoder.encode(Canonical(instructions: trimmedInstructions ?? "", rules: enabledRules, token: reanalysisToken))) ?? Data()
         return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 

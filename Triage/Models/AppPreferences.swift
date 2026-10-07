@@ -4,6 +4,10 @@ import ServiceManagement
 enum TriagePreferenceKeys {
     static let showMenuBarExtra = "interface.show-menu-bar-extra"
     static let sortField = "interface.sort-field"
+    static let refreshIntervalMinutes = "sync.refresh-interval-minutes"
+    static let refreshWhenActive = "sync.refresh-when-active"
+    static let laterTodayHours = "inbox.later-today-hours"
+    static let tomorrowHour = "inbox.tomorrow-hour"
     static let sortAscending = "interface.sort-ascending"
 }
 
@@ -11,6 +15,13 @@ enum TriagePreferenceKeys {
 final class AppPreferences: ObservableObject {
     @Published var showMenuBarExtra: Bool {
         didSet { defaults.set(showMenuBarExtra, forKey: TriagePreferenceKeys.showMenuBarExtra) }
+    }
+    /// Minutes between automatic refreshes; `0` means manual only.
+    @Published var refreshIntervalMinutes: Int {
+        didSet { defaults.set(refreshIntervalMinutes, forKey: TriagePreferenceKeys.refreshIntervalMinutes) }
+    }
+    @Published var refreshWhenActive: Bool {
+        didSet { defaults.set(refreshWhenActive, forKey: TriagePreferenceKeys.refreshWhenActive) }
     }
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var launchAtLoginError: String?
@@ -20,6 +31,8 @@ final class AppPreferences: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         showMenuBarExtra = defaults.object(forKey: TriagePreferenceKeys.showMenuBarExtra) as? Bool ?? true
+        refreshIntervalMinutes = Self.refreshIntervalMinutes(defaults)
+        refreshWhenActive = defaults.object(forKey: TriagePreferenceKeys.refreshWhenActive) as? Bool ?? true
         refreshLaunchAtLoginStatus()
     }
 
@@ -39,5 +52,60 @@ final class AppPreferences: ObservableObject {
 
     func refreshLaunchAtLoginStatus() {
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+    }
+}
+
+extension AppPreferences {
+    nonisolated static let refreshIntervalChoices = [2, 5, 10, 15, 30, 60, 0]
+    nonisolated static let defaultRefreshIntervalMinutes = 5
+
+    nonisolated static func refreshIntervalMinutes(_ defaults: UserDefaults = .standard) -> Int {
+        let stored = defaults.object(forKey: TriagePreferenceKeys.refreshIntervalMinutes) as? Int
+        return stored.flatMap { refreshIntervalChoices.contains($0) ? $0 : nil } ?? defaultRefreshIntervalMinutes
+    }
+
+    nonisolated static func refreshInterval(minutes: Int) -> Duration? {
+        minutes > 0 ? .seconds(minutes * 60) : nil
+    }
+
+    nonisolated static func refreshIntervalTitle(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: "Manually"
+        case 60: "Every hour"
+        default: "Every \(minutes) minutes"
+        }
+    }
+}
+
+/// Snooze times shared by every snooze control, using the user's preferences.
+enum SnoozeOption: CaseIterable, Identifiable {
+    case laterToday, tomorrow, nextWeek
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .laterToday: "Later Today"
+        case .tomorrow: "Tomorrow"
+        case .nextWeek: "Next Week"
+        }
+    }
+
+    func date(from now: Date = .now, defaults: UserDefaults = .standard, calendar: Calendar = .current) -> Date {
+        switch self {
+        case .laterToday:
+            let hours = defaults.object(forKey: TriagePreferenceKeys.laterTodayHours) as? Int ?? 3
+            return now.addingTimeInterval(TimeInterval(max(1, hours) * 3_600))
+        case .tomorrow, .nextWeek:
+            let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
+            let days = self == .tomorrow ? 1 : 7
+            let day = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: now)) ?? now
+            return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+        }
+    }
+
+    /// e.g. "Tomorrow, 9:00 AM" for menus.
+    func subtitle(from now: Date = .now) -> String {
+        date(from: now).formatted(.dateTime.weekday(.wide).hour().minute())
     }
 }

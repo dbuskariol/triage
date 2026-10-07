@@ -13,27 +13,23 @@ struct SettingsView: View {
     @State private var resourceOwnerOrganization = ""
     @State private var accountPendingRemoval: GitHubAccount?
     @State private var removalError: String?
+    @State private var isConfirmingReanalysis = false
 
     var body: some View {
         NavigationSplitView {
-            List(supportedCategories, selection: Binding(
+            List(SettingsCategory.allCases, selection: Binding(
                 get: { navigation.settingsCategory },
                 set: { if let category = $0 { navigation.settingsCategory = category } }
             )) { category in
-                Label(categoryTitle(category), systemImage: category.systemImage)
+                Label(category.title, systemImage: category.systemImage)
                     .tag(category)
             }
             .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
         } detail: {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text(categoryTitle(navigation.settingsCategory))
-                        .font(.largeTitle.weight(.bold))
-                    selectedPage
-                }
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            selectedPage
+                .formStyle(.grouped)
+                .navigationTitle(navigation.settingsCategory.title)
         }
         .confirmationDialog(
             "Add a GitHub Account",
@@ -61,6 +57,14 @@ struct SettingsView: View {
         } message: {
             Text("This removes credentials and encrypted local Triage data from this Mac. It never changes GitHub.")
         }
+        .confirmationDialog(
+            "Re-analyze all work with Copilot?",
+            isPresented: $isConfirmingReanalysis
+        ) {
+            Button("Re-analyze All") { appModel.reanalyzeAll() }
+        } message: {
+            Text("Copilot reviews every item again in the background. Current decisions stay visible until each is replaced.")
+        }
         .alert("Triage could not remove this account", isPresented: Binding(
             get: { removalError != nil },
             set: { if !$0 { removalError = nil } }
@@ -74,143 +78,309 @@ struct SettingsView: View {
         }
     }
 
-    private var supportedCategories: [SettingsCategory] {
-        [.accounts, .organizations, .ai, .rules, .general, .updates, .about]
-    }
-
     @ViewBuilder
     private var selectedPage: some View {
         switch navigation.settingsCategory {
+        case .general: generalPage
+        case .inbox: inboxPage
         case .accounts: accountsPage
         case .organizations: organizationsPage
         case .ai: aiPage
         case .rules: RulesSettingsView()
-        case .general: generalPage
+        case .privacy: PrivacySettingsView()
         case .updates: updatesPage
-        case .about: aboutPage
-        default: EmptyView()
+        case .about: AboutSettingsView()
         }
     }
 
-    private var accountsPage: some View {
-        SettingsSection("Connected Accounts") {
-            Button("Add Account…") { isPresentingAccountAddition = true }
-                .disabled(appModel.isConnecting)
-            if appModel.accounts.isEmpty {
-                Text("No GitHub accounts are connected.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(appModel.accounts) { account in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(account.login)
-                        Text(account.authenticationKind.title)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Use") { appModel.selectAccount(account.id) }
-                    Button("Remove…", role: .destructive) {
-                        accountPendingRemoval = account
-                    }
-                    .disabled(appModel.isRemovingAccount(account.id))
-                }
-            }
-            if !appModel.unavailableAccountIDs.isEmpty || !appModel.vaultRecoveryIssues.isEmpty {
-                Label(
-                    appModel.restorationError ?? "Some encrypted local account data needs recovery.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(.orange)
-                Button("Try Again") { Task { await appModel.restoreAccounts() } }
-            }
-            if let error = appModel.connectionError {
-                errorLabel(error)
-            }
-        }
-    }
+    // MARK: General
 
-    private var organizationsPage: some View {
-        SettingsSection("Organizations") {
-            if appModel.organizations.isEmpty {
-                Text("Connect a GitHub account to discover organizations.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(appModel.organizations) { organization in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(organization.displayName ?? organization.login)
-                        Text(organization.login)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if organization.id == appModel.selectedOrganizationID {
-                        Text("Current").foregroundStyle(.secondary)
-                    } else {
-                        Button("Select") { appModel.selectOrganization(organization.id) }
-                    }
-                }
-            }
-            Button("Refresh Now") { appModel.refreshNow() }
-                .disabled(appModel.selectedOrganization == nil)
-        }
-    }
-
-    private var aiPage: some View {
-        SettingsSection("Copilot") {
-            if let organization = appModel.selectedOrganization {
-                let state = appModel.selectedOrganizationAISettings
-                Toggle(
-                    "Allow AI analysis for \(organization.displayName ?? organization.login)",
-                    isOn: Binding(
-                        get: { state?.consent.isEnabled ?? false },
-                        set: { enabled in
-                            Task { await appModel.recordSelectedOrganizationAIConsent(enabled) }
-                        }
-                    )
-                )
-                Text("Copilot reads your relevant issues and pull requests to prioritize them. It is review-only and never changes GitHub.")
-                    .foregroundStyle(.secondary)
-
-                Picker("Model", selection: Binding(
-                    get: { state?.consent.selectedModelID ?? "auto" },
-                    set: { id in
-                        Task {
-                            await appModel.selectSelectedOrganizationCopilotModel(
-                                id == "auto" ? nil : id
-                            )
-                        }
-                    }
-                )) {
-                    Text("Auto").tag("auto")
-                    ForEach(state?.availableModels ?? []) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
-                }
-                .disabled(state?.consent.isEnabled != true)
-
-                runtimeControls
-                HStack {
-                    Text(state?.status ?? "Checking Copilot availability…")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if appModel.isCopilotAuthenticationInProgress {
-                        ProgressView()
-                        Button("Cancel") { appModel.cancelSelectedCopilotAuthentication() }
-                    } else {
-                        Button("Connect Copilot") {
-                            appModel.startSelectedCopilotAuthenticationAtUserRequest()
-                        }
-                        .disabled(state?.consent.isEnabled != true)
-                    }
-                }
-                if let error = appModel.copilotAuthenticationError ?? appModel.copilotRuntimeOperationError {
+    private var generalPage: some View {
+        Form {
+            Section {
+                Toggle("Open at login", isOn: Binding(
+                    get: { preferences.launchAtLoginEnabled },
+                    set: { preferences.setLaunchAtLogin($0) }
+                ))
+                if let error = preferences.launchAtLoginError {
                     errorLabel(error)
                 }
+                Toggle("Show in menu bar", isOn: $preferences.showMenuBarExtra)
+            } header: {
+                Text("Startup")
+            }
+
+            Section {
+                Picker("Check GitHub", selection: $preferences.refreshIntervalMinutes) {
+                    ForEach(AppPreferences.refreshIntervalChoices, id: \.self) { minutes in
+                        Text(AppPreferences.refreshIntervalTitle(minutes)).tag(minutes)
+                    }
+                }
+                Toggle("Refresh when Triage becomes active", isOn: $preferences.refreshWhenActive)
+                LabeledContent("Last refreshed") {
+                    Text(relative(appModel.presentation.status.lastRefreshAt) ?? "Not yet")
+                }
+                LabeledContent("Next refresh") {
+                    Text(nextRefreshText)
+                }
+                HStack {
+                    Spacer()
+                    Button("Refresh Now") { appModel.refreshNow() }
+                        .disabled(appModel.selectedOrganization == nil)
+                }
+            } header: {
+                Text("Refresh")
+            } footer: {
+                Text("Each refresh searches GitHub for work involving you, then Copilot re-checks only what changed. Shorter intervals use more GitHub API quota.")
+            }
+
+            Section("Keyboard Shortcuts") {
+                shortcut("Next or previous item", "↓ ↑  or  j k")
+                shortcut("Mark done", "E  or  ⌫")
+                shortcut("Snooze until tomorrow", "S")
+                shortcut("Open on GitHub", "↩  or  ⌘O")
+                shortcut("Switch section", "⌘1 – ⌘6")
+                shortcut("Refresh", "⌘R")
+            }
+        }
+    }
+
+    private var nextRefreshText: String {
+        if preferences.refreshIntervalMinutes == 0 { return "Manual only" }
+        return relative(appModel.presentation.status.nextRefreshAt) ?? "After the current refresh"
+    }
+
+    private func shortcut(_ title: String, _ keys: String) -> some View {
+        LabeledContent(title) {
+            Text(keys).font(.body.monospaced()).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Inbox
+
+    @AppStorage(TriagePreferenceKeys.laterTodayHours) private var laterTodayHours = 3
+    @AppStorage(TriagePreferenceKeys.tomorrowHour) private var tomorrowHour = 9
+    @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
+    @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
+
+    private var inboxPage: some View {
+        Form {
+            Section {
+                Picker("Sort lists by", selection: Binding(
+                    get: { sortField },
+                    set: { sortField = $0; sortAscending = $0.defaultAscending }
+                )) {
+                    ForEach(WorkspaceSortField.allCases) { Text($0.title).tag($0) }
+                }
+                Picker("Order", selection: $sortAscending) {
+                    Text("Ascending").tag(true)
+                    Text("Descending").tag(false)
+                }
+                .disabled(!sortField.supportsDirection)
+            } header: {
+                Text("Sorting")
+            } footer: {
+                Text("Recommended uses Copilot’s priority in the Inbox and your relationship to the work elsewhere. You can also change this from the toolbar.")
+            }
+
+            Section {
+                Picker("Later Today", selection: $laterTodayHours) {
+                    ForEach([1, 2, 3, 4, 6], id: \.self) { Text("In \($0) hour\($0 == 1 ? "" : "s")").tag($0) }
+                }
+                Picker("Tomorrow and Next Week", selection: $tomorrowHour) {
+                    ForEach(6...13, id: \.self) { hour in
+                        Text(Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: .now)?
+                            .formatted(date: .omitted, time: .shortened) ?? "\(hour):00").tag(hour)
+                    }
+                }
+            } header: {
+                Text("Snooze")
+            } footer: {
+                Text("Snoozed work returns to its section at this time. Anything new on the item brings it back sooner.")
+            }
+
+            Section {
+                LabeledContent("Done items") { Text("Return automatically when something changes") }
+                LabeledContent("Inbox") { Text("Items needing action or worth a look") }
+            } header: {
+                Text("Behavior")
+            }
+        }
+    }
+
+    // MARK: Accounts
+
+    private var accountsPage: some View {
+        Form {
+            Section {
+                if appModel.accounts.isEmpty {
+                    Text("No GitHub accounts are connected.").foregroundStyle(.secondary)
+                }
+                ForEach(appModel.accounts) { account in
+                    HStack(spacing: 12) {
+                        InitialAvatar(text: account.displayName ?? account.login, size: 32)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(account.displayName ?? account.login).fontWeight(.medium)
+                                if account.id == appModel.selectedAccountID {
+                                    Text("Current")
+                                        .font(.caption.weight(.medium))
+                                        .padding(.horizontal, 6).padding(.vertical, 1)
+                                        .background(.tint.opacity(0.15), in: Capsule())
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                            Text("@\(account.login) · \(account.authenticationKind.title)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        credentialBadge(account.credentialStatus)
+                        Menu {
+                            Button("Use This Account") { appModel.selectAccount(account.id) }
+                                .disabled(account.id == appModel.selectedAccountID)
+                            Divider()
+                            Button("Remove…", role: .destructive) { accountPendingRemoval = account }
+                                .disabled(appModel.isRemovingAccount(account.id))
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .accessibilityLabel("Actions for \(account.login)")
+                    }
+                    .padding(.vertical, 2)
+                }
+                HStack {
+                    Spacer()
+                    Button("Add Account…") { isPresentingAccountAddition = true }
+                        .disabled(appModel.isConnecting)
+                }
+            } header: {
+                Text("GitHub Accounts")
+            } footer: {
+                Text("Credentials are stored in your Keychain. Each account has its own encrypted local data.")
+            }
+
+            if !appModel.unavailableAccountIDs.isEmpty || !appModel.vaultRecoveryIssues.isEmpty || appModel.connectionError != nil {
+                Section("Needs Attention") {
+                    if !appModel.unavailableAccountIDs.isEmpty || !appModel.vaultRecoveryIssues.isEmpty {
+                        errorLabel(appModel.restorationError ?? "Some encrypted local account data needs recovery.")
+                        Button("Try Again") { Task { await appModel.restoreAccounts() } }
+                    }
+                    if let error = appModel.connectionError { errorLabel(error) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func credentialBadge(_ status: CredentialStatus) -> some View {
+        let (text, color): (String, Color) = switch status {
+        case .active: ("Connected", .green)
+        case .expiring: ("Expiring soon", .orange)
+        case .expired: ("Expired", .red)
+        case .revoked: ("Revoked", .red)
+        case .missing: ("Sign in again", .red)
+        case .capabilityLimited: ("Limited access", .orange)
+        }
+        Label(text, systemImage: "circle.fill")
+            .labelStyle(StatusDotLabelStyle(color: color))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    // MARK: Organizations
+
+    private var organizationsPage: some View {
+        Form {
+            Section {
+                if appModel.organizations.isEmpty {
+                    Text("Connect a GitHub account to discover organizations.").foregroundStyle(.secondary)
+                }
+                Picker("Show work from", selection: Binding(
+                    get: { appModel.selectedOrganizationID },
+                    set: { if let id = $0 { appModel.selectOrganization(id) } }
+                )) {
+                    ForEach(appModel.organizations) { organization in
+                        Text(organization.displayName ?? organization.login).tag(Optional(organization.id))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text(appModel.selectedAccount.map { "Organizations for @\($0.login)" } ?? "Organizations")
+            } footer: {
+                Text("Triage shows work involving you in one organization at a time. Copilot and rules are configured separately for each organization.")
+            }
+        }
+    }
+
+    // MARK: Copilot
+
+    private var aiPage: some View {
+        Form {
+            if let organization = appModel.selectedOrganization {
+                let state = appModel.selectedOrganizationAISettings
+                let authorization = appModel.selectedCopilotAuthorizationState
+                Section {
+                    LabeledContent("Status") {
+                        Label(copilotStatusText(state, authorization), systemImage: "circle.fill")
+                            .labelStyle(StatusDotLabelStyle(color: state?.isEffectivelyAvailable == true ? .green : .orange))
+                    }
+                    LabeledContent("Account") {
+                        Text(appModel.selectedAccount.map { "@\($0.login)" } ?? "—")
+                    }
+                    LabeledContent("Runtime") { Text(runtimeText(authorization.runtime)) }
+                    HStack {
+                        Spacer()
+                        if appModel.isCopilotAuthenticationInProgress {
+                            ProgressView().controlSize(.small)
+                            Button("Cancel") { appModel.cancelSelectedCopilotAuthentication() }
+                        } else if authorization.authentication != .authenticated {
+                            Button("Connect Copilot…") { appModel.startSelectedCopilotAuthenticationAtUserRequest() }
+                                .disabled(state?.consent.isEnabled != true)
+                        }
+                        runtimeControls
+                    }
+                    if let error = appModel.copilotAuthenticationError ?? appModel.copilotRuntimeOperationError {
+                        errorLabel(error)
+                    }
+                } header: {
+                    Text("Copilot")
+                }
+
+                Section {
+                    Toggle("Use Copilot to prioritize work", isOn: Binding(
+                        get: { state?.consent.isEnabled ?? false },
+                        set: { enabled in Task { await appModel.recordSelectedOrganizationAIConsent(enabled) } }
+                    ))
+                    Picker("Model", selection: Binding(
+                        get: { state?.consent.selectedModelID ?? "auto" },
+                        set: { id in Task { await appModel.selectSelectedOrganizationCopilotModel(id == "auto" ? nil : id) } }
+                    )) {
+                        Text("Auto").tag("auto")
+                        ForEach(state?.availableModels ?? []) { model in
+                            Text(model.displayName).tag(model.id)
+                        }
+                    }
+                    .disabled(state?.consent.isEnabled != true)
+                    LabeledContent("Rules and instructions") {
+                        Button("Edit…") { navigation.settingsCategory = .rules }
+                    }
+                    LabeledContent("Re-analyze all work") {
+                        Button("Re-analyze…") { isConfirmingReanalysis = true }
+                            .disabled(state?.isEffectivelyAvailable != true)
+                    }
+                } header: {
+                    Text(organization.displayName ?? organization.login)
+                } footer: {
+                    Text("Copilot reads titles, descriptions, recent comments, and pull request status for work involving you. It is review-only and never changes anything on GitHub.")
+                }
             } else {
-                Text("Select an organization before configuring Copilot.")
-                    .foregroundStyle(.secondary)
+                Section {
+                    Text("Select an organization before configuring Copilot.").foregroundStyle(.secondary)
+                }
             }
         }
         .task(id: appModel.selectedOrganizationID) {
@@ -218,61 +388,83 @@ struct SettingsView: View {
         }
     }
 
+    private func copilotStatusText(_ state: OrganizationAISettingsState?, _ authorization: CopilotAccountAuthorizationState) -> String {
+        if state?.isEffectivelyAvailable == true { return "Prioritizing your work" }
+        return state?.status ?? "Checking…"
+    }
+
+    private func runtimeText(_ runtime: CopilotRuntimeStatus) -> String {
+        switch runtime {
+        case .ready: "Installed"
+        case .missing: "Not installed"
+        case .downloading(let received, let expected):
+            if let expected, expected > 0 { "Downloading \(Int(Double(received) / Double(expected) * 100))%" } else { "Downloading…" }
+        case .verifying: "Verifying…"
+        case .corrupt: "Needs repair"
+        case .unsupported(let reason): "Unsupported: \(reason)"
+        }
+    }
+
     @ViewBuilder
     private var runtimeControls: some View {
         switch appModel.selectedCopilotAuthorizationState.runtime {
         case .ready:
-            Button("Remove Copilot Runtime", role: .destructive) {
+            Button("Remove Runtime", role: .destructive) {
                 Task { await appModel.removeCopilotRuntimeAtUserRequest() }
             }
         case .corrupt:
-            Button("Repair Copilot Runtime") {
-                appModel.startCopilotRuntimeRepairAtUserRequest()
-            }
+            Button("Repair Runtime") { appModel.startCopilotRuntimeRepairAtUserRequest() }
         case .downloading, .verifying:
-            HStack {
-                ProgressView("Preparing Copilot runtime…")
-                Button("Cancel") { appModel.cancelCopilotRuntimeOperation() }
-            }
+            ProgressView().controlSize(.small)
+            Button("Cancel") { appModel.cancelCopilotRuntimeOperation() }
         case .missing, .unsupported:
-            Button("Download Copilot Runtime") {
-                appModel.startCopilotRuntimeAcquisitionAtUserRequest()
-            }
-            .disabled(appModel.isCopilotRuntimeOperationInProgress)
+            Button("Download Runtime") { appModel.startCopilotRuntimeAcquisitionAtUserRequest() }
+                .disabled(appModel.isCopilotRuntimeOperationInProgress)
         }
     }
 
-    private var generalPage: some View {
-        SettingsSection("App") {
-            Toggle("Show Triage in the menu bar", isOn: $preferences.showMenuBarExtra)
-            Toggle("Launch at login", isOn: Binding(
-                get: { preferences.launchAtLoginEnabled },
-                set: { preferences.setLaunchAtLogin($0) }
-            ))
-        }
-    }
+    // MARK: Updates
 
     private var updatesPage: some View {
-        SettingsSection("Automatic Updates") {
-            Toggle("Automatically check for updates", isOn: Binding(
-                get: { softwareUpdates.automaticallyChecksForUpdates },
-                set: { softwareUpdates.setAutomaticallyChecksForUpdates($0) }
-            ))
-            Button("Check Now") { softwareUpdates.checkForUpdates() }
-                .disabled(!softwareUpdates.canCheckForUpdates)
+        Form {
+            Section {
+                Toggle("Automatically check for updates", isOn: Binding(
+                    get: { softwareUpdates.automaticallyChecksForUpdates },
+                    set: { softwareUpdates.setAutomaticallyChecksForUpdates($0) }
+                ))
+                Picker("Check", selection: Binding(
+                    get: { softwareUpdates.updateCheckInterval },
+                    set: { softwareUpdates.setUpdateCheckInterval($0) }
+                )) {
+                    ForEach(AppUpdateCheckInterval.allCases) { Text($0.title).tag($0) }
+                }
+                .disabled(!softwareUpdates.automaticallyChecksForUpdates)
+                Toggle("Automatically download and install updates", isOn: Binding(
+                    get: { softwareUpdates.automaticallyDownloadsUpdates },
+                    set: { softwareUpdates.setAutomaticallyDownloadsUpdates($0) }
+                ))
+                .disabled(!softwareUpdates.automaticallyChecksForUpdates || !softwareUpdates.allowsAutomaticUpdates)
+            } header: {
+                Text("Automatic Updates")
+            } footer: {
+                Text("Updates are signed by the developer and verified before installing.")
+            }
+            Section {
+                LabeledContent("Current version") { Text(AboutSettingsView.versionString) }
+                LabeledContent("Last checked") {
+                    Text(relative(softwareUpdates.lastUpdateCheckDate) ?? "Never")
+                }
+                HStack {
+                    Spacer()
+                    Button("Check for Updates…") { softwareUpdates.checkForUpdates() }
+                        .disabled(!softwareUpdates.canCheckForUpdates)
+                }
+            }
         }
     }
 
-    private var aboutPage: some View {
-        SettingsSection("Triage") {
-            Text("A native macOS 26 application.")
-            Text("Triage is private by default and does not collect tracking data.")
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func categoryTitle(_ category: SettingsCategory) -> String {
-        category == .ai ? "AI" : category.title
+    private func relative(_ date: Date?) -> String? {
+        date?.formatted(.relative(presentation: .named))
     }
 
     private func connectWithGitHub() {
@@ -332,24 +524,5 @@ struct SettingsView: View {
         }
         .padding(24)
         .frame(width: 440)
-    }
-}
-
-private struct SettingsSection<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        GroupBox(title) {
-            VStack(alignment: .leading, spacing: 14) {
-                content
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 }

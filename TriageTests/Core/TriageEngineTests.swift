@@ -109,6 +109,24 @@ final class TriageEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testManualModeWaitsAndShorterIntervalRefreshesLive() async throws {
+        let store = MemoryStore()
+        let discovery = CountingDiscovery(items: [engineItem("x", relationship: .assigned)])
+        let engine = TriageEngine(
+            store: store, makeDiscovery: { _ in discovery }, decider: RecordingDecider(batchSize: 5),
+            refreshInterval: nil
+        )
+        await engine.start(scope)
+        try await waitUntil { await discovery.calls == 1 }
+        try await Task.sleep(for: .milliseconds(200))
+        let manualCalls = await discovery.calls
+        XCTAssertEqual(manualCalls, 1, "Manual mode must not refresh on its own.")
+
+        await engine.setRefreshInterval(.milliseconds(50))
+        try await waitUntil { await discovery.calls >= 3 }
+        await engine.stop()
+    }
+
     // MARK: Fixtures
 
     private let scope = WorkspaceScope(

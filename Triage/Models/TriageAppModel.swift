@@ -196,7 +196,8 @@ final class TriageAppModel: ObservableObject {
     /// Activation and wake only refresh when saved work is more than a minute
     /// old and nothing is running; explicit Refresh always runs.
     private func refreshIfStale() {
-        guard case .idle = status.phase,
+        guard UserDefaults.standard.object(forKey: TriagePreferenceKeys.refreshWhenActive) as? Bool ?? true,
+              case .idle = status.phase,
               let last = status.lastRefreshAt, Date.now.timeIntervalSince(last) > 60
         else { return }
         refreshNow()
@@ -645,6 +646,23 @@ final class TriageAppModel: ObservableObject {
 }
 
 // MARK: - Workspace actions
+
+// MARK: Refresh
+
+extension TriageAppModel {
+    func setRefreshInterval(minutes: Int) {
+        guard let engine = runtime?.value.engine else { return }
+        Task { await engine.setRefreshInterval(AppPreferences.refreshInterval(minutes: minutes)) }
+    }
+
+    /// Re-analyzes all work for the selected organization with Copilot while
+    /// keeping current decisions visible until each is replaced.
+    func reanalyzeAll() {
+        var updated = rules
+        updated.reanalysisToken = UUID().uuidString
+        saveRules(updated)
+    }
+}
 
 // MARK: Selection
 
