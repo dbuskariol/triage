@@ -68,7 +68,9 @@ final class TriageEngineTests: XCTestCase {
         )
         await engine.start(scope)
         try await waitUntil { let decided = await store.decidedCount(); let failed = await store.failureCount(); return decided == 1 && failed == 1 }
-        let pending = try await store.itemsNeedingAnalysis(scope: scope, rulesDigest: "", at: .now, limit: 10)
+        let pending = try await store.itemsNeedingAnalysis(
+            scope: scope, rulesDigest: TriageRules.empty.digest, at: .now, limit: 10
+        )
         XCTAssertTrue(pending.isEmpty, "A failed item waits for its retry time.")
         await engine.stop()
     }

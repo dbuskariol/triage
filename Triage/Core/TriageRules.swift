@@ -10,6 +10,9 @@ import Foundation
 ///   lower-precedence block after the fixed system policy.
 struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
+    /// Bump when the triage prompt changes materially, so existing decisions
+    /// are re-analyzed in the background with the improved prompt.
+    static let promptVersion = "prompt-2"
     static let maximumRules = 100
     static let empty = TriageRules(instructions: "", rules: [])
 
@@ -40,13 +43,13 @@ struct TriageRules: Codable, Equatable, Sendable {
 
     /// Changes whenever anything Copilot sees changes, so decisions made under
     /// older preferences are re-analyzed. Disabled and invalid rules are ignored.
-    /// Empty when there are no preferences, so existing decisions stay current.
+    /// Just the prompt version when there are no preferences.
     var digest: String {
-        guard trimmedInstructions != nil || !enabledRules.isEmpty || !reanalysisToken.isEmpty else { return "" }
-        struct Canonical: Encodable { let instructions: String; let rules: [TriageRule]; let token: String }
+        guard trimmedInstructions != nil || !enabledRules.isEmpty || !reanalysisToken.isEmpty else { return Self.promptVersion }
+        struct Canonical: Encodable { let prompt: String; let instructions: String; let rules: [TriageRule]; let token: String }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = (try? encoder.encode(Canonical(instructions: trimmedInstructions ?? "", rules: enabledRules, token: reanalysisToken))) ?? Data()
+        let data = (try? encoder.encode(Canonical(prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", rules: enabledRules, token: reanalysisToken))) ?? Data()
         return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
