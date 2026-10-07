@@ -16,21 +16,20 @@ struct SettingsView: View {
     @State private var isConfirmingReanalysis = false
 
     var body: some View {
-        NavigationSplitView {
-            List(SettingsCategory.allCases, selection: Binding(
-                get: { navigation.settingsCategory },
-                set: { if let category = $0 { navigation.settingsCategory = category } }
-            )) { category in
-                Label(category.title, systemImage: category.systemImage)
+        TabView(selection: Binding(
+            get: { navigation.settingsCategory },
+            set: { navigation.settingsCategory = $0 }
+        )) {
+            ForEach(SettingsCategory.allCases) { category in
+                page(category)
+                    .formStyle(.grouped)
+                    // A fixed size per tab lets the Settings window resize to each page.
+                    .frame(width: 720, height: Self.idealHeight(category))
+                    .tabItem { Label(category.title, systemImage: category.systemImage) }
                     .tag(category)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
-        } detail: {
-            selectedPage
-                .formStyle(.grouped)
-                .navigationTitle(navigation.settingsCategory.title)
         }
+        .scenePadding(.bottom)
         .confirmationDialog(
             "Add a GitHub Account",
             isPresented: $isPresentingAccountAddition,
@@ -80,17 +79,25 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var selectedPage: some View {
-        switch navigation.settingsCategory {
+    private func page(_ category: SettingsCategory) -> some View {
+        switch category {
         case .general: generalPage
         case .inbox: inboxPage
         case .accounts: accountsPage
-        case .organizations: organizationsPage
         case .ai: aiPage
         case .rules: RulesSettingsView()
-        case .privacy: PrivacySettingsView()
         case .updates: updatesPage
-        case .about: AboutSettingsView()
+        }
+    }
+
+    private static func idealHeight(_ category: SettingsCategory) -> CGFloat {
+        switch category {
+        case .general: 820
+        case .inbox: 620
+        case .accounts: 640
+        case .ai: 700
+        case .rules: 760
+        case .updates: 460
         }
     }
 
@@ -134,6 +141,8 @@ struct SettingsView: View {
             } footer: {
                 Text("Each refresh searches GitHub for work involving you, then Copilot re-checks only what changed. Shorter intervals use more GitHub API quota.")
             }
+
+            PrivacySettingsSections()
 
             Section("Keyboard Shortcuts") {
                 shortcut("Next or previous item", "↓ ↑  or  j k")
@@ -266,6 +275,26 @@ struct SettingsView: View {
                 Text("Credentials are stored in your Keychain. Each account has its own encrypted local data.")
             }
 
+            Section {
+                if appModel.organizations.isEmpty {
+                    Text("Connect a GitHub account to discover organizations.").foregroundStyle(.secondary)
+                }
+                Picker("Show work from", selection: Binding(
+                    get: { appModel.selectedOrganizationID },
+                    set: { if let id = $0 { appModel.selectOrganization(id) } }
+                )) {
+                    ForEach(appModel.organizations) { organization in
+                        Text(organization.displayName ?? organization.login).tag(Optional(organization.id))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text(appModel.selectedAccount.map { "Organizations for @\($0.login)" } ?? "Organizations")
+            } footer: {
+                Text("Triage shows work involving you in one organization at a time. Copilot and rules are configured separately for each organization.")
+            }
+
             if !appModel.unavailableAccountIDs.isEmpty || !appModel.vaultRecoveryIssues.isEmpty || appModel.connectionError != nil {
                 Section("Needs Attention") {
                     if !appModel.unavailableAccountIDs.isEmpty || !appModel.vaultRecoveryIssues.isEmpty {
@@ -295,30 +324,6 @@ struct SettingsView: View {
     }
 
     // MARK: Organizations
-
-    private var organizationsPage: some View {
-        Form {
-            Section {
-                if appModel.organizations.isEmpty {
-                    Text("Connect a GitHub account to discover organizations.").foregroundStyle(.secondary)
-                }
-                Picker("Show work from", selection: Binding(
-                    get: { appModel.selectedOrganizationID },
-                    set: { if let id = $0 { appModel.selectOrganization(id) } }
-                )) {
-                    ForEach(appModel.organizations) { organization in
-                        Text(organization.displayName ?? organization.login).tag(Optional(organization.id))
-                    }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
-            } header: {
-                Text(appModel.selectedAccount.map { "Organizations for @\($0.login)" } ?? "Organizations")
-            } footer: {
-                Text("Triage shows work involving you in one organization at a time. Copilot and rules are configured separately for each organization.")
-            }
-        }
-    }
 
     // MARK: Copilot
 

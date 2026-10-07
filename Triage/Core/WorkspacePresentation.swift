@@ -193,5 +193,8 @@ protocol WorkspaceActions: AnyObject {
     func openCopilotSettings()
     /// Adds a hard rule for the selected organization (quick rules, feedback).
     func addRule(_ rule: TriageRule)
+    /// Opens the rule editor prefilled from `entry`. `correcting` (from
+    /// "Not right?") suggests moving the item somewhere else.
+    func beginRule(from entry: TriageEntry, correcting: Bool)
     func openRulesSettings()
 }

@@ -37,6 +37,18 @@ struct WorkspaceSidebarView<Pickers: View>: View {
         }
         .listStyle(.sidebar)
         .accessibilityLabel("Triage sidebar")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack {
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("Settings (⌘,)")
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
     }
 
     private func row(_ section: WorkspacePresentation.Section, showsBadge: Bool = false) -> some View {

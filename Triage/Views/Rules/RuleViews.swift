@@ -6,159 +6,6 @@ extension EnvironmentValues {
     @Entry var triageViewerLogin = ""
 }
 
-/// One-click rules built from an item's facts, for context menus and the
-/// detail view. Creating one is always an explicit user action.
-struct QuickRuleMenu: View {
-    let item: PersonalWorkItem
-    let actions: any WorkspaceActions
-
-    var body: some View {
-        Menu("Create Rule") {
-            if item.relationships.contains(.reviewRequested) {
-                Section("Review requests") {
-                    button(.lowerPriority, .relationship, TriageRuleCondition.Field.reviewRequestedTeam,
-                           title: "Lower priority when only my team is requested")
-                    button(.noAction, .relationship, TriageRuleCondition.Field.reviewRequestedTeam,
-                           title: "No action when only my team is requested")
-                    button(.needsAction, .relationship, TriageRuleCondition.Field.reviewRequestedDirect,
-                           title: "Needs my action when I'm requested directly")
-                    ForEach(teams, id: \.self) { team in
-                        Menu("Team \(team)") {
-                            button(.lowerPriority, .requestedTeam, team)
-                            button(.noAction, .requestedTeam, team)
-                            button(.mute, .requestedTeam, team)
-                        }
-                    }
-                }
-            }
-            Section(item.repository) {
-                button(.alwaysInbox, .repository, item.repository)
-                button(.raisePriority, .repository, item.repository)
-                button(.lowerPriority, .repository, item.repository)
-                button(.mute, .repository, item.repository)
-            }
-            if let author = item.author {
-                Section("Author \(author)") {
-                    button(.alwaysInbox, .author, author)
-                    button(.noAction, .author, author)
-                    button(.mute, .author, author)
-                }
-            }
-            if !item.labels.isEmpty {
-                Menu("Label") {
-                    ForEach(item.labels, id: \.self) { label in
-                        Menu(label) {
-                            button(.alwaysInbox, .label, label)
-                            button(.raisePriority, .label, label)
-                            button(.noAction, .label, label)
-                            button(.mute, .label, label)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button("Manage Rules…") { actions.openRulesSettings() }
-        }
-    }
-
-    private var teams: [String] {
-        (item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }
-    }
-
-    private func button(
-        _ effect: TriageRuleEffect, _ field: TriageRuleCondition.Field, _ value: String, title: String? = nil
-    ) -> some View {
-        Button {
-            actions.addRule(.quick(effect, field, value))
-        } label: {
-            Label(title ?? effect.title, systemImage: effect.systemImage)
-        }
-    }
-}
-
-/// "Not right?" feedback: the user says where an item belongs and how widely
-/// that should apply, and reviews the rule before it is created.
-struct RuleFeedbackSheet: View {
-    let entry: TriageEntry
-    let allEntries: [TriageEntry]
-    let actions: any WorkspaceActions
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var effect: TriageRuleEffect = .alwaysInbox
-    @State private var scope: TriageRuleCondition
-
-    init(entry: TriageEntry, allEntries: [TriageEntry], actions: any WorkspaceActions) {
-        self.entry = entry
-        self.allEntries = allEntries
-        self.actions = actions
-        _scope = State(initialValue: TriageRuleCondition(field: .repository, value: entry.item.repository))
-        _effect = State(initialValue: entry.decision?.disposition.isInbox == true ? .noAction : .alwaysInbox)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Teach Triage").font(.title2.weight(.semibold))
-                Text("Create a rule so similar work is handled your way. Rules always apply, even when Copilot disagrees.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Form {
-                Picker("This should be", selection: $effect) {
-                    ForEach(TriageRuleEffect.allCases) { option in
-                        Label(option.title, systemImage: option.systemImage).tag(option)
-                    }
-                }
-                Picker("For", selection: $scope) {
-                    ForEach(scopeOptions, id: \.self) { option in
-                        Text(option.summary.prefix(1).uppercased() + option.summary.dropFirst()).tag(option)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-            }
-            .formStyle(.grouped)
-            .scrollDisabled(true)
-
-            RulePreview(rule: rule, entries: allEntries)
-
-            HStack {
-                Button("Edit Instructions Instead…") {
-                    dismiss()
-                    actions.openRulesSettings()
-                }
-                .buttonStyle(.link)
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Create Rule") {
-                    actions.addRule(rule)
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(width: 520)
-    }
-
-    private var rule: TriageRule { TriageRule(name: "", conditions: [scope], effect: effect) }
-
-    private var scopeOptions: [TriageRuleCondition] {
-        var options: [TriageRuleCondition] = []
-        if entry.item.relationships.contains(.reviewRequested) {
-            options.append(.init(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedTeam))
-            options += (entry.item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }
-                .prefix(3).map { .init(field: .requestedTeam, value: $0) }
-        }
-        options.append(TriageRuleCondition(field: .repository, value: entry.item.repository))
-        if let author = entry.item.author { options.append(.init(field: .author, value: author)) }
-        options += entry.item.labels.prefix(5).map { .init(field: .label, value: $0) }
-        return options
-    }
-}
-
 /// Live "this rule matches N items" preview against current work.
 struct RulePreview: View {
     let rule: TriageRule
@@ -191,29 +38,76 @@ struct RulePreview: View {
     }
 }
 
-/// Create or edit a rule: When all conditions match → Then one effect.
+/// A rule being created or edited. From an item, `suggestions` holds
+/// conditions taken from it, shown as checkboxes.
+struct RuleDraft: Identifiable {
+    let id = UUID()
+    var rule: TriageRule
+    var suggestions: [TriageRuleCondition] = []
+    var isNew = true
+    /// Shown above the form, e.g. the item the rule was started from.
+    var context: String?
+}
+
+/// The one rule editor, used from items and from Settings:
+/// When (suggested and custom conditions) → Then (one action), with a live preview.
 struct RuleEditorSheet: View {
-    @State var rule: TriageRule
+    @State private var rule: TriageRule
+    private let suggestions: [TriageRuleCondition]
+    private let isNew: Bool
+    private let context: String?
     let entries: [TriageEntry]
     let onSave: (TriageRule) -> Void
     @Environment(\.dismiss) private var dismiss
 
+    init(draft: RuleDraft, entries: [TriageEntry], onSave: @escaping (TriageRule) -> Void) {
+        _rule = State(initialValue: draft.rule)
+        suggestions = draft.suggestions
+        isNew = draft.isNew
+        context = draft.context
+        self.entries = entries
+        self.onSave = onSave
+    }
+
+    private var customIndices: [Int] {
+        rule.conditions.indices.filter { !suggestions.contains(rule.conditions[$0]) }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             Form {
-                Section {
-                    TextField("Name", text: $rule.name, prompt: Text(rule.defaultName))
+                if let context {
+                    Section {
+                        Label(context, systemImage: "doc.text.magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
-                Section("When all of these match") {
-                    ForEach($rule.conditions.indices, id: \.self) { index in
+                Section {
+                    ForEach(suggestions, id: \.self) { condition in
+                        Toggle(capitalized(condition.summary), isOn: Binding(
+                            get: { rule.conditions.contains(condition) },
+                            set: { isOn in
+                                if isOn { rule.conditions.append(condition) } else { rule.conditions.removeAll { $0 == condition } }
+                            }
+                        ))
+                    }
+                    ForEach(customIndices, id: \.self) { index in
                         conditionRow(index)
                     }
                     Button {
                         rule.conditions.append(.init(field: .repository, value: ""))
                     } label: {
-                        Label("Add Condition", systemImage: "plus")
+                        Label(suggestions.isEmpty ? "Add Condition" : "Add Other Condition", systemImage: "plus")
                     }
+                    .buttonStyle(.link)
                     .disabled(rule.conditions.count >= 5)
+                } header: {
+                    Text("When all of these match")
+                } footer: {
+                    if !suggestions.isEmpty {
+                        Text("Suggested from this item. Choose more for a narrower rule.")
+                    }
                 }
                 Section("Then") {
                     Picker("Action", selection: $rule.effect) {
@@ -221,20 +115,26 @@ struct RuleEditorSheet: View {
                             Label(option.title, systemImage: option.systemImage).tag(option)
                         }
                     }
-                    Toggle("Enabled", isOn: $rule.isEnabled)
+                    TextField("Name", text: $rule.name, prompt: Text(rule.isValid ? rule.defaultName : "Optional"))
+                    if !isNew { Toggle("Enabled", isOn: $rule.isEnabled) }
+                }
+                Section {
+                    RulePreview(rule: rule, entries: entries)
+                        .listRowInsets(EdgeInsets())
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 320)
-
-            RulePreview(rule: rule, entries: entries)
-                .padding(.horizontal, 20)
 
             HStack {
+                if isNew {
+                    Text("Rules apply instantly and always win over Copilot.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Save") {
+                Button(isNew ? "Create Rule" : "Save") {
                     onSave(rule)
                     dismiss()
                 }
@@ -242,9 +142,13 @@ struct RuleEditorSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!rule.isValid)
             }
-            .padding([.horizontal, .bottom], 20)
+            .padding(20)
         }
-        .frame(width: 560)
+        .frame(width: 560, height: 600)
+    }
+
+    private func capitalized(_ text: String) -> String {
+        text.prefix(1).uppercased() + text.dropFirst()
     }
 
     @ViewBuilder
@@ -260,17 +164,22 @@ struct RuleEditorSheet: View {
                 ForEach(TriageRuleCondition.Field.allCases) { Text($0.title).tag($0) }
             }
             .labelsHidden()
-            .frame(width: 150)
+            .frame(width: 170)
 
             if let choices = rule.conditions[index].field.choices {
-                Picker("Value", selection: $rule.conditions[index].value) {
+                Picker("Value", selection: Binding(
+                    get: { rule.conditions[index].value },
+                    set: { rule.conditions[index].value = $0 }
+                )) {
                     ForEach(choices, id: \.value) { Text($0.title).tag($0.value) }
                 }
                 .labelsHidden()
             } else {
-                TextField("Value", text: $rule.conditions[index].value,
-                          prompt: Text(rule.conditions[index].field.placeholder))
-                    .labelsHidden()
+                TextField("Value", text: Binding(
+                    get: { rule.conditions[index].value },
+                    set: { rule.conditions[index].value = $0 }
+                ), prompt: Text(rule.conditions[index].field.placeholder))
+                .labelsHidden()
             }
 
             Button {
@@ -279,7 +188,6 @@ struct RuleEditorSheet: View {
                 Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .disabled(rule.conditions.count == 1)
             .accessibilityLabel("Remove condition")
         }
     }

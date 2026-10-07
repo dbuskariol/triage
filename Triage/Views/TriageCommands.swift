@@ -53,6 +53,13 @@ struct TriageWorkspaceCommands: Commands {
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(appModel.selectedEntry == nil)
 
+            Button("Create Rule…") {
+                guard let entry = appModel.selectedEntry else { return }
+                appModel.beginRule(from: entry, correcting: false)
+            }
+            .keyboardShortcut("r", modifiers: [.command, .option])
+            .disabled(appModel.selectedEntry == nil)
+
             Button("Open on GitHub") {
                 guard let entry = appModel.selectedEntry else { return }
                 appModel.openOnGitHub(entry)

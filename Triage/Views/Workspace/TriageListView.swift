@@ -272,7 +272,7 @@ struct TriageListView: View {
             Button("Open on GitHub") { actions.openOnGitHub(entry) }
         }
         Divider()
-        QuickRuleMenu(item: entry.item, actions: actions)
+        Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }
     }
 
     @ViewBuilder

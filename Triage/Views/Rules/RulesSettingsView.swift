@@ -6,7 +6,7 @@ struct RulesSettingsView: View {
     @EnvironmentObject private var appModel: TriageAppModel
 
     @State private var instructions = ""
-    @State private var editingRule: TriageRule?
+    @State private var editingRule: RuleDraft?
     @State private var isAddingRule = false
     @Environment(\.triageViewerLogin) private var viewer
 
@@ -34,8 +34,8 @@ struct RulesSettingsView: View {
         .onChange(of: appModel.rules.instructions) { _, saved in
             if instructions != saved, !hasUnsavedInstructions { instructions = saved }
         }
-        .sheet(item: $editingRule) { rule in
-            RuleEditorSheet(rule: rule, entries: appModel.presentation.allEntries) { updated in
+        .sheet(item: $editingRule) { draft in
+            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { updated in
                 var rules = appModel.rules
                 if let index = rules.rules.firstIndex(where: { $0.id == updated.id }) {
                     rules.rules[index] = updated
@@ -52,7 +52,7 @@ struct RulesSettingsView: View {
     private var rulesSection: some View {
         Section {
             if appModel.rules.rules.isEmpty {
-                Text("No rules yet. Right-click any item in the main window to create one quickly.")
+                Text("No rules yet. Select any item and choose Create Rule… to start from it.")
                     .foregroundStyle(.secondary)
             }
             ForEach(Array(appModel.rules.rules.enumerated()), id: \.element.id) { index, rule in
@@ -64,7 +64,7 @@ struct RulesSettingsView: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Add Rule…") {
-                    editingRule = TriageRule(name: "", conditions: [.init(field: .repository, value: "")], effect: .alwaysInbox)
+                    editingRule = RuleDraft(rule: TriageRule(name: "", conditions: [.init(field: .repository, value: "")], effect: .alwaysInbox))
                 }
             }
             if let error = appModel.rulesError {
@@ -111,7 +111,7 @@ struct RulesSettingsView: View {
             }
 
             Menu {
-                Button("Edit…") { editingRule = rule }
+                Button("Edit…") { editingRule = RuleDraft(rule: rule, isNew: false) }
                 Button("Move Up") { move(index, by: -1) }.disabled(index == 0)
                 Button("Move Down") { move(index, by: 1) }.disabled(index == appModel.rules.rules.count - 1)
                 Divider()
@@ -126,7 +126,7 @@ struct RulesSettingsView: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { editingRule = rule }
+        .onTapGesture(count: 2) { editingRule = RuleDraft(rule: rule, isNew: false) }
     }
 
     private func update(_ rule: TriageRule, _ change: (inout TriageRule) -> Void) {

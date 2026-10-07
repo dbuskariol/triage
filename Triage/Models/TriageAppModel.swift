@@ -76,6 +76,8 @@ final class TriageAppModel: ObservableObject {
     /// The selected organization's triage rules and instructions.
     @Published private(set) var rules = TriageRules.empty
     @Published private(set) var rulesError: String?
+    /// The rule editor started from an item, if open.
+    @Published var ruleDraft: RuleDraft?
     /// Local status changes shown immediately, before the store confirms them.
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
     @Published var selectedSection: WorkspacePresentation.Section = .inbox
@@ -772,6 +774,22 @@ extension TriageAppModel: WorkspaceActions {
 
     func openRulesSettings() {
         openSettings?(.rules)
+    }
+
+    func beginRule(from entry: TriageEntry, correcting: Bool) {
+        let viewer = selectedAccount?.login ?? ""
+        let suggestions = TriageRule.suggestedConditions(for: entry.item, viewer: viewer)
+        let teamOnly = entry.item.reviewRequestKind(viewer: viewer) == .team
+        let effect: TriageRuleEffect = if correcting {
+            entry.decision?.disposition.isInbox == true ? .noAction : .alwaysInbox
+        } else {
+            teamOnly ? .lowerPriority : .alwaysInbox
+        }
+        ruleDraft = RuleDraft(
+            rule: TriageRule(name: "", conditions: Array(suggestions.prefix(1)), effect: effect),
+            suggestions: suggestions,
+            context: "From \(entry.item.reference): \(entry.item.title)"
+        )
     }
 
     func addRule(_ rule: TriageRule) {
