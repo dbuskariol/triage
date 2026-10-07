@@ -8,6 +8,11 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @FocusState private var isListFocused: Bool
+    @State private var statusNow = Date.now
+
+    private var statusSubtitle: String {
+        WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
+    }
 
     var body: some View {
         Group {
@@ -16,7 +21,7 @@ struct TriageListView: View {
             } else {
                 List(selection: $selectedEntryID) {
                     ForEach(entries) { entry in
-                        TriageEntryRow(entry: entry)
+                        TriageEntryRow(entry: entry, isSelected: entry.id == selectedEntryID)
                             .tag(entry.id)
                             .contextMenu { actionMenu(for: entry) }
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -56,9 +61,19 @@ struct TriageListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaBar(edge: .top) {
-            TriageStatusView(status: presentation.status, actions: actions)
+            if presentation.status.problem != nil {
+                TriageStatusView(status: presentation.status, actions: actions)
+            }
         }
         .navigationTitle(section.title)
+        .navigationSubtitle(statusSubtitle)
+        .task(id: presentation.status) {
+            // Keep "Updated N minutes ago" current while idle.
+            while !Task.isCancelled {
+                statusNow = .now
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
     }
 
     private var selectedEntry: TriageEntry? {
@@ -224,79 +239,128 @@ struct TriageListView: View {
 
 struct TriageEntryRow: View {
     let entry: TriageEntry
+    /// On the selection highlight, tinted content switches to the
+    /// highlight's foreground so it stays legible.
+    var isSelected = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             priorityIndicator
-                .padding(.top, 5)
+                .frame(width: 10)
+                .padding(.top, 4)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
+                sourceLine
                 Text(entry.item.title)
                     .font(.headline)
-                    .lineLimit(1)
-
-                Text("\(entry.item.reference) · \(entry.item.primaryRelationship?.title ?? "Related to you")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                if let decision = entry.decision {
-                    Text(decision.reason)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    if let nextAction = decision.nextAction {
-                        Text("→ \(nextAction)")
-                            .font(.subheadline)
-                            .lineLimit(1)
-                    }
-                    if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
-                        // Decided earlier; Copilot is re-checking newer facts or preferences.
-                        Label(entry.analysis == .pending ? "Re-checking…" : analysis, systemImage: "arrow.triangle.2.circlepath")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                } else if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
-                    Text(analysis)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                if !WorkspaceViewPresentation.badges(for: entry).isEmpty {
-                    HStack(spacing: 5) {
-                        ForEach(WorkspaceViewPresentation.badges(for: entry), id: \.self) { badge in
-                            Text(badge)
-                                .font(.caption2.weight(.medium))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.quaternary, in: Capsule())
-                        }
-                    }
-                }
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                copilotLine
+                chips
             }
-
-            Spacer(minLength: 8)
-            Text(entry.item.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 6)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
     }
 
+    /// Where it lives and why it's yours: the first thing the eye reads.
+    private var sourceLine: some View {
+        HStack(spacing: 5) {
+            Text(repositoryName)
+                .font(.subheadline.weight(.semibold))
+            Text(verbatim: "#\(entry.item.number)")
+                .font(.subheadline)
+                .foregroundStyle(secondary)
+            if let relationship = entry.item.primaryRelationship {
+                Text("·").foregroundStyle(secondary)
+                Text(relationship.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(secondary)
+            }
+            Spacer(minLength: 6)
+            Text(entry.item.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
+                .font(.caption)
+                .foregroundStyle(secondary)
+        }
+        .lineLimit(1)
+    }
+
+    /// Copilot's single most useful line: the next step, else the reason.
+    @ViewBuilder
+    private var copilotLine: some View {
+        if let decision = entry.decision {
+            Text(decision.nextAction ?? decision.reason)
+                .font(.subheadline)
+                .foregroundStyle(secondary)
+                .lineLimit(2)
+            if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
+                Label(entry.analysis == .pending ? "Re-checking…" : analysis, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(secondary)
+                    .lineLimit(1)
+            }
+        } else if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
+            Text(analysis)
+                .font(.subheadline)
+                .foregroundStyle(secondary)
+                .lineLimit(2)
+        }
+    }
+
+    /// Only what blocks progress gets color; everything else stays quiet.
+    @ViewBuilder
+    private var chips: some View {
+        let badges = WorkspaceViewPresentation.badges(for: entry)
+        if !badges.isEmpty {
+            HStack(spacing: 10) {
+                ForEach(badges, id: \.self) { badge in
+                    Label(badge, systemImage: Self.symbol(forBadge: badge))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : Self.style(forBadge: badge))
+                }
+            }
+            .lineLimit(1)
+        }
+    }
+
+    private var secondary: AnyShapeStyle {
+        isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(.secondary)
+    }
+
+    static func symbol(forBadge badge: String) -> String {
+        switch badge {
+        case "Checks failing": "xmark.circle.fill"
+        case "Conflicts": "exclamationmark.triangle.fill"
+        case "Changes requested": "arrow.uturn.backward.circle.fill"
+        default: "pencil.circle"
+        }
+    }
+
+    static func style(forBadge badge: String) -> AnyShapeStyle {
+        switch badge {
+        case "Checks failing", "Conflicts": AnyShapeStyle(Color.red)
+        case "Changes requested": AnyShapeStyle(Color.orange)
+        default: AnyShapeStyle(.secondary)
+        }
+    }
+
+    private var repositoryName: String {
+        entry.item.repository.split(separator: "/").last.map(String.init) ?? entry.item.repository
+    }
+
     @ViewBuilder
     private var priorityIndicator: some View {
+        let color: Color = isSelected ? .white : .accentColor
         switch entry.decision?.disposition {
         case .act:
-            Circle().fill(Color.accentColor).frame(width: 9, height: 9)
+            Circle().fill(color).frame(width: 9, height: 9)
+                .help("Needs your action")
         case .review:
-            Circle().stroke(Color.accentColor, lineWidth: 1.5).frame(width: 9, height: 9)
+            Circle().strokeBorder(color, lineWidth: 1.5).frame(width: 9, height: 9)
+                .help("Worth a look")
         default:
-            Image(systemName: "circle").foregroundStyle(.tertiary)
+            Color.clear.frame(width: 9, height: 9)
         }
     }
 

@@ -6,10 +6,6 @@ struct TriageStatusView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(WorkspaceViewPresentation.statusLine(status))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
             if let problem = status.problem {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")

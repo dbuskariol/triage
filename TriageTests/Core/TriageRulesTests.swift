@@ -47,11 +47,11 @@ struct TriageRulesTests {
         #expect(presentation.count(in: .analyzing) == 0)
     }
 
-    @Test func digestIsEmptyWithoutPreferencesAndIgnoresDisabledRules() throws {
-        #expect(TriageRules.empty.digest == "")
+    @Test func digestIsPromptVersionWithoutPreferencesAndIgnoresDisabledRules() throws {
+        #expect(TriageRules.empty.digest == TriageRules.promptVersion)
         var rule = TriageRule.quick(.mute, .author, "bot")
         rule.isEnabled = false
-        #expect(TriageRules(instructions: "  ", rules: [rule]).digest == "")
+        #expect(TriageRules(instructions: "  ", rules: [rule]).digest == TriageRules.promptVersion)
         let withInstructions = TriageRules(instructions: "Security first.", rules: [])
         #expect(!withInstructions.digest.isEmpty)
         #expect(withInstructions.digest != TriageRules(instructions: "Docs first.", rules: []).digest)
@@ -110,6 +110,8 @@ struct AnalyzingQueueTests {
             rules: TriageRules(instructions: "Security first.", rules: [])
         )
         #expect(withInstructions.count(in: .analyzing) == 1)
-        #expect(WorkspacePresentation(entries: [current], status: .initial, now: .now).count(in: .analyzing) == 0)
+        var currentPrompt = current
+        currentPrompt.decision?.rulesDigest = TriageRules.promptVersion
+        #expect(WorkspacePresentation(entries: [currentPrompt], status: .initial, now: .now).count(in: .analyzing) == 0)
     }
 }
