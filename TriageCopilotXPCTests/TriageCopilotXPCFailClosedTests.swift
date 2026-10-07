@@ -272,19 +272,19 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
   func testRuntimeTrustPinsTheExtractedExecutableRatherThanItsArchive() {
     XCTAssertEqual(
       CopilotRuntimeHostArchitecture.arm64.expectedExecutableSHA256,
-      "2f4238eebaa42e1196e4f9473a06d03fca612fd6fed09bb9033d9c506d4a5e9a"
+      "d054ca3c31802d48e88e96627af502a0d5c579ee2f940c8cadf2d4bda07e0b54"
     )
     XCTAssertEqual(
       CopilotRuntimeHostArchitecture.x86_64.expectedExecutableSHA256,
-      "8da653f6c4944d6be001af17aaf6d685066c91b1f62af543bbc3ebb35b85435c"
+      "33980346a4094f8cc17f19dd66d5e71e01a39457911af312bd407bb5d8eb7b97"
     )
     XCTAssertNotEqual(
       CopilotRuntimeHostArchitecture.arm64.expectedExecutableSHA256,
-      "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871"
+      "6aa2af1d0436b23c92810f11ea35a3d1c2b36b716d3e6d7c44299d199f905c5b"
     )
     XCTAssertNotEqual(
       CopilotRuntimeHostArchitecture.x86_64.expectedExecutableSHA256,
-      "1fb04e8e040525ae39cf53cce7f9e44b7d3fbb200bc9bfe38e2e7436d7dd3b74"
+      "7527cdd1c254d1daeb3e3fbd042deec3ba1f283cce86c83dced2bea8b63cc28b"
     )
   }
 

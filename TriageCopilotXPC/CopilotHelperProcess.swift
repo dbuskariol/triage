@@ -858,10 +858,10 @@ protocol CopilotRuntimeTrustVerifying {
 
 /// Verifies the locally installed official Copilot CLI immediately before every
 /// helper launch. Runtime acquisition publishes only this fixed namespace:
-/// `Application Support/Triage/CopilotRuntime/1.0.81-10/<host-arch>/copilot`.
+/// `Application Support/Triage/CopilotRuntime/1.0.92/<host-arch>/copilot`.
 /// The XPC process never accepts a runtime path from its caller.
 final class CopilotRuntimeTrustVerifier: CopilotRuntimeTrustVerifying {
-  private static let releaseVersion = "1.0.81-10"
+  private static let releaseVersion = "1.0.92"
   private static let directoryFlags: Int32 = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
 
   private let applicationSupportDirectory: URL?
@@ -1088,8 +1088,8 @@ enum CopilotRuntimeHostArchitecture: String {
   /// the acquisition-side archive pins.
   var expectedExecutableSHA256: String {
     switch self {
-    case .arm64: "2f4238eebaa42e1196e4f9473a06d03fca612fd6fed09bb9033d9c506d4a5e9a"
-    case .x86_64: "8da653f6c4944d6be001af17aaf6d685066c91b1f62af543bbc3ebb35b85435c"
+    case .arm64: "d054ca3c31802d48e88e96627af502a0d5c579ee2f940c8cadf2d4bda07e0b54"
+    case .x86_64: "33980346a4094f8cc17f19dd66d5e71e01a39457911af312bd407bb5d8eb7b97"
     }
   }
 

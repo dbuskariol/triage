@@ -26,6 +26,13 @@ use crate::{
     schema::{TriageItem, TriageItemDecision},
 };
 
+/// Per-request model tuning chosen in Settings.
+#[derive(Clone, Debug, Default)]
+pub struct TriageModelOptions {
+    pub reasoning_effort: Option<String>,
+    pub context_tier: Option<String>,
+}
+
 /// The only capability policy accepted by Triage.
 #[derive(Clone, Debug, Default)]
 pub struct ZeroToolPolicy;
@@ -190,6 +197,7 @@ pub trait CopilotEngine: Send + Sync + 'static {
         instructions: Option<String>,
         items: Vec<TriageItem>,
         selected_model: Option<String>,
+        options: TriageModelOptions,
         cancellation: CancellationState,
     ) -> Result<Vec<TriageItemDecision>, Failure>;
     async fn authenticate(
@@ -323,7 +331,7 @@ impl TrustedRuntimeConfiguration {
         let triage_root = runtime_root
             .parent()
             .ok_or(TrustedRuntimeError::InvalidPath)?;
-        if release_directory.file_name().and_then(|name| name.to_str()) != Some("1.0.81-10")
+        if release_directory.file_name().and_then(|name| name.to_str()) != Some("1.0.92")
             || runtime_root.file_name().and_then(|name| name.to_str()) != Some("CopilotRuntime")
             || triage_root.file_name().and_then(|name| name.to_str()) != Some("Triage")
             || self.runtime_lock_path != runtime_root.join(".runtime.lock")
@@ -723,6 +731,13 @@ impl CopilotEngine for FailClosedCopilotEngine {
             .filter(|model| !model.id.is_empty() && !model.name.is_empty())
             .map(|model| ModelDescriptor {
                 is_default: model.id == "auto",
+                supported_reasoning_efforts: model.supported_reasoning_efforts.unwrap_or_default(),
+                default_reasoning_effort: model.default_reasoning_effort,
+                supports_long_context: model
+                    .supported_context_tiers
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|tier| tier == "long_context"),
                 id: model.id,
                 display_name: model.name,
             })
@@ -738,6 +753,7 @@ impl CopilotEngine for FailClosedCopilotEngine {
         instructions: Option<String>,
         items: Vec<TriageItem>,
         selected_model: Option<String>,
+        options: TriageModelOptions,
         cancellation: CancellationState,
     ) -> Result<Vec<TriageItemDecision>, Failure> {
         let _gate = self.operation_gate.lock().await;
@@ -756,6 +772,12 @@ impl CopilotEngine for FailClosedCopilotEngine {
         let model_selector = selected_model.as_deref().unwrap_or("auto").to_owned();
         if let Some(model) = selected_model {
             config = config.with_model(model);
+        }
+        if let Some(effort) = options.reasoning_effort {
+            config = config.with_reasoning_effort(effort);
+        }
+        if let Some(tier) = options.context_tier {
+            config = config.with_context_tier(tier);
         }
         let session = Arc::new(
             tokio::time::timeout(SDK_STARTUP_TIMEOUT, client.create_session(config))
@@ -830,8 +852,10 @@ impl CopilotEngine for FailClosedCopilotEngine {
             .map_err(|_| {
                 authentication_stage("Copilot runtime startup timed out after browser sign-in.")
             })?
-            .map_err(|_| {
-                authentication_stage("Copilot runtime could not start after browser sign-in.")
+            .map_err(|error| {
+                // Startup errors describe the runtime handshake, never credentials.
+                let detail: String = error.to_string().chars().take(160).collect();
+                authentication_stage(&format!("Copilot runtime could not start: {detail}"))
             })?;
         // The inbound frame token is zeroized now. The SDK holds only the
         // child-process injection it requires for this authenticated runtime.
@@ -956,7 +980,7 @@ fn authentication_failed() -> Failure {
     )
 }
 
-fn authentication_stage(message: &'static str) -> Failure {
+fn authentication_stage(message: &str) -> Failure {
     Failure::new(FailureCode::AuthenticationFailed, message)
 }
 
@@ -1605,7 +1629,7 @@ mod tests {
         let root = temporary_directory("bootstrap-layout");
         let triage = root.join("Triage");
         let runtime_root = triage.join("CopilotRuntime");
-        let runtime = runtime_root.join("1.0.81-10").join("arm64");
+        let runtime = runtime_root.join("1.0.92").join("arm64");
         let cli = runtime.join("copilot");
         let lock = runtime_root.join(".runtime.lock");
         let account = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

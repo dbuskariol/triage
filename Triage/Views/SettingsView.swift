@@ -369,6 +369,7 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(state?.consent.isEnabled != true)
+                    modelTuning(state)
                     LabeledContent("Rules and instructions") {
                         Button("Edit…") { navigation.settingsCategory = .rules }
                     }
@@ -379,7 +380,7 @@ struct SettingsView: View {
                 } header: {
                     Text(organization.displayName ?? organization.login)
                 } footer: {
-                    Text("Copilot reads titles, descriptions, recent comments, and pull request status for work involving you. It is review-only and never changes anything on GitHub.")
+                    Text("Copilot reads titles, descriptions, recent comments, and pull request status for work involving you. It is review-only and never changes anything on GitHub. Higher reasoning effort and long context can improve judgment on complex work but are slower and may use more of your Copilot allowance.")
                 }
             } else {
                 Section {
@@ -389,6 +390,51 @@ struct SettingsView: View {
         }
         .task(id: appModel.selectedOrganizationID) {
             await appModel.refreshSelectedOrganizationAIStatus()
+        }
+    }
+
+    /// Reasoning effort and long context, shown only for what the selected model supports.
+    @ViewBuilder
+    private func modelTuning(_ state: OrganizationAISettingsState?) -> some View {
+        let consent = state?.consent
+        let model = state?.availableModels.first { $0.id == consent?.selectedModelID }
+        let efforts = model?.supportedReasoningEfforts ?? []
+        if consent?.isEnabled == true, consent?.selectedModelID == nil {
+            Text("Choose a specific model to adjust reasoning effort and context length.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        if let consent, consent.isEnabled, !efforts.isEmpty {
+            Picker("Reasoning effort", selection: Binding(
+                get: { consent.reasoningEffort ?? "" },
+                set: { effort in
+                    Task {
+                        await appModel.saveSelectedOrganizationCopilotChoice(.init(
+                            modelID: consent.selectedModelID,
+                            reasoningEffort: effort.isEmpty ? nil : effort,
+                            contextTier: consent.contextTier
+                        ))
+                    }
+                }
+            )) {
+                Text(model?.defaultReasoningEffort.map { "Default (\($0.capitalized))" } ?? "Default").tag("")
+                ForEach(efforts, id: \.self) { Text($0.capitalized).tag($0) }
+            }
+        }
+        if let consent, consent.isEnabled, model?.supportsLongContext == true {
+            Toggle("Long context", isOn: Binding(
+                get: { consent.contextTier == "long_context" },
+                set: { isOn in
+                    Task {
+                        await appModel.saveSelectedOrganizationCopilotChoice(.init(
+                            modelID: consent.selectedModelID,
+                            reasoningEffort: consent.reasoningEffort,
+                            contextTier: isOn ? "long_context" : nil
+                        ))
+                    }
+                }
+            ))
+            .help("Gives Copilot a larger context window for long descriptions and discussions. May use more premium requests.")
         }
     }
 

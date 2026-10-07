@@ -449,6 +449,11 @@ final class TriageAppModel: ObservableObject {
             accountID: scope.accountID, organizationID: scope.organizationID
         )
         var state = await authorization.state(for: account.id)
+        if consent.isEnabled, state.runtime == .missing,
+           (try? await authorization.upgradeRuntimeIfPreviouslyInstalled()) == true {
+            Self.logger.notice("Copilot runtime upgraded after app update")
+            state = await authorization.state(for: account.id)
+        }
         if consent.isEnabled, state.runtime == .ready, state.authentication == .signedOut,
            force || copilotRestoreAttempted.insert(scope).inserted {
             do {
@@ -496,7 +501,7 @@ final class TriageAppModel: ObservableObject {
     func recordSelectedOrganizationAIConsent(_ isEnabled: Bool) async {
         guard let scope = selectedScope else { return }
         do {
-            try await dependencies.saveConsent(scope, isEnabled, nil)
+            try await dependencies.saveConsent(scope, isEnabled, .auto)
             if !isEnabled { await runtime?.value.engine.stop() }
             await refreshSelectedOrganizationAIStatus()
             if isEnabled, let runtime, runtime.scope == scope {
@@ -509,9 +514,15 @@ final class TriageAppModel: ObservableObject {
     }
 
     func selectSelectedOrganizationCopilotModel(_ modelID: String?) async {
+        // A different model may not support the previous effort or tier.
+        await saveSelectedOrganizationCopilotChoice(.init(modelID: modelID, reasoningEffort: nil, contextTier: nil))
+    }
+
+    /// Saves model, reasoning effort, and context tier for the selected organization.
+    func saveSelectedOrganizationCopilotChoice(_ choice: CopilotModelChoice) async {
         guard let scope = selectedScope else { return }
         do {
-            try await dependencies.saveConsent(scope, true, modelID)
+            try await dependencies.saveConsent(scope, true, choice)
             await refreshSelectedOrganizationAIStatus()
         } catch {
             copilotAuthenticationError = "The Copilot model selection could not be saved."

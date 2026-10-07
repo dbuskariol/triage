@@ -361,11 +361,40 @@ struct CopilotModel: Codable, Equatable, Sendable, Identifiable {
   let id: String
   let displayName: String
   let isDefault: Bool
+  /// Reasoning effort levels this model accepts (e.g. low, medium, high).
+  var supportedReasoningEfforts: [String]? = nil
+  var defaultReasoningEffort: String? = nil
+  /// Whether the model offers the long-context tier.
+  var supportsLongContext: Bool? = nil
 
   enum CodingKeys: String, CodingKey {
     case id
     case displayName = "display_name"
     case isDefault = "is_default"
+    case supportedReasoningEfforts = "supported_reasoning_efforts"
+    case defaultReasoningEffort = "default_reasoning_effort"
+    case supportsLongContext = "supports_long_context"
+  }
+}
+
+/// The user's Copilot model choice for an organization.
+struct CopilotModelChoice: Equatable, Sendable {
+  /// `nil` is Auto.
+  var modelID: String?
+  /// `nil` uses the model's default.
+  var reasoningEffort: String?
+  /// `"long_context"` or `nil` (default tier).
+  var contextTier: String?
+
+  static let auto = CopilotModelChoice(modelID: nil, reasoningEffort: nil, contextTier: nil)
+
+  static func isValidReasoningEffort(_ value: String?) -> Bool {
+    guard let value else { return true }
+    return (1...16).contains(value.count) && value.allSatisfy { $0.isASCII && ($0.isLowercase || $0 == "_") }
+  }
+
+  static func isValidContextTier(_ value: String?) -> Bool {
+    value == nil || value == "long_context" || value == "default"
   }
 }
 
@@ -461,6 +490,8 @@ private enum CopilotWireCodingKey: String, CodingKey {
   case triage
   case viewerLogin = "viewer_login"
   case items, decisions, id, disposition, priority, reason, instructions
+  case reasoningEffort = "reasoning_effort"
+  case contextTier = "context_tier"
   case targetRequestID = "target_request_id"
   case cancelledRequestID = "cancelled_request_id"
 }
@@ -601,11 +632,13 @@ struct CopilotTriageRequest: Codable, Equatable, Sendable {
   let deadline: Date
   /// The user's free-text triage preferences; sent in a delimited system block.
   let instructions: String?
-  enum CodingKeys: String, CodingKey { case modelID = "model_id"; case viewerLogin = "viewer_login"; case items, deadline, instructions }
-  init(accountID: AccountID, organizationID: OrganizationID, viewerLogin: String, items: [CopilotTriageItem], modelID: String? = nil, deadline: Date, instructions: String? = nil, requestID: UUID = UUID()) { header = .init(accountID: accountID, organizationID: organizationID, operation: .triage, requestID: requestID); self.modelID = modelID; self.viewerLogin = viewerLogin; self.items = items; self.deadline = deadline; self.instructions = instructions }
-  init(from decoder: any Decoder) throws { let c = try decoder.container(keyedBy: CopilotWireCodingKey.self); header = try .init(container: c); modelID = try c.decodeIfPresent(String.self, forKey: .modelID); viewerLogin = try c.decode(String.self, forKey: .viewerLogin); items = try c.decode([CopilotTriageItem].self, forKey: .items); deadline = try c.decode(Date.self, forKey: .deadline); instructions = try c.decodeIfPresent(String.self, forKey: .instructions) }
-  func encode(to encoder: any Encoder) throws { var c = encoder.container(keyedBy: CopilotWireCodingKey.self); try header.encode(to: &c); try c.encodeIfPresent(modelID, forKey: .modelID); try c.encode(viewerLogin, forKey: .viewerLogin); try c.encode(items, forKey: .items); try c.encode(deadline, forKey: .deadline); try c.encodeIfPresent(instructions, forKey: .instructions) }
-  func validate() throws { guard header.operation == .triage, !viewerLogin.isEmpty, (1...20).contains(items.count), Set(items.map(\.id)).count == items.count, (instructions?.utf8.count ?? 0) <= TriageRules.maximumInstructionBytes else { throw CopilotXPCError.invalidResponse }; try items.forEach { try $0.validate() }; guard try JSONEncoder().encode(self).count <= 120 * 1024 else { throw CopilotXPCError.invalidResponse } }
+  let reasoningEffort: String?
+  let contextTier: String?
+  enum CodingKeys: String, CodingKey { case modelID = "model_id"; case viewerLogin = "viewer_login"; case items, deadline, instructions; case reasoningEffort = "reasoning_effort"; case contextTier = "context_tier" }
+  init(accountID: AccountID, organizationID: OrganizationID, viewerLogin: String, items: [CopilotTriageItem], modelID: String? = nil, deadline: Date, instructions: String? = nil, reasoningEffort: String? = nil, contextTier: String? = nil, requestID: UUID = UUID()) { header = .init(accountID: accountID, organizationID: organizationID, operation: .triage, requestID: requestID); self.modelID = modelID; self.viewerLogin = viewerLogin; self.items = items; self.deadline = deadline; self.instructions = instructions; self.reasoningEffort = reasoningEffort; self.contextTier = contextTier }
+  init(from decoder: any Decoder) throws { let c = try decoder.container(keyedBy: CopilotWireCodingKey.self); header = try .init(container: c); modelID = try c.decodeIfPresent(String.self, forKey: .modelID); viewerLogin = try c.decode(String.self, forKey: .viewerLogin); items = try c.decode([CopilotTriageItem].self, forKey: .items); deadline = try c.decode(Date.self, forKey: .deadline); instructions = try c.decodeIfPresent(String.self, forKey: .instructions); reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort); contextTier = try c.decodeIfPresent(String.self, forKey: .contextTier) }
+  func encode(to encoder: any Encoder) throws { var c = encoder.container(keyedBy: CopilotWireCodingKey.self); try header.encode(to: &c); try c.encodeIfPresent(modelID, forKey: .modelID); try c.encode(viewerLogin, forKey: .viewerLogin); try c.encode(items, forKey: .items); try c.encode(deadline, forKey: .deadline); try c.encodeIfPresent(instructions, forKey: .instructions); try c.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort); try c.encodeIfPresent(contextTier, forKey: .contextTier) }
+  func validate() throws { guard header.operation == .triage, !viewerLogin.isEmpty, (1...20).contains(items.count), Set(items.map(\.id)).count == items.count, (instructions?.utf8.count ?? 0) <= TriageRules.maximumInstructionBytes, CopilotModelChoice.isValidReasoningEffort(reasoningEffort), CopilotModelChoice.isValidContextTier(contextTier) else { throw CopilotXPCError.invalidResponse }; try items.forEach { try $0.validate() }; guard try JSONEncoder().encode(self).count <= 120 * 1024 else { throw CopilotXPCError.invalidResponse } }
 }
 
 struct CopilotTriageResponse: Codable, Equatable, Sendable {

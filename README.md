@@ -52,6 +52,14 @@ Each row reads top to bottom in order of importance: **repository, number, and w
 
 Select an item to see the full recommendation, pull request status, people, the formatted description, and recent activity. Click **Not right?** to teach Triage with a rule.
 
+### Search
+
+The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, people, labels, and Copilot's notes, or use GitHub-style filters:
+
+`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high`
+
+Suggestions turn into removable filter chips. Search **This Section** or **All Work**; results across all work show which section they're in.
+
 ### Keyboard
 
 | Action | Keys |
@@ -62,6 +70,7 @@ Select an item to see the full recommendation, pull request status, people, the 
 | Open on GitHub | ↩ or ⌘O |
 | Switch section | ⌘1 – ⌘6 |
 | Refresh | ⌘R |
+| Search | ⌘F |
 | Settings | ⌘, |
 
 Marking done or snoozing moves selection to the next item instantly.
@@ -109,7 +118,7 @@ Your own activity never brings done work back; a reply, review, or push from som
 | **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · Mark work done when you handle it |
 | **Accounts** | Connected GitHub accounts, connection status, add and remove |
 | **Organizations** | Which organization's work to show |
-| **Copilot** | Status, account, runtime · Use Copilot for this organization · Model · Re-analyze all |
+| **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all |
 | **Rules** | Hard rules and Instructions for Copilot, per organization |
 | **Privacy & Data** | What stays local and what's sent to Copilot · Local data size · Show in Finder |
 | **Updates** | Automatic checks and installs · Check now |

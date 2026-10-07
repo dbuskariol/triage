@@ -24,7 +24,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         let installed = try await service.acquireAtUserRequest()
         XCTAssertTrue(FileManager.default.fileExists(atPath: installed.path))
         XCTAssertEqual(installed.lastPathComponent, "copilot")
-        XCTAssertTrue(installed.path.contains("Triage/CopilotRuntime/1.0.81-10/arm64"))
+        XCTAssertTrue(installed.path.contains("Triage/CopilotRuntime/1.0.92/arm64"))
         XCTAssertEqual(fixture.downloader.calls, 1)
         XCTAssertEqual(fixture.extractor.calls, 1)
         XCTAssertEqual(fixture.validator.calls, 2, "validate before and after atomic publish")
@@ -70,13 +70,13 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
 
     func testPinnedArchiveAndExecutableDigestsAreDistinctForEachArchitecture() {
         let arm64 = CopilotRuntimeRelease.pinned.archive(for: .arm64)
-        XCTAssertEqual(arm64.expectedArchiveSHA256, "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871")
-        XCTAssertEqual(arm64.expectedExecutableSHA256, "2f4238eebaa42e1196e4f9473a06d03fca612fd6fed09bb9033d9c506d4a5e9a")
+        XCTAssertEqual(arm64.expectedArchiveSHA256, "6aa2af1d0436b23c92810f11ea35a3d1c2b36b716d3e6d7c44299d199f905c5b")
+        XCTAssertEqual(arm64.expectedExecutableSHA256, "d054ca3c31802d48e88e96627af502a0d5c579ee2f940c8cadf2d4bda07e0b54")
         XCTAssertNotEqual(arm64.expectedArchiveSHA256, arm64.expectedExecutableSHA256)
 
         let x86_64 = CopilotRuntimeRelease.pinned.archive(for: .x86_64)
-        XCTAssertEqual(x86_64.expectedArchiveSHA256, "1fb04e8e040525ae39cf53cce7f9e44b7d3fbb200bc9bfe38e2e7436d7dd3b74")
-        XCTAssertEqual(x86_64.expectedExecutableSHA256, "8da653f6c4944d6be001af17aaf6d685066c91b1f62af543bbc3ebb35b85435c")
+        XCTAssertEqual(x86_64.expectedArchiveSHA256, "7527cdd1c254d1daeb3e3fbd042deec3ba1f283cce86c83dced2bea8b63cc28b")
+        XCTAssertEqual(x86_64.expectedExecutableSHA256, "33980346a4094f8cc17f19dd66d5e71e01a39457911af312bd407bb5d8eb7b97")
         XCTAssertNotEqual(x86_64.expectedArchiveSHA256, x86_64.expectedExecutableSHA256)
     }
 
@@ -309,7 +309,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
         SuspendedRuntimeDownloadURLProtocol.setStartHandler { started.fulfill() }
         defer { SuspendedRuntimeDownloadURLProtocol.setStartHandler(nil) }
 
-        let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.81-10/copilot-darwin-arm64.tar.gz")!
+        let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.92/copilot-darwin-arm64.tar.gz")!
         let transfer = CopilotRuntimeURLTransfer(
             destination: root.appending(path: "runtime.tar.gz"),
             maximumBytes: 1_024,
@@ -340,7 +340,7 @@ final class CopilotRuntimeAcquisitionTests: XCTestCase {
     }
 
     func testRedirectPolicyAllowsOnlyGitHubsSignedPinnedAssetRedirect() {
-        let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.81-10/copilot-darwin-arm64.tar.gz")!
+        let source = URL(string: "https://github.com/github/copilot-cli/releases/download/v1.0.92/copilot-darwin-arm64.tar.gz")!
         var components = URLComponents(string: "https://release-assets.githubusercontent.com/github-production-release-asset/585860664/72ea65b1-51c9-4b30-87ed-e9ca2904af61")!
         components.queryItems = [
             URLQueryItem(name: "sig", value: "signed-value"),
@@ -441,7 +441,7 @@ private final class Fixture {
     var runtimeRoot: URL {
         CopilotRuntimeAcquisitionService.runtimeRoot(applicationSupportDirectory: root)
     }
-    var runtimeDirectory: URL { runtimeRoot.appending(path: "1.0.81-10/arm64", directoryHint: .isDirectory) }
+    var runtimeDirectory: URL { runtimeRoot.appending(path: "1.0.92/arm64", directoryHint: .isDirectory) }
     var runtimeExecutable: URL { runtimeDirectory.appending(path: "copilot") }
 
     init(
@@ -478,7 +478,7 @@ private final class Fixture {
         for directory in [
             root.appending(path: "Triage", directoryHint: .isDirectory),
             runtimeRoot,
-            runtimeRoot.appending(path: "1.0.81-10", directoryHint: .isDirectory),
+            runtimeRoot.appending(path: "1.0.92", directoryHint: .isDirectory),
             runtimeDirectory,
         ] {
             try FileManager.default.createDirectory(

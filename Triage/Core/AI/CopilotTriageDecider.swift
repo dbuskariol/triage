@@ -40,10 +40,14 @@ enum TriageDecisionError: Error, LocalizedError, TriageAvailabilityError, Sendab
 struct CopilotTriageAuthorization: Sendable {
     let isConsentGranted: Bool
     let selectedModelID: String?
+    let reasoningEffort: String?
+    let contextTier: String?
 
-    init(isConsentGranted: Bool, selectedModelID: String?) {
+    init(isConsentGranted: Bool, selectedModelID: String?, reasoningEffort: String? = nil, contextTier: String? = nil) {
         self.isConsentGranted = isConsentGranted
         self.selectedModelID = selectedModelID
+        self.reasoningEffort = reasoningEffort
+        self.contextTier = contextTier
     }
 }
 
@@ -96,7 +100,9 @@ actor CopilotTriageDecider: TriageDeciding {
             )
             return CopilotTriageAuthorization(
                 isConsentGranted: consent.isEnabled,
-                selectedModelID: consent.selectedModelID
+                selectedModelID: consent.selectedModelID,
+                reasoningEffort: consent.reasoningEffort,
+                contextTier: consent.contextTier
             )
         }
     }
@@ -137,7 +143,9 @@ actor CopilotTriageDecider: TriageDeciding {
                     items: wireItems,
                     modelID: authorization.selectedModelID,
                     deadline: now().addingTimeInterval(Self.requestTimeout),
-                    instructions: instructions
+                    instructions: instructions,
+                    reasoningEffort: authorization.reasoningEffort,
+                    contextTier: authorization.contextTier
                 )
             }
             if authenticatedScope != scope {

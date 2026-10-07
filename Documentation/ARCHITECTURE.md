@@ -85,6 +85,12 @@ Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers a
 
 `TriageCopilotXPC` launches the signed Rust `TriageCopilotHelper` with a verified, pinned Copilot runtime. The helper supports only `health`, `authenticate`, `models`, `triage`, `cancel`, and `shutdown`. It runs Copilot with all tools denied and no file, MCP, or extra network access. One authenticated session per account and organization is reused across batches and recreated if it expires. The Copilot sign-in is separate from the GitHub connection and stored in an account-private profile.
 
+**Versions.** The helper uses the Rust `github-copilot-sdk` (pinned exactly, `runtime` feature only) and a pinned Copilot CLI release whose archive and executable SHA-256 digests are checked by both the app and the XPC service, along with GitHub's Developer ID signature. Updating the CLI means updating the version and all four digests in `CopilotRuntimeAcquisition.swift` and `CopilotHelperProcess.swift`, verified against the release's `SHA256SUMS.txt`. When an app update changes the pin, a previously installed runtime is upgraded automatically and superseded versions are deleted.
+
+**Model options.** Each organization stores a model, reasoning effort, and context tier. Settings offers only the efforts and tiers the selected model reports through the SDK, and the helper applies them to each session.
+
+**Disk hygiene.** Every triage session is disconnected and deleted through the SDK after its batch. After each sign-in, sessions left by an interrupted run are listed and deleted through the SDK, the CLI runs at error-only log level, and only its five newest log files are kept.
+
 ## Storage
 
 Each GitHub account has its own SQLCipher database under `~/Library/Application Support/Triage/Vaults/<account>/`, keyed from the Keychain. A single schema reconciler (`TriageDatabaseMigrator`) rebuilds known tables from canonical DDL, drops unknown ones, and validates foreign keys before commit. Observed tables are rowid tables so SQLite's update hook, and therefore live UI updates, fire on every write.
