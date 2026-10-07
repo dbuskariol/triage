@@ -94,7 +94,7 @@ struct TriageApplicationDependencies: Sendable {
     let accountSession: any AccountSessionServing
     let copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding
     let consent: @Sendable (WorkspaceScope) async throws -> OrganizationAIConsent
-    let saveConsent: @Sendable (WorkspaceScope, _ isEnabled: Bool, _ modelID: String?) async throws -> Void
+    let saveConsent: @Sendable (WorkspaceScope, _ isEnabled: Bool, _ choice: CopilotModelChoice) async throws -> Void
     let makeWorkspace: @Sendable (WorkspaceScope) async throws -> WorkspaceRuntime
     var purgeAccountNavigationState: AccountNavigationStatePurging = { _ in }
 }

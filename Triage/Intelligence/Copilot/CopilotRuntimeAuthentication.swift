@@ -420,6 +420,10 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
     }
 }
 
+extension CopilotRuntimeAuthorizationProviding {
+    func upgradeRuntimeIfPreviouslyInstalled() async throws -> Bool { false }
+}
+
 protocol CopilotRuntimeAuthorizationProviding: Sendable {
     func restore(account: GitHubAccount, organizationID: OrganizationID, hasOrganizationConsent: Bool, isEntitled: Bool) async throws -> Bool
     func state(for accountID: AccountID) async -> CopilotAccountAuthorizationState
@@ -427,6 +431,10 @@ protocol CopilotRuntimeAuthorizationProviding: Sendable {
     /// return `nil` when no approved runtime exists on this Mac.
     func runtimeStateUpdates() async -> AsyncStream<CopilotRuntimeStatus>?
     func acquireRuntimeAtUserRequest() async throws
+    /// After an app update changes the pinned runtime, downloads the new
+    /// version only if the user had installed an earlier one. Returns whether
+    /// an upgrade ran.
+    func upgradeRuntimeIfPreviouslyInstalled() async throws -> Bool
     func repairRuntimeAtUserRequest() async throws
     func cancelRuntimeOperationAtUserRequest() async
     func removeRuntimeAtUserRequest() async throws
@@ -547,6 +555,14 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         invalidateAllModelIDs()
         _ = try await runtime.acquireAtUserRequest()
         _ = try await runtime.runtimeForUse()
+    }
+
+    func upgradeRuntimeIfPreviouslyInstalled() async throws -> Bool {
+        guard let runtime, !runtime.supersededReleaseVersions().isEmpty,
+              (try? await runtime.runtimeForUse()) == nil
+        else { return false }
+        try await acquireRuntimeAtUserRequest()
+        return true
     }
 
     func repairRuntimeAtUserRequest() async throws {
@@ -882,6 +898,7 @@ struct NoopCopilotRuntimeAuthorizationProvider: CopilotRuntimeAuthorizationProvi
     func state(for _: AccountID) async -> CopilotAccountAuthorizationState { .unavailable }
     func runtimeStateUpdates() async -> AsyncStream<CopilotRuntimeStatus>? { nil }
     func acquireRuntimeAtUserRequest() async throws { throw CopilotAuthenticationError.runtimeUnavailable }
+    func upgradeRuntimeIfPreviouslyInstalled() async throws -> Bool { false }
     func repairRuntimeAtUserRequest() async throws { throw CopilotAuthenticationError.runtimeUnavailable }
     func removeRuntimeAtUserRequest() async throws {}
     func authenticate(account _: GitHubAccount, organizationID _: OrganizationID, hasOrganizationConsent _: Bool, isEntitled _: Bool) async throws { throw CopilotAuthenticationError.runtimeUnavailable }

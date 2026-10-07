@@ -39,12 +39,14 @@ struct TriageProductionComposition: Sendable {
                 try await AIConsentRepository(vault: openVault(scope.accountID))
                     .consent(for: scope.accountID, organizationID: scope.organizationID)
             },
-            saveConsent: { scope, isEnabled, modelID in
+            saveConsent: { scope, isEnabled, choice in
                 try await AIConsentRepository(vault: openVault(scope.accountID)).save(.init(
                     accountID: scope.accountID,
                     organizationID: scope.organizationID,
                     isEnabled: isEnabled,
-                    selectedModelID: modelID,
+                    selectedModelID: choice.modelID,
+                    reasoningEffort: choice.reasoningEffort,
+                    contextTier: choice.contextTier,
                     automaticActionConfidenceThreshold: OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
                     updatedAt: .now
                 ))

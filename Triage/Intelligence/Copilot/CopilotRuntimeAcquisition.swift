@@ -8,7 +8,7 @@ import zlib
 /// acquisition boundary, not a runtime enablement switch: callers must still
 /// satisfy the independent consent, credential, and XPC gates.
 struct CopilotRuntimeRelease: Equatable, Sendable {
-    static let pinned = Self(version: "1.0.81-10")
+    static let pinned = Self(version: "1.0.92")
 
     let version: String
     static let githubAuthority = "github.com"
@@ -18,14 +18,14 @@ struct CopilotRuntimeRelease: Equatable, Sendable {
     func archive(for architecture: CopilotRuntimeArchitecture) -> CopilotRuntimeArchive {
         let name = architecture == .arm64 ? "copilot-darwin-arm64.tar.gz" : "copilot-darwin-x64.tar.gz"
         let archiveSHA256 = architecture == .arm64
-            ? "7d693bfdc82f1a1223d4fe034903faeb16063cbc0075d0f45e04af1ea7914871"
-            : "1fb04e8e040525ae39cf53cce7f9e44b7d3fbb200bc9bfe38e2e7436d7dd3b74"
+            ? "6aa2af1d0436b23c92810f11ea35a3d1c2b36b716d3e6d7c44299d199f905c5b"
+            : "7527cdd1c254d1daeb3e3fbd042deec3ba1f283cce86c83dced2bea8b63cc28b"
         // These are deliberately distinct from the compressed archive pins.
         // They were derived only after authenticating each official archive
         // against the archive pins above and hashing its sole `copilot` file.
         let executableSHA256 = architecture == .arm64
-            ? "2f4238eebaa42e1196e4f9473a06d03fca612fd6fed09bb9033d9c506d4a5e9a"
-            : "8da653f6c4944d6be001af17aaf6d685066c91b1f62af543bbc3ebb35b85435c"
+            ? "d054ca3c31802d48e88e96627af502a0d5c579ee2f940c8cadf2d4bda07e0b54"
+            : "33980346a4094f8cc17f19dd66d5e71e01a39457911af312bd407bb5d8eb7b97"
         return CopilotRuntimeArchive(
             url: URL(string: "https://github.com/github/copilot-cli/releases/download/v\(version)/\(name)")!,
             expectedArchiveSHA256: archiveSHA256,
@@ -302,6 +302,7 @@ actor CopilotRuntimeAcquisitionService {
             try validator.validate(installed!, architecture: architecture)
             try requireActiveAcquisition(generation)
             finishAcquisition(.ready(installed!), generation: generation)
+            removeSupersededReleases()
             return installed!
         } catch is CancellationError {
             rollbackInstalledRuntime(installed, generation: generation)
@@ -323,6 +324,28 @@ actor CopilotRuntimeAcquisitionService {
             rollbackInstalledRuntime(installed, generation: generation)
             finishAcquisition(.absent, generation: generation)
             throw CopilotRuntimeAcquisitionError.fileSystem
+        }
+    }
+
+    /// Versions of the runtime installed before the current pin (from an app
+    /// update). Their presence means the user already chose to download Copilot.
+    nonisolated func supersededReleaseVersions() -> [String] {
+        let pinned = release.version
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        return names.filter { name in
+            name != pinned && name.range(of: #"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$"#, options: .regularExpression) != nil
+        }
+    }
+
+    /// Deletes superseded runtime versions (about 140 MB each). Only plain
+    /// version directories directly under the runtime root are removed.
+    nonisolated func removeSupersededReleases() {
+        for name in supersededReleaseVersions() {
+            let url = root.appending(path: name, directoryHint: .isDirectory)
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true
+            else { continue }
+            try? FileManager.default.removeItem(at: url)
         }
     }
 

@@ -65,3 +65,23 @@ struct WorkspaceSearchTests {
         #expect(WorkspaceSearch(text: "fix wid").textWithoutLastWord == "fix ")
     }
 }
+
+struct CopilotModelChoiceTests {
+    @Test func validatesEffortAndContextTier() {
+        #expect(CopilotModelChoice.isValidReasoningEffort(nil))
+        #expect(CopilotModelChoice.isValidReasoningEffort("high"))
+        #expect(CopilotModelChoice.isValidReasoningEffort("xhigh"))
+        #expect(!CopilotModelChoice.isValidReasoningEffort("High"))
+        #expect(!CopilotModelChoice.isValidReasoningEffort("very high"))
+        #expect(CopilotModelChoice.isValidContextTier("long_context"))
+        #expect(!CopilotModelChoice.isValidContextTier("huge"))
+    }
+
+    @Test func modelCapabilitiesDecodeFromTheHelperAndDefaultWhenAbsent() throws {
+        let json = #"[{"id":"m","display_name":"M","is_default":false,"supported_reasoning_efforts":["low","high"],"default_reasoning_effort":"low","supports_long_context":true},{"id":"auto","display_name":"Auto","is_default":true}]"#
+        let models = try JSONDecoder().decode([CopilotModel].self, from: Data(json.utf8))
+        #expect(models[0].supportedReasoningEfforts == ["low", "high"])
+        #expect(models[0].supportsLongContext == true)
+        #expect(models[1].supportedReasoningEfforts == nil)
+    }
+}
