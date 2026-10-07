@@ -72,8 +72,21 @@ Triage uses **two layers** you control, on top of a fixed built-in policy:
 
 | Layer | What it does | When it applies |
 |---|---|---|
-| **Rules** | *When* repository / author / label / relationship / type / title matches → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. |
+| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. |
 | **Instructions** | Plain-English guidance, e.g. *“Production incidents matter more than refactors.”* Up to 2,000 characters. | On the next analysis. Copilot re-checks affected work in the background. |
+
+Rule conditions (all must match):
+
+| Condition | Examples |
+|---|---|
+| My relationship | Review requested from me **directly** or from **my team only**, assigned, opened by me, mentions me, I commented |
+| Requested team | `core` or `octo/core` |
+| Pull request status | Draft, ready for review, approved, changes requested, checks failing, has conflicts |
+| Repository, author, label | `octo/widgets`, `octo/*`, `dependabot[bot]`, `security` |
+| Type, title contains | Issue, pull request, draft pull request; any text |
+| No updates for | At least *N* days, for stale work |
+
+For example, *“My relationship is review requested from my team only → Lower priority”* keeps team-wide review requests from crowding out the ones addressed to you.
 
 Create rules from **Settings ▸ Rules**, by right-clicking any item (**Create Rule**), or with **Not right?** on a recommendation. The recommendation shows which rules applied and how your instructions changed the decision.
 

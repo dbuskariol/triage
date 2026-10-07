@@ -161,3 +161,48 @@ struct HandledDetectionTests {
         #expect(work.latestActivity(excluding: "me") != nil)
     }
 }
+
+struct RuleConditionTests {
+    private func reviewItem(reviewers: [String], draft: Bool = false, updated: Date = .now) -> PersonalWorkItem {
+        PersonalWorkItem(
+            id: GitHubNodeID(rawValue: "PR_review")!, kind: .pullRequest, repository: "octo/widgets", number: 3,
+            title: "t", url: URL(string: "https://github.com/octo/widgets/pull/3")!, state: .open, author: "alice",
+            createdAt: .distantPast, updatedAt: updated, relationships: [.reviewRequested], labels: [], assignees: [],
+            body: "",
+            pullRequest: PullRequestFacts(
+                isDraft: draft, reviewDecision: .changesRequested, requestedReviewers: reviewers, latestReviews: [],
+                checks: .failure, mergeable: "CONFLICTING", unresolvedReviewThreads: 0, additions: 0, deletions: 0
+            ),
+            recentActivity: []
+        )
+    }
+
+    @Test func reviewRequestsTierIntoDirectAndTeamOnly() {
+        let direct = reviewItem(reviewers: ["Me", "octo/core"])
+        let team = reviewItem(reviewers: ["octo/core"])
+        let directRule = TriageRuleCondition(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedDirect)
+        let teamRule = TriageRuleCondition(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedTeam)
+        #expect(directRule.matches(direct, viewer: "me"))
+        #expect(!teamRule.matches(direct, viewer: "me"))
+        #expect(teamRule.matches(team, viewer: "me"))
+        #expect(TriageRuleCondition(field: .relationship, value: "reviewRequested").matches(team, viewer: "me"))
+
+        let rules = TriageRules(instructions: "", rules: [.quick(.lowerPriority, .relationship, TriageRuleCondition.Field.reviewRequestedTeam)])
+        #expect(rules.matches(for: team, viewer: "me").count == 1)
+        #expect(rules.matches(for: direct, viewer: "me").isEmpty)
+    }
+
+    @Test func requestedTeamStatusAndInactivityConditions() {
+        let item = reviewItem(reviewers: ["octo/core"], draft: true, updated: Date(timeIntervalSinceNow: -20 * 86_400))
+        #expect(TriageRuleCondition(field: .requestedTeam, value: "core").matches(item))
+        #expect(TriageRuleCondition(field: .requestedTeam, value: "octo/core").matches(item))
+        #expect(!TriageRuleCondition(field: .requestedTeam, value: "octo/other").matches(item))
+        for status in ["draft", "changesRequested", "checksFailing", "conflicts"] {
+            #expect(TriageRuleCondition(field: .pullRequestStatus, value: status).matches(item))
+        }
+        #expect(!TriageRuleCondition(field: .pullRequestStatus, value: "approved").matches(item))
+        #expect(TriageRuleCondition(field: .inactiveDays, value: "14").matches(item))
+        #expect(!TriageRuleCondition(field: .inactiveDays, value: "30").matches(item))
+        #expect(!TriageRuleCondition(field: .inactiveDays, value: "soon").isValid)
+    }
+}

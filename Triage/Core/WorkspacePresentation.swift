@@ -68,7 +68,7 @@ struct WorkspacePresentation: Equatable, Sendable {
     init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty, viewer: String = "") {
         let digest = rules.digest
         let all = raw.map { entry in
-            var entry = rules.apply(to: entry)
+            var entry = rules.apply(to: entry, viewer: viewer)
             // Decided under different preferences: queued for re-analysis.
             if entry.analysis == .current, let decision = entry.decision, (decision.rulesDigest ?? "") != digest {
                 entry.analysis = .pending

@@ -73,6 +73,7 @@ struct SettingsView: View {
         } message: {
             Text(removalError ?? "")
         }
+        .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         .onAppear {
             preferences.refreshLaunchAtLoginStatus()
         }

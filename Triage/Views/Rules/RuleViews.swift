@@ -1,5 +1,11 @@
 import SwiftUI
 
+extension EnvironmentValues {
+    /// The signed-in GitHub login, for rule previews that depend on it
+    /// (e.g. "review requested from me directly").
+    @Entry var triageViewerLogin = ""
+}
+
 /// One-click rules built from an item's facts, for context menus and the
 /// detail view. Creating one is always an explicit user action.
 struct QuickRuleMenu: View {
@@ -8,6 +14,23 @@ struct QuickRuleMenu: View {
 
     var body: some View {
         Menu("Create Rule") {
+            if item.relationships.contains(.reviewRequested) {
+                Section("Review requests") {
+                    button(.lowerPriority, .relationship, TriageRuleCondition.Field.reviewRequestedTeam,
+                           title: "Lower priority when only my team is requested")
+                    button(.noAction, .relationship, TriageRuleCondition.Field.reviewRequestedTeam,
+                           title: "No action when only my team is requested")
+                    button(.needsAction, .relationship, TriageRuleCondition.Field.reviewRequestedDirect,
+                           title: "Needs my action when I'm requested directly")
+                    ForEach(teams, id: \.self) { team in
+                        Menu("Team \(team)") {
+                            button(.lowerPriority, .requestedTeam, team)
+                            button(.noAction, .requestedTeam, team)
+                            button(.mute, .requestedTeam, team)
+                        }
+                    }
+                }
+            }
             Section(item.repository) {
                 button(.alwaysInbox, .repository, item.repository)
                 button(.raisePriority, .repository, item.repository)
@@ -38,11 +61,17 @@ struct QuickRuleMenu: View {
         }
     }
 
-    private func button(_ effect: TriageRuleEffect, _ field: TriageRuleCondition.Field, _ value: String) -> some View {
+    private var teams: [String] {
+        (item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }
+    }
+
+    private func button(
+        _ effect: TriageRuleEffect, _ field: TriageRuleCondition.Field, _ value: String, title: String? = nil
+    ) -> some View {
         Button {
             actions.addRule(.quick(effect, field, value))
         } label: {
-            Label(effect.title, systemImage: effect.systemImage)
+            Label(title ?? effect.title, systemImage: effect.systemImage)
         }
     }
 }
@@ -117,7 +146,13 @@ struct RuleFeedbackSheet: View {
     private var rule: TriageRule { TriageRule(name: "", conditions: [scope], effect: effect) }
 
     private var scopeOptions: [TriageRuleCondition] {
-        var options = [TriageRuleCondition(field: .repository, value: entry.item.repository)]
+        var options: [TriageRuleCondition] = []
+        if entry.item.relationships.contains(.reviewRequested) {
+            options.append(.init(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedTeam))
+            options += (entry.item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }
+                .prefix(3).map { .init(field: .requestedTeam, value: $0) }
+        }
+        options.append(TriageRuleCondition(field: .repository, value: entry.item.repository))
         if let author = entry.item.author { options.append(.init(field: .author, value: author)) }
         options += entry.item.labels.prefix(5).map { .init(field: .label, value: $0) }
         return options
@@ -128,9 +163,10 @@ struct RuleFeedbackSheet: View {
 struct RulePreview: View {
     let rule: TriageRule
     let entries: [TriageEntry]
+    @Environment(\.triageViewerLogin) private var viewer
 
     var body: some View {
-        let matches = entries.filter { rule.matches($0.item) }
+        let matches = entries.filter { rule.matches($0.item, viewer: viewer) }
         VStack(alignment: .leading, spacing: 6) {
             Label(
                 rule.isValid

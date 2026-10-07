@@ -60,26 +60,27 @@ struct TriageRules: Codable, Equatable, Sendable {
         return self
     }
 
-    /// Enabled rules matching `item`, in list order.
-    func matches(for item: PersonalWorkItem) -> [TriageRule] {
-        enabledRules.filter { $0.matches(item) }
+    /// Enabled rules matching `item`, in list order. `viewer` is the signed-in
+    /// login, needed for "requested from me directly / from my team".
+    func matches(for item: PersonalWorkItem, viewer: String = "") -> [TriageRule] {
+        enabledRules.filter { $0.matches(item, viewer: viewer) }
     }
 
-    func isMuted(_ item: PersonalWorkItem) -> Bool {
-        matches(for: item).contains { $0.effect == .mute }
+    func isMuted(_ item: PersonalWorkItem, viewer: String = "") -> Bool {
+        matches(for: item, viewer: viewer).contains { $0.effect == .mute }
     }
 
     /// Short, model-readable statements of what the user's rules will enforce.
-    func hints(for item: PersonalWorkItem) -> [String] {
-        matches(for: item).prefix(10).map { rule in
+    func hints(for item: PersonalWorkItem, viewer: String = "") -> [String] {
+        matches(for: item, viewer: viewer).prefix(10).map { rule in
             String("User rule “\(rule.displayName)”: \(rule.effect.hint)".prefix(200))
         }
     }
 
     /// Applies hard rules on top of Copilot's decision. The first matching
     /// disposition rule wins; priority adjustments accumulate.
-    func apply(to entry: TriageEntry) -> TriageEntry {
-        let matched = matches(for: entry.item)
+    func apply(to entry: TriageEntry, viewer: String = "") -> TriageEntry {
+        let matched = matches(for: entry.item, viewer: viewer)
         guard !matched.isEmpty else { return entry }
         var result = entry
         result.appliedRules = matched.map(\.displayName)
@@ -141,16 +142,19 @@ struct TriageRule: Codable, Equatable, Identifiable, Sendable {
         "\(effect.title): \(conditions.map(\.summary).joined(separator: " and "))"
     }
 
-    func matches(_ item: PersonalWorkItem) -> Bool {
-        isValid && conditions.allSatisfy { $0.matches(item) }
+    func matches(_ item: PersonalWorkItem, viewer: String = "") -> Bool {
+        isValid && conditions.allSatisfy { $0.matches(item, viewer: viewer) }
     }
 }
 
 struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
     enum Field: String, Codable, CaseIterable, Identifiable, Sendable {
-        case repository, author, label, relationship, kind, titleContains
+        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, inactiveDays
 
         var id: String { rawValue }
+
+        static let reviewRequestedDirect = "reviewRequestedDirect"
+        static let reviewRequestedTeam = "reviewRequestedTeam"
 
         var title: String {
             switch self {
@@ -158,8 +162,11 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .author: "Author"
             case .label: "Label"
             case .relationship: "My relationship"
+            case .requestedTeam: "Requested team"
+            case .pullRequestStatus: "Pull request status"
             case .kind: "Type"
             case .titleContains: "Title contains"
+            case .inactiveDays: "No updates for (days)"
             }
         }
 
@@ -168,17 +175,30 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .repository: "owner/name or owner/*"
             case .author: "login, e.g. dependabot[bot]"
             case .label: "label name"
-            case .relationship, .kind: ""
+            case .relationship, .kind, .pullRequestStatus: ""
+            case .requestedTeam: "team slug or org/team"
             case .titleContains: "text"
+            case .inactiveDays: "e.g. 14"
             }
         }
 
         /// Fixed choices; `nil` means free text.
         var choices: [(value: String, title: String)]? {
             switch self {
-            case .relationship: WorkRelationship.allCases.map { ($0.rawValue, $0.title) }
+            case .relationship:
+                [
+                    ("reviewRequested", "Review requested (direct or team)"),
+                    (Self.reviewRequestedDirect, "Review requested from me directly"),
+                    (Self.reviewRequestedTeam, "Review requested from my team only"),
+                ] + WorkRelationship.allCases.filter { $0 != .reviewRequested }.map { ($0.rawValue, $0.title) }
+            case .pullRequestStatus:
+                [
+                    ("draft", "Draft"), ("ready", "Ready for review"), ("approved", "Approved"),
+                    ("changesRequested", "Changes requested"), ("checksFailing", "Checks failing"),
+                    ("conflicts", "Has conflicts"),
+                ]
             case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request")]
-            case .repository, .author, .label, .titleContains: nil
+            case .repository, .author, .label, .titleContains, .requestedTeam, .inactiveDays: nil
             }
         }
     }
@@ -186,16 +206,24 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
     var field: Field
     var value: String
 
-    var isValid: Bool { !normalizedValue.isEmpty }
+    var isValid: Bool {
+        guard !normalizedValue.isEmpty else { return false }
+        return field != .inactiveDays || (Int(normalizedValue) ?? 0) > 0
+    }
 
     private var normalizedValue: String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var summary: String {
         let shown = field.choices?.first { $0.value == normalizedValue }?.title ?? normalizedValue
-        return "\(field.title.lowercased()) \(field == .titleContains ? "“\(shown)”" : "is \(shown)")"
+        switch field {
+        case .titleContains: return "title contains “\(shown)”"
+        case .inactiveDays: return "no updates for \(shown)+ days"
+        case .relationship, .pullRequestStatus: return shown.prefix(1).lowercased() + shown.dropFirst()
+        default: return "\(field.title.lowercased()) is \(shown)"
+        }
     }
 
-    func matches(_ item: PersonalWorkItem) -> Bool {
+    func matches(_ item: PersonalWorkItem, viewer: String = "", now: Date = .now) -> Bool {
         let value = normalizedValue
         guard !value.isEmpty else { return false }
         func same(_ other: String?) -> Bool { other?.caseInsensitiveCompare(value) == .orderedSame }
@@ -207,7 +235,31 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             return same(item.repository) || same(item.repository.split(separator: "/").last.map(String.init))
         case .author: return same(item.author)
         case .label: return item.labels.contains { same($0) }
-        case .relationship: return item.relationships.contains { $0.rawValue == value }
+        case .relationship:
+            switch value {
+            case Field.reviewRequestedDirect: return item.reviewRequestKind(viewer: viewer) == .direct
+            case Field.reviewRequestedTeam: return item.reviewRequestKind(viewer: viewer) == .team
+            default: return item.relationships.contains { $0.rawValue == value }
+            }
+        case .requestedTeam:
+            // Matches "org/team" exactly, or just the team slug.
+            return (item.pullRequest?.requestedReviewers ?? []).contains { reviewer in
+                reviewer.contains("/") && (same(reviewer) || same(reviewer.split(separator: "/").last.map(String.init)))
+            }
+        case .pullRequestStatus:
+            guard let facts = item.pullRequest else { return false }
+            switch value {
+            case "draft": return facts.isDraft
+            case "ready": return !facts.isDraft && item.state == .open
+            case "approved": return facts.reviewDecision == .approved
+            case "changesRequested": return facts.reviewDecision == .changesRequested
+            case "checksFailing": return facts.checks == .failure || facts.checks == .error
+            case "conflicts": return facts.mergeable?.uppercased() == "CONFLICTING"
+            default: return false
+            }
+        case .inactiveDays:
+            guard let days = Int(value), days > 0 else { return false }
+            return now.timeIntervalSince(item.updatedAt) >= TimeInterval(days * 86_400)
         case .kind:
             switch value {
             case "issue": return item.kind == .issue
