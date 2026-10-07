@@ -202,12 +202,7 @@ struct TriageEntryRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
-                    Text(analysis)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                } else if let decision = entry.decision {
+                if let decision = entry.decision {
                     Text(decision.reason)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -217,6 +212,18 @@ struct TriageEntryRow: View {
                             .font(.subheadline)
                             .lineLimit(1)
                     }
+                    if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
+                        // Decided earlier; Copilot is re-checking newer facts or preferences.
+                        Label(entry.analysis == .pending ? "Re-checking…" : analysis, systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                } else if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
+                    Text(analysis)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
 
                 if !WorkspaceViewPresentation.badges(for: entry).isEmpty {

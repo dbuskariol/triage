@@ -261,7 +261,7 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
     /// The newest decision, even if it was made from older facts. Once
     /// presented, the user's hard rules have been applied to it.
     var decision: TriageDecision?
-    let analysis: AnalysisState
+    var analysis: AnalysisState
     let local: LocalStatus
     /// Names of the user's rules that matched (set by `TriageRules.apply`).
     var appliedRules: [String] = []

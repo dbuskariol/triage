@@ -225,7 +225,7 @@ actor TriageEngine {
             }
         }
         if failedItems > 0, status.problem == nil {
-            status.problem = .analysisFailed("\(failedItems) item\(failedItems == 1 ? "" : "s") could not be analyzed and will be retried.")
+            status.problem = .analysisFailed("\(failedItems) item\(failedItems == 1 ? "" : "s") will be retried in \(Int(retryDelay / 60)) minutes · see Analyzing")
         } else if failedItems == 0, case .analysisFailed = status.problem {
             status.problem = nil
         }

@@ -51,7 +51,7 @@ enum WorkspaceViewPresentation {
     static func analysisLabel(_ analysis: AnalysisState, now: Date = .now) -> String? {
         switch analysis {
         case .pending:
-            "Analyzing…"
+            "Waiting for Copilot…"
         case .failed(let reason, let retryAt):
             "\(reason) · Retry \(retryAt.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
         case .current:
