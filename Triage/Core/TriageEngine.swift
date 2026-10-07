@@ -214,7 +214,7 @@ actor TriageEngine {
             // Muted work is never sent to Copilot.
             let candidates = try await store.itemsNeedingAnalysis(
                 scope: scope, rulesDigest: rules.digest, at: now(), limit: 1_000
-            ).filter { !rules.isMuted($0) }
+            ).filter { !rules.isMuted($0, viewer: scope.viewerLogin) }
             contexts = try await handledContexts(for: candidates, scope: scope)
             // Work you just acted on goes first, so it leaves the Inbox quickly.
             pending = candidates.filter { contexts[$0.id] != nil } + candidates.filter { contexts[$0.id] == nil }

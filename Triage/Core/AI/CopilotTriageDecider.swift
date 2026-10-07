@@ -127,7 +127,7 @@ actor CopilotTriageDecider: TriageDeciding {
         let helper = self.helper ?? makeHelper()
         self.helper = helper
         do {
-            let wireItems = items.map { Self.item($0, hints: rules.hints(for: $0), context: contexts[$0.id]) }
+            let wireItems = items.map { Self.item($0, hints: rules.hints(for: $0, viewer: scope.viewerLogin), context: contexts[$0.id]) }
             let instructions = rules.trimmedInstructions
             let makeRequest = { [now] in
                 CopilotTriageRequest(

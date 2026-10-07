@@ -164,6 +164,20 @@ struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
 
     var reference: String { "\(repository)#\(number)" }
 
+    enum ReviewRequestKind { case direct, team }
+
+    /// Whether `viewer` was asked to review directly, or only through a team
+    /// they belong to. `nil` when there is no review request for them.
+    func reviewRequestKind(viewer: String) -> ReviewRequestKind? {
+        guard relationships.contains(.reviewRequested) else { return nil }
+        let reviewers = pullRequest?.requestedReviewers ?? []
+        if !viewer.isEmpty, reviewers.contains(where: { $0.caseInsensitiveCompare(viewer) == .orderedSame }) {
+            return .direct
+        }
+        // GitHub's search says you're requested; if not by name, it was via a team.
+        return .team
+    }
+
     /// The newest activity by anyone other than `viewer` (comments, reviews,
     /// the head commit). `nil` when there is none.
     func latestActivity(excluding viewer: String) -> Date? {

@@ -8,6 +8,7 @@ struct RulesSettingsView: View {
     @State private var instructions = ""
     @State private var editingRule: TriageRule?
     @State private var isAddingRule = false
+    @Environment(\.triageViewerLogin) private var viewer
 
     private static let examples = [
         "I’m a backend engineer. Production incidents and security fixes matter more than refactors.",
@@ -101,7 +102,7 @@ struct RulesSettingsView: View {
 
             Spacer(minLength: 8)
 
-            let matches = appModel.presentation.allEntries.filter { rule.matches($0.item) }.count
+            let matches = appModel.presentation.allEntries.filter { rule.matches($0.item, viewer: viewer) }.count
             if rule.isEnabled {
                 Text("\(matches) match\(matches == 1 ? "" : "es")")
                     .font(.caption)

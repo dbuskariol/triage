@@ -86,6 +86,7 @@ private struct WorkspaceView: View {
                     .help("Search GitHub for new and changed work now")
             }
         }
+        .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
         .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }
     }
