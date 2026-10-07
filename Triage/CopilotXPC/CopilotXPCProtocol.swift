@@ -567,10 +567,14 @@ struct CopilotTriageItem: Codable, Equatable, Sendable {
   let recentActivity: [CopilotTriageActivity]
   /// Outcomes the user's hard rules will enforce, so Copilot's explanation agrees.
   var ruleHints: [String]? = nil
-  enum CodingKeys: String, CodingKey { case id, kind, repository, number, title, state, author, relationships, labels, assignees, body; case updatedAt = "updated_at"; case pullRequest = "pull_request"; case recentActivity = "recent_activity"; case ruleHints = "rule_hints" }
+  /// The previous decision's next step, when the viewer has acted since.
+  var previousNextAction: String? = nil
+  /// What the viewer did since that decision.
+  var viewerActivity: [String]? = nil
+  enum CodingKeys: String, CodingKey { case id, kind, repository, number, title, state, author, relationships, labels, assignees, body; case updatedAt = "updated_at"; case pullRequest = "pull_request"; case recentActivity = "recent_activity"; case ruleHints = "rule_hints"; case previousNextAction = "previous_next_action"; case viewerActivity = "viewer_activity" }
   func validate() throws {
     guard !id.isEmpty, !kind.isEmpty, !repository.isEmpty, number > 0, !title.isEmpty, !state.isEmpty, body.utf8.count <= 4_000,
-      Set(relationships).count == relationships.count, relationships.allSatisfy({ !$0.isEmpty }), labels.allSatisfy({ !$0.isEmpty }), assignees.allSatisfy({ !$0.isEmpty }), recentActivity.allSatisfy({ !$0.author.isEmpty && $0.excerpt.utf8.count <= 600 }), (ruleHints ?? []).count <= 10, (ruleHints ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }) else { throw CopilotXPCError.invalidResponse }
+      Set(relationships).count == relationships.count, relationships.allSatisfy({ !$0.isEmpty }), labels.allSatisfy({ !$0.isEmpty }), assignees.allSatisfy({ !$0.isEmpty }), recentActivity.allSatisfy({ !$0.author.isEmpty && $0.excerpt.utf8.count <= 600 }), (ruleHints ?? []).count <= 10, (ruleHints ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }), (previousNextAction?.utf8.count ?? 0) <= 200, (viewerActivity ?? []).count <= 10, (viewerActivity ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }) else { throw CopilotXPCError.invalidResponse }
   }
 }
 
@@ -583,8 +587,10 @@ struct CopilotTriageItemDecision: Codable, Equatable, Sendable {
   let reason: String
   let nextAction: String?
   var instructionNote: String? = nil
-  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason; case nextAction = "next_action"; case instructionNote = "instruction_note" }
-  func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, instructionNote?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
+  var handled: HandledState? = nil
+  var handledEvidence: String? = nil
+  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason, handled; case nextAction = "next_action"; case instructionNote = "instruction_note"; case handledEvidence = "handled_evidence" }
+  func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, instructionNote?.utf8.count ?? 0 <= 200, handledEvidence?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
 }
 
 struct CopilotTriageRequest: Codable, Equatable, Sendable {

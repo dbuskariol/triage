@@ -69,7 +69,10 @@ struct TriageProductionComposition: Sendable {
                         return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(client: client))
                     },
                     decider: CopilotTriageDecider(resolveVault: openVault),
-                    refreshInterval: AppPreferences.refreshInterval(minutes: AppPreferences.refreshIntervalMinutes())
+                    refreshInterval: AppPreferences.refreshInterval(minutes: AppPreferences.refreshIntervalMinutes()),
+                    autoMarkHandled: {
+                        UserDefaults.standard.object(forKey: TriagePreferenceKeys.autoDoneHandled) as? Bool ?? true
+                    }
                 )
                 return WorkspaceRuntime(store: store, engine: engine)
             }

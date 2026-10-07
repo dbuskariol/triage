@@ -9,6 +9,22 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @FocusState private var isListFocused: Bool
     @State private var statusNow = Date.now
+    @State private var handledFilter = HandledFilter.all
+
+    enum HandledFilter: String, CaseIterable, Identifiable {
+        case all = "All", byYou = "Handled by You", done = "Done", snoozed = "Snoozed"
+        var id: Self { self }
+
+        func includes(_ entry: TriageEntry) -> Bool {
+            switch (self, entry.local) {
+            case (.all, _): true
+            case (.byYou, .done): entry.handledEvidence != nil
+            case (.done, .done): entry.handledEvidence == nil
+            case (.snoozed, .snoozed): true
+            default: false
+            }
+        }
+    }
 
     private var statusSubtitle: String {
         WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
@@ -61,8 +77,19 @@ struct TriageListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaBar(edge: .top) {
-            if presentation.status.problem != nil {
-                TriageStatusView(status: presentation.status, actions: actions)
+            VStack(spacing: 0) {
+                if presentation.status.problem != nil {
+                    TriageStatusView(status: presentation.status, actions: actions)
+                }
+                if section == .handled {
+                    Picker("Show", selection: $handledFilter) {
+                        ForEach(HandledFilter.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal)
+                    .padding(.vertical, 6)
+                }
             }
         }
         .navigationTitle(section.title)
@@ -91,7 +118,8 @@ struct TriageListView: View {
 
 
     private var entries: [TriageEntry] {
-        presentation.entries(in: section, sortedBy: sortField, ascending: sortAscending)
+        let sorted = presentation.entries(in: section, sortedBy: sortField, ascending: sortAscending)
+        return section == .handled ? sorted.filter(handledFilter.includes) : sorted
     }
 
     @ViewBuilder
@@ -312,6 +340,11 @@ struct TriageEntryRow: View {
     @ViewBuilder
     private var chips: some View {
         let badges = WorkspaceViewPresentation.badges(for: entry)
+        if entry.handledEvidence != nil {
+            Label("Handled by you", systemImage: "checkmark.circle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(Color.green))
+        }
         if !badges.isEmpty {
             HStack(spacing: 10) {
                 ForEach(badges, id: \.self) { badge in

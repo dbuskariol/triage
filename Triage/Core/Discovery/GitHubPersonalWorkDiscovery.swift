@@ -81,7 +81,13 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
     struct Review: Decodable, Sendable { let author: Actor?; let state: String; let submittedAt: Date? }
     struct Commits: Decodable, Sendable { let nodes: [CommitNode?] }
     struct CommitNode: Decodable, Sendable { let commit: Commit? }
-    struct Commit: Decodable, Sendable { let statusCheckRollup: StatusCheckRollup? }
+    struct Commit: Decodable, Sendable {
+        let statusCheckRollup: StatusCheckRollup?
+        let committedDate: Date?
+        let authors: CommitAuthors?
+    }
+    struct CommitAuthors: Decodable, Sendable { let nodes: [CommitAuthor?] }
+    struct CommitAuthor: Decodable, Sendable { let user: Actor? }
     struct StatusCheckRollup: Decodable, Sendable { let state: String? }
     struct Threads: Decodable, Sendable { let nodes: [Thread?] }
     struct Thread: Decodable, Sendable { let isResolved: Bool }
@@ -302,6 +308,7 @@ private actor Collector {
             ActivityFact(author: $0.author?.login ?? "ghost", createdAt: $0.createdAt,
                          excerpt: PersonalWorkItem.cleanedMarkdown($0.body, maximumBytes: PersonalWorkItem.maximumExcerptLength))
         }
+        let headCommit = node.commits?.nodes.compactMap(\.self).last?.commit
         let pullRequest = kind == .pullRequest ? PullRequestFacts(
             isDraft: node.isDraft ?? false,
             reviewDecision: reviewDecision(node.reviewDecision),
@@ -313,10 +320,12 @@ private actor Collector {
                 guard let review else { return nil }
                 return ReviewFact(author: review.author?.login ?? "ghost", state: review.state, submittedAt: review.submittedAt)
             } ?? [],
-            checks: checkStatus(node.commits?.nodes.compactMap(\.self).last?.commit?.statusCheckRollup?.state),
+            checks: checkStatus(headCommit?.statusCheckRollup?.state),
             mergeable: node.mergeable,
             unresolvedReviewThreads: node.reviewThreads?.nodes.compactMap(\.self).filter { !$0.isResolved }.count ?? 0,
-            additions: node.additions ?? 0, deletions: node.deletions ?? 0
+            additions: node.additions ?? 0, deletions: node.deletions ?? 0,
+            lastCommitAt: headCommit?.committedDate,
+            lastCommitAuthors: headCommit?.authors?.nodes.compactMap { $0?.user?.login }
         ) : nil
         return PersonalWorkItem(
             id: node.id, kind: kind, repository: node.repository.nameWithOwner, number: node.number,

@@ -96,6 +96,9 @@ struct PullRequestFacts: Codable, Equatable, Sendable {
     let unresolvedReviewThreads: Int
     let additions: Int
     let deletions: Int
+    /// The head commit, to tell whether the viewer or someone else pushed last.
+    var lastCommitAt: Date? = nil
+    var lastCommitAuthors: [String]? = nil
 }
 
 struct ActivityFact: Codable, Equatable, Sendable {
@@ -160,6 +163,42 @@ struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
     let recentActivity: [ActivityFact]
 
     var reference: String { "\(repository)#\(number)" }
+
+    /// The newest activity by anyone other than `viewer` (comments, reviews,
+    /// the head commit). `nil` when there is none.
+    func latestActivity(excluding viewer: String) -> Date? {
+        func isViewer(_ login: String) -> Bool { !viewer.isEmpty && login.caseInsensitiveCompare(viewer) == .orderedSame }
+        var dates = recentActivity.filter { !isViewer($0.author) }.map(\.createdAt)
+        if let facts = pullRequest {
+            dates += facts.latestReviews.filter { !isViewer($0.author) }.compactMap(\.submittedAt)
+            if let at = facts.lastCommitAt, !(facts.lastCommitAuthors ?? []).contains(where: isViewer) {
+                dates.append(at)
+            }
+        }
+        return dates.max()
+    }
+
+    /// Plain statements of what `viewer` did after `since`, for Copilot to
+    /// judge whether its previous next step was handled.
+    func viewerActivity(since: Date, viewer: String) -> [String] {
+        guard !viewer.isEmpty else { return [] }
+        func isViewer(_ login: String) -> Bool { login.caseInsensitiveCompare(viewer) == .orderedSame }
+        func when(_ date: Date) -> String { date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false)) }
+        var facts: [String] = []
+        for comment in recentActivity where isViewer(comment.author) && comment.createdAt > since {
+            facts.append("Commented at \(when(comment.createdAt)): \(comment.excerpt.prefix(140))")
+        }
+        if let pullRequest {
+            for review in pullRequest.latestReviews where isViewer(review.author) && (review.submittedAt ?? .distantPast) > since {
+                facts.append("Submitted a \(review.state.lowercased().replacingOccurrences(of: "_", with: " ")) review at \(when(review.submittedAt!))")
+            }
+            if let at = pullRequest.lastCommitAt, at > since, (pullRequest.lastCommitAuthors ?? []).contains(where: isViewer) {
+                facts.append("Pushed commits at \(when(at))")
+            }
+        }
+        if state != .open { facts.append("The item is now \(state.rawValue)") }
+        return facts.map { String($0.prefix(200)) }
+    }
 
     /// The most urgent relationship, used for ordering.
     var primaryRelationship: WorkRelationship? {
@@ -233,6 +272,19 @@ struct TriageDecision: Codable, Equatable, Sendable {
     var rulesDigest: String? = nil
     /// How the user's instructions changed this decision, per Copilot.
     var instructionNote: String? = nil
+    /// Whether the viewer's activity since the previous decision completed its
+    /// next step (only set when there was such activity), with evidence.
+    var handled: HandledState? = nil
+    var handledEvidence: String? = nil
+}
+
+struct TriageHandledContext: Equatable, Sendable {
+    let previousNextAction: String
+    let viewerActivity: [String]
+}
+
+enum HandledState: String, Codable, Sendable {
+    case yes, partial, no
 }
 
 // MARK: - Local state
@@ -240,8 +292,11 @@ struct TriageDecision: Codable, Equatable, Sendable {
 /// The user's local handling of an item. Never written back to GitHub.
 enum LocalStatus: Codable, Equatable, Sendable {
     case active
-    /// Hidden until the item's facts change (a new fingerprint resurfaces it).
-    case done(fingerprint: String)
+    /// Hidden until someone other than the viewer acts on the item after `at`.
+    /// `handledEvidence` is set when Triage marked it done because the viewer
+    /// handled Copilot's next step. Legacy values without `at` return when the
+    /// fingerprint changes.
+    case done(fingerprint: String, at: Date? = nil, handledEvidence: String? = nil)
     /// Hidden until the date passes.
     case snoozed(until: Date)
 }
@@ -269,12 +324,20 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
 
     var id: GitHubNodeID { item.id }
 
-    func isVisible(at date: Date) -> Bool {
+    /// Done work stays hidden until someone *other than* `viewer` acts on it,
+    /// so your own follow-up never brings it back.
+    func isVisible(at date: Date, viewer: String = "") -> Bool {
         switch local {
         case .active: true
-        case .done(let fingerprint): fingerprint != item.fingerprint
+        case .done(let fingerprint, let doneAt, _):
+            if let doneAt { (item.latestActivity(excluding: viewer) ?? .distantPast) > doneAt }
+            else { fingerprint != item.fingerprint }
         case .snoozed(let until): until <= date
         }
+    }
+
+    var handledEvidence: String? {
+        if case .done(_, _, let evidence) = local { evidence } else { nil }
     }
 }
 
@@ -302,6 +365,8 @@ struct TriageStatus: Equatable, Sendable {
     var problem: Problem?
     var lastRefreshAt: Date?
     var nextRefreshAt: Date?
+    /// Items marked done in the last analysis because the viewer handled them.
+    var recentlyHandled = 0
 
     static let initial = TriageStatus()
 }
@@ -343,6 +408,13 @@ protocol TriageStore: Sendable {
     func entries(scope: WorkspaceScope) async throws -> AsyncThrowingStream<[TriageEntry], Error>
     func lastRefreshAt(scope: WorkspaceScope) async throws -> Date?
     func rules(scope: WorkspaceScope) async throws -> TriageRules
+    /// Current decisions for `ids` (any fingerprint).
+    func decisions(for ids: [GitHubNodeID], scope: WorkspaceScope) async throws -> [GitHubNodeID: TriageDecision]
+    /// Marks an active item done because the viewer handled it. Returns false
+    /// (and changes nothing) if the user already set a local status.
+    func markHandled(
+        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Bool
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws
 }
 
@@ -352,5 +424,10 @@ protocol TriageDeciding: Sendable {
     var maximumBatchSize: Int { get }
     /// Returns exactly one decision per input item, or throws.
     /// Decisions carry `rules.digest`. Muted items are never passed in.
-    func decide(_ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules) async throws -> [TriageDecision]
+    /// `contexts` holds, per item, the previous next step and what the viewer
+    /// did since, so the decision can say whether that step was handled.
+    func decide(
+        _ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules,
+        contexts: [GitHubNodeID: TriageHandledContext]
+    ) async throws -> [TriageDecision]
 }

@@ -103,7 +103,8 @@ actor CopilotTriageDecider: TriageDeciding {
     func decide(
         _ items: [PersonalWorkItem],
         scope: WorkspaceScope,
-        rules: TriageRules
+        rules: TriageRules,
+        contexts: [GitHubNodeID: TriageHandledContext] = [:]
     ) async throws -> [TriageDecision] {
         guard (1...maximumBatchSize).contains(items.count) else {
             throw TriageDecisionError.invalidResponse
@@ -125,7 +126,7 @@ actor CopilotTriageDecider: TriageDeciding {
         let helper = self.helper ?? makeHelper()
         self.helper = helper
         do {
-            let wireItems = items.map { Self.item($0, hints: rules.hints(for: $0)) }
+            let wireItems = items.map { Self.item($0, hints: rules.hints(for: $0), context: contexts[$0.id]) }
             let instructions = rules.trimmedInstructions
             let makeRequest = { [now] in
                 CopilotTriageRequest(
@@ -172,7 +173,10 @@ actor CopilotTriageDecider: TriageDeciding {
                     modelID: response.modelID,
                     decidedAt: now(),
                     rulesDigest: rules.digest,
-                    instructionNote: decision.instructionNote
+                    instructionNote: decision.instructionNote,
+                    // Only meaningful when we asked (the viewer acted since the last decision).
+                    handled: contexts[item.id] == nil ? nil : decision.handled,
+                    handledEvidence: contexts[item.id] == nil ? nil : decision.handledEvidence
                 )
             }
         } catch let error as TriageDecisionError {
@@ -212,7 +216,9 @@ actor CopilotTriageDecider: TriageDeciding {
         Self.logger.notice("Copilot session authenticated")
     }
 
-    private static func item(_ item: PersonalWorkItem, hints: [String]) -> CopilotTriageItem {
+    private static func item(
+        _ item: PersonalWorkItem, hints: [String], context: TriageHandledContext?
+    ) -> CopilotTriageItem {
         CopilotTriageItem(
             id: item.id.rawValue,
             kind: item.kind.rawValue,
@@ -252,7 +258,9 @@ actor CopilotTriageDecider: TriageDeciding {
                     excerpt: activity.excerpt
                 )
             },
-            ruleHints: hints.isEmpty ? nil : hints
+            ruleHints: hints.isEmpty ? nil : hints,
+            previousNextAction: context.map { String($0.previousNextAction.prefix(200)) },
+            viewerActivity: context.map { Array($0.viewerActivity.prefix(10)) }
         )
     }
 }

@@ -296,6 +296,49 @@ actor GRDBTriageStore: TriageStore {
         }
     }
 
+    func decisions(for ids: [GitHubNodeID], scope: WorkspaceScope) async throws -> [GitHubNodeID: TriageDecision] {
+        try await validate(scope)
+        guard !ids.isEmpty else { return [:] }
+        let decoder = self.decoder
+        let wanted = Set(ids.map(\.rawValue))
+        return try await vault.read { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: "SELECT node_id, decision_json FROM triage_decisions WHERE account_id = ? AND organization_id = ?",
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            )
+            var result: [GitHubNodeID: TriageDecision] = [:]
+            for row in rows {
+                guard let nodeID: String = row["node_id"], wanted.contains(nodeID),
+                      let data: Data = row["decision_json"],
+                      let decision = try? decoder.decode(TriageDecision.self, from: data)
+                else { continue }
+                result[decision.itemID] = decision
+            }
+            return result
+        }
+    }
+
+    func markHandled(
+        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Bool {
+        try await validate(scope)
+        let status = try encoder.encode(LocalStatus.done(fingerprint: fingerprint, at: date, handledEvidence: evidence))
+        let at = milliseconds(date)
+        return try await vault.writeTransaction { database in
+            // Never override a status the user set (done, snoozed) themselves.
+            try database.execute(
+                sql: """
+                    INSERT INTO triage_local_status (account_id, organization_id, node_id, status_json, updated_at_ms)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, organization_id, node_id) DO NOTHING
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, itemID.rawValue, status, at]
+            )
+            return database.changesCount > 0
+        }
+    }
+
     func rules(scope: WorkspaceScope) async throws -> TriageRules {
         try await validate(scope)
         let decoder = self.decoder

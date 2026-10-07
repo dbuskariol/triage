@@ -102,6 +102,24 @@ final class GRDBTriageStoreTests: XCTestCase {
         XCTAssertEqual(stale.map(\.id), [work.id])
     }
 
+    func testMarkHandledNeverOverridesAStatusYouSet() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let work = item(id: "item", relationship: .assigned, updatedAt: Date())
+        try await fixture.store.replaceItems([work], scope: fixture.scope, at: Date())
+        let marked = try await fixture.store.markHandled(
+            itemID: work.id, fingerprint: work.fingerprint, evidence: "You replied.", at: Date(), scope: fixture.scope
+        )
+        XCTAssertTrue(marked)
+        let again = try await fixture.store.markHandled(
+            itemID: work.id, fingerprint: work.fingerprint, evidence: "Other.", at: Date(), scope: fixture.scope
+        )
+        XCTAssertFalse(again)
+        var iterator = try await fixture.store.entries(scope: fixture.scope).makeAsyncIterator()
+        let entries = try await iterator.next()
+        XCTAssertEqual(entries?.first?.handledEvidence, "You replied.")
+    }
+
     private func makeFixture() async throws -> (directory: URL, store: GRDBTriageStore, scope: WorkspaceScope) {
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".triage-store-tests-\(UUID().uuidString)", isDirectory: true)

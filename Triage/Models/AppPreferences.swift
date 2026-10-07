@@ -8,6 +8,7 @@ enum TriagePreferenceKeys {
     static let refreshWhenActive = "sync.refresh-when-active"
     static let laterTodayHours = "inbox.later-today-hours"
     static let tomorrowHour = "inbox.tomorrow-hour"
+    static let autoDoneHandled = "inbox.auto-done-handled"
     static let sortAscending = "interface.sort-ascending"
 }
 

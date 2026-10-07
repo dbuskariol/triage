@@ -77,6 +77,10 @@ pub struct TriageItem {
     pub recent_activity: Vec<TriageActivity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_hints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_next_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewer_activity: Vec<String>,
 }
 // Model output: unknown fields are ignored and only known fields are re-serialized.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -91,6 +95,10 @@ pub struct TriageItemDecision {
     pub next_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled_evidence: Option<String>,
 }
 impl TriageItem {
     fn validate(&self) -> Result<(), ValidationError> {
@@ -164,6 +172,17 @@ pub fn parse_triage_output(content: &str) -> Option<Vec<TriageItemDecision>> {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .map(|value| clamp_text(value, 200));
+        decision.handled = decision
+            .handled
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "yes" | "partial" | "no"));
+        decision.handled_evidence = decision
+            .handled_evidence
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("null"))
             .map(|value| clamp_text(value, 200));
         decision.instruction_note = decision
             .instruction_note
@@ -259,6 +278,8 @@ mod triage_contract_tests {
             pull_request: None,
             recent_activity: vec![],
             rule_hints: vec![],
+            previous_next_action: None,
+            viewer_activity: vec![],
         }
     }
     fn decision(id: &str) -> TriageItemDecision {
@@ -271,6 +292,8 @@ mod triage_contract_tests {
             reason: "It is relevant to you.".into(),
             next_action: None,
             instruction_note: None,
+            handled: None,
+            handled_evidence: None,
         }
     }
     #[test]
