@@ -164,7 +164,7 @@ final class TriageEngineTests: XCTestCase {
     private let scope = WorkspaceScope(
         accountID: AccountID(rawValue: "engine-account")!,
         organizationID: OrganizationID(rawValue: "engine-org")!,
-        organizationLogin: "github", viewerLogin: "octocat"
+        organizationLogin: "octo", viewerLogin: "octocat"
     )
 
     private func engine(store: MemoryStore, items: [PersonalWorkItem], decider: any TriageDeciding) -> TriageEngine {
@@ -191,8 +191,8 @@ fileprivate func engineItem(
     viewerCommentAt: Date? = nil
 ) -> PersonalWorkItem {
     PersonalWorkItem(
-        id: GitHubNodeID(rawValue: id)!, kind: .issue, repository: "github/triage", number: 1,
-        title: "Item \(id)", url: URL(string: "https://github.com/github/triage/issues/1")!,
+        id: GitHubNodeID(rawValue: id)!, kind: .issue, repository: "octo/repo", number: 1,
+        title: "Item \(id)", url: URL(string: "https://github.com/octo/repo/issues/1")!,
         state: .open, author: author, createdAt: updatedAt, updatedAt: updatedAt,
         relationships: [relationship], labels: [], assignees: [], body: "",
         pullRequest: nil,
