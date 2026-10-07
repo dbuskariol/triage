@@ -10,7 +10,7 @@ enum CopilotIPC {
 }
 
 enum CopilotOperation: String, Codable, Sendable {
-    case health, authenticate, models, analyze, cancel, shutdown
+    case health, authenticate, models, triage, cancel, shutdown
 }
 
 struct CopilotWireRequest: Codable, Sendable {
@@ -27,10 +27,19 @@ struct CopilotWireRequest: Codable, Sendable {
         case organizationID = "organization_id"
         case operation
     }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(protocolVersion, forKey: .protocolVersion)
+        try container.encode(requestID.uuidString.lowercased(), forKey: .requestID)
+        try container.encode(accountID, forKey: .accountID)
+        try container.encode(organizationID, forKey: .organizationID)
+        try container.encode(operation, forKey: .operation)
+    }
 }
 
 enum CopilotResponseStatus: String, Codable, Sendable {
-    case health, authentication, models, analysis, cancelled, shutdown, failure
+    case health, authentication, models, triage, cancelled, shutdown, failure
 }
 
 struct CopilotHealth: Codable, Equatable, Sendable {

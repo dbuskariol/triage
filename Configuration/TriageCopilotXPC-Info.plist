@@ -15,6 +15,13 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>TriageExpectedTeamIdentifier</key>
-	<string>$(TRIAGE_DEVELOPMENT_TEAM)</string>
+	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>XPCService</key>
+	<dict>
+		<key>ServiceType</key>
+		<string>Application</string>
+		<key>RunLoopType</key>
+		<string>NSRunLoop</string>
+	</dict>
 </dict>
 </plist>

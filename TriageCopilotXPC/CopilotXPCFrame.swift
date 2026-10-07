@@ -69,7 +69,7 @@ enum CopilotXPCFrame {
     if request.operation == Operation.authenticate.rawValue,
        header.status == "failure" {
       return .fixedAuthenticationFailure(
-        try framedFixedAuthenticationFailure(for: request)
+        try framedFixedAuthenticationFailure(for: request, payload: payload)
       )
     }
 
@@ -98,8 +98,33 @@ enum CopilotXPCFrame {
   }
 
   private static func framedFixedAuthenticationFailure(
-    for request: RequestHeader
+    for request: RequestHeader,
+    payload originalPayload: Data
   ) throws -> Data {
+    let safeMessages: Set<String> = [
+      "Copilot browser login could not start.",
+      "Copilot browser login exited before authorization completed.",
+      "Copilot browser sign-in timed out. Connect again and finish authorization within five minutes.",
+      "Copilot runtime startup timed out after browser sign-in.",
+      "Copilot runtime could not start after browser sign-in.",
+      "Copilot runtime could not read the signed-in account.",
+      "Copilot runtime could not activate its saved account.",
+      "Copilot runtime did not find the browser login in its isolated profile.",
+      "Copilot browser login could not read its bounded response.",
+      "Copilot could not establish a trusted TLS connection after browser authorization.",
+      "Copilot could not contact GitHub to exchange the browser authorization.",
+      "Copilot could not save its login in the system credential store.",
+      "Copilot could not write its isolated login profile because access was denied.",
+      "Copilot requested terminal input after browser authorization.",
+      "GitHub rejected an expired or invalid browser authorization. Start a fresh Copilot sign-in.",
+      "GitHub denied Copilot access for the authorized account. Check its subscription and organization policy.",
+      "Copilot could not locate a required system tool or login-profile directory.",
+      "Copilot requires confirmation before storing credentials in its local profile.",
+    ]
+    let object = try? JSONSerialization.jsonObject(with: originalPayload) as? [String: Any]
+    let suppliedMessage = (object?["failure"] as? [String: Any])?["message"] as? String
+    let message = suppliedMessage.flatMap { safeMessages.contains($0) ? $0 : nil }
+      ?? "Copilot authentication could not be completed. Authenticate again after checking your GitHub connection."
     let payload = try JSONSerialization.data(
       withJSONObject: [
         "protocol_version": request.protocolVersion,
@@ -109,7 +134,7 @@ enum CopilotXPCFrame {
         "status": "failure",
         "failure": [
           "code": "authentication_failed",
-          "message": "Copilot authentication could not be completed. Authenticate again after checking your GitHub connection.",
+          "message": message,
         ],
       ],
       options: [.sortedKeys]
@@ -164,7 +189,7 @@ enum CopilotXPCFrame {
     case health
     case authenticate
     case models
-    case analyze
+    case triage
     case cancel
     case shutdown
   }

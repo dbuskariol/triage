@@ -1,21 +1,10 @@
 # Triage Architecture
 
-The authoritative product scope and implementation sequence are defined in
-`Documentation/IMPLEMENTATION_PLAN.md`.
+Triage is a local-first native macOS application. `Triage/Core` defines its contracts and contains the personal-work GitHub GraphQL discovery path, `GRDBTriageStore`, `CopilotTriageDecider`, `TriageEngine`, and workspace presentation model.
 
-Triage currently contains only the application shell. Product architecture will be added after the product definition is known.
+Discovery searches GitHub GraphQL per relationship. The engine stores the resulting local workspace, sends bounded personal-work items through the authenticated Copilot helper's single `triage` operation, and publishes workspace presentation for `Triage/Views/Workspace`. The app has no legacy synchronization engine, evidence-receipt pipeline, or derived-intelligence subsystem.
 
-## Baseline boundaries
-
-- `TriageApp` owns scene composition and long-lived application objects.
-- `AppNavigationModel` owns sidebar and Settings navigation.
-- `AppPreferences` owns durable macOS integration preferences.
-- `SoftwareUpdateController` is the single boundary around Sparkle.
-- Views contain presentation and route actions through those shared objects.
-
-The shell uses Swift 6 strict concurrency. UI state and framework objects are main-actor isolated. No domain persistence, background work, permissions, telemetry, or data collection exists. Network access is limited to signed Sparkle update checks.
-
-The privacy manifest declares the app-private `UserDefaults` required-reason API and no tracking or collected data.
+The helper is fail-closed: health, authenticate, models, triage, cancel, and shutdown are its only operations. It has no tools, MCP, filesystem, or network capability beyond the pinned Copilot runtime.
 
 ## Distribution
 

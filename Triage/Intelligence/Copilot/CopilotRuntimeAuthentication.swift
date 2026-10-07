@@ -42,7 +42,69 @@ struct CopilotAccountAuthorizationState: Equatable, Sendable {
     )
 }
 
+/// A precise, non-actionable summary for UI surfaces. "Blocked" is reserved
+/// for a failed or mismatched authorization, rather than every incomplete
+/// prerequisite.
+enum CopilotAvailabilityPresentation: Equatable, Sendable {
+    case available
+    case consentRequired
+    case entitlementUnavailable
+    case runtimeUnavailable
+    case signInRequired
+    case separateSignInUnavailable
+    case verifying
+    case unavailable
+    case blocked
+
+    init(
+        authorization: CopilotAccountAuthorizationState,
+        isEffectivelyAvailable: Bool,
+        authenticationKind: AuthenticationKind
+    ) {
+        guard isEffectivelyAvailable else {
+            if !authorization.hasOrganizationConsent {
+                self = .consentRequired
+            } else if authorization.runtime != .ready {
+                self = .runtimeUnavailable
+            } else {
+                switch authorization.authentication {
+                case .signedOut, .deviceLoginRequired:
+                    self = .signInRequired
+                case .verifyingIdentity:
+                    self = .verifying
+                case .identityMismatch, .blocked, .failed:
+                    self = .blocked
+                case .authenticated:
+                    // Budget or model availability has not been established.
+                    self = authorization.isEntitled ? .unavailable : .entitlementUnavailable
+                }
+            }
+            return
+        }
+        self = .available
+    }
+
+    var title: String {
+        switch self {
+        case .available: "Available"
+        case .consentRequired: "Consent required"
+        case .entitlementUnavailable: "Entitlement unavailable"
+        case .runtimeUnavailable: "Runtime unavailable"
+        case .signInRequired: "Sign-in required"
+        case .separateSignInUnavailable: "Separate sign-in unavailable"
+        case .verifying: "Verifying"
+        case .unavailable: "Unavailable"
+        case .blocked: "Blocked"
+        }
+    }
+
+    var requiresAttention: Bool {
+        self != .available && self != .verifying
+    }
+}
+
 enum CopilotAuthenticationError: Error, Equatable, Sendable {
+    case signInRequired
     case consentRequired
     case entitlementRequired
     case runtimeUnavailable
@@ -64,6 +126,7 @@ struct CopilotRuntimeAuthenticationResult: Equatable, Sendable {
 /// an already validated executable and an app-owned profile directory; they
 /// must never consult PATH, a user profile, or ambient Copilot configuration.
 protocol CopilotRuntimeAuthenticating: Sendable {
+    func restoreSession(accountID: AccountID, organizationID: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult
     func authenticateWithEphemeralCredential(
         accountID: AccountID,
         organizationID: OrganizationID,
@@ -77,6 +140,12 @@ protocol CopilotRuntimeAuthenticating: Sendable {
     func models(accountID: AccountID, organizationID: OrganizationID) async throws -> [CopilotModel]
 
     func removeSession(profileDirectory: URL) async
+}
+
+extension CopilotRuntimeAuthenticating {
+    func restoreSession(accountID: AccountID, organizationID: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
+        throw CopilotAuthenticationError.signInRequired
+    }
 }
 
 /// Explicit fallback used only by tests or configurations without the signed
@@ -147,6 +216,19 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
         organizationID: OrganizationID,
         credential: CopilotEphemeralCredential
     ) async throws -> CopilotRuntimeAuthenticationResult {
+        try await authenticate(
+            accountID: accountID,
+            organizationID: organizationID,
+            credential: credential
+        )
+    }
+
+    private func authenticate(
+        accountID: AccountID,
+        organizationID: OrganizationID,
+        credential: CopilotEphemeralCredential?,
+        allowsBrowser: Bool = true
+    ) async throws -> CopilotRuntimeAuthenticationResult {
         let scope = SessionScope(accountID: accountID, organizationID: organizationID)
         let generation = beginAuthentication(for: scope)
         let operationToken = UUID()
@@ -165,13 +247,16 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
             client: client
         )
         do {
-            let response = try await client.helper.authenticate(
+            let request = if let credential {
                 CopilotAuthenticateRequest(
                     accountID: accountID,
                     organizationID: organizationID,
                     credential: credential
                 )
-            )
+            } else {
+                CopilotAuthenticateRequest(accountID: accountID, organizationID: organizationID, allowsBrowser: allowsBrowser)
+            }
+            let response = try await client.helper.authenticate(request)
             guard isCurrent(generation, for: scope) else {
                 await shutdownPendingAuthentication(operationToken)
                 throw CancellationError()
@@ -221,8 +306,19 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
         }
     }
 
-    func authenticateWithDeviceLogin(accountID _: AccountID, organizationID _: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
-        throw CopilotAuthenticationError.deviceLoginUnavailable
+    func authenticateWithDeviceLogin(
+        accountID: AccountID,
+        organizationID: OrganizationID
+    ) async throws -> CopilotRuntimeAuthenticationResult {
+        try await authenticate(
+            accountID: accountID,
+            organizationID: organizationID,
+            credential: nil
+        )
+    }
+
+    func restoreSession(accountID: AccountID, organizationID: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
+        try await authenticate(accountID: accountID, organizationID: organizationID, credential: nil, allowsBrowser: false)
     }
     func models(accountID: AccountID, organizationID: OrganizationID) async throws -> [CopilotModel] {
         let scope = SessionScope(accountID: accountID, organizationID: organizationID)
@@ -325,6 +421,7 @@ actor CopilotXPCAuthenticator: CopilotRuntimeAuthenticating {
 }
 
 protocol CopilotRuntimeAuthorizationProviding: Sendable {
+    func restore(account: GitHubAccount, organizationID: OrganizationID, hasOrganizationConsent: Bool, isEntitled: Bool) async throws -> Bool
     func state(for accountID: AccountID) async -> CopilotAccountAuthorizationState
     /// An operation-scoped stream of real acquisition state. Implementations
     /// return `nil` when no approved runtime exists on this Mac.
@@ -340,20 +437,16 @@ protocol CopilotRuntimeAuthorizationProviding: Sendable {
         isEntitled: Bool
     ) async throws
     func models(accountID: AccountID, organizationID: OrganizationID) async throws -> [CopilotModel]
-    func externalState(for scope: SynchronizationScope, account: GitHubAccount) async -> OrganizationAIExternalState
     func disconnect(accountID: AccountID) async
 }
 
 extension CopilotRuntimeAuthorizationProviding {
+    func restore(account: GitHubAccount, organizationID: OrganizationID, hasOrganizationConsent: Bool, isEntitled: Bool) async throws -> Bool { false }
     func runtimeStateUpdates() async -> AsyncStream<CopilotRuntimeStatus>? { nil }
     func cancelRuntimeOperationAtUserRequest() async {}
 }
 
-/// Account-scoped authentication adapter. OAuth and fine-grained PAT values
-/// are read only after consent and entitlement are true, passed once to the
-/// runtime boundary, and never stored outside Keychain. Classic PAT accounts
-/// remain explicitly unavailable until an independently verified device flow
-/// can meet the same storage and identity guarantees.
+/// Account-scoped Copilot login, independent of GitHub synchronization tokens.
 actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding {
     private struct CopilotCredentialReference: Sendable {
         let authenticationGeneration: UInt64
@@ -492,6 +585,25 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         hasOrganizationConsent: Bool,
         isEntitled: Bool
     ) async throws {
+        try await authenticate(account: account, organizationID: organizationID, hasOrganizationConsent: hasOrganizationConsent, isEntitled: isEntitled, allowsBrowser: true)
+    }
+
+    func restore(account: GitHubAccount, organizationID: OrganizationID, hasOrganizationConsent: Bool, isEntitled: Bool) async throws -> Bool {
+        do {
+            try await authenticate(account: account, organizationID: organizationID, hasOrganizationConsent: hasOrganizationConsent, isEntitled: isEntitled, allowsBrowser: false)
+            return true
+        } catch CopilotAuthenticationError.signInRequired {
+            return false
+        }
+    }
+
+    private func authenticate(
+        account: GitHubAccount,
+        organizationID: OrganizationID,
+        hasOrganizationConsent: Bool,
+        isEntitled: Bool,
+        allowsBrowser: Bool
+    ) async throws {
         let mutationGeneration = runtimeMutationGeneration
         guard !isRuntimeMutationInProgress else {
             throw CopilotAuthenticationError.runtimeUnavailable
@@ -525,98 +637,25 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         }
         update(accountID: account.id, authentication: .verifyingIdentity, entitlement: isEntitled, consent: hasOrganizationConsent)
         do {
-        switch account.authenticationKind {
-        case .oauth, .fineGrainedPersonalAccessToken:
-            // This read happens only after both policy gates above succeed.
-            // The Keychain data buffer is zeroed after the identity probe and
-            // one XPC authentication exchange finish.
-            let result: (GitHubUserDTO, CopilotRuntimeAuthenticationResult)?
-            do {
-                result = try await withEphemeralCredential(
-                    for: account,
-                    preflight: { credential in
-                    guard await self.isCurrent(
-                        generation,
-                        for: account.id,
-                        runtimeMutationGeneration: mutationGeneration
-                    ) else {
-                        throw CancellationError()
-                    }
-                    let githubUser = try await self.loadAuthenticatedUser(credential)
-                    guard await self.isCurrent(
-                        generation,
-                        for: account.id,
-                        runtimeMutationGeneration: mutationGeneration
-                    ) else {
-                        throw CancellationError()
-                    }
-                    return githubUser
-                },
-                    authenticate: { githubUser, credential in
-                    guard await self.isCurrent(
-                        generation,
-                        for: account.id,
-                        runtimeMutationGeneration: mutationGeneration
-                    ) else {
-                        throw CancellationError()
-                    }
-                    guard githubUser.id == account.githubUserID,
-                          githubUser.login.caseInsensitiveCompare(account.login) == .orderedSame
-                    else {
-                        throw CopilotAuthenticationError.identityMismatch(
-                            expected: account.githubUserID,
-                            actual: githubUser.id
-                        )
-                    }
-                    let authenticated = try await self.authenticator.authenticateWithEphemeralCredential(
-                        accountID: account.id,
-                        organizationID: organizationID,
-                        credential: credential
-                    )
-                    guard await self.isCurrent(
-                        generation,
-                        for: account.id,
-                        runtimeMutationGeneration: mutationGeneration
-                    ) else {
-                        throw CancellationError()
-                    }
-                    return (githubUser, authenticated)
-                })
-            } catch let error as CopilotAuthenticationError {
-                guard isCurrent(generation, for: account.id, runtimeMutationGeneration: mutationGeneration) else {
-                    throw CancellationError()
-                }
-                if case let .identityMismatch(expected, actual) = error {
-                    update(accountID: account.id, authentication: .identityMismatch(expected: expected, actual: actual), entitlement: isEntitled, consent: hasOrganizationConsent)
-                }
-                throw error
-            }
-            guard let result else { throw CopilotAuthenticationError.credentialUnavailable }
-            guard isCurrent(generation, for: account.id, runtimeMutationGeneration: mutationGeneration) else {
-                throw CancellationError()
-            }
-            let (_, authenticated) = result
-            guard authenticated.isAuthenticated,
-                  authenticated.host.caseInsensitiveCompare("github.com") == .orderedSame,
-                  authenticated.login.caseInsensitiveCompare(account.login) == .orderedSame
-            else {
-                update(accountID: account.id, authentication: .blocked("Copilot did not verify the selected github.com identity."), entitlement: isEntitled, consent: hasOrganizationConsent)
-                throw CopilotAuthenticationError.copilotIdentityMismatch
-            }
-        case .classicPersonalAccessToken:
-            // The approved runtime does not currently implement a verifiable,
-            // Keychain-only isolated device flow.  Never offer a classic PAT
-            // to the helper or imply that a sign-in can complete.
-            update(
-                accountID: account.id,
-                authentication: .blocked("This classic personal access token is used only for read-only GitHub synchronization and is never sent to Copilot. A separate Copilot OAuth sign-in is not yet available in this build."),
-                entitlement: isEntitled,
-                consent: hasOrganizationConsent
-            )
-            throw CopilotAuthenticationError.deviceLoginUnavailable
+        // GitHub account credentials—including OAuth and both PAT kinds—are
+        // exclusively for GitHub synchronization. Copilot always owns a
+        // separate standard CLI browser login and never receives a Triage
+        // credential, even ephemerally.
+        let authenticated = try await (allowsBrowser
+            ? authenticator.authenticateWithDeviceLogin(accountID: account.id, organizationID: organizationID)
+            : authenticator.restoreSession(accountID: account.id, organizationID: organizationID))
+        guard isCurrent(generation, for: account.id, runtimeMutationGeneration: mutationGeneration) else {
+            throw CancellationError()
+        }
+        guard authenticated.isAuthenticated else { throw CopilotAuthenticationError.signInRequired }
+        guard authenticated.host.caseInsensitiveCompare("github.com") == .orderedSame,
+              authenticated.login.caseInsensitiveCompare(account.login) == .orderedSame
+        else {
+            update(accountID: account.id, authentication: .blocked("Copilot did not verify the selected github.com identity."), entitlement: isEntitled, consent: hasOrganizationConsent)
+            throw CopilotAuthenticationError.copilotIdentityMismatch
         }
         // A random opaque reference is the only Copilot auth value Triage
-        // persists. The credential itself remains ephemeral or in Keychain.
+        // persists. Copilot manages its own standard credential storage.
         // Its distinct Keychain identifier gives stale continuations a safe,
         // operation-local cleanup target.
         let reference = CopilotCredentialReference(
@@ -646,6 +685,14 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         update(accountID: account.id, authentication: .authenticated, entitlement: isEntitled, consent: hasOrganizationConsent)
         } catch {
             guard isCurrent(generation, for: account.id, runtimeMutationGeneration: mutationGeneration) else {
+                throw error
+            }
+            if error is CancellationError || (error as? CopilotXPCError) == .operationCancelled {
+                update(accountID: account.id, authentication: .signedOut, entitlement: isEntitled, consent: hasOrganizationConsent)
+                throw CancellationError()
+            }
+            if (error as? CopilotAuthenticationError) == .signInRequired {
+                update(accountID: account.id, authentication: .signedOut, entitlement: isEntitled, consent: hasOrganizationConsent)
                 throw error
             }
             if let error = error as? CopilotXPCError,
@@ -695,12 +742,6 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         return values
     }
 
-    func externalState(for scope: SynchronizationScope, account: GitHubAccount) async -> OrganizationAIExternalState {
-        let state = await state(for: account.id)
-        let ids = modelIDs["\(scope.accountID.rawValue)/\(scope.organizationID.rawValue)"] ?? []
-        let runtimeReady: Bool = if case .ready = state.runtime { true } else { false }
-        return .init(isRuntimeAvailable: runtimeReady, isAuthenticatedIdentityMatch: state.authentication == .authenticated, isEntitled: state.isEntitled, supportsAutoModel: !ids.isEmpty, availableModelIDs: ids, hasAvailableBudget: false)
-    }
 
     /// The mutable Data returned by Keychain is the only credential buffer this
     /// adapter owns. It is wiped after the supplied operation. A temporary
@@ -845,6 +886,5 @@ struct NoopCopilotRuntimeAuthorizationProvider: CopilotRuntimeAuthorizationProvi
     func removeRuntimeAtUserRequest() async throws {}
     func authenticate(account _: GitHubAccount, organizationID _: OrganizationID, hasOrganizationConsent _: Bool, isEntitled _: Bool) async throws { throw CopilotAuthenticationError.runtimeUnavailable }
     func models(accountID _: AccountID, organizationID _: OrganizationID) async throws -> [CopilotModel] { throw CopilotAuthenticationError.runtimeUnavailable }
-    func externalState(for _: SynchronizationScope, account _: GitHubAccount) async -> OrganizationAIExternalState { .unavailable }
     func disconnect(accountID _: AccountID) async {}
 }

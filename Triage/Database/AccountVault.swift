@@ -896,19 +896,26 @@ actor AccountVault {
     }
 
     func read<Value: Sendable>(
-        _ operation: @Sendable (Database) throws -> Value
-    ) throws -> Value {
-        try databasePool.read(operation)
+        _ operation: @escaping @Sendable (Database) throws -> Value
+    ) async throws -> Value {
+        try await databasePool.read(operation)
     }
 
-    /// Creates a value-only workspace observation bridge while retaining sole
-    /// ownership of this vault's database pool. Consumers can cancel their
-    /// subscriptions, but never receive a database handle.
-    func workspaceObservationBridge() -> WorkspaceDatabaseObservationBridge {
-        WorkspaceDatabaseObservationService.bridge(
-            in: databasePool,
-            accountID: accountID
-        )
+    /// Starts a value-only database observation without exposing the pool.
+    func observe<Value: Equatable & Sendable>(
+        _ fetch: @escaping @Sendable (Database) throws -> Value,
+        onError: @escaping @Sendable (Error) -> Void,
+        onChange: @escaping @Sendable (Value) -> Void
+    ) -> AnyDatabaseCancellable {
+        ValueObservation
+            .tracking(fetch)
+            .removeDuplicates()
+            .start(
+                in: databasePool,
+                scheduling: .task,
+                onError: onError,
+                onChange: onChange
+            )
     }
 
     func write<Value: Sendable>(
@@ -931,157 +938,32 @@ actor AccountVault {
         try databasePool.close()
     }
 
-    func applyMigrations() throws {
-        try VaultPathValidator.ensureMigrationBackups(rootDirectory: rootDirectory, accountID: accountID)
-        let databasePool = databasePool
-        let vaultKey = vaultKey
-        let rootDirectory = rootDirectory
-        let accountID = accountID
-        try TriageDatabaseMigrator.migrate(
-            databasePool,
-            beforeDestructiveMigration: { migrationID in
-                try VaultPathValidator.ensureMigrationBackups(
-                    rootDirectory: rootDirectory,
-                    accountID: accountID
-                )
-                try Self.createVerifiedMigrationBackup(
-                    for: migrationID,
-                    from: databasePool,
-                    vaultKey: vaultKey,
-                    rootDirectory: rootDirectory,
-                    accountID: accountID
-                )
-            }
-        )
-    }
-
-    static let destructiveMigrationBackupIDs = [
-        "033-role-search-page-replay-v2",
-        "034-role-search-page-replay-parser-identity"
-    ]
-
-    static func configuration(
-        vaultKey: VaultKey,
-        readonly: Bool = false
-    ) -> Configuration {
+    static func configuration(vaultKey: VaultKey, readonly: Bool = false) -> Configuration {
         var configuration = Configuration()
         configuration.label = "Triage.AccountVault"
         configuration.foreignKeysEnabled = true
         configuration.readonly = readonly
-        if !readonly {
-            configuration.journalMode = .wal
-        }
+        if !readonly { configuration.journalMode = .wal }
         configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { database in
             try database.usePassphrase(vaultKey.data)
             try database.execute(sql: "PRAGMA cipher_memory_security = ON")
-            if !readonly {
-                try database.execute(sql: "PRAGMA secure_delete = ON")
-            }
+            if !readonly { try database.execute(sql: "PRAGMA secure_delete = ON") }
         }
         return configuration
     }
 
-    private static func createVerifiedMigrationBackup(
-        for migrationID: String,
-        from source: DatabasePool,
-        vaultKey: VaultKey,
-        rootDirectory: URL,
-        accountID: AccountID
-    ) throws {
-        guard destructiveMigrationBackupIDs.contains(migrationID) else {
-            throw VaultError.unsupportedDestructiveMigration(migrationID)
+    static func verify(_ databasePool: DatabasePool) throws {
+        try databasePool.read { database in
+            guard !(try database.cipherVersion).isEmpty else { throw VaultError.sqlCipherUnavailable }
+            guard try String.fetchAll(database, sql: "PRAGMA cipher_integrity_check").isEmpty else {
+                throw VaultError.invalidIntegrityCheck
+            }
         }
-        let sourceReplayCount = try source.read { database in
-            guard try database.tableExists("role_search_page_replays"),
-                  try String.fetchOne(
-                    database,
-                    sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                    arguments: [migrationID]
-                  ) == nil
-            else {
-                throw VaultError.invalidMigrationBackup
-            }
-            return try Int.fetchOne(
-                database,
-                sql: "SELECT COUNT(*) FROM role_search_page_replays"
-            ) ?? 0
-        }
+    }
 
-        let backupComponents = ["Vaults", accountID.rawValue, "MigrationBackups"]
-        try NoFollowFilesystem.withDirectory(
-            beneath: rootDirectory,
-            components: backupComponents,
-            create: true
-        ) { backupDirectory in
-            let temporaryName = ".\(migrationID).\(UUID().uuidString.lowercased()).partial"
-            defer {
-                try? NoFollowFilesystem.removeRegularFileIfPresent(
-                    relativeTo: backupDirectory,
-                    name: temporaryName
-                )
-                for suffix in ["-journal", "-shm", "-wal"] {
-                    try? NoFollowFilesystem.removeRegularFileIfPresent(
-                        relativeTo: backupDirectory,
-                        name: temporaryName + suffix
-                    )
-                }
-            }
-
-            try NoFollowFilesystem.createRegularFileIfMissing(
-                relativeTo: backupDirectory,
-                name: temporaryName
-            )
-            let heldBackupPath = try NoFollowFilesystem.currentPath(of: backupDirectory)
-            let temporaryPath = URL(fileURLWithPath: heldBackupPath, isDirectory: true)
-                .appendingPathComponent(temporaryName, isDirectory: false)
-                .path
-            var backupConfiguration = configuration(vaultKey: vaultKey)
-            backupConfiguration.journalMode = .default
-            backupConfiguration.prepareDatabase { database in
-                try database.execute(sql: "PRAGMA journal_mode = MEMORY")
-            }
-            let destination = try DatabaseQueue(
-                path: temporaryPath,
-                configuration: backupConfiguration
-            )
-            try source.backup(to: destination)
-            try verify(destination)
-            let verified = try destination.read { database in
-                guard try database.tableExists("role_search_page_replays"),
-                      try String.fetchOne(
-                        database,
-                        sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                        arguments: [migrationID]
-                      ) == nil
-                else {
-                    return false
-                }
-                return (try Int.fetchOne(
-                    database,
-                    sql: "SELECT COUNT(*) FROM role_search_page_replays"
-                ) ?? 0) == sourceReplayCount
-            }
-            try destination.close()
-            guard verified else { throw VaultError.invalidMigrationBackup }
-
-            try NoFollowFilesystem.setRegularFilePermissions(
-                relativeTo: backupDirectory,
-                name: temporaryName
-            )
-            let published: Bool? = try NoFollowFilesystem.withRegularFileIfPresent(
-                relativeTo: backupDirectory,
-                name: temporaryName
-            ) { temporaryFile in
-                try NoFollowFilesystem.copyOpenRegularFileAtomically(
-                    temporaryFile,
-                    to: backupDirectory,
-                    destinationName: "\(migrationID).sqlite"
-                )
-                return true
-            }
-            guard published == true else { throw VaultError.invalidMigrationBackup }
-        }
+    func applyMigrations() throws {
+        try TriageDatabaseMigrator.migrate(databasePool, beforeDestructiveMigration: { _ in })
     }
 
     static func verifiedMigrationBackupIDs(
@@ -1090,115 +972,10 @@ actor AccountVault {
         vaultKey: VaultKey
     ) throws -> [String] {
         _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
-        var verifiedIDs: [String] = []
-        for migrationID in destructiveMigrationBackupIDs {
-            do {
-                try withVerifiedMigrationBackup(
-                    rootDirectory: rootDirectory,
-                    accountID: accountID,
-                    vaultKey: vaultKey,
-                    migrationID: migrationID
-                ) { _ in }
-                verifiedIDs.append(migrationID)
-            } catch {
-                // A corrupt or replaced backup is never advertised as a
-                // recovery option. The caller still reports the vault issue.
-            }
-        }
-        return verifiedIDs
+        _ = vaultKey
+        return []
     }
 
-    /// Retains the exact no-follow candidate descriptor from SQLCipher
-    /// verification through `operation`. Callers that install a backup must
-    /// copy this descriptor rather than resolving its filename again.
-    static func withVerifiedMigrationBackup<Value>(
-        rootDirectory: URL,
-        accountID: AccountID,
-        vaultKey: VaultKey,
-        migrationID: String,
-        _ operation: (Int32) throws -> Value
-    ) throws -> Value {
-        guard destructiveMigrationBackupIDs.contains(migrationID) else {
-            throw VaultError.invalidMigrationBackup
-        }
-        _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
-        return try NoFollowFilesystem.withDirectory(
-            beneath: rootDirectory,
-            components: ["Vaults", accountID.rawValue],
-            create: false
-        ) { vaultDirectory in
-            try withVerifiedMigrationBackup(
-                relativeTo: vaultDirectory,
-                vaultKey: vaultKey,
-                migrationID: migrationID,
-                operation
-            )
-        }
-    }
-
-    /// Uses a vault directory descriptor already retained by the caller so an
-    /// account pathname swap cannot select a different candidate while the
-    /// verified descriptor is in flight.
-    static func withVerifiedMigrationBackup<Value>(
-        relativeTo vaultDirectory: Int32,
-        vaultKey: VaultKey,
-        migrationID: String,
-        _ operation: (Int32) throws -> Value
-    ) throws -> Value {
-        guard destructiveMigrationBackupIDs.contains(migrationID) else {
-            throw VaultError.invalidMigrationBackup
-        }
-        return try NoFollowFilesystem.withDirectory(
-            relativeTo: vaultDirectory,
-            components: ["MigrationBackups"],
-            create: false
-        ) { backupDirectory in
-            let value = try NoFollowFilesystem.withRegularFileIfPresent(
-                relativeTo: backupDirectory,
-                name: "\(migrationID).sqlite"
-            ) { backupFile in
-                let isExpectedPreMigrationBackup = try NoFollowFilesystem.withPrivateVerificationDirectory {
-                    verificationDirectoryPath, verificationDirectory in
-                    try NoFollowFilesystem.copyOpenRegularFileAtomically(
-                        backupFile,
-                        to: verificationDirectory,
-                        destinationName: "verified.sqlite"
-                    )
-                    let pool = try DatabasePool(
-                        path: URL(fileURLWithPath: verificationDirectoryPath, isDirectory: true)
-                            .appendingPathComponent("verified.sqlite", isDirectory: false)
-                            .path,
-                        configuration: configuration(vaultKey: vaultKey, readonly: true)
-                    )
-                    defer { try? pool.close() }
-                    try verify(pool)
-                    return try pool.read { database in
-                        let hasReplayTable = try database.tableExists("role_search_page_replays")
-                        let migrationChecksum = try String.fetchOne(
-                            database,
-                            sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                            arguments: [migrationID]
-                        )
-                        return hasReplayTable && migrationChecksum == nil
-                    }
-                }
-                guard isExpectedPreMigrationBackup else {
-                    throw VaultError.invalidMigrationBackup
-                }
-                return try operation(backupFile)
-            }
-            guard let value else {
-                throw VaultError.invalidMigrationBackup
-            }
-            return value
-        }
-    }
-
-    /// Installs a previously discovered verified migration backup without
-    /// deleting the damaged vault. The current encrypted database and its WAL
-    /// sidecars are copied into an account-private recovery directory first;
-    /// subsequent deletion of the account still removes that directory as
-    /// part of its vault artifact tree.
     static func restoreVerifiedMigrationBackup(
         rootDirectory: URL,
         accountID: AccountID,
@@ -1206,127 +983,9 @@ actor AccountVault {
         migrationID: String
     ) throws {
         _ = try VaultPathValidator.paths(rootDirectory: rootDirectory, accountID: accountID)
-        let vaultComponents = ["Vaults", accountID.rawValue]
-        let archiveID = "before-\(migrationID)-\(UUID().uuidString.lowercased())"
-
-        try NoFollowFilesystem.withDirectory(
-            beneath: rootDirectory,
-            components: vaultComponents,
-            create: false
-        ) { vaultDirectory in
-            try withVerifiedMigrationBackup(
-                relativeTo: vaultDirectory,
-                vaultKey: vaultKey,
-                migrationID: migrationID
-            ) { backupFile in
-                try NoFollowFilesystem.withDirectory(
-                    relativeTo: vaultDirectory,
-                    components: ["RecoveryCopies", archiveID],
-                    create: true
-                ) { archiveDirectory in
-                    // Copy the entire encrypted SQLite set before touching the
-                    // live database. A missing sidecar is normal; a
-                    // symlink/non-regular file is never treated as recoverable.
-                    for name in ["triage.sqlite", "triage.sqlite-wal", "triage.sqlite-shm"] {
-                        _ = try NoFollowFilesystem.withRegularFileIfPresent(
-                            relativeTo: vaultDirectory,
-                            name: name
-                        ) { artifact in
-                            try NoFollowFilesystem.copyOpenRegularFileAtomically(
-                                artifact,
-                                to: archiveDirectory,
-                                destinationName: name
-                            )
-                        }
-                    }
-                }
-
-                // The verified candidate descriptor and vault directory remain
-                // held until this copy completes, so neither a candidate nor
-                // account pathname swap can install different bytes.
-                try NoFollowFilesystem.copyOpenRegularFileAtomically(
-                    backupFile,
-                    to: vaultDirectory,
-                    destinationName: "triage.sqlite"
-                )
-                try NoFollowFilesystem.removeRegularFileIfPresent(
-                    relativeTo: vaultDirectory,
-                    name: "triage.sqlite-wal"
-                )
-                try NoFollowFilesystem.removeRegularFileIfPresent(
-                    relativeTo: vaultDirectory,
-                    name: "triage.sqlite-shm"
-                )
-
-                let validation = try NoFollowFilesystem.withRegularFileIfPresent(
-                    relativeTo: vaultDirectory,
-                    name: "triage.sqlite"
-                ) { restoredFile in
-                    try NoFollowFilesystem.withPrivateVerificationDirectory {
-                        verificationDirectoryPath, verificationDirectory in
-                        try NoFollowFilesystem.copyOpenRegularFileAtomically(
-                            restoredFile,
-                            to: verificationDirectory,
-                            destinationName: "verified.sqlite"
-                        )
-                        let restored = try DatabasePool(
-                            path: URL(fileURLWithPath: verificationDirectoryPath, isDirectory: true)
-                                .appendingPathComponent("verified.sqlite", isDirectory: false)
-                                .path,
-                            configuration: configuration(vaultKey: vaultKey, readonly: true)
-                        )
-                        defer { try? restored.close() }
-                        try verify(restored)
-                        return try restored.read { database in
-                            let hasReplayTable = try database.tableExists("role_search_page_replays")
-                            let migrationChecksum = try String.fetchOne(
-                                database,
-                                sql: "SELECT checksum FROM schema_migrations WHERE id = ?",
-                                arguments: [migrationID]
-                            )
-                            return hasReplayTable && migrationChecksum == nil
-                        }
-                    }
-                }
-                guard let isExpectedPreMigrationBackup = validation,
-                      isExpectedPreMigrationBackup
-                else {
-                    throw VaultError.invalidMigrationBackup
-                }
-            }
-        }
-    }
-
-    static func verify(_ databasePool: DatabasePool) throws {
-        try databasePool.read { database in
-            guard !(try database.cipherVersion).isEmpty else {
-                throw VaultError.sqlCipherUnavailable
-            }
-            let integrityRows = try String.fetchAll(
-                database,
-                sql: "PRAGMA cipher_integrity_check"
-            )
-            // SQLCipher reports one row per integrity error and no rows when
-            // every encrypted page passes HMAC verification.
-            guard integrityRows.isEmpty else {
-                throw VaultError.invalidIntegrityCheck
-            }
-        }
-    }
-
-    static func verify(_ databaseQueue: DatabaseQueue) throws {
-        try databaseQueue.read { database in
-            guard !(try database.cipherVersion).isEmpty else {
-                throw VaultError.sqlCipherUnavailable
-            }
-            let integrityRows = try String.fetchAll(
-                database,
-                sql: "PRAGMA cipher_integrity_check"
-            )
-            guard integrityRows.isEmpty else {
-                throw VaultError.invalidIntegrityCheck
-            }
-        }
+        _ = vaultKey
+        _ = migrationID
+        throw VaultError.invalidMigrationBackup
     }
 }
 

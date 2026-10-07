@@ -2,6 +2,22 @@ import XCTest
 @testable import Triage
 
 final class GitHubRESTTransportTests: XCTestCase {
+    func testBodylessResponsesReturnWithoutReadingAnAsyncBody() async throws {
+        let configuration = TriageHTTPSessionFactory.makeConfiguration()
+        configuration.protocolClasses = [BodylessResponseProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let transport = URLSessionHTTPSession(session: session)
+        for status in [204, 304] {
+            let response = try await transport.data(
+                for: URLRequest(url: URL(string: "https://api.github.com/\(status)")!),
+                maximumResponseBodyBytes: 1
+            )
+            XCTAssertTrue(response.0.isEmpty)
+            XCTAssertEqual(response.1.statusCode, status)
+        }
+    }
+
     func testProductionSessionConfigurationDisablesPersistenceAndConnectivityWaiting() {
         let configuration = TriageHTTPSessionFactory.makeConfiguration()
 
@@ -11,6 +27,20 @@ final class GitHubRESTTransportTests: XCTestCase {
         XCTAssertFalse(configuration.httpShouldSetCookies)
         XCTAssertNil(configuration.urlCredentialStorage)
         XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+
+    private final class BodylessResponseProtocol: URLProtocol {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: Int(request.url!.lastPathComponent)!,
+                httpVersion: "HTTP/1.1", headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
     }
 
     func testTransportBuildsAReadOnlyAuthenticatedGitHubRequest() async throws {

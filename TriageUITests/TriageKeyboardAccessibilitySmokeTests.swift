@@ -46,7 +46,7 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
             workRow(containing: "Fixture Acme keyboard accessibility smoke").waitForExistence(timeout: 10),
             "Partial access must retain already synchronized local work."
         )
-        let partialStatus = app.descendants(matching: .any).matching(
+        let partialStatus = app.staticTexts.matching(
             NSPredicate(
                 format: "label BEGINSWITH %@ OR value BEGINSWITH %@",
                 "Partial access",
@@ -257,7 +257,12 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
             settingsWindow.descendants(matching: .any)["Allow AI analysis for Fixture Acme (@fixture-acme)"].waitForExistence(timeout: 5),
             "Fixture Settings should retain per-organization consent controls."
         )
-        XCTAssertTrue(element(named: "Blocked").waitForExistence(timeout: 5))
+        XCTAssertTrue(element(named: "Consent required").waitForExistence(timeout: 5))
+        let connect = settingsWindow.buttons["Connect Copilot"]
+        XCTAssertTrue(connect.exists)
+        XCTAssertFalse(connect.isEnabled, "The fixture has not granted organization AI consent.")
+        XCTAssertLessThanOrEqual(connect.frame.maxX, settingsWindow.frame.maxX)
+        XCTAssertGreaterThanOrEqual(connect.frame.minX, settingsWindow.frame.minX)
     }
 
     func testAccountAndOrganizationSwitchingRestoresFixtureScope() throws {
@@ -330,8 +335,8 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
     }
 
     private func workRow(containing title: String) -> XCUIElement {
-        app.descendants(matching: .any)
-            .matching(NSPredicate(format: "value CONTAINS %@", title))
+        app.outlines["work-list"].descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", title, title))
             .firstMatch
     }
 

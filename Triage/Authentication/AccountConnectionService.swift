@@ -195,17 +195,6 @@ actor AccountConnectionService {
                 account,
                 credentialRevision: CredentialRevision(rawValue: UUID().uuidString.lowercased())!
             )
-            let probedAccountCapabilities = try await GitHubCapabilityProbe(
-                identityClient: GitHubIdentityClient(client: client),
-                restClient: client
-            ).probeAccountCapabilities()
-            let accountCapabilities = AccountCapabilitySnapshot(
-                accountID: account.id,
-                capabilities: probedAccountCapabilities,
-                checkedAt: probedAccountCapabilities.map(\.checkedAt).max() ?? now
-            )
-            try await repository.save(accountCapabilities)
-
             let identity = GitHubIdentityClient(client: client)
             let organizationDTOs: [GitHubOrganizationDTO]
             let organizationDiscoverySSOHeader: GitHubSSOHeader?
@@ -266,7 +255,7 @@ actor AccountConnectionService {
                 account: account,
                 organizations: organizations,
                 organizationAccesses: organizationAccesses,
-                accountCapabilities: accountCapabilities
+                accountCapabilities: AccountCapabilitySnapshot(accountID: account.id, capabilities: [], checkedAt: now)
             )
         } catch {
             try await removeAllSecrets(accountID)

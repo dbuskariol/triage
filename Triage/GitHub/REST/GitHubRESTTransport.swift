@@ -264,6 +264,9 @@ struct URLSessionHTTPSession: BoundedHTTPSession {
             throw GitHubTransportError.unexpectedResponse
         }
 
+        if httpResponse.statusCode == 204 || httpResponse.statusCode == 304 {
+            return (Data(), httpResponse)
+        }
         var body = Data()
         body.reserveCapacity(min(maximumResponseBodyBytes, 64 * 1_024))
         for try await byte in bytes {

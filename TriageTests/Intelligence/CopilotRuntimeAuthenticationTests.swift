@@ -4,6 +4,22 @@ import XCTest
 @testable import Triage
 
 final class CopilotRuntimeAuthenticationTests: XCTestCase {
+    func testRequestIDsUseTheCanonicalLowercaseXPCRepresentation() throws {
+        let id = UUID(uuidString: "ABCDEFAB-ABCD-4ABC-8ABC-ABCDEFABCDEF")!
+        let accountID = AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let wire = CopilotWireRequest(
+            protocolVersion: CopilotIPC.version, requestID: id,
+            accountID: accountID, organizationID: organizationID, operation: .authenticate
+        )
+        let health = CopilotHealthRequest(
+            accountID: accountID, organizationID: organizationID, requestID: id
+        )
+        for data in [try JSONEncoder().encode(wire), try JSONEncoder().encode(health)] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(object["request_id"] as? String, id.uuidString.lowercased())
+        }
+    }
+
     func testAIStaysBlockedUntilEveryIndependentGateIsTrue() {
         let base = CopilotAccountAuthorizationState(
             runtime: .ready,
@@ -44,6 +60,102 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
             hasOrganizationConsent: true
         )
         XCTAssertFalse(state.permitsAI)
+    }
+
+    func testAvailabilityPresentationDoesNotCallEveryIncompleteGateBlocked() {
+        let base = CopilotAccountAuthorizationState(
+            runtime: .ready,
+            authentication: .authenticated,
+            isEntitled: true,
+            hasOrganizationConsent: true
+        )
+
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: base,
+                isEffectivelyAvailable: true,
+                authenticationKind: .oauth
+            ),
+            .available
+        )
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: .init(
+                    runtime: .ready,
+                    authentication: .signedOut,
+                    isEntitled: true,
+                    hasOrganizationConsent: true
+                ),
+                isEffectivelyAvailable: false,
+                authenticationKind: .oauth
+            ),
+            .signInRequired
+        )
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: .init(
+                    runtime: .ready,
+                    authentication: .authenticated,
+                    isEntitled: true,
+                    hasOrganizationConsent: false
+                ),
+                isEffectivelyAvailable: false,
+                authenticationKind: .oauth
+            ),
+            .consentRequired
+        )
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: .init(
+                    runtime: .ready,
+                    authentication: .identityMismatch(expected: 10, actual: 11),
+                    isEntitled: true,
+                    hasOrganizationConsent: true
+                ),
+                isEffectivelyAvailable: false,
+                authenticationKind: .oauth
+            ),
+            .blocked
+        )
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: base,
+                isEffectivelyAvailable: false,
+                authenticationKind: .oauth
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            CopilotAvailabilityPresentation(
+                authorization: .init(
+                    runtime: .ready,
+                    authentication: .signedOut,
+                    isEntitled: true,
+                    hasOrganizationConsent: true
+                ),
+                isEffectivelyAvailable: false,
+                authenticationKind: .classicPersonalAccessToken
+            ),
+            .signInRequired
+        )
+    }
+
+    func testSignInRemainsActionableBeforeEntitlementIsKnown() {
+        for kind in [AuthenticationKind.oauth, .classicPersonalAccessToken, .fineGrainedPersonalAccessToken] {
+            XCTAssertEqual(
+                CopilotAvailabilityPresentation(
+                    authorization: .init(
+                        runtime: .ready,
+                        authentication: .signedOut,
+                        isEntitled: false,
+                        hasOrganizationConsent: true
+                    ),
+                    isEffectivelyAvailable: false,
+                    authenticationKind: kind
+                ),
+                .signInRequired
+            )
+        }
     }
 
     func testStateQueryCannotRestoreAuthenticationAfterDisconnect() async throws {
@@ -253,61 +365,6 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         XCTAssertEqual(shutdownCount, 1)
     }
 
-    func testRuntimeMutationFencesSuspendedModelsBeforeTheyCanRepopulateCache() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-model-mutation-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let account = makeAccount()
-        let runtime = try readyRuntime(at: root)
-        let authenticator = SuspendedModelsAuthenticator()
-        let service = CopilotRuntimeAuthenticationService(
-            applicationSupportDirectory: root,
-            secretStore: TokenSecretStore(),
-            authenticator: authenticator,
-            loadAuthenticatedUser: { _ in
-                GitHubUserDTO(
-                    id: account.githubUserID,
-                    nodeID: account.nodeID.rawValue,
-                    login: account.login,
-                    name: nil,
-                    avatarURL: nil
-                )
-            },
-            runtime: runtime
-        )
-        try await service.authenticate(
-            account: account,
-            organizationID: organizationID,
-            hasOrganizationConsent: true,
-            isEntitled: true
-        )
-
-        let models = Task { [service, accountID = account.id, organizationID = organizationID] in
-            try await service.models(accountID: accountID, organizationID: organizationID)
-        }
-        await authenticator.waitUntilModelsStarted()
-        let removal = Task { try? await service.removeRuntimeAtUserRequest() }
-        await authenticator.waitUntilRemoveSessionStarted()
-        await authenticator.releaseModels()
-
-        let result = await models.result
-        guard case let .failure(error) = result else {
-            return XCTFail("Expected model request to be fenced by runtime mutation.")
-        }
-        XCTAssertTrue(error is CancellationError)
-        await authenticator.releaseRemoveSession()
-        _ = await removal.value
-
-        let external = await service.externalState(
-            for: .init(
-                accountID: account.id,
-                organizationID: organizationID,
-                credentialRevision: CredentialRevision(rawValue: "credential-revision")!,
-                capabilityRevision: CapabilityRevision(rawValue: "capability-revision")!
-            ),
-            account: account
-        )
-        XCTAssertFalse(external.supportsAutoModel)
-    }
 
     func testStaleCredentialReferenceWriteCannotSurviveDisconnect() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-reference-disconnect-\(UUID().uuidString)")
@@ -381,16 +438,35 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         XCTAssertEqual(referenceCount, 1)
     }
 
-    func testClassicPersonalAccessTokensCannotStartAnUnavailableDeviceLogin() async {
-        let authenticator = CopilotXPCAuthenticator()
-        await assertAsyncThrows {
-            try await authenticator.authenticateWithDeviceLogin(
-                accountID: AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
-                organizationID: self.organizationID
-            )
-        } verify: {
-            XCTAssertEqual($0 as? CopilotAuthenticationError, .deviceLoginUnavailable)
-        }
+    func testStandardLoginUsesXPCWithoutForwardingAGitHubCredential() async throws {
+        let spy = CopilotAuthenticationClientSpy()
+        let authenticator = CopilotXPCAuthenticator(makeClient: { spy })
+
+        let result = try await authenticator.authenticateWithDeviceLogin(
+            accountID: AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
+            organizationID: self.organizationID
+        )
+        XCTAssertTrue(result.isAuthenticated)
+        let requestDescription = await spy.requestDescription
+        XCTAssertFalse(requestDescription.isEmpty)
+        let receivedCredential = await spy.receivedCredential
+        XCTAssertFalse(receivedCredential)
+        let allowsBrowser = await spy.allowsBrowser
+        XCTAssertEqual(allowsBrowser, true)
+    }
+
+    func testRestorationNeverRequestsBrowserAuthorizationOrAGitHubToken() async throws {
+        let spy = CopilotAuthenticationClientSpy()
+        let authenticator = CopilotXPCAuthenticator(makeClient: { spy })
+        let result = try await authenticator.restoreSession(
+            accountID: AccountID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
+            organizationID: organizationID
+        )
+        XCTAssertTrue(result.isAuthenticated)
+        let allowsBrowser = await spy.allowsBrowser
+        let receivedCredential = await spy.receivedCredential
+        XCTAssertEqual(allowsBrowser, false)
+        XCTAssertFalse(receivedCredential)
     }
 
     private func makeAccount() -> GitHubAccount {
@@ -444,6 +520,8 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
 
 private actor CopilotAuthenticationClientSpy: TriageCopilotHelping {
     private(set) var requestDescription = ""
+    private(set) var receivedCredential = false
+    private(set) var allowsBrowser: Bool?
     private(set) var shutdownCount = 0
     private(set) var modelRequestCount = 0
 
@@ -451,6 +529,8 @@ private actor CopilotAuthenticationClientSpy: TriageCopilotHelping {
 
     func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse {
         requestDescription = String(describing: request)
+        receivedCredential = request.credential != nil
+        allowsBrowser = request.allowsBrowser
         return CopilotAuthenticationResponse(
             header: .init(
                 requestID: request.header.requestID,
@@ -474,7 +554,6 @@ private actor CopilotAuthenticationClientSpy: TriageCopilotHelping {
             models: [.init(id: "model-a", displayName: "Model A", isDefault: false)]
         )
     }
-    func analyze(_: CopilotAnalyzeRequest) async throws -> CopilotAnalysisResponse { throw CancellationError() }
     func cancel(_: CopilotCancelRequest) async throws -> CopilotCancelResponse { throw CancellationError() }
     func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse {
         shutdownCount += 1
@@ -567,7 +646,6 @@ private actor SuspendedAuthenticationClient: TriageCopilotHelping {
     func models(_: CopilotModelsRequest) async throws -> CopilotModelsResponse {
         throw CopilotAuthenticationError.runtimeUnavailable
     }
-    func analyze(_: CopilotAnalyzeRequest) async throws -> CopilotAnalysisResponse { throw CancellationError() }
     func cancel(_: CopilotCancelRequest) async throws -> CopilotCancelResponse { throw CancellationError() }
     func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse {
         shutdownCount += 1
@@ -750,7 +828,7 @@ private actor ImmediateRuntimeAuthenticator: CopilotRuntimeAuthenticating {
         .init(isAuthenticated: true, host: "github.com", login: "test", authenticationType: "token")
     }
     func authenticateWithDeviceLogin(accountID _: AccountID, organizationID _: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
-        throw CopilotAuthenticationError.deviceLoginUnavailable
+        .init(isAuthenticated: true, host: "github.com", login: "test", authenticationType: "device_code")
     }
     func models(accountID _: AccountID, organizationID _: OrganizationID) async throws -> [CopilotModel] { [] }
     func removeSession(profileDirectory _: URL) async {}
@@ -774,7 +852,7 @@ private actor SuspendedModelsAuthenticator: CopilotRuntimeAuthenticating {
         .init(isAuthenticated: true, host: "github.com", login: "test", authenticationType: "token")
     }
     func authenticateWithDeviceLogin(accountID _: AccountID, organizationID _: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
-        throw CopilotAuthenticationError.deviceLoginUnavailable
+        .init(isAuthenticated: true, host: "github.com", login: "test", authenticationType: "device_code")
     }
     func models(accountID _: AccountID, organizationID _: OrganizationID) async throws -> [CopilotModel] {
         modelsStarted = true

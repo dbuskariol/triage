@@ -16,7 +16,10 @@ use crate::{
         AuthenticationResponse, CancellationScope, CancellationState, CopilotEngine,
         EphemeralCredential, TrustedRuntimeBootstrap,
     },
-    schema::{AnalysisInput, AnalysisOutput, ValidationError},
+    schema::{
+        TriageItem, TriageItemDecision, ValidationError, retain_valid_triage_outputs,
+        validate_triage_inputs, validate_triage_instructions,
+    },
 };
 
 /// Must stay in lockstep with `CopilotIPC.version`.
@@ -92,10 +95,22 @@ impl WireRequest {
         }
         validate_identifier(&self.account_id, "account_id")?;
         validate_identifier(&self.organization_id, "organization_id")?;
-        if let RequestOperation::Analyze { input, .. } = &self.operation {
-            input.validate().map_err(ProtocolError::InvalidRequest)?;
+        if let RequestOperation::Triage {
+            viewer_login,
+            items,
+            instructions,
+            ..
+        } = &self.operation
+        {
+            validate_triage_inputs(viewer_login, items).map_err(ProtocolError::InvalidRequest)?;
+            validate_triage_instructions(instructions.as_deref())
+                .map_err(ProtocolError::InvalidRequest)?;
         }
-        if let RequestOperation::Authenticate { credential } = &self.operation {
+        if let RequestOperation::Authenticate {
+            credential: Some(credential),
+            ..
+        } = &self.operation
+        {
             credential.validate().map_err(|_| {
                 ProtocolError::InvalidRequest(ValidationError::new("credential is invalid"))
             })?;
@@ -109,14 +124,19 @@ impl WireRequest {
 pub enum RequestOperation {
     Health,
     Models,
-    Analyze {
+    Triage {
         #[serde(skip_serializing_if = "Option::is_none")]
         model_id: Option<String>,
-        input: AnalysisInput,
+        viewer_login: String,
+        items: Vec<TriageItem>,
         deadline: DateTime<Utc>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
     },
     Authenticate {
-        credential: EphemeralCredential,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<EphemeralCredential>,
+        allow_browser: bool,
     },
     Cancel {
         target_request_id: Uuid,
@@ -144,19 +164,21 @@ struct HeaderRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AnalyzeRequest {
+struct TriageRequest {
     #[serde(flatten)]
     header: HeaderRequest,
-    operation: AnalyzeOperation,
+    operation: TriageOperation,
     model_id: Option<String>,
-    input: AnalysisInput,
+    viewer_login: String,
+    items: Vec<TriageItem>,
     deadline: DateTime<Utc>,
+    #[serde(default)]
+    instructions: Option<String>,
 }
-
 #[derive(Deserialize)]
-enum AnalyzeOperation {
-    #[serde(rename = "analyze")]
-    Analyze,
+enum TriageOperation {
+    #[serde(rename = "triage")]
+    Triage,
 }
 
 #[derive(Deserialize)]
@@ -165,7 +187,9 @@ struct AuthenticateRequest {
     #[serde(flatten)]
     header: HeaderRequest,
     operation: AuthenticateOperation,
-    credential: EphemeralCredential,
+    credential: Option<EphemeralCredential>,
+    #[serde(default)]
+    allow_browser: bool,
 }
 
 #[derive(Deserialize)]
@@ -252,9 +276,9 @@ pub enum ResponseResult {
     Models {
         models: Vec<ModelDescriptor>,
     },
-    Analysis {
-        #[serde(flatten)]
-        analysis: AnalysisOutput,
+    Triage {
+        model_id: String,
+        decisions: Vec<TriageItemDecision>,
     },
     Authentication {
         authentication: AuthenticationResponse,
@@ -365,18 +389,25 @@ fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
                 operation,
             })
         }
-        "analyze" => {
-            let request: AnalyzeRequest = decode_typed(payload)?;
-            let AnalyzeOperation::Analyze = request.operation;
+        "triage" => {
+            if payload.len() > 120 * 1024 {
+                return Err(ProtocolError::InvalidRequest(ValidationError::new(
+                    "triage request exceeds 120 KiB",
+                )));
+            }
+            let request: TriageRequest = decode_typed(payload)?;
+            let TriageOperation::Triage = request.operation;
             Ok(WireRequest {
                 protocol_version: request.header.protocol_version,
                 request_id: request.header.request_id,
                 account_id: request.header.account_id,
                 organization_id: request.header.organization_id,
-                operation: RequestOperation::Analyze {
+                operation: RequestOperation::Triage {
                     model_id: request.model_id,
-                    input: request.input,
+                    viewer_login: request.viewer_login,
+                    items: request.items,
                     deadline: request.deadline,
+                    instructions: request.instructions,
                 },
             })
         }
@@ -390,7 +421,10 @@ fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
                 request_id: request.header.request_id,
                 account_id: request.header.account_id,
                 organization_id: request.header.organization_id,
-                operation: RequestOperation::Authenticate { credential },
+                operation: RequestOperation::Authenticate {
+                    credential,
+                    allow_browser: request.allow_browser,
+                },
             })
         }
         "cancel" => {
@@ -539,53 +573,15 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                             continue;
                         }
                         match &mut request.operation {
-                        RequestOperation::Analyze { input, model_id, deadline } => {
-                            if !analyses.is_empty() {
-                                write_response(&mut writer, &WireResponse::failure(&request, Failure::new(FailureCode::Busy, "Only one analysis may run at a time")))?;
-                                continue;
-                            }
-                            let input = input.clone();
-                            let model_id = model_id.clone();
-                            let deadline = *deadline;
-                            cancellation.begin(request.request_id, cancellation_scope(&request));
-                            let task_engine = Arc::clone(&engine);
-                            let cancellation_engine = Arc::clone(&engine);
-                            let task_cancellation = cancellation.clone();
-                            analyses.spawn(async move {
-                                let deadline = deadline.signed_duration_since(Utc::now());
-                                let analysis = if deadline <= chrono::Duration::zero() {
-                                    task_cancellation.cancel(request.request_id);
-                                    let _ = cancellation_engine.cancel(request.request_id).await;
-                                    Err(Failure::new(FailureCode::Cancelled, "Analysis deadline elapsed"))
-                                } else {
-                                    let analysis = task_engine.analyze(request.request_id, input.clone(), model_id, task_cancellation.clone());
-                                    tokio::pin!(analysis);
-                                    let deadline = tokio::time::sleep(std::time::Duration::from_millis(deadline.num_milliseconds() as u64));
-                                    tokio::pin!(deadline);
-                                    tokio::select! {
-                                        result = &mut analysis => result,
-                                        _ = &mut deadline => {
-                                            task_cancellation.cancel(request.request_id);
-                                            let _ = cancellation_engine.cancel(request.request_id).await;
-                                            Err(Failure::new(FailureCode::Cancelled, "Analysis deadline elapsed"))
-                                        }
-                                    }
-                                };
-                                let response = match analysis {
-                                    Ok(_) if task_cancellation.is_cancelled(request.request_id) => WireResponse::failure(&request, Failure::new(FailureCode::Cancelled, "Analysis was cancelled")),
-                                    Ok(analysis) => match analysis.validate_against(&input) {
-                                        Ok(()) => WireResponse::for_request(&request, ResponseResult::Analysis { analysis }),
-                                        Err(_) => WireResponse::failure(&request, Failure::new(FailureCode::ValidationFailed, "Analysis failed output validation")),
-                                    },
-                                    Err(failure) => WireResponse::failure(&request, failure),
-                                };
-                                task_cancellation.finish(request.request_id);
-                                response
-                            });
+                        RequestOperation::Triage { model_id, viewer_login, items, deadline, instructions } => {
+                            let model_id = model_id.clone(); let viewer_login = viewer_login.clone(); let items = items.clone(); let deadline = *deadline; let instructions = instructions.clone();
+                            cancellation.begin(request.request_id, cancellation_scope(&request)); let task_engine = Arc::clone(&engine); let cancellation_engine = Arc::clone(&engine); let task_cancellation = cancellation.clone();
+                            analyses.spawn(async move { let remaining = deadline.signed_duration_since(Utc::now()); let result = if remaining <= chrono::Duration::zero() { Err(Failure::new(FailureCode::Cancelled, "Triage deadline elapsed")) } else { let work = task_engine.triage(request.request_id, viewer_login, instructions, items.clone(), model_id.clone(), task_cancellation.clone()); tokio::pin!(work); let timer = tokio::time::sleep(std::time::Duration::from_millis(remaining.num_milliseconds() as u64)); tokio::pin!(timer); tokio::select! { value = &mut work => value, _ = &mut timer => { task_cancellation.cancel(request.request_id); let _ = cancellation_engine.cancel(request.request_id).await; Err(Failure::new(FailureCode::Cancelled, "Triage deadline elapsed")) } } }; let response = match result { Ok(decisions) => match retain_valid_triage_outputs(decisions, &items) { Ok(decisions) => WireResponse::for_request(&request, ResponseResult::Triage { model_id: model_id.unwrap_or_else(|| "auto".to_owned()), decisions }), Err(_) => WireResponse::failure(&request, Failure::new(FailureCode::ValidationFailed, "Triage failed output validation")) }, Err(failure) => WireResponse::failure(&request, failure) }; task_cancellation.finish(request.request_id); response });
                         }
-                        RequestOperation::Authenticate { credential } => {
+                        RequestOperation::Authenticate { credential, allow_browser } => {
                             let credential = credential.take();
-                            write_engine_response(&mut writer, &request, engine.authenticate(credential).await.map(|authentication| ResponseResult::Authentication { authentication }))?;
+                            let allow_browser = *allow_browser;
+                            write_engine_response(&mut writer, &request, engine.authenticate(credential, allow_browser).await.map(|authentication| ResponseResult::Authentication { authentication }))?;
                         }
                         RequestOperation::Health => write_engine_response(&mut writer, &request, engine.health().await.map(|health| ResponseResult::Health { health }))?,
                         RequestOperation::Models => write_engine_response(&mut writer, &request, engine.models().await.map(|models| ResponseResult::Models { models }))?,
@@ -645,7 +641,6 @@ enum ReaderEvent {
 mod tests {
     use super::*;
     use crate::engine::EphemeralCredential;
-    use crate::schema::tests::input;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -685,27 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_swift_operation_fields_are_enforced() {
-        let analyze = request(RequestOperation::Analyze {
-            model_id: Some("model-a".to_owned()),
-            input: input(),
-            deadline: "2026-08-29T04:00:00Z".parse().unwrap(),
-        });
-        assert!(analyze.validate().is_ok());
-        let mut value = serde_json::to_value(analyze).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("candidate".to_owned(), serde_json::json!({}));
-        let mut framed = Vec::new();
-        write_frame(&mut framed, &serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(matches!(
-            read_request(&mut framed.as_slice()),
-            Err(ProtocolError::InvalidRequest(_))
-        ));
-    }
-
-    #[test]
     fn failures_and_cancel_responses_are_bound_to_the_request_account() {
         let request = request(RequestOperation::Cancel {
             target_request_id: Uuid::new_v4(),
@@ -736,12 +710,8 @@ mod tests {
         assert!(!is_control_operation(&RequestOperation::Health));
         assert!(!is_control_operation(&RequestOperation::Models));
         assert!(!is_control_operation(&RequestOperation::Authenticate {
-            credential: EphemeralCredential::new("test-token".to_owned()),
-        }));
-        assert!(!is_control_operation(&RequestOperation::Analyze {
-            model_id: None,
-            input: input(),
-            deadline: "2026-08-29T04:00:00Z".parse().unwrap(),
+            allow_browser: false,
+            credential: Some(EphemeralCredential::new("test-token".to_owned())),
         }));
         assert!(is_control_operation(&RequestOperation::Cancel {
             target_request_id: Uuid::new_v4(),
@@ -764,19 +734,21 @@ mod tests {
             Err(Failure::new(FailureCode::Internal, "not used"))
         }
 
-        async fn analyze(
+        async fn triage(
             &self,
             _: Uuid,
-            _: AnalysisInput,
+            _: String,
+            _: Option<String>,
+            _: Vec<TriageItem>,
             _: Option<String>,
             _: CancellationState,
-        ) -> Result<AnalysisOutput, Failure> {
-            Err(Failure::new(FailureCode::Internal, "not used"))
+        ) -> Result<Vec<TriageItemDecision>, Failure> {
+            Err(Failure::new(FailureCode::Internal, "unused"))
         }
-
         async fn authenticate(
             &self,
-            _: EphemeralCredential,
+            _: Option<EphemeralCredential>,
+            _: bool,
         ) -> Result<AuthenticationResponse, Failure> {
             Err(Failure::new(FailureCode::Internal, "not used"))
         }

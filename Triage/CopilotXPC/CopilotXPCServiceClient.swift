@@ -3,14 +3,14 @@ import Foundation
 /// XPC caller for the fixed, app-embedded service. It accepts only complete
 /// frames and has no path, command, or environment configuration surface.
 actor CopilotXPCServiceClient: CopilotXPCFrameService {
-  static let machServiceName = "com.triage.mac.TriageCopilotXPC"
+  static let serviceName = "com.triage.mac.TriageCopilotXPC"
 
   private let connection: NSXPCConnection
 
   init(connection: NSXPCConnection? = nil) {
     let connection =
       connection
-      ?? NSXPCConnection(machServiceName: Self.machServiceName, options: [])
+      ?? NSXPCConnection(serviceName: Self.serviceName)
     connection.remoteObjectInterface = NSXPCInterface(with: TriageCopilotHelper.self)
     connection.resume()
     self.connection = connection

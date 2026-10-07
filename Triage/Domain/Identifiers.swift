@@ -1,5 +1,13 @@
 import Foundation
 
+enum GitHubTeamSlug {
+    static func isValid(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 255 && value.unicodeScalars.allSatisfy {
+            $0.isASCII && ($0.properties.isLowercase || $0.properties.numericType != nil || $0 == "-" || $0 == "_" || $0 == ":")
+        }
+    }
+}
+
 protocol TriageIdentifier: Codable, Hashable, Sendable, RawRepresentable, CustomStringConvertible
     where RawValue == String
 {

@@ -88,6 +88,7 @@ enum GitHubResponseDecodingResult<Value: Sendable>: Sendable {
 }
 
 enum GitHubRESTClientError: Error, Equatable, Sendable {
+    case outsidePersonalWorkScope
     case invalidJSON
     case missingServerDate
     case responseTooLarge
@@ -98,17 +99,20 @@ actor GitHubRESTClient {
     private let credential: SecretValue
     private let rateLimitController: GitHubRateLimitController?
     private let requestPriority: GitHubRequestPriority
+    private let personalWorkOnly: Bool
 
     init(
         transport: GitHubRESTTransport,
         credential: SecretValue,
         rateLimitController: GitHubRateLimitController? = nil,
-        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh
+        requestPriority: GitHubRequestPriority = .selectedOrganizationRefresh,
+        personalWorkOnly: Bool = false
     ) {
         self.transport = transport
         self.credential = credential
         self.rateLimitController = rateLimitController
         self.requestPriority = requestPriority
+        self.personalWorkOnly = personalWorkOnly
     }
 
     func get<Value: Decodable & Sendable>(
@@ -233,17 +237,61 @@ actor GitHubRESTClient {
     }
 
     private func send(_ request: GitHubRESTRequest) async throws -> GitHubRESTResponse {
+        let trace = GitHubRequestTrace(operation: GitHubRequestTrace.restCategory(path: request.pathForClassification))
+        do {
+            let response = try await sendWithRetries(request)
+            trace.finish(statusCode: response.statusCode, bytes: response.body.count)
+            return response
+        } catch {
+            trace.fail(error)
+            throw error
+        }
+    }
+
+    private func sendWithRetries(_ request: GitHubRESTRequest) async throws -> GitHubRESTResponse {
+        if personalWorkOnly {
+            guard let path = request.pathForClassification else { throw GitHubRESTClientError.outsidePersonalWorkScope }
+            let parts = path.split(separator: "/")
+            let broadCollections: Set<String> = ["repos", "teams", "projects", "members", "public_members", "outside_collaborators"]
+            let isBroadCollection = parts.count == 3
+                && ["orgs", "organizations", "users"].contains(String(parts[0]))
+                && broadCollections.contains(String(parts[2]))
+            guard !isBroadCollection, !["/user/repos", "/repositories", "/organizations", "/users"].contains(path) else {
+                throw GitHubRESTClientError.outsidePersonalWorkScope
+            }
+        }
         let resource: GitHubRateLimitResource = request.isSearchRequest ? .search : .core
         guard let rateLimitController else {
             return try await transport.send(request, credential: credential)
         }
-        return try await rateLimitController.execute(
-            resource: resource,
-            priority: requestPriority
-        ) {
-            let response = try await self.transport.send(request, credential: self.credential)
-            try await rateLimitController.record(response: response, fallbackResource: resource)
-            return response
+        var retriesRemaining = 2
+        while true {
+            let response: GitHubRESTResponse
+            do {
+                response = try await rateLimitController.execute(
+                    resource: resource,
+                    priority: requestPriority
+                ) {
+                    let response = try await self.transport.send(request, credential: self.credential)
+                    try await rateLimitController.record(response: response, fallbackResource: resource)
+                    return response
+                }
+            } catch let error as URLError where retriesRemaining > 0
+                && [.cancelled, .networkConnectionLost, .timedOut].contains(error.code) {
+                try Task.checkCancellation()
+                retriesRemaining -= 1
+                GitHubDiagnostics.recordReadRetry(code: error.code.rawValue)
+                try await Task.sleep(for: .seconds(1))
+                continue
+            }
+            let failureKind = GitHubFailureClassifier.classify(response)?.kind
+            guard retriesRemaining > 0,
+                  failureKind == .secondaryRateLimited || failureKind == .rateLimited,
+                  await rateLimitController.pauseUntil(for: resource) != nil
+            else { return response }
+            // Reacquiring the permit honors the recorded account-wide pause.
+            // Keep the original page request instead of restarting discovery.
+            retriesRemaining -= 1
         }
     }
 

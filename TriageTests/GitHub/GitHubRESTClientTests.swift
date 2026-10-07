@@ -1,7 +1,130 @@
 import XCTest
+import Synchronization
 @testable import Triage
 
 final class GitHubRESTClientTests: XCTestCase {
+    func testInterruptedReadRetriesWithoutCancellingRefresh() async throws {
+        let session = InterruptedReadSession(cancelCaller: false)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: GitHubRateLimitController()
+        )
+        let value = try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+        XCTAssertEqual(value.id, 1)
+        let count = await session.requestCount
+        XCTAssertEqual(count, 2)
+    }
+
+    func testCallerCancellationDoesNotRetryInterruptedRead() async throws {
+        let session = InterruptedReadSession(cancelCaller: true)
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: GitHubRateLimitController()
+        )
+        let task = Task {
+            try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+        }
+        do {
+            _ = try await task.value
+            XCTFail("Expected caller cancellation.")
+        } catch is CancellationError {}
+        let count = await session.requestCount
+        XCTAssertEqual(count, 1)
+    }
+
+    func testPrimary403WaitsForResetAndRetriesWithoutPermissionFailure() async throws {
+        let clock = RetryClock()
+        let session = RetrySession(
+            statuses: [403, 200],
+            failureHeaders: ["X-RateLimit-Resource": "core", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1060"],
+            failureMessage: "API rate limit exceeded"
+        )
+        let controller = GitHubRateLimitController(
+            now: { clock.now }, sleep: { clock.advance($0) }, jitter: { $0 }
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: controller
+        )
+        let response = try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+        XCTAssertEqual(response.id, 1)
+        XCTAssertEqual(clock.delays, [60])
+        let requests = await session.urls
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testPermission403IsNotRetried() async throws {
+        let session = RetrySession(statuses: [403, 200], failureMessage: "Resource not accessible")
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: GitHubRateLimitController()
+        )
+        do {
+            _ = try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+            XCTFail("Expected permission failure.")
+        } catch let failure as GitHubFailure {
+            XCTAssertEqual(failure.kind, .forbidden)
+        }
+        let requests = await session.urls
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testSecondaryLimitRetriesSamePageAfterAccountBackoff() async throws {
+        let clock = RetryClock()
+        let session = RetrySession(statuses: [403, 200])
+        let controller = GitHubRateLimitController(
+            now: { clock.now }, sleep: { clock.advance($0) }, jitter: { $0 }
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: controller
+        )
+        let response = try await client.get(
+            OrganizationDTO.self, request: GitHubRESTRequest(path: "/user")
+        )
+        XCTAssertEqual(response.id, 1)
+        let requests = await session.urls
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.first, requests.last)
+        XCTAssertEqual(clock.delays, [60])
+    }
+
+    func testSecondaryLimitRetriesAreBoundedAndIncreaseBackoff() async throws {
+        let clock = RetryClock()
+        let session = RetrySession(statuses: [403, 403, 403])
+        let controller = GitHubRateLimitController(
+            now: { clock.now }, sleep: { clock.advance($0) }, jitter: { $0 }
+        )
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: controller
+        )
+        do {
+            _ = try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+            XCTFail("Persistent rate limiting must remain an explicit failure.")
+        } catch let failure as GitHubFailure {
+            XCTAssertEqual(failure.kind, .secondaryRateLimited)
+        }
+        let requests = await session.urls
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(clock.delays, [60, 120])
+    }
+
+    func testCancellationDuringSecondaryBackoffDoesNotResend() async throws {
+        let session = RetrySession(statuses: [403, 200])
+        let controller = GitHubRateLimitController(sleep: { _ in throw CancellationError() })
+        let client = GitHubRESTClient(
+            transport: try GitHubRESTTransport(session: session),
+            credential: SecretValue("token"), rateLimitController: controller
+        )
+        do {
+            _ = try await client.get(OrganizationDTO.self, request: GitHubRESTRequest(path: "/user"))
+            XCTFail("Expected cancellation.")
+        } catch is CancellationError {}
+        let requests = await session.urls
+        XCTAssertEqual(requests.count, 1)
+    }
+
     func testClientDecodesAPageAndPreservesGitHubNextLink() async throws {
         let nextPage = "https://api.github.com/user/orgs?page=2"
         let session = StubSession(
@@ -147,6 +270,59 @@ final class GitHubRESTClientTests: XCTestCase {
 private struct OrganizationDTO: Codable, Equatable, Sendable {
     let id: UInt64
     let login: String
+}
+
+private final class RetryClock: Sendable {
+    private let state = Mutex((date: Date(timeIntervalSince1970: 1_000), delays: [TimeInterval]()))
+    var now: Date { state.withLock { $0.date } }
+    var delays: [TimeInterval] { state.withLock { $0.delays } }
+    func advance(_ duration: TimeInterval) {
+        state.withLock {
+            $0.date.addTimeInterval(duration)
+            $0.delays.append(duration)
+        }
+    }
+}
+
+private actor RetrySession: HTTPSession {
+    let statuses: [Int]
+    let failureHeaders: [String: String]
+    let failureMessage: String
+    private(set) var urls: [URL] = []
+    init(statuses: [Int], failureHeaders: [String: String] = [:], failureMessage: String = "secondary rate limit") {
+        self.statuses = statuses
+        self.failureHeaders = failureHeaders
+        self.failureMessage = failureMessage
+    }
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let status = statuses[min(urls.count, statuses.count - 1)]
+        urls.append(request.url!)
+        return (
+            status == 200
+                ? Data(#"{"id":1,"login":"github"}"#.utf8)
+                : try JSONSerialization.data(withJSONObject: ["message": failureMessage]),
+            HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: status == 200 ? [:] : failureHeaders)!
+        )
+    }
+}
+
+private actor InterruptedReadSession: HTTPSession {
+    let cancelCaller: Bool
+    private(set) var requestCount = 0
+
+    init(cancelCaller: Bool) { self.cancelCaller = cancelCaller }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        requestCount += 1
+        if requestCount == 1 {
+            if cancelCaller { withUnsafeCurrentTask { $0?.cancel() } }
+            throw URLError(.cancelled)
+        }
+        return (
+            Data(#"{"id":1,"login":"github"}"#.utf8),
+            HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+    }
 }
 
 private actor StubSession: HTTPSession {
