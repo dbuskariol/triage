@@ -170,7 +170,12 @@ private struct NativeSearchField: NSViewRepresentable {
         field.recentsAutosaveName = "TriageWorkspaceSearch"
         field.controlSize = .large
         field.setAccessibilityLabel("Search work")
+        context.coordinator.watchClicksOutside(field)
         return field
+    }
+
+    static func dismantleNSView(_ field: NSSearchField, coordinator: Coordinator) {
+        coordinator.stopWatching()
     }
 
     func updateNSView(_ field: NSSearchField, context: Context) {
@@ -186,6 +191,31 @@ private struct NativeSearchField: NSViewRepresentable {
     final class Coordinator: NSObject, NSSearchFieldDelegate {
         var parent: NativeSearchField
         var lastFocusRequest: Int
+        private var clickMonitor: Any?
+
+        /// Any click elsewhere in the window ends editing (like Mail and
+        /// Finder). The click itself still reaches whatever was clicked.
+        func watchClicksOutside(_ field: NSSearchField) {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak field] event in
+                guard let field, let window = field.window, event.window === window,
+                      field.currentEditor() != nil
+                else { return event }
+                let point = field.convert(event.locationInWindow, from: nil)
+                if !field.bounds.contains(point) {
+                    window.makeFirstResponder(nil)
+                }
+                return event
+            }
+        }
+
+        func stopWatching() {
+            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+            clickMonitor = nil
+        }
+
+        deinit { stopWatching() }
 
         init(_ parent: NativeSearchField) {
             self.parent = parent
