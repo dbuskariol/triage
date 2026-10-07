@@ -5,6 +5,9 @@ struct TriageListView: View {
     let section: WorkspacePresentation.Section
     @Binding var selectedEntryID: GitHubNodeID?
     let actions: any WorkspaceActions
+    @Binding var search: WorkspaceSearch
+    var searchFocusRequest = 0
+    @Environment(\.triageViewerLogin) private var viewer
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @FocusState private var isListFocused: Bool
@@ -27,7 +30,11 @@ struct TriageListView: View {
     }
 
     private var statusSubtitle: String {
-        WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
+        if search.isActive {
+            let count = entries.count
+            return "\(count) result\(count == 1 ? "" : "s")\(search.scope == .all ? " in all work" : "")"
+        }
+        return WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
     }
 
     var body: some View {
@@ -37,7 +44,11 @@ struct TriageListView: View {
             } else {
                 List(selection: $selectedEntryID) {
                     ForEach(entries) { entry in
-                        TriageEntryRow(entry: entry, isSelected: entry.id == selectedEntryID)
+                        TriageEntryRow(
+                            entry: entry, isSelected: entry.id == selectedEntryID,
+                            sectionLabel: search.isActive && search.scope == .all
+                                ? presentation.section(containing: entry)?.title : nil
+                        )
                             .tag(entry.id)
                             .contextMenu { actionMenu(for: entry) }
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -78,10 +89,14 @@ struct TriageListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaBar(edge: .top) {
             VStack(spacing: 0) {
+                WorkspaceSearchBar(
+                    search: $search, focusRequest: searchFocusRequest,
+                    suggestionSource: presentation.allEntries, actions: actions
+                )
                 if presentation.status.problem != nil {
                     TriageStatusView(status: presentation.status, actions: actions)
                 }
-                if section == .handled {
+                if section == .handled, !search.isActive {
                     Picker("Show", selection: $handledFilter) {
                         ForEach(HandledFilter.allCases) { Text($0.rawValue).tag($0) }
                     }
@@ -118,12 +133,26 @@ struct TriageListView: View {
 
 
     private var entries: [TriageEntry] {
+        if search.isActive {
+            return presentation.searchResults(
+                search, section: section, sortedBy: sortField, ascending: sortAscending, viewer: viewer
+            )
+        }
         let sorted = presentation.entries(in: section, sortedBy: sortField, ascending: sortAscending)
         return section == .handled ? sorted.filter(handledFilter.includes) : sorted
     }
 
     @ViewBuilder
     private var emptyState: some View {
+        if search.isActive {
+            ContentUnavailableView.search(text: search.text)
+        } else {
+            sectionEmptyState
+        }
+    }
+
+    @ViewBuilder
+    private var sectionEmptyState: some View {
         if section == .inbox, isWorking {
             ContentUnavailableView {
                 Label(workingTitle, systemImage: "sparkles")
@@ -270,6 +299,8 @@ struct TriageEntryRow: View {
     /// On the selection highlight, tinted content switches to the
     /// highlight's foreground so it stays legible.
     var isSelected = false
+    /// Shown when searching all work, so you know where a result lives.
+    var sectionLabel: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -307,6 +338,13 @@ struct TriageEntryRow: View {
                     .foregroundStyle(secondary)
             }
             Spacer(minLength: 6)
+            if let sectionLabel {
+                Text(sectionLabel)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(secondary)
+                    .padding(.horizontal, 5)
+                    .background(.quaternary, in: Capsule())
+            }
             Text(entry.item.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
                 .font(.caption)
                 .foregroundStyle(secondary)

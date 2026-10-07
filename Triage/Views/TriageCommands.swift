@@ -19,6 +19,11 @@ struct TriageWorkspaceCommands: Commands {
             }
         }
 
+        CommandGroup(after: .textEditing) {
+            Button("Find…") { appModel.searchFocusRequest += 1 }
+                .keyboardShortcut("f", modifiers: .command)
+        }
+
         CommandMenu("Go To") {
             ForEach(Array(WorkspacePresentation.Section.allCases.enumerated()), id: \.element) { index, section in
                 Button(section.title) {

@@ -66,7 +66,9 @@ private struct WorkspaceView: View {
                 presentation: appModel.presentation,
                 section: appModel.selectedSection,
                 selectedEntryID: $appModel.selectedEntryID,
-                actions: appModel
+                actions: appModel,
+                search: $appModel.search,
+                searchFocusRequest: appModel.searchFocusRequest
             )
             .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 560)
         } detail: {
@@ -77,15 +79,7 @@ private struct WorkspaceView: View {
                 actions: appModel
             )
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                WorkspaceSortToolbarMenu()
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Refresh", systemImage: "arrow.clockwise") { appModel.refreshNow() }
-                    .help("Search GitHub for new and changed work now")
-            }
-        }
+        .onChange(of: appModel.search) { appModel.selectFirstEntry() }
         .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
         .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }

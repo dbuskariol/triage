@@ -406,7 +406,7 @@ impl TrustedRuntimeConfiguration {
         if !preserve_sdk_auth_token {
             removals.push("COPILOT_SDK_AUTH_TOKEN".into());
         }
-        ClientOptions::new()
+        let mut options = ClientOptions::new()
             .with_program(CliProgram::Path(self.cli_path.clone()))
             .with_transport(Transport::Stdio)
             .with_cwd(self.working_directory.clone())
@@ -414,7 +414,10 @@ impl TrustedRuntimeConfiguration {
             .with_env(environment.as_pairs())
             .with_env_remove(removals)
             .with_mode(ClientMode::Empty)
-            .with_enable_remote_sessions(false)
+            .with_enable_remote_sessions(false);
+        // Errors only: each CLI start writes a log file in the private profile.
+        options.log_level = Some(github_copilot_sdk::LogLevel::Error);
+        options
     }
 
     fn authenticated_client_options(&self, credential: &EphemeralCredential) -> ClientOptions {
@@ -615,6 +618,22 @@ impl FailClosedCopilotEngine {
             active.take()
         } else {
             None
+        }
+    }
+
+    /// Removes persisted sessions through the SDK's own session API.
+    async fn delete_orphaned_sessions(client: &Client) {
+        let Ok(Ok(sessions)) =
+            tokio::time::timeout(SDK_TEARDOWN_TIMEOUT, client.list_sessions(None)).await
+        else {
+            return;
+        };
+        for session in sessions {
+            let _ = tokio::time::timeout(
+                SDK_TEARDOWN_TIMEOUT,
+                client.delete_session(&session.session_id),
+            )
+            .await;
         }
     }
 
@@ -891,6 +910,13 @@ impl CopilotEngine for FailClosedCopilotEngine {
             auth_type,
             is_authenticated: true,
         };
+        // No triage session exists yet on this client, so anything persisted
+        // is left over from an interrupted run (app quit, crash, timeout).
+        Self::delete_orphaned_sessions(&client).await;
+        prune_logs(
+            &configuration.base_directory.join("logs"),
+            MAX_RETAINED_LOGS,
+        );
         let mut client_slot = self.client.lock().await;
         if let Some(previous) = client_slot.replace(client) {
             Self::stop_client(previous).await;
@@ -1051,6 +1077,44 @@ async fn run_browser_login(
 }
 
 #[cfg(test)]
+mod cleanup_tests {
+    #[test]
+    fn prune_logs_keeps_only_the_newest_files() {
+        let directory = std::env::temp_dir().join(format!("triage-logs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..8 {
+            let path = directory.join(format!("process-{index}.log"));
+            std::fs::write(&path, b"x").unwrap();
+            let time =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + index);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        super::prune_logs(&directory, 5);
+        let mut remaining: Vec<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            [
+                "process-3.log",
+                "process-4.log",
+                "process-5.log",
+                "process-6.log",
+                "process-7.log"
+            ]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod triage_prompt_tests {
     #[test]
     fn user_preferences_follow_the_fixed_policy_in_a_delimited_block() {
@@ -1190,6 +1254,31 @@ fn classify_login_failure(stdout: &[u8], stderr: &[u8]) -> Failure {
         }
     }
     authentication_stage("Copilot browser login exited before authorization completed.")
+}
+
+/// The CLI writes one log file per start; keep only the newest few.
+const MAX_RETAINED_LOGS: usize = 5;
+
+/// Deletes all but the `keep` most recently modified regular files in `directory`.
+/// Never follows symlinks; failures are ignored (cleanup is best-effort).
+fn prune_logs(directory: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, entry.path()))
+        })
+        .collect();
+    files.sort_by(|lhs, rhs| rhs.0.cmp(&lhs.0));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn triage_failure(message: &str) -> Failure {
