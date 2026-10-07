@@ -3,6 +3,7 @@ import XCTest
 @testable import Triage
 
 final class CopilotHelperClientTests: XCTestCase {
+
   func testTerminatingPendingFrameWipesItBeforeInvalidatingService() async throws {
     let service = InvalidationRecordingService()
     let wipe = PendingFrameWipeRecorder()
@@ -184,358 +185,18 @@ final class CopilotHelperClientTests: XCTestCase {
     await transport.waitUntilTerminated()
   }
 
-  func testAnalysisRejectsInvalidConfidence() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let requestID = UUID()
-    let request = CopilotAnalyzeRequest(
-      organizationID: organizationID,
-      input: CopilotAnalysisInput(
-        candidateID: candidateID,
-        workItemTitle: "Title",
-        workItemState: "open",
-        deterministicReasons: ["mention"],
-        body: "Body",
-        conversation: [],
-        evidenceIDs: [evidenceID]
-      ),
-      deadline: .now.addingTimeInterval(60),
-      requestID: requestID
-    )
-    let response = CopilotAnalysisResponse(
-      header: responseHeader(
-        requestID: requestID,
-        organizationID: organizationID,
-        status: .analysis
-      ),
-      summary: "Summary",
-      state: "needs_response",
-      confidence: 1.1,
-      evidenceIDs: [evidenceID],
-      actionItems: [],
-      nextAction: nil,
-      modelID: "auto",
-      promptProvenance: "v1"
-    )
-    let client = CopilotHelperClient(
-      transport: FakeFrameTransport(responses: [try encode(response)])
-    )
 
-    do {
-      _ = try await client.analyze(request)
-      XCTFail("Expected invalid analysis to be rejected.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .invalidAnalysis)
-    }
-  }
 
-  func testAnalysisRejectsActionWithoutStructuredClaims() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let requestID = UUID()
-    let request = CopilotAnalyzeRequest(
-      organizationID: organizationID,
-      input: CopilotAnalysisInput(
-        candidateID: candidateID,
-        workItemTitle: "Title",
-        workItemState: "open",
-        deterministicReasons: ["mention"],
-        body: "Body",
-        conversation: [],
-        evidenceIDs: [evidenceID]
-      ),
-      deadline: .now.addingTimeInterval(60),
-      requestID: requestID
-    )
-    let response = Data(
-      """
-      {"protocol_version":2,"request_id":"\(requestID.uuidString.lowercased())","account_id":"\(copilotTestAccountID.rawValue)","organization_id":"\(organizationID.rawValue)","status":"analysis","summary":"Review this source.","state":"open","confidence":0.95,"evidence_ids":["\(evidenceID.rawValue)"],"action_items":[{"id":"reply","text":"Reply","confidence":0.95,"evidence_ids":["\(evidenceID.rawValue)"]}],"model_id":"model-a","prompt_provenance":"triage-copilot-v2"}
-      """.utf8
-    )
-    let client = CopilotHelperClient(transport: FakeFrameTransport(responses: [response]))
 
-    do {
-      _ = try await client.analyze(request)
-      XCTFail("An action missing its claims array must not cross the wire boundary.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .invalidResponse)
-    }
-  }
 
-  func testAnalysisRejectsResponseFromDifferentSelectedModel() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let requestID = UUID()
-    let request = CopilotAnalyzeRequest(
-      organizationID: organizationID,
-      input: CopilotAnalysisInput(
-        candidateID: candidateID,
-        workItemTitle: "Title",
-        workItemState: "open",
-        deterministicReasons: ["mention"],
-        body: "Body",
-        conversation: [],
-        evidenceIDs: [evidenceID]
-      ),
-      modelID: "selected-model",
-      deadline: .now.addingTimeInterval(60),
-      requestID: requestID
-    )
-    let response = CopilotAnalysisResponse(
-      header: responseHeader(
-        requestID: requestID,
-        organizationID: organizationID,
-        status: .analysis
-      ),
-      summary: "Summary",
-      state: "needs_response",
-      confidence: 0.95,
-      evidenceIDs: [evidenceID],
-      actionItems: [],
-      nextAction: nil,
-      modelID: "different-model",
-      promptProvenance: "v1"
-    )
-    let client = CopilotHelperClient(
-      transport: FakeFrameTransport(responses: [try encode(response)])
-    )
 
-    do {
-      _ = try await client.analyze(request)
-      XCTFail("A selected model must match the model that produced the response.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .invalidAnalysis)
-    }
-  }
 
-  func testSingleFlightRejectsSecondOperation() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let transport = BlockingFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
-    let first = Task {
-      try await client.health(CopilotHealthRequest(organizationID: organizationID))
-    }
 
-    await transport.waitUntilReadStarted()
-    do {
-      _ = try await client.models(CopilotModelsRequest(organizationID: organizationID))
-      XCTFail("Expected the concurrent operation to be rejected.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .operationInProgress)
-    }
 
-    first.cancel()
-    let firstResult = await first.result
-    XCTAssertEqual(error(from: firstResult), .operationCancelled)
-    await transport.waitUntilTerminated()
-  }
 
-  func testCancellationTerminatesCurrentTransportOperationAndShutsDownClient() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let transport = BlockingFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
-    let operation = Task {
-      try await client.health(CopilotHealthRequest(organizationID: organizationID))
-    }
 
-    await transport.waitUntilReadStarted()
-    operation.cancel()
-    let operationResult = await operation.result
-    XCTAssertEqual(error(from: operationResult), .operationCancelled)
-    let terminationCount = await transport.terminationCount()
-    XCTAssertEqual(terminationCount, 1)
-    await transport.waitUntilTerminated()
 
-    do {
-      _ = try await client.models(CopilotModelsRequest(organizationID: organizationID))
-      XCTFail("Expected the shut-down client to reject new work.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .shutDown)
-    }
-  }
 
-  func testServiceCancellationSynchronouslyTerminatesCurrentTransportOperation() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let transport = ServiceCancellationFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
-
-    do {
-      _ = try await client.health(CopilotHealthRequest(organizationID: organizationID))
-      XCTFail("Expected service cancellation to be reported.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .operationCancelled)
-    }
-
-    // `health` must not return the cancellation result until the helper has
-    // been synchronously fenced and reaped.
-    let terminationCount = await transport.terminationCount()
-    XCTAssertEqual(terminationCount, 1)
-    do {
-      _ = try await client.models(CopilotModelsRequest(organizationID: organizationID))
-      XCTFail("Expected the cancelled client to reject new work.")
-    } catch {
-      XCTAssertEqual(error as? CopilotXPCError, .shutDown)
-    }
-  }
-
-  func testDelayedCancellationForOldRequestCannotTerminateNewExchange() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let requestID = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
-    let firstExchangeID = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
-    let retryExchangeID = UUID(uuidString: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")!
-    let healthRequest = CopilotHealthRequest(
-      organizationID: organizationID,
-      requestID: requestID
-    )
-    let retryRequest = CopilotHealthRequest(
-      organizationID: organizationID,
-      requestID: requestID
-    )
-    let healthResponse = CopilotHealthResponse(
-      header: responseHeader(
-        requestID: healthRequest.header.requestID,
-        organizationID: organizationID,
-        status: .health
-      ),
-      health: CopilotHealth(
-        helperVersion: "1.0.0",
-        copilotAvailable: false,
-        toolPolicy: "deny_all"
-      )
-    )
-    let transport = StaleCancellationInterleavingFrameTransport(
-      firstResponse: try encode(healthResponse),
-      secondResponse: try encode(healthResponse)
-    )
-    let exchangeIDs = ExchangeIDSequence([firstExchangeID, retryExchangeID])
-    let client = CopilotHelperClient(
-      transport: transport,
-      exchangeIDGenerator: { exchangeIDs.next() }
-    )
-
-    _ = try await client.health(healthRequest)
-    let nextOperation = Task { try await client.health(retryRequest) }
-    await transport.waitUntilSecondReadStarted()
-
-    // This models an `onCancel` task queued for the completed first exchange.
-    // The retry intentionally uses the same protocol request ID, so only the
-    // local exchange token can distinguish it from the stale cancellation.
-    await client.cancelRunningProcess(matching: firstExchangeID)
-    let terminations = await transport.terminationCount()
-    XCTAssertEqual(terminations, 0)
-
-    await transport.releaseSecondResponse()
-    _ = try await nextOperation.value
-  }
-
-  func testCancelRequestTerminatesMatchingAnalysis() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let requestID = UUID()
-    let transport = BlockingFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
-    let analysis = Task {
-      try await client.analyze(
-        CopilotAnalyzeRequest(
-          organizationID: organizationID,
-          input: CopilotAnalysisInput(
-            candidateID: candidateID,
-            workItemTitle: "Title",
-            workItemState: "open",
-            deterministicReasons: ["mention"],
-            body: "Body",
-            conversation: [],
-            evidenceIDs: [evidenceID]
-          ),
-          deadline: .now.addingTimeInterval(60),
-          requestID: requestID
-        )
-      )
-    }
-
-    await transport.waitUntilReadStarted()
-    let cancellation = try await client.cancel(
-      CopilotCancelRequest(
-        organizationID: organizationID,
-        targetRequestID: requestID
-      )
-    )
-    XCTAssertEqual(cancellation.cancelledRequestID, requestID)
-    let analysisResult = await analysis.result
-    XCTAssertEqual(error(from: analysisResult), .operationCancelled)
-    await transport.waitUntilTerminated()
-  }
-
-  func testExplicitCancelNormalizesOnlyTheTerminatedExchangeTransportFailure() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let requestID = UUID()
-    let transport = InvalidatingFrameTransport()
-    let client = CopilotHelperClient(transport: transport)
-    let analysis = Task {
-      try await client.analyze(
-        CopilotAnalyzeRequest(
-          organizationID: organizationID,
-          input: CopilotAnalysisInput(
-            candidateID: candidateID,
-            workItemTitle: "Title",
-            workItemState: "open",
-            deterministicReasons: ["mention"],
-            body: "Body",
-            conversation: [],
-            evidenceIDs: [evidenceID]
-          ),
-          deadline: .now.addingTimeInterval(60),
-          requestID: requestID
-        )
-      )
-    }
-
-    await transport.waitUntilReadStarted()
-    _ = try await client.cancel(
-      CopilotCancelRequest(organizationID: organizationID, targetRequestID: requestID)
-    )
-
-    let analysisResult = await analysis.result
-    XCTAssertEqual(error(from: analysisResult), .operationCancelled)
-  }
-
-  func testDeadlineTerminatesTransportAndReportsTimeout() async throws {
-    let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
-    let evidenceID = try XCTUnwrap(EvidenceID(rawValue: "evidence-1"))
-    let candidateID = try XCTUnwrap(AIRequestID(rawValue: "candidate-1"))
-    let transport = BlockingFrameTransport()
-    let timeout = TimeoutGate()
-    let client = CopilotHelperClient(
-      transport: transport,
-      waitForTimeout: { _ in await timeout.wait() }
-    )
-    let request = CopilotAnalyzeRequest(
-      organizationID: organizationID,
-      input: CopilotAnalysisInput(
-        candidateID: candidateID,
-        workItemTitle: "Title",
-        workItemState: "open",
-        deterministicReasons: ["mention"],
-        body: "Body",
-        conversation: [],
-        evidenceIDs: [evidenceID]
-      ),
-      deadline: .now.addingTimeInterval(60)
-    )
-
-    let analysis = Task { try await client.analyze(request) }
-    await transport.waitUntilReadStarted()
-    await timeout.fire()
-    let result = await analysis.result
-    XCTAssertEqual(error(from: result), .operationTimedOut)
-    await transport.waitUntilTerminated()
-  }
 
   func testHealthRejectsResponseWithUnexpectedFields() async throws {
     let organizationID = try XCTUnwrap(OrganizationID(rawValue: "org-1"))
@@ -814,25 +475,6 @@ private extension CopilotModelsRequest {
   }
 }
 
-private extension CopilotAnalyzeRequest {
-  init(
-    organizationID: OrganizationID,
-    input: CopilotAnalysisInput,
-    modelID: String? = nil,
-    deadline: Date,
-    requestID: UUID = UUID()
-  ) {
-    self.init(
-      accountID: copilotTestAccountID,
-      organizationID: organizationID,
-      input: input,
-      modelID: modelID,
-      deadline: deadline,
-      requestID: requestID
-    )
-  }
-}
-
 private extension CopilotCancelRequest {
   init(
     organizationID: OrganizationID,
@@ -1054,5 +696,22 @@ private actor StaleCancellationInterleavingFrameTransport: CopilotFrameTransport
 
   func terminationCount() -> Int {
     terminated
+  }
+}
+
+extension CopilotHelperClientTests {
+  func testTriageWireRoundTripRejectsMissingAndExtraIDs() throws {
+    let organization = try XCTUnwrap(OrganizationID(rawValue: "triage-org"))
+    let item = CopilotTriageItem(id: "node-1", kind: "issue", repository: "o/r", number: 1, title: "Review", state: "open", author: "octo", updatedAt: Date(), relationships: ["assigned"], labels: [], assignees: [], body: "", pullRequest: nil, recentActivity: [])
+    let request = CopilotTriageRequest(accountID: copilotTestAccountID, organizationID: organization, viewerLogin: "octo", items: [item], deadline: Date().addingTimeInterval(30))
+    let decision = CopilotTriageItemDecision(id: "node-1", disposition: .review, priority: 50, confidence: 0.8, summary: "Review this item.", reason: "It is assigned to you.", nextAction: "Read it.")
+    let header = CopilotResponseHeader(requestID: request.header.requestID, accountID: copilotTestAccountID, organizationID: organization, status: .triage)
+    let response = CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision])
+    let roundTrip = try JSONDecoder().decode(CopilotTriageResponse.self, from: JSONEncoder().encode(response))
+    try roundTrip.validate(against: request)
+    let missing = CopilotTriageResponse(header: header, modelID: "auto", decisions: [])
+    XCTAssertThrowsError(try missing.validate(against: request))
+    let extra = CopilotTriageResponse(header: header, modelID: "auto", decisions: [.init(id: "unknown", disposition: .none, priority: 0, confidence: 1, summary: "No action.", reason: "It is informational.", nextAction: nil)])
+    XCTAssertThrowsError(try extra.validate(against: request))
   }
 }

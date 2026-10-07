@@ -36,6 +36,13 @@ MESSAGE
   exit 2
 fi
 
+EXPECTED_TEAM="${TRIAGE_DEVELOPMENT_TEAM:-}"
+if [[ -z "$EXPECTED_TEAM" ]]; then
+  EXPECTED_TEAM="$(/usr/bin/sed -nE 's/.*\(([A-Z0-9]{10})\)$/\1/p' <<<"$SIGNING_IDENTITY")"
+fi
+[[ "$EXPECTED_TEAM" =~ ^[A-Z0-9]{10}$ ]] \
+  || triage_fail 'set TRIAGE_DEVELOPMENT_TEAM to the signing certificate team so the embedded XPC service can authorize Triage'
+
 XCODE_ARGS=(
   -project "$ROOT_DIR/Triage.xcodeproj"
   -scheme Triage
@@ -44,10 +51,8 @@ XCODE_ARGS=(
   -derivedDataPath "$DERIVED_DATA"
   CODE_SIGN_STYLE=Manual
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY"
+  DEVELOPMENT_TEAM="$EXPECTED_TEAM"
 )
-if [[ -n "${TRIAGE_DEVELOPMENT_TEAM:-}" ]]; then
-  XCODE_ARGS+=(DEVELOPMENT_TEAM="$TRIAGE_DEVELOPMENT_TEAM")
-fi
 if [[ "${TRIAGE_VERBOSE_BUILD:-0}" != "1" ]]; then
   XCODE_ARGS=(-quiet "${XCODE_ARGS[@]}")
 fi
@@ -77,6 +82,8 @@ NEW_TEAM="$(/usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$SIGNING_D
   printf 'The built app signature is missing its team identifier.\n' >&2
   exit 1
 }
+[[ "$NEW_TEAM" == "$EXPECTED_TEAM" ]] \
+  || triage_fail 'the built app signing team does not match its configured XPC caller authorization'
 
 if [[ -d "$INSTALL_PATH" ]]; then
   CURRENT_DETAILS="$(/usr/bin/codesign -dvv "$INSTALL_PATH" 2>&1 || true)"

@@ -112,17 +112,20 @@ actor GitHubGraphQLClient {
     private let credential: SecretValue
     private let rateLimitController: GitHubRateLimitController?
     private let requestPriority: GitHubRequestPriority
+    private let personalWorkOnly: Bool
 
     init(
         session: any HTTPSession = URLSessionHTTPSession(),
         credential: SecretValue,
         rateLimitController: GitHubRateLimitController? = nil,
-        requestPriority: GitHubRequestPriority = .inboxCandidateHydration
+        requestPriority: GitHubRequestPriority = .inboxCandidateHydration,
+        personalWorkOnly: Bool = false
     ) {
         self.session = session
         self.credential = credential
         self.rateLimitController = rateLimitController
         self.requestPriority = requestPriority
+        self.personalWorkOnly = personalWorkOnly
     }
 
     func execute<Value: Decodable & Sendable, Variables: Encodable & Sendable>(
@@ -172,6 +175,9 @@ actor GitHubGraphQLClient {
         as type: Value.Type
     ) async throws -> GitHubGraphQLProvenanceResult<Value> {
         try Self.validateCommittedQuery(query)
+        if personalWorkOnly && ["TriageOrganizationProjectsV2", "TriageProjectV2Items"].contains(query.operationName) {
+            throw GitHubGraphQLError.invalidQuery
+        }
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(credential.rawValue)", forHTTPHeaderField: "Authorization")
@@ -182,7 +188,16 @@ actor GitHubGraphQLClient {
         request.httpBody = try JSONEncoder().encode(
             GraphQLRequest(query: query.document, operationName: query.operationName, variables: variables)
         )
-        let (body, response) = try await send(request)
+        let trace = GitHubRequestTrace(operation: query.operationName)
+        let body: Data
+        let response: HTTPURLResponse
+        do {
+            (body, response) = try await send(request)
+            trace.finish(statusCode: response.statusCode, bytes: body.count)
+        } catch {
+            trace.fail(error)
+            throw error
+        }
         try Task.checkCancellation()
         guard GitHubAPIResponseAuthority.isValid(response.url) else {
             throw GitHubGraphQLError.invalidResponseAuthority
@@ -217,6 +232,9 @@ actor GitHubGraphQLClient {
                 )
             )
         } catch {
+            if let decodingError = error as? DecodingError {
+                GitHubDiagnostics.recordDecodingFailure(decodingError)
+            }
             let errors = (try? decoder.decode(GraphQLErrorEnvelope.self, from: body).errors) ?? []
             return .undecodable(
                 GitHubGraphQLUndecodableResponse(

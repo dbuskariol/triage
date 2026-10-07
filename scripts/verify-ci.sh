@@ -6,6 +6,19 @@ source "$ROOT_DIR/scripts/lib/triage-release.sh"
 
 DERIVED_DATA="${TRIAGE_CI_DERIVED_DATA:-$(triage_default_derived_data CI)}"
 HOST_ARCH="$(/usr/bin/uname -m)"
+TEST_APP_EXECUTABLE="$DERIVED_DATA/Build/Products/Debug/Triage.app/Contents/MacOS/Triage"
+
+# Xcode normally reaps its test host. If this verifier is interrupted, reap
+# only hosts from this invocation's external DerivedData tree; never target an
+# installed or separately built debug application.
+cleanup_test_hosts() {
+  local pid command
+  while read -r pid command; do
+    [[ "$command" == "$TEST_APP_EXECUTABLE"* ]] || continue
+    /bin/kill -TERM "$pid" 2>/dev/null || true
+  done < <(/bin/ps -ax -o pid= -o command=)
+}
+trap cleanup_test_hosts EXIT
 
 while IFS= read -r -d '' script; do
   /bin/bash -n "$script"

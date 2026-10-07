@@ -1,200 +1,85 @@
 import AppKit
 import SwiftUI
 
-/// Keeps menu-bar labels compact without discarding the full source title from
-/// the main work surface or its accessibility label.
-enum TriageMenuLabel {
-    static func abbreviated(_ title: String, limit: Int = 30) -> String {
-        precondition(limit >= 0, "A menu title limit cannot be negative.")
-        guard limit > 0 else { return "" }
-
-        let normalized = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        guard normalized.count > limit else { return normalized }
-        guard limit > 1 else { return "…" }
-        return String(normalized.prefix(limit - 1)) + "…"
-    }
-}
-
 struct MenuBarView: View {
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
-    @EnvironmentObject private var navigation: AppNavigationModel
     @EnvironmentObject private var appModel: TriageAppModel
-    @EnvironmentObject private var softwareUpdates: SoftwareUpdateController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "square.stack.3d.up")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Triage")
-                        .font(.headline)
-                    Text(selectionSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(summary)
-                }
-                Spacer()
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(appModel.selectedOrganization?.displayName ?? appModel.selectedOrganization?.login ?? "Triage")
+                    .font(.headline)
+                Text(WorkspaceViewPresentation.statusLine(appModel.presentation.status))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
 
-            if appModel.hasConnectedAccount {
-                SynchronizationStatusLabel(
-                    status: presentation.synchronizationStatus,
-                    detail: presentation.synchronizationDetail
-                )
-
-                Menu("Open Work View") {
-                    ForEach(AppSection.allCases) { section in
-                        Button(section.title) {
-                            navigation.section = section
-                            openMainWindow()
-                        }
-                    }
-                }
-                .accessibilityHint("Opens the chosen local Triage work view.")
-
-                ForEach(topItems) { item in
+            if inboxEntries.isEmpty {
+                Text("You’re all caught up")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(inboxEntries) { entry in
                     Button {
-                        navigation.section = .inbox
-                        appModel.selectedWorkItemID = item.id
+                        appModel.selectedSection = .inbox
+                        appModel.selectedEntryID = entry.id
                         openMainWindow()
                     } label: {
-                        Text(TriageMenuLabel.abbreviated(item.title))
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(priorityColor(for: entry))
+                                .frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.item.title)
+                                    .lineLimit(1)
+                                Text(entry.decision?.reason ?? "Needs your attention")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
-                    .accessibilityLabel(item.title)
-                    .accessibilityHint("Opens this item in Triage. It does not change GitHub.")
+                    .accessibilityLabel(entry.item.title)
                 }
-                if !topItems.isEmpty {
-                    Divider()
-                }
-            } else {
-                Label("No GitHub account connected", systemImage: "person.crop.circle.badge.questionmark")
-                    .foregroundStyle(.secondary)
-                Text("Open Triage to connect an account and choose an organization.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Divider()
             }
 
-            Button("Open Triage") {
-                navigation.section = .inbox
-                openMainWindow()
-            }
-            .accessibilityHint("Opens the local Triage Inbox window.")
+            Divider()
 
+            Button("Refresh Now") {
+                appModel.refreshNow()
+            }
             Button("Settings…") {
-                navigation.openSettings(.general)
+                appModel.openSettings?(.general)
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
             }
-
-            Button("Refresh GitHub Work") {
-                Task {
-                    await appModel.refreshSelectedOrganizationAfterAccessCheck()
-                }
-            }
-            .disabled(appModel.selectedOrganization == nil || appModel.isRefreshing)
-            .accessibilityHint("Refreshes read-only GitHub data for the selected organization.")
-
-            Button("Check for Updates…") {
-                softwareUpdates.checkForUpdates()
-            }
-            .disabled(!softwareUpdates.canCheckForUpdates)
-
             Divider()
-
             Button("Quit Triage") {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q")
         }
         .padding(14)
-        .frame(width: 250)
+        .frame(width: 280)
     }
 
-    private var inboxItems: [WorkItem] {
-        WorkListPresentation.items(
-            from: appModel.workItems,
-            section: .inbox,
-            at: Date()
-        )
+    private var inboxEntries: ArraySlice<TriageEntry> {
+        appModel.presentation.entries(in: .inbox).prefix(5)
     }
 
-    private var topItems: ArraySlice<WorkItem> {
-        inboxItems.prefix(5)
-    }
-
-    private var summary: String {
-        guard appModel.hasConnectedAccount else {
-            return "No account connected"
+    private func priorityColor(for entry: TriageEntry) -> Color {
+        switch entry.decision?.priority ?? 0 {
+        case 80...: .red
+        case 50...: .orange
+        default: .secondary
         }
-        let highPriority = inboxItems.filter { $0.workflow.priority == .high }.count
-        let account = appModel.accounts.first(where: { $0.id == appModel.selectedAccountID })
-        let accountName = account?.displayName ?? account?.login
-        let organization = appModel.selectedOrganization?.displayName ?? appModel.selectedOrganization?.login
-        let counts = "\(highPriority) priority · \(inboxItems.count) inbox"
-        let selection = [accountName, organization].compactMap { $0 }.joined(separator: " · ")
-        return selection.isEmpty ? counts : "\(selection) · \(counts)"
-    }
-
-    private var selectionSummary: String {
-        TriageMenuLabel.abbreviated(summary)
-    }
-
-    private var presentation: WorkspacePresentationState {
-        Self.workspacePresentation(
-            workItems: appModel.workItems,
-            selectedAccountID: appModel.selectedAccountID,
-            selectedOrganizationID: appModel.selectedOrganizationID,
-            organizationAccess: appModel.selectedOrganizationAccess,
-            hasSSOAuthorizationHeader: appModel.ssoAuthorizationHeader != nil,
-            isRefreshing: appModel.isRefreshing,
-            refreshError: appModel.refreshError,
-            workspaceFreshness: appModel.selectedOrganizationFreshness,
-            workspaceCoverage: appModel.selectedWorkspaceCoverage,
-            organizationVisibilityFreshness: appModel.selectedOrganizationVisibilityFreshness,
-            restorationError: appModel.workspaceRestorationError,
-            now: Date()
-        )
-    }
-
-    static func workspacePresentation(
-        workItems: [WorkItem],
-        selectedAccountID: AccountID?,
-        selectedOrganizationID: OrganizationID?,
-        organizationAccess: OrganizationAccess?,
-        hasSSOAuthorizationHeader: Bool,
-        isRefreshing: Bool,
-        refreshError: String?,
-        workspaceFreshness: FreshnessState?,
-        workspaceCoverage: CoverageEvaluation?,
-        organizationVisibilityFreshness: FreshnessState?,
-        restorationError: String?,
-        now: Date
-    ) -> WorkspacePresentationState {
-        WorkspacePresentationState(
-            workItems: workItems,
-            selectedAccountID: selectedAccountID,
-            selectedOrganizationID: selectedOrganizationID,
-            organizationAccess: organizationAccess,
-            hasSSOAuthorizationHeader: hasSSOAuthorizationHeader,
-            isRefreshing: isRefreshing,
-            refreshError: refreshError,
-            workspaceFreshness: workspaceFreshness,
-            workspaceCoverage: workspaceCoverage,
-            organizationVisibilityFreshness: organizationVisibilityFreshness,
-            restorationError: restorationError,
-            now: now
-        )
     }
 
     private func openMainWindow() {
-        openWindow(id: "main")
+        openWindow(id: WorkspaceWindowRestoration.mainWindowFrameIdentifier)
         NSApp.activate(ignoringOtherApps: true)
     }
 }

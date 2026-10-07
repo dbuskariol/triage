@@ -2,6 +2,32 @@ import XCTest
 @testable import Triage
 
 final class GitHubRateLimitTests: XCTestCase {
+    func testExpiredPrimaryResetStillPausesWithMissingResourceHeader() async throws {
+        let observedAt = Date(timeIntervalSince1970: 1_000)
+        let controller = GitHubRateLimitController(now: { observedAt }, jitter: { $0 })
+        try await controller.record(response: GitHubRESTResponse(
+            statusCode: 403,
+            url: URL(string: "https://api.github.com/search/issues")!,
+            headers: ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "999"],
+            body: Data()
+        ), fallbackResource: .search)
+        let pause = await controller.pauseUntil(for: .search)
+        XCTAssertEqual(pause, observedAt.addingTimeInterval(60))
+    }
+
+    func testSecondaryLimitNeverShortensServerRetryAfterToLocalCap() async throws {
+        let observedAt = Date(timeIntervalSince1970: 1_000)
+        let controller = GitHubRateLimitController(now: { observedAt }, jitter: { $0 })
+        try await controller.record(response: GitHubRESTResponse(
+            statusCode: 403,
+            url: URL(string: "https://api.github.com/search/issues")!,
+            headers: ["Retry-After": "1800"],
+            body: Data()
+        ))
+        let pause = await controller.pauseUntil(for: .graphql)
+        XCTAssertEqual(pause, observedAt.addingTimeInterval(1_800))
+    }
+
     func testParsesExhaustedSearchLimit() throws {
         let limit = try XCTUnwrap(
             GitHubRateLimit(headers: [

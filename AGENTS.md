@@ -4,7 +4,7 @@ This file is the repository-wide operating guide for coding agents working on Tr
 
 ## Product state
 
-Triage is intentionally an empty native macOS application shell. Do not infer or add product behavior until it is explicitly defined.
+Triage is a local-first AI-assisted GitHub personal-work triage app. Preserve its Core discovery/store/AI/engine boundaries and native Workspace views.
 
 Preserve these baseline invariants:
 
@@ -17,9 +17,10 @@ Preserve these baseline invariants:
 
 ## Repository map
 
-- `Triage/Models`: application state and preferences.
-- `Triage/Services`: non-UI services, including software updates.
-- `Triage/Views`: SwiftUI surfaces and reusable components.
+- `Triage/Core`: contracts, GitHub personal-work discovery, GRDB store, AI triage, engine, and presentation.
+- `Triage/CopilotXPC` and `TriageCopilotHelper`: fail-closed authenticated Copilot helper; `triage` is its only inference operation.
+- `Triage/Views/Workspace`: SwiftUI workspace surfaces.
+- `Triage/Models` and `Triage/Services`: app state, preferences, and platform services.
 - `TriageTests`: deterministic unit tests.
 - `Package.swift`: command-line compilation and test mirror.
 - `Configuration`: bundle metadata.

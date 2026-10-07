@@ -18,7 +18,17 @@ fn main() {
     let engine = trusted_engine_from_pipe().unwrap_or_default();
 
     if runtime
-        .block_on(serve_stdio(Arc::new(engine)))
+        .block_on(async {
+            let mut termination =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Termination signal initialization failed");
+            tokio::select! {
+                result = serve_stdio(Arc::new(engine)) => result,
+                // Dropping the in-flight login future kills its owned CLI.
+                // XPC sends TERM before its bounded SIGKILL fallback.
+                _ = termination.recv() => Ok(()),
+            }
+        })
         .map_err(|error| eprintln!("TriageCopilotHelper protocol error: {error}"))
         .is_err()
     {

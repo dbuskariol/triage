@@ -2,6 +2,66 @@ import Foundation
 import XCTest
 
 final class TriageCopilotXPCFailClosedTests: XCTestCase {
+  func testCopilotProfileSurvivesSessionCleanupAndTheNextConnection() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "CopilotPersistentProfile-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let accountID = UUID().uuidString.lowercased()
+    let bundle = try makeFixtureBundle(helperPermissions: 0o700)
+    let profile = root.appending(path: "Triage/CopilotXPC/\(accountID)/copilot-home")
+    let marker = profile.appending(path: "fixture-marker")
+    for attempt in 0..<2 {
+      let process = CopilotHelperProcess(
+        bundle: bundle,
+        applicationSupportDirectory: root,
+        signatureValidator: { _, _ in },
+        runtimeVerifier: TestRuntimeVerifier.trusted(),
+        processLauncher: { _ in throw CopilotXPCServiceError.processLaunchFailed }
+      )
+      XCTAssertThrowsError(try process.exchange(frame: authenticatedRequest(
+        accountID: accountID, requestID: UUID().uuidString.lowercased(), credential: "fixture"
+      )))
+      XCTAssertTrue(FileManager.default.fileExists(atPath: profile.path))
+      if attempt == 0 { try Data("nonsecret fixture".utf8).write(to: marker) }
+      process.cancel()
+      XCTAssertEqual(try Data(contentsOf: marker), Data("nonsecret fixture".utf8))
+    }
+  }
+
+  func testEmbeddedServiceDeclaresLaunchMetadataAndUsesTheSigningTeam() throws {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    let data = try Data(contentsOf: root.appending(path: "Configuration/TriageCopilotXPC-Info.plist"))
+    let plist = try XCTUnwrap(
+      PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    )
+    let service = try XCTUnwrap(plist["XPCService"] as? [String: String])
+    XCTAssertEqual(service["ServiceType"], "Application")
+    XCTAssertEqual(service["RunLoopType"], "NSRunLoop")
+    XCTAssertEqual(plist["TriageExpectedTeamIdentifier"] as? String, "$(DEVELOPMENT_TEAM)")
+  }
+
+  func testAuthenticationStageMessagesAreStrictlyAllowlisted() throws {
+    let accountID = UUID().uuidString.lowercased()
+    let requestID = UUID().uuidString.lowercased()
+    let request = try CopilotXPCFrame.validatedRequestHeader(authenticatedRequest(
+      accountID: accountID, requestID: requestID, credential: "fixture-only"
+    ))
+    let safeMessage = "Copilot browser login exited before authorization completed."
+    for message in [safeMessage, safeMessage + " secret-must-not-escape"] {
+      let response = try framedJSON([
+        "protocol_version": 2, "request_id": requestID,
+        "account_id": accountID, "organization_id": "org-1", "status": "failure",
+        "failure": ["code": "authentication_failed", "message": message],
+      ])
+      guard case let .fixedAuthenticationFailure(frame) =
+        try CopilotXPCFrame.responseForForwarding(response, matches: request)
+      else { return XCTFail("Authentication errors must use a fixed response.") }
+      let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.dropFirst(4))) as? [String: Any])
+      let failure = try XCTUnwrap(object["failure"] as? [String: String])
+      XCTAssertFalse(failure["message"]!.contains("secret-must-not-escape"))
+      XCTAssertEqual(failure["message"] == safeMessage, message == safeMessage)
+    }
+  }
+
   func testOwnedRequestFrameDeepCopiesAndWipesAfterQueueUse() throws {
     let secret = Data("gho_owned-frame-must-not-survive-queue-use".utf8)
     var source = secret

@@ -151,6 +151,7 @@ targets:
       - TriageCopilotXPC/CopilotXPCCallerValidator.swift
       - TriageCopilotXPC/CopilotXPCFrame.swift
       - TriageCopilotXPC/TriageCopilotXPCService.swift
+      - TriageCopilotXPC/TriageCopilotXPCListener.swift
       - Triage/CopilotXPC/CopilotXPCInterface.swift
     settings:
       base:

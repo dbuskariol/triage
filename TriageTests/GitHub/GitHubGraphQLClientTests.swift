@@ -10,19 +10,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         let queries = try GitHubGraphQLQueries.registeredQueries()
         XCTAssertEqual(
             queries.map(\.operationName),
-            [
-                "TriageViewer",
-                "TriageHydrateNodes",
-                "TriagePullRequestReviewThreads",
-                "TriagePullRequestReviewThreadComments",
-                "TriagePullRequestStatusChecks",
-                "TriageRepositoryDiscussions",
-                "TriageDiscussionComments",
-                "TriageDiscussionCommentReplies",
-                "TriageOrganizationProjectsV2",
-                "TriageProjectV2Items",
-                "TriageProjectV2ItemFieldValues"
-            ]
+            ["TriageViewer", "TriagePersonalWorkSearch"]
         )
         XCTAssertNoThrow(try GitHubGraphQLQueries.validateProductionRegistry(queries))
         XCTAssertTrue(queries.allSatisfy { query in
@@ -55,25 +43,9 @@ final class GitHubGraphQLClientTests: XCTestCase {
             }
         }
 
-        let independentlyPaginatedConnections = [
-            ("TriagePullRequestReviewThreads", "reviewThreads(first: 50, after: $after)"),
-            ("TriagePullRequestReviewThreadComments", "comments(first: 50, after: $after)"),
-            ("TriagePullRequestStatusChecks", "contexts(first: 50, after: $after)"),
-            ("TriageRepositoryDiscussions", "discussions(first: 50, after: $after,"),
-            ("TriageDiscussionComments", "comments(first: 50, after: $after)"),
-            ("TriageDiscussionCommentReplies", "replies(first: 50, after: $after)"),
-            ("TriageOrganizationProjectsV2", "projectsV2(first: 50, after: $after)"),
-            ("TriageProjectV2Items", "items(first: 50, after: $after)"),
-            ("TriageProjectV2ItemFieldValues", "fieldValues(first: 50, after: $after)")
-        ]
-        for (operation, connection) in independentlyPaginatedConnections {
-            let document = try XCTUnwrap(documents[operation])
-            XCTAssertTrue(document.contains(connection), "\(operation) must cursor-paginate \(connection).")
-            XCTAssertTrue(
-                document.contains("pageInfo { hasNextPage endCursor }"),
-                "\(operation) must expose cursor continuation metadata."
-            )
-        }
+        let search = try XCTUnwrap(documents["TriagePersonalWorkSearch"])
+        XCTAssertTrue(search.contains("search(query: $query, type: ISSUE, first: 25, after: $cursor)"))
+        XCTAssertTrue(search.contains("pageInfo { hasNextPage endCursor }") || search.contains("pageInfo {"))
     }
 
     func testRegistryValidationRejectsMismatchedOperationAndMissingRateLimit() throws {

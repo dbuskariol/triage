@@ -233,7 +233,15 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
 
   private func exchange(using session: HelperSession, frame: inout Data) throws -> Data {
     let timeout = DispatchSource.makeTimerSource()
-    timeout.schedule(deadline: .now() + Self.maximumRuntime)
+    let request = try CopilotXPCFrame.validatedRequestHeader(frame)
+    let maximumRuntime: DispatchTimeInterval =
+      switch request.operation {
+      case "authenticate": .seconds(320)
+      // One triage request analyzes up to 15 items in a single model call.
+      case "triage": .seconds(150)
+      default: Self.maximumRuntime
+      }
+    timeout.schedule(deadline: .now() + maximumRuntime)
     let supervisor = self.supervisor
     timeout.setEventHandler { supervisor.timeout() }
     timeout.resume()
@@ -410,11 +418,11 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
     let root = try scratchRootDirectory()
     let accountComponents = ["Triage", "CopilotXPC", accountID]
     let scratchID = directory.lastPathComponent
-    for child in ["work", "copilot-home"] {
+    for components in [accountComponents + [scratchID, "work"], accountComponents + ["copilot-home"]] {
       do {
         try CopilotScratchFilesystem.ensureDirectory(
           at: root,
-          components: accountComponents + [scratchID, child]
+          components: components
         )
       } catch {
         throw CopilotXPCServiceError.processLaunchFailed
@@ -430,7 +438,7 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
       version: Self.bootstrapVersion,
       executablePath: trustedRuntime.executableURL.path,
       runtimeLockPath: trustedRuntime.lockURL.path,
-      baseDirectoryPath: privateDirectory.appending(path: "copilot-home").path,
+      baseDirectoryPath: privateDirectory.deletingLastPathComponent().appending(path: "copilot-home").path,
       workingDirectoryPath: privateDirectory.appending(path: "work").path
     )
     let payload = try JSONEncoder().encode(handoff)

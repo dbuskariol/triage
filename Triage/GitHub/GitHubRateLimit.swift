@@ -148,6 +148,28 @@ actor GitHubRateLimitController {
         fallbackResource: GitHubRateLimitResource? = nil
     ) async throws {
         let observedAt = now()
+        if GitHubFailureClassifier.classify(response)?.kind == .rateLimited,
+           let resource = GitHubRateLimit(headers: response.headers, now: observedAt)?.resource ?? fallbackResource {
+            // A rejected request can arrive at the reset boundary, or omit
+            // the resource header. Never immediately retry an exhausted budget.
+            let resetAt = response.header(named: "X-RateLimit-Reset")
+                .flatMap(TimeInterval.init).map { Date(timeIntervalSince1970: $0) }
+            let retryAfter = response.header(named: "Retry-After").flatMap(TimeInterval.init) ?? 0
+            let pause = max(
+                resetAt ?? observedAt,
+                observedAt.addingTimeInterval(jitter(max(60, retryAfter)))
+            )
+            retryPauses[resource] = max(retryPauses[resource] ?? .distantPast, pause)
+            GitHubDiagnostics.recordRatePause(resource: resource, seconds: pause.timeIntervalSince(observedAt))
+            if let accountID, let persistence {
+                try await persistence.save(
+                    GitHubRateLimit(
+                        resource: resource, limit: nil, remaining: 0, resetAt: pause,
+                        retryAfter: pause.timeIntervalSince(observedAt), observedAt: observedAt
+                    ), for: accountID
+                )
+            }
+        }
         guard let limit = GitHubRateLimit(headers: response.headers, now: observedAt) else {
             if let fallbackResource,
                let retryAfter = response.header(named: "Retry-After").flatMap(TimeInterval.init),
@@ -157,11 +179,17 @@ actor GitHubRateLimitController {
                     limit: nil,
                     remaining: nil,
                     resetAt: nil,
-                    retryAfter: retryAfter,
+                    retryAfter: max(
+                        retryAfter,
+                        retryPauses[fallbackResource]?.timeIntervalSince(observedAt) ?? 0
+                    ),
                     observedAt: observedAt
                 )
                 limits[fallbackResource] = fallbackLimit
-                retryPauses[fallbackResource] = observedAt.addingTimeInterval(jitter(retryAfter))
+                retryPauses[fallbackResource] = max(
+                    retryPauses[fallbackResource] ?? .distantPast,
+                    observedAt.addingTimeInterval(jitter(retryAfter))
+                )
                 if let accountID, let persistence {
                     try await persistence.save(fallbackLimit, for: accountID)
                 }
@@ -171,10 +199,24 @@ actor GitHubRateLimitController {
         }
         limits[limit.resource] = limit
         if let retryAfter = limit.retryAfter, retryAfter > 0 {
-            retryPauses[limit.resource] = observedAt.addingTimeInterval(jitter(retryAfter))
+            retryPauses[limit.resource] = max(
+                retryPauses[limit.resource] ?? .distantPast,
+                observedAt.addingTimeInterval(jitter(retryAfter))
+            )
         }
         if let accountID, let persistence {
-            try await persistence.save(limit, for: accountID)
+            let persistedLimit: GitHubRateLimit
+            if GitHubFailureClassifier.classify(response)?.kind == .rateLimited,
+               let pause = retryPauses[limit.resource] {
+                persistedLimit = GitHubRateLimit(
+                    resource: limit.resource, limit: limit.limit, remaining: limit.remaining,
+                    resetAt: limit.resetAt, retryAfter: pause.timeIntervalSince(observedAt),
+                    observedAt: observedAt
+                )
+            } else {
+                persistedLimit = limit
+            }
+            try await persistence.save(persistedLimit, for: accountID)
         }
         try await recordSecondaryLimitIfNeeded(response, observedAt: observedAt)
     }
@@ -212,7 +254,7 @@ actor GitHubRateLimitController {
         while true {
             if let pauseUntil = pauseUntil(for: resource) {
                 try Task.checkCancellation()
-                try await sleep(pauseUntil.timeIntervalSince(now()))
+                try await sleep(max(0, pauseUntil.timeIntervalSince(now())))
                 continue
             }
 
@@ -300,7 +342,8 @@ actor GitHubRateLimitController {
         let retryAfter = response.header(named: "Retry-After").flatMap(TimeInterval.init)
         let minimumDelay = retryAfter.map { max($0, 60) } ?? 60
         let remainingPause = (secondaryPauseUntil ?? observedAt).timeIntervalSince(observedAt)
-        let delay = min(900, max(minimumDelay, remainingPause * 2))
+        let exponentialDelay = 60 * pow(2, Double(min(consecutiveSecondaryLimitCount - 1, 4)))
+        let delay = max(minimumDelay, min(900, max(exponentialDelay, remainingPause * 2)))
         let candidate = observedAt.addingTimeInterval(jitter(delay))
         secondaryPauseUntil = max(secondaryPauseUntil ?? .distantPast, candidate)
         adaptiveConcurrency = 1

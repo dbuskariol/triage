@@ -59,7 +59,10 @@ actor CopilotHelperClient: TriageCopilotHelping {
     return try await exchangePayload(
       header: request.header,
       expectedStatus: .authentication,
-      timeout: 60,
+      // A device-code login waits for the person to complete browser consent.
+      // Cancelling its task invalidates the XPC connection and reaps its
+      // isolated helper process.
+      timeout: request.credential == nil ? 330 : 60,
       payload: payload
     )
   }
@@ -68,22 +71,13 @@ actor CopilotHelperClient: TriageCopilotHelping {
     try await exchange(request, expectedStatus: .models, timeout: nil)
   }
 
-  func analyze(_ request: CopilotAnalyzeRequest) async throws -> CopilotAnalysisResponse {
+  func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse {
     let timeout = request.deadline.timeIntervalSinceNow
     guard timeout > 0 else { throw CopilotXPCError.operationTimedOut }
-    try request.input.validate()
-    let response: CopilotAnalysisResponse = try await exchange(
-      request,
-      expectedStatus: .analysis,
-      timeout: timeout
-    )
-    try response.validate(against: request.input)
-    // A selected model is an authorization and cache boundary. Auto may
-    // accept the runtime-selected model, but an explicit selection must not
-    // silently accept a response from another model.
-    guard request.modelID == nil || response.modelID == request.modelID else {
-      throw CopilotXPCError.invalidAnalysis
-    }
+    try request.validate()
+    let response: CopilotTriageResponse = try await exchange(request, expectedStatus: .triage, timeout: timeout)
+    try response.validate(against: request)
+    guard request.modelID == nil || response.modelID == request.modelID else { throw CopilotXPCError.invalidResponse }
     return response
   }
 
@@ -91,10 +85,9 @@ actor CopilotHelperClient: TriageCopilotHelping {
     guard let activeOperation,
       activeOperation.requestID == request.targetRequestID,
       activeOperation.accountID == request.header.accountID,
-      activeOperation.organizationID == request.header.organizationID,
-      activeOperation.operation == .analyze
+      activeOperation.organizationID == request.header.organizationID
     else {
-      throw CopilotXPCError.noActiveAnalysis
+      throw CopilotXPCError.noActiveOperation
     }
     // A pipe has one response reader. Termination safely interrupts it; the
     // XPC service will own protocol-level cancellation dispatch.
@@ -380,7 +373,7 @@ private protocol CopilotRequestContaining {
 
 extension CopilotHealthRequest: CopilotRequestContaining {}
 extension CopilotModelsRequest: CopilotRequestContaining {}
-extension CopilotAnalyzeRequest: CopilotRequestContaining {}
+extension CopilotTriageRequest: CopilotRequestContaining {}
 extension CopilotCancelRequest: CopilotRequestContaining {}
 extension CopilotShutdownRequest: CopilotRequestContaining {}
 
@@ -391,20 +384,49 @@ private protocol CopilotResponseContaining {
 extension CopilotHealthResponse: CopilotResponseContaining {}
 extension CopilotAuthenticationResponse: CopilotResponseContaining {}
 extension CopilotModelsResponse: CopilotResponseContaining {}
-extension CopilotAnalysisResponse: CopilotResponseContaining {}
+extension CopilotTriageResponse: CopilotResponseContaining {}
 extension CopilotCancelResponse: CopilotResponseContaining {}
 extension CopilotShutdownResponse: CopilotResponseContaining {}
 
 private enum CopilotJSONCodec {
+  private static func fractionalSecondsFormatter() -> ISO8601DateFormatter {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+  }
+
+  private static func legacyFormatter() -> ISO8601DateFormatter {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+  }
+
   static func encode<Value: Encodable>(_ value: Value) throws -> Data {
     let encoder = JSONEncoder()
-    encoder.dateEncodingStrategy = .iso8601
+    encoder.dateEncodingStrategy = .custom { date, encoder in
+      var container = encoder.singleValueContainer()
+      try container.encode(fractionalSecondsFormatter().string(from: date))
+    }
     return try encoder.encode(value)
   }
 
   static func decode<Value: Decodable>(_ type: Value.Type, from data: Data) throws -> Value {
     let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
+    decoder.dateDecodingStrategy = .custom { decoder in
+      let container = try decoder.singleValueContainer()
+      let value = try container.decode(String.self)
+      guard let date = fractionalSecondsFormatter().date(from: value)
+        ?? legacyFormatter().date(from: value)
+      else {
+        throw DecodingError.dataCorruptedError(
+          in: container,
+          debugDescription: "Expected an ISO 8601 timestamp."
+        )
+      }
+      return date
+    }
     do {
       return try decoder.decode(Value.self, from: data)
     } catch {
@@ -470,7 +492,13 @@ private enum CopilotAuthenticationRequestEncoder {
       0x2c, 0x22, 0x63, 0x72, 0x65, 0x64, 0x65,
       0x6e, 0x74, 0x69, 0x61, 0x6c, 0x22, 0x3a,
     ])
-    try request.credential.appendJSONString(to: &payload)
+    if let credential = request.credential {
+      try credential.appendJSONString(to: &payload)
+    } else {
+      payload.append(contentsOf: "null".utf8)
+    }
+    payload.append(contentsOf: ",\"allow_browser\":".utf8)
+    payload.append(contentsOf: (request.allowsBrowser ? "true" : "false").utf8)
     payload.append(0x7d)
     return CopilotOwnedPayload(copying: payload)
   }
@@ -510,17 +538,8 @@ private enum CopilotWireSchema {
       operationFields = ["authentication"]
     case .models:
       operationFields = ["models"]
-    case .analysis:
-      operationFields = [
-        "summary",
-        "state",
-        "confidence",
-        "evidence_ids",
-        "action_items",
-        "next_action",
-        "model_id",
-        "prompt_provenance",
-      ]
+    case .triage:
+      operationFields = ["model_id", "decisions"]
     case .cancelled:
       operationFields = ["cancelled_request_id"]
     case .shutdown:
@@ -532,39 +551,27 @@ private enum CopilotWireSchema {
     guard Set(object.keys).isSubset(of: commonFields.union(operationFields)) else {
       throw CopilotXPCError.invalidResponse
     }
-    if actualStatus == .analysis, expectedStatus == .analysis {
-      try validateAnalysis(object)
+    if actualStatus == .triage, expectedStatus == .triage { try validateTriage(object) }
+  }
+
+
+
+  private static func validateTriage(_ object: [String: Any]) throws {
+    guard let model = object["model_id"] as? String, !model.isEmpty,
+      let decisions = object["decisions"] as? [[String: Any]], (1...20).contains(decisions.count) else { throw CopilotXPCError.invalidResponse }
+    let fields: Set<String> = ["id", "disposition", "priority", "confidence", "summary", "reason", "next_action"]
+    var ids = Set<String>()
+    for decision in decisions {
+      guard Set(decision.keys).isSubset(of: fields), let id = decision["id"] as? String, !id.isEmpty, ids.insert(id).inserted,
+        let disposition = decision["disposition"] as? String, ["act", "review", "wait", "none"].contains(disposition),
+        let priority = decision["priority"] as? NSNumber, CFGetTypeID(priority) != CFBooleanGetTypeID(), priority.doubleValue.rounded() == priority.doubleValue, (0...100).contains(priority.doubleValue),
+        let confidence = decision["confidence"] as? NSNumber, CFGetTypeID(confidence) != CFBooleanGetTypeID(), confidence.doubleValue.isFinite, (0...1).contains(confidence.doubleValue),
+        let summary = decision["summary"] as? String, !summary.isEmpty, summary.utf8.count <= 280,
+        let reason = decision["reason"] as? String, !reason.isEmpty, reason.utf8.count <= 400,
+        decision["next_action"] == nil || decision["next_action"] is String || decision["next_action"] is NSNull,
+        (decision["next_action"] as? String)?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse }
     }
   }
 
-  private static func validateAnalysis(_ object: [String: Any]) throws {
-    guard let actions = object["action_items"] as? [[String: Any]],
-      actions.count <= 128
-    else { throw CopilotXPCError.invalidResponse }
-    let permittedActionFields: Set<String> = [
-      "id", "text", "confidence", "evidence_ids", "deadline", "claims",
-    ]
-    let permittedClaimFields: Set<String> = [
-      "evidence_id", "actor_role", "timestamp", "quoted_span", "deterministic_reason_id",
-    ]
-    for action in actions {
-      guard Set(action.keys).isSubset(of: permittedActionFields),
-        action["id"] is String,
-        action["text"] is String,
-        action["confidence"] is NSNumber,
-        action["evidence_ids"] is [String],
-        let claims = action["claims"] as? [[String: Any]],
-        claims.count <= 128
-      else { throw CopilotXPCError.invalidResponse }
-      for claim in claims {
-        guard Set(claim.keys).isSubset(of: permittedClaimFields),
-          claim["evidence_id"] is String,
-          claim["actor_role"] is String,
-          claim["timestamp"] is String,
-          claim["quoted_span"] is String,
-          claim["deterministic_reason_id"] is String
-        else { throw CopilotXPCError.invalidResponse }
-      }
-    }
-  }
+
 }

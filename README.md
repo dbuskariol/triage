@@ -1,17 +1,12 @@
 # Triage
 
-Triage is an intentionally empty, production-ready native macOS application shell.
+Triage is a native, local-first macOS application for AI-assisted GitHub personal-work triage. It uses Swift 6, SwiftUI, GRDB/SQLCipher, and a fail-closed Rust Copilot helper.
 
-The baseline follows the same engineering and distribution conventions as Reccy:
+## Architecture
 
-- Swift 6 and SwiftUI for macOS 26
-- Native window, sidebar, Settings scene, menus, and menu-bar extra
-- Launch-at-login and menu-bar preferences
-- Sparkle automatic update controls and signed feed verification
-- Privacy manifest with no tracking or collected data
-- Universal Apple silicon and Intel release builds
-- Hardened Runtime, Developer ID signing, notarization, signed DMG and ZIP packaging
-- Apple silicon and Intel GitHub Actions verification
+- `Triage/Core`: contracts, GitHub personal-work discovery, local GRDB storage, the `TriageEngine` loop, Copilot triage decisioning, and workspace presentation.
+- `Triage/Views/Workspace`: the native SwiftUI workspace.
+- `Triage/CopilotXPC` and `TriageCopilotHelper`: authenticated helper boundary. Its only inference operation is `triage`.
 
 ## Open
 
@@ -25,6 +20,4 @@ open Triage.xcodeproj
 scripts/verify-ci.sh
 ```
 
-The checked-in Swift package mirrors the app target so command-line environments can run `swift test`; the Xcode project remains the shipping app definition.
-
-Product behavior is deliberately absent until its purpose and requirements are defined.
+The checked-in Swift package mirrors the app target for command-line `swift test`; the Xcode project is the shipping app definition.

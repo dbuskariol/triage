@@ -1,90 +1,35 @@
 import AppKit
 import SwiftUI
-@preconcurrency import UserNotifications
 
 @MainActor
-private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
     private weak var appModel: TriageAppModel?
-    private var notificationActionHandler: (any NotificationLocalActionHandling)?
-    private var pendingNotificationActions: [NotificationLocalAction] = []
     private var terminationTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
 
-    func install(
-        appModel: TriageAppModel,
-        notificationActionHandler: any NotificationLocalActionHandling
-    ) {
+    func install(appModel: TriageAppModel) {
         self.appModel = appModel
-        self.notificationActionHandler = notificationActionHandler
-        UNUserNotificationCenter.current().delegate = self
-        if wakeObserver == nil {
-            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-                forName: NSWorkspace.didWakeNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.appModel?.handleSystemWake()
-                }
-            }
-        }
-        let pending = pendingNotificationActions
-        pendingNotificationActions = []
-        Task { @MainActor in
-            for action in pending {
-                await notificationActionHandler.handle(action)
-            }
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.appModel?.handleSystemWake() }
         }
     }
 
-    private func stopWakeObservation() {
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
-            self.wakeObserver = nil
-        }
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        #if DEBUG
-        guard !TriageUITestFixture.isRequested else { return }
-        #endif
-        UNUserNotificationCenter.current().delegate = self
+    func applicationDidBecomeActive(_ notification: Notification) {
+        appModel?.applicationDidBecomeActive()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard terminationTask == nil, let appModel else {
-            return terminationTask == nil ? .terminateNow : .terminateLater
-        }
-        terminationTask = Task { [weak self, weak sender] in
-            self?.stopWakeObservation()
+        guard let appModel else { return .terminateNow }
+        guard terminationTask == nil else { return .terminateLater }
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        terminationTask = Task {
             await appModel.shutdown()
-            sender?.reply(toApplicationShouldTerminate: true)
-            self?.terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
-    }
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
-        guard let action = NotificationResponseRouter.localAction(from: response) else {
-            completionHandler()
-            return
-        }
-        completionHandler()
-        Task { @MainActor in
-            await handleNotificationAction(action)
-        }
-    }
-
-    private func handleNotificationAction(_ action: NotificationLocalAction) async {
-        guard let notificationActionHandler else {
-            pendingNotificationActions.append(action)
-            return
-        }
-        await notificationActionHandler.handle(action)
     }
 }
 
@@ -93,164 +38,55 @@ struct TriageApp: App {
     @NSApplicationDelegateAdaptor(TriageApplicationDelegate.self) private var appDelegate
     @StateObject private var navigation: AppNavigationModel
     @StateObject private var appModel: TriageAppModel
-    @StateObject private var preferences: AppPreferences
-    @StateObject private var notificationSettings: NativeNotificationSettings
-    @StateObject private var notificationAuthorization: NotificationSystemAuthorization
-    @StateObject private var softwareUpdates: SoftwareUpdateController
-    @StateObject private var externalNavigation: ExternalNavigationConfirmationCoordinator
-    @StateObject private var workspaceAccessibility: WorkspaceAccessibilityCoordinator
-    private let notificationScheduler: UserNotificationCenterScheduler?
-    private let notificationResponseAdapter: NotificationResponseApplicationAdapter?
-    private let rootDefaults: UserDefaults
-    #if DEBUG
-    private let uiTestFixture: TriageUITestFixture?
-    #endif
+    @StateObject private var preferences = AppPreferences()
+    @StateObject private var softwareUpdates = SoftwareUpdateController()
 
     init() {
-        #if DEBUG
-        do {
-            uiTestFixture = try TriageUITestFixture.makeIfRequested()
-        } catch {
-            fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
-        }
-        #endif
-
-        let workspaceAccessibility = WorkspaceAccessibilityCoordinator()
-        _workspaceAccessibility = StateObject(wrappedValue: workspaceAccessibility)
-        _externalNavigation = StateObject(wrappedValue: ExternalNavigationConfirmationCoordinator())
-
-        #if DEBUG
-        if let fixture = uiTestFixture {
-            rootDefaults = fixture.defaults
-            let navigation = AppNavigationModel(defaults: fixture.defaults)
-            _navigation = StateObject(wrappedValue: navigation)
-            _preferences = StateObject(wrappedValue: AppPreferences(defaults: fixture.defaults))
-            let notificationSettings = fixture.makeNotificationSettings()
-            _notificationSettings = StateObject(wrappedValue: notificationSettings)
-            _notificationAuthorization = StateObject(wrappedValue: fixture.makeNotificationAuthorization())
-            _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController(startingUpdater: false))
-            notificationScheduler = nil
-            notificationResponseAdapter = nil
-            _appModel = StateObject(wrappedValue: fixture.makeAppModel(
-                workspaceAccessibility: workspaceAccessibility
-            ))
-            return
-        }
-        #endif
-
-        rootDefaults = .standard
         let navigation = AppNavigationModel()
         _navigation = StateObject(wrappedValue: navigation)
-        let businessDayPolicyPreferences = BusinessDayPolicyPreferences()
-        let appPreferences = AppPreferences(
-            businessDayPolicyPreferences: businessDayPolicyPreferences
-        )
-        _preferences = StateObject(wrappedValue: appPreferences)
-        _notificationAuthorization = StateObject(wrappedValue: NotificationSystemAuthorization())
-        _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController())
-        notificationScheduler = UserNotificationCenterScheduler()
-        notificationResponseAdapter = NotificationResponseApplicationAdapter()
         do {
-            let notificationSettings = NativeNotificationSettings()
-            _notificationSettings = StateObject(wrappedValue: notificationSettings)
             let fileManager = FileManager.default
-            let applicationSupportDirectory = try fileManager.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            let cachesDirectory = try fileManager.url(
-                for: .cachesDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            let vaultRegistry = try VaultRegistry()
-            let secretStore = KeychainSecretStore.shared
-            notificationSettings.configureEncryptedConsent(
-                vaultRegistry: vaultRegistry,
-                secretStore: secretStore
-            )
             let composition = TriageProductionComposition(
-                vaultRegistry: vaultRegistry,
-                secretStore: secretStore,
-                applicationSupportDirectory: applicationSupportDirectory,
-                cachesDirectory: cachesDirectory
+                vaultRegistry: try VaultRegistry(),
+                secretStore: .shared,
+                applicationSupportDirectory: try fileManager.url(
+                    for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+                ),
+                cachesDirectory: try fileManager.url(
+                    for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+                )
             )
             _appModel = StateObject(wrappedValue: TriageAppModel(
                 dependencies: composition.dependencies(
-                    notificationSettings: notificationSettings,
-                    notificationDeliveryLeaseGate: notificationSettings.notificationDeliveryLeaseGate,
-                    businessDayPolicyProvider: { businessDayPolicyPreferences.policy() },
-                    purgeAccountNavigationState: { accountID in
-                        navigation.purgeSelectionState(for: accountID)
-                    },
-                    purgeAccountNotificationPreferences: { accountID in
-                        await notificationSettings.removeAccountPreferences(for: accountID)
-                    }
-                ),
-                vaultRegistry: vaultRegistry,
-                workspaceAccessibility: workspaceAccessibility,
-                automaticRefreshEnabled: appPreferences.refreshBehavior == .automatic
+                    purgeAccountNavigationState: { navigation.purgeSelectionState(for: $0) }
+                )
             ))
         } catch {
-            fatalError(TriageStartupDiagnostics.workspaceConstructionFatalDiagnostic(for: error))
+            fatalError("Triage could not construct its local encrypted workspace.")
         }
     }
 
     var body: some Scene {
         Window("Triage", id: WorkspaceWindowRestoration.mainWindowFrameIdentifier) {
-            ExternalNavigationConfirmationHost(coordinator: externalNavigation) {
-                RootView(defaults: rootDefaults)
-                    .environmentObject(appModel)
-                    .environmentObject(navigation)
-                    .environmentObject(preferences)
-                    .environmentObject(notificationSettings)
-                    .environmentObject(notificationAuthorization)
-                    .environmentObject(softwareUpdates)
-                    .environmentObject(workspaceAccessibility)
-                    .frame(minWidth: 940, minHeight: 680)
-                    .task {
-                        #if DEBUG
-                        if let uiTestFixture {
-                            await uiTestFixture.bootstrap(appModel)
-                            return
-                        }
-                        guard !TriageUITestFixture.isUnitTestHost else { return }
-                        #endif
-                        guard let notificationResponseAdapter, let notificationScheduler else { return }
-                        notificationResponseAdapter.install(routeHandler: appModel)
-                        appDelegate.install(
-                            appModel: appModel,
-                            notificationActionHandler: notificationResponseAdapter
-                        )
-                        await appModel.restoreAccounts()
-                        if preferences.refreshBehavior == .automatic {
-                            await appModel.startAutomaticRefreshes()
-                            await appModel.refreshSelectedOrganizationAfterAccessCheck()
-                            await appModel.launchOrganizationRefreshLifecycle()
-                        }
-                        await notificationScheduler.registerLocalActions()
-                    }
-            }
+            RootView()
+                .environmentObject(appModel)
+                .environmentObject(navigation)
+                .environmentObject(preferences)
+                .environmentObject(softwareUpdates)
+                .frame(minWidth: 940, minHeight: 620)
+                .task {
+                    guard !Self.isRunningTests else { return }
+                    appDelegate.install(appModel: appModel)
+                    await appModel.restoreAccounts()
+                }
         }
-        .defaultSize(width: 1080, height: 760)
-        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1180, height: 760)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") {
-                    softwareUpdates.checkForUpdates()
-                }
-                .disabled(!softwareUpdates.canCheckForUpdates)
+                Button("Check for Updates…") { softwareUpdates.checkForUpdates() }
+                    .disabled(!softwareUpdates.canCheckForUpdates)
             }
-            TriageWorkspaceCommands(
-                appModel: appModel,
-                navigation: navigation,
-                preferences: preferences,
-                externalNavigation: externalNavigation,
-                workspaceAccessibility: workspaceAccessibility
-            )
+            TriageWorkspaceCommands(appModel: appModel)
             TriageSettingsWindowCommands()
         }
 
@@ -258,7 +94,6 @@ struct TriageApp: App {
             MenuBarView()
                 .environmentObject(appModel)
                 .environmentObject(navigation)
-                .environmentObject(softwareUpdates)
         } label: {
             Label("Triage", systemImage: "square.stack.3d.up")
         }
@@ -269,23 +104,14 @@ struct TriageApp: App {
                 .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
-                .environmentObject(notificationSettings)
-                .environmentObject(notificationAuthorization)
                 .environmentObject(softwareUpdates)
-                .frame(
-                    minWidth: SettingsSidebarLayout.minimumWindowWidth,
-                    idealWidth: SettingsSidebarLayout.defaultWindowWidth,
-                    minHeight: 620,
-                    idealHeight: 680
-                )
+                .frame(minWidth: 720, minHeight: 560)
         }
-        .defaultSize(
-            width: SettingsSidebarLayout.defaultWindowWidth,
-            height: 680
-        )
-        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 820, height: 640)
     }
 
+    /// MenuBarExtra writes its inserted state back during scene updates.
+    /// Publishing an unchanged value would re-evaluate the scene recursively.
     private var menuBarExtraInsertion: Binding<Bool> {
         Binding(
             get: { preferences.showMenuBarExtra },
@@ -296,6 +122,10 @@ struct TriageApp: App {
         )
     }
 
+    /// The XCTest host launches the app; it must not touch Keychain or GitHub.
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
 }
 
 private struct TriageSettingsWindowCommands: Commands {
@@ -303,16 +133,8 @@ private struct TriageSettingsWindowCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") {
-                openWindow(id: "settings")
-            }
-            .keyboardShortcut(",", modifiers: .command)
+            Button("Settings…") { openWindow(id: "settings") }
+                .keyboardShortcut(",", modifiers: .command)
         }
-    }
-}
-
-enum TriageStartupDiagnostics {
-    static func workspaceConstructionFatalDiagnostic(for _: Error) -> String {
-        "Triage could not construct its local encrypted workspace."
     }
 }

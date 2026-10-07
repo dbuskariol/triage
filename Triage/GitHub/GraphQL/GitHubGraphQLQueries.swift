@@ -1,37 +1,13 @@
 import Foundation
 
 enum GitHubGraphQLQueries {
-    private static let productionOperationNames = [
-        "TriageViewer",
-        "TriageHydrateNodes",
-        "TriagePullRequestReviewThreads",
-        "TriagePullRequestReviewThreadComments",
-        "TriagePullRequestStatusChecks",
-        "TriageRepositoryDiscussions",
-        "TriageDiscussionComments",
-        "TriageDiscussionCommentReplies",
-        "TriageOrganizationProjectsV2",
-        "TriageProjectV2Items",
-        "TriageProjectV2ItemFieldValues"
-    ]
+    private static let productionOperationNames = ["TriageViewer", "TriagePersonalWorkSearch"]
 
     /// Every operation permitted to cross the GraphQL transport boundary.
     /// Keep this inventory exhaustive: callers cannot send dynamically-built
     /// documents, even when they are read-only.
     static func registeredQueries() throws -> [GitHubGraphQLQuery] {
-        let queries = try [
-            viewer(),
-            hydrateNodes(),
-            pullRequestReviewThreads(),
-            pullRequestReviewThreadComments(),
-            pullRequestStatusChecks(),
-            repositoryDiscussions(),
-            discussionComments(),
-            discussionCommentReplies(),
-            organizationProjectsV2(),
-            projectV2Items(),
-            projectV2ItemFieldValues()
-        ]
+        let queries = try [viewer(), personalWorkSearch()]
         try validateProductionRegistry(queries)
         return queries
     }
@@ -103,6 +79,7 @@ enum GitHubGraphQLQueries {
             name
             avatarUrl
           }
+
           rateLimit {
             cost
             remaining
@@ -114,286 +91,51 @@ enum GitHubGraphQLQueries {
         )
     }
 
-    static func hydrateNodes() throws -> GitHubGraphQLQuery {
+    static func personalWorkSearch() throws -> GitHubGraphQLQuery {
         try GitHubGraphQLQuery(
         document: """
-        query TriageHydrateNodes($ids: [ID!]!) {
-          nodes(ids: $ids) {
-            ... on Issue {
-              __typename id databaseId number title body url state createdAt updatedAt closedAt locked
-              author { ...ActorFields }
-              repository { ...RepositoryFields }
-              assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }
-              labels(first: 50) { nodes { id name color } pageInfo { hasNextPage } }
-              comments { totalCount }
-            }
-            ... on PullRequest {
-              __typename id databaseId number title body url state createdAt updatedAt closedAt mergedAt isDraft
-              mergeable headRefName headRefOid baseRefName reviewDecision
-              author { ...ActorFields }
-              repository { ...RepositoryFields }
-              assignees(first: 50) { nodes { ...ActorFields } pageInfo { hasNextPage } }
-              labels(first: 50) { nodes { id name color } pageInfo { hasNextPage } }
-              reviewRequests(first: 50) {
-                nodes {
-                  requestedReviewer {
-                    ... on User { ...ActorFields }
-                    ... on Team { id slug avatarUrl }
+        query TriagePersonalWorkSearch($query: String!, $cursor: String) {
+          search(query: $query, type: ISSUE, first: 25, after: $cursor) {
+            issueCount
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on Issue {
+                id number title url state createdAt updatedAt body
+                author { login }
+                repository { nameWithOwner isArchived }
+                labels(first: 20) { nodes { name } }
+                assignees(first: 20) { nodes { login } }
+                comments(last: 5) { nodes { author { login } createdAt body } }
+              }
+              ... on PullRequest {
+                id number title url state createdAt updatedAt body
+                author { login }
+                repository { nameWithOwner isArchived }
+                labels(first: 20) { nodes { name } }
+                assignees(first: 20) { nodes { login } }
+                comments(last: 5) { nodes { author { login } createdAt body } }
+                isDraft merged reviewDecision mergeable additions deletions
+                reviewRequests(first: 20) {
+                  nodes {
+                    requestedReviewer {
+                      __typename
+                      ... on User { login }
+                      ... on Team { combinedSlug }
+                      ... on Bot { login }
+                    }
                   }
                 }
-                pageInfo { hasNextPage }
-              }
-              closingIssuesReferences(first: 50) {
-                nodes { id }
-                pageInfo { hasNextPage }
+                latestReviews(first: 10) { nodes { author { login } state submittedAt } }
+                commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+                reviewThreads(first: 50) { nodes { isResolved } }
               }
             }
           }
           rateLimit { cost remaining resetAt }
         }
-        fragment ActorFields on Actor { id login avatarUrl }
-        fragment RepositoryFields on Repository { id nameWithOwner isPrivate isArchived hasDiscussions url }
         """,
-        operationName: "TriageHydrateNodes"
-        )
-    }
-
-    static func pullRequestReviewThreads() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriagePullRequestReviewThreads($pullRequestID: ID!, $after: String) {
-              node(id: $pullRequestID) {
-                ... on PullRequest {
-                  id
-                  reviewThreads(first: 50, after: $after) {
-                    nodes {
-                      id
-                      isResolved
-                      isOutdated
-                    }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriagePullRequestReviewThreads"
-        )
-    }
-
-    static func pullRequestReviewThreadComments() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriagePullRequestReviewThreadComments($threadID: ID!, $after: String) {
-              node(id: $threadID) {
-                ... on PullRequestReviewThread {
-                  id
-                  comments(first: 50, after: $after) {
-                    nodes {
-                      id
-                      body
-                      createdAt
-                      updatedAt
-                      url
-                      author { id login avatarUrl }
-                    }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriagePullRequestReviewThreadComments"
-        )
-    }
-
-    /// The sole authority for a pull request's current status checks. Both
-    /// CheckRun and StatusContext implement RequirableByPullRequest, so
-    /// requiredness is evaluated by GitHub for this exact pull request rather
-    /// than inferred from a branch rule or a similarly named check.
-    static func pullRequestStatusChecks() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriagePullRequestStatusChecks($pullRequestID: ID!, $after: String) {
-              node(id: $pullRequestID) {
-                ... on PullRequest {
-                  id
-                  number
-                  mergeable
-                  headRefOid
-                  statusCheckRollup {
-                    contexts(first: 50, after: $after) {
-                      nodes {
-                        __typename
-                        ... on CheckRun {
-                          id name status conclusion completedAt
-                          isRequired(pullRequestId: $pullRequestID)
-                        }
-                        ... on StatusContext {
-                          id context state updatedAt
-                          isRequired(pullRequestId: $pullRequestID)
-                        }
-                      }
-                      pageInfo { hasNextPage endCursor }
-                    }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriagePullRequestStatusChecks"
-        )
-    }
-
-    static func repositoryDiscussions() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageRepositoryDiscussions($repositoryID: ID!, $after: String) {
-              node(id: $repositoryID) {
-                ... on Repository {
-                  id
-                  discussions(first: 50, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) {
-                    nodes {
-                      id number title body url createdAt updatedAt closedAt isAnswered
-                      category { name }
-                      answer { id }
-                      comments { totalCount }
-                    }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriageRepositoryDiscussions"
-        )
-    }
-
-    static func discussionComments() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageDiscussionComments($discussionID: ID!, $after: String) {
-              node(id: $discussionID) {
-                ... on Discussion {
-                  id
-                  comments(first: 50, after: $after) {
-                    nodes { id body createdAt updatedAt url author { id login avatarUrl } replies { totalCount } }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriageDiscussionComments"
-        )
-    }
-
-    static func discussionCommentReplies() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageDiscussionCommentReplies($commentID: ID!, $after: String) {
-              node(id: $commentID) {
-                ... on DiscussionComment {
-                  id
-                  replies(first: 50, after: $after) {
-                    nodes { id body createdAt updatedAt url author { id login avatarUrl } }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriageDiscussionCommentReplies"
-        )
-    }
-
-    static func organizationProjectsV2() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageOrganizationProjectsV2($organizationID: ID!, $after: String) {
-              node(id: $organizationID) {
-                ... on Organization {
-                  id
-                  projectsV2(first: 50, after: $after) {
-                    nodes { id number title shortDescription closed url updatedAt }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriageOrganizationProjectsV2"
-        )
-    }
-
-    static func projectV2Items() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageProjectV2Items($projectID: ID!, $after: String) {
-              node(id: $projectID) {
-                ... on ProjectV2 {
-                  id
-                  items(first: 50, after: $after) {
-                    nodes {
-                      id type updatedAt
-                      content {
-                        __typename
-                        ... on Issue { id }
-                        ... on PullRequest { id }
-                        ... on DraftIssue { id }
-                      }
-                    }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            """,
-            operationName: "TriageProjectV2Items"
-        )
-    }
-
-    static func projectV2ItemFieldValues() throws -> GitHubGraphQLQuery {
-        try GitHubGraphQLQuery(
-            document: """
-            query TriageProjectV2ItemFieldValues($itemID: ID!, $after: String) {
-              node(id: $itemID) {
-                ... on ProjectV2Item {
-                  id
-                  fieldValues(first: 50, after: $after) {
-                    nodes {
-                      __typename
-                      ... on ProjectV2ItemFieldTextValue { text field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldNumberValue { number field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldDateValue { date field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldSingleSelectValue { name field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldIterationValue { title field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldUserValue { users(first: 50) { nodes { id } pageInfo { hasNextPage } } field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldLabelValue { labels(first: 50) { nodes { id name } pageInfo { hasNextPage } } field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldMilestoneValue { milestone { id title } field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldRepositoryValue { repository { id nameWithOwner } field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 50) { nodes { id } pageInfo { hasNextPage } } field { ...ProjectField } }
-                      ... on ProjectV2ItemFieldIssueValue { issue { id } field { ...ProjectField } }
-                    }
-                    pageInfo { hasNextPage endCursor }
-                  }
-                }
-              }
-              rateLimit { cost remaining resetAt }
-            }
-            fragment ProjectField on ProjectV2FieldConfiguration {
-              ... on ProjectV2FieldCommon { id name dataType }
-            }
-            """,
-            operationName: "TriageProjectV2ItemFieldValues"
+        operationName: "TriagePersonalWorkSearch"
         )
     }
 }

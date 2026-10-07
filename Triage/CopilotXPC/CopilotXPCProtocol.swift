@@ -17,7 +17,7 @@ enum CopilotXPCError: Error, Equatable, Sendable {
   case processLaunchFailed
   case processExited
   case operationInProgress
-  case noActiveAnalysis
+  case noActiveOperation
   case operationCancelled
   case operationTimedOut
   case shutDown
@@ -194,7 +194,11 @@ final class CopilotEphemeralCredential: @unchecked Sendable, CustomStringConvert
 /// or a process environment. The Rust helper zeroizes its frame credential.
 struct CopilotAuthenticateRequest: Sendable, CustomStringConvertible {
   let header: CopilotRequestHeader
-  let credential: CopilotEphemeralCredential
+  /// `nil` selects the CLI's standard OAuth device flow. A credential is
+  /// retained only for backwards-compatible fixture coverage; production
+  /// device sign-in never supplies a GitHub credential.
+  let credential: CopilotEphemeralCredential?
+  let allowsBrowser: Bool
 
   init(
     accountID: AccountID,
@@ -204,186 +208,22 @@ struct CopilotAuthenticateRequest: Sendable, CustomStringConvertible {
   ) {
     header = CopilotRequestHeader(accountID: accountID, organizationID: organizationID, operation: .authenticate, requestID: requestID)
     self.credential = credential
+    allowsBrowser = false
   }
-
-  var description: String {
-    "CopilotAuthenticateRequest(header: \(header), credential: <redacted>)"
-  }
-}
-
-struct CopilotAnalysisInput: Codable, Equatable, Sendable {
-  let candidateID: AIRequestID
-  /// Every byte originating outside the vault's local workflow is untrusted.
-  /// The helper must not treat titles, conversation, labels, or evidence as
-  /// instructions to alter its fixed schema or tool policy.
-  let contentIsUntrusted: Bool
-  let workItemTitle: String
-  let workItemState: String
-  let deterministicReasons: [String]
-  let body: String
-  let labels: [String]
-  let projectFields: [String: String]
-  let conversation: [CopilotConversationExcerpt]
-  let evidence: [CopilotEvidenceExcerpt]
-  let evidenceIDs: [EvidenceID]
-
-  enum CodingKeys: String, CodingKey {
-    case candidateID = "candidate_id"
-    case contentIsUntrusted = "content_is_untrusted"
-    case workItemTitle = "work_item_title"
-    case workItemState = "work_item_state"
-    case deterministicReasons = "deterministic_reasons"
-    case body, labels, conversation, evidence
-    case projectFields = "project_fields"
-    case evidenceIDs = "evidence_ids"
-  }
-
-  init(
-    candidateID: AIRequestID,
-    contentIsUntrusted: Bool = true,
-    workItemTitle: String,
-    workItemState: String,
-    deterministicReasons: [String],
-    body: String,
-    labels: [String] = [],
-    projectFields: [String: String] = [:],
-    conversation: [CopilotConversationExcerpt],
-    evidence: [CopilotEvidenceExcerpt]? = nil,
-    evidenceIDs: [EvidenceID]
-  ) {
-    self.candidateID = candidateID
-    self.contentIsUntrusted = contentIsUntrusted
-    self.workItemTitle = workItemTitle
-    self.workItemState = workItemState
-    self.deterministicReasons = deterministicReasons
-    self.body = body
-    self.labels = labels
-    self.projectFields = projectFields
-    self.conversation = conversation
-    // Compatibility for in-memory fixture callers. Production uses the
-    // explicit source-backed table assembled by `CopilotCandidateInputBuilder`;
-    // an empty compatibility excerpt can never authorize auto-entry.
-    self.evidence = evidence ?? evidenceIDs.map {
-      CopilotEvidenceExcerpt(
-        id: $0,
-        actorRole: "source:unknown",
-        text: "",
-        timestamp: .distantPast,
-        explicitDeadline: nil
-      )
-    }
-    self.evidenceIDs = evidenceIDs
-  }
-
-  func validate() throws {
-    guard contentIsUntrusted,
-      !workItemTitle.isEmpty,
-      !workItemState.isEmpty,
-      !deterministicReasons.isEmpty,
-      Set(deterministicReasons).count == deterministicReasons.count,
-      Set(evidenceIDs).count == evidenceIDs.count,
-      evidence.count <= 128,
-      labels.count <= 64,
-      projectFields.count <= 64,
-      workItemTitle.utf8.count <= 4_096,
-      workItemState.utf8.count <= 256,
-      body.utf8.count <= 65_536,
-      labels.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }),
-      Set(labels).count == labels.count,
-      projectFields.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 512 && $0.value.utf8.count <= 2_048 }),
-      deterministicReasons.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1_024 }),
-      conversation.allSatisfy({
-        !$0.authorRole.isEmpty
-          && $0.authorRole.utf8.count <= 256
-          && $0.text.utf8.count <= 32_768
-          && evidenceIDs.contains($0.evidenceID)
-          && $0.timestamp.timeIntervalSinceReferenceDate.isFinite
-      }),
-      Set(evidence.map(\.id)).count == evidence.count,
-      Set(evidence.map(\.id)) == Set(evidenceIDs),
-      evidence.allSatisfy({
-        !$0.actorRole.isEmpty
-          && $0.actorRole.utf8.count <= 256
-          && $0.text.utf8.count <= 8_192
-          && $0.timestamp.timeIntervalSinceReferenceDate.isFinite
-          && ($0.explicitDeadline?.timeIntervalSinceReferenceDate.isFinite ?? true)
-      })
-    else {
-      throw CopilotXPCError.invalidAnalysis
-    }
-  }
-}
-
-/// The fixed evidence table is the only source context a response may cite.
-/// `explicitDeadline` is intentionally absent unless normalization identified
-/// it as a source fact; the helper cannot invent one from prose.
-struct CopilotEvidenceExcerpt: Codable, Equatable, Sendable {
-  let id: EvidenceID
-  let actorRole: String
-  let text: String
-  let timestamp: Date
-  let explicitDeadline: Date?
-
-  enum CodingKeys: String, CodingKey {
-    case id
-    case actorRole = "actor_role"
-    case text, timestamp
-    case explicitDeadline = "explicit_deadline"
-  }
-}
-
-struct CopilotConversationExcerpt: Codable, Equatable, Sendable {
-  let evidenceID: EvidenceID
-  let authorRole: String
-  let text: String
-  let timestamp: Date
-
-  enum CodingKeys: String, CodingKey {
-    case evidenceID = "evidence_id"
-    case authorRole = "author_role"
-    case text, timestamp
-  }
-}
-
-struct CopilotAnalyzeRequest: Codable, Equatable, Sendable {
-  let header: CopilotRequestHeader
-  let modelID: String?
-  let input: CopilotAnalysisInput
-  let deadline: Date
 
   init(
     accountID: AccountID,
     organizationID: OrganizationID,
-    input: CopilotAnalysisInput,
-    modelID: String? = nil,
-    deadline: Date,
-    requestID: UUID = UUID()
+    requestID: UUID = UUID(),
+    allowsBrowser: Bool = true
   ) {
-    header = CopilotRequestHeader(
-      accountID: accountID,
-      organizationID: organizationID,
-      operation: .analyze,
-      requestID: requestID
-    )
-    self.modelID = modelID
-    self.input = input
-    self.deadline = deadline
+    header = CopilotRequestHeader(accountID: accountID, organizationID: organizationID, operation: .authenticate, requestID: requestID)
+    credential = nil
+    self.allowsBrowser = allowsBrowser
   }
 
-  init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CopilotWireCodingKey.self)
-    header = try CopilotRequestHeader(container: container)
-    modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
-    input = try container.decode(CopilotAnalysisInput.self, forKey: .input)
-    deadline = try container.decode(Date.self, forKey: .deadline)
-  }
-
-  func encode(to encoder: any Encoder) throws {
-    var container = encoder.container(keyedBy: CopilotWireCodingKey.self)
-    try header.encode(to: &container)
-    try container.encodeIfPresent(modelID, forKey: .modelID)
-    try container.encode(input, forKey: .input)
-    try container.encode(deadline, forKey: .deadline)
+  var description: String {
+    "CopilotAuthenticateRequest(header: \(header), credential: <redacted>)"
   }
 }
 
@@ -551,187 +391,6 @@ struct CopilotModelsResponse: Codable, Equatable, Sendable {
   }
 }
 
-/// A source-grounded assertion made by an action suggestion.  Claims are
-/// optional for review-only output, but are deliberately structured so the
-/// app can independently reject an automatic action that does not exactly
-/// match its current, bounded evidence table.
-struct CopilotActionClaim: Codable, Equatable, Sendable {
-  let evidenceID: EvidenceID
-  let actorRole: String
-  let timestamp: Date
-  let quotedSpan: String
-  let deterministicReasonID: String
-
-  enum CodingKeys: String, CodingKey {
-    case evidenceID = "evidence_id"
-    case actorRole = "actor_role"
-    case timestamp
-    case quotedSpan = "quoted_span"
-    case deterministicReasonID = "deterministic_reason_id"
-  }
-
-  init(
-    evidenceID: EvidenceID,
-    actorRole: String,
-    timestamp: Date,
-    quotedSpan: String,
-    deterministicReasonID: String
-  ) {
-    self.evidenceID = evidenceID
-    self.actorRole = actorRole
-    self.timestamp = timestamp
-    self.quotedSpan = quotedSpan
-    self.deterministicReasonID = deterministicReasonID
-  }
-}
-
-struct CopilotSuggestedActionItem: Codable, Equatable, Sendable {
-  let id: String
-  let text: String
-  let confidence: Double
-  let evidenceIDs: [EvidenceID]
-  let deadline: Date?
-  /// Empty claims keep an otherwise valid semantic result review-only.
-  let claims: [CopilotActionClaim]
-
-  enum CodingKeys: String, CodingKey {
-    case id, text, confidence, deadline, claims
-    case evidenceIDs = "evidence_ids"
-  }
-
-  init(
-    id: String,
-    text: String,
-    confidence: Double = 0,
-    evidenceIDs: [EvidenceID],
-    deadline: Date? = nil,
-    claims: [CopilotActionClaim] = []
-  ) {
-    self.id = id
-    self.text = text
-    self.confidence = confidence
-    self.evidenceIDs = evidenceIDs
-    self.deadline = deadline
-    self.claims = claims
-  }
-}
-
-struct CopilotAnalysisResponse: Codable, Equatable, Sendable {
-  let header: CopilotResponseHeader
-  let summary: String
-  let state: String
-  let confidence: Double
-  let evidenceIDs: [EvidenceID]
-  let actionItems: [CopilotSuggestedActionItem]
-  let nextAction: String?
-  let modelID: String
-  let promptProvenance: String
-
-  init(
-    header: CopilotResponseHeader,
-    summary: String,
-    state: String,
-    confidence: Double,
-    evidenceIDs: [EvidenceID],
-    actionItems: [CopilotSuggestedActionItem],
-    nextAction: String?,
-    modelID: String,
-    promptProvenance: String
-  ) {
-    self.header = header
-    self.summary = summary
-    self.state = state
-    self.confidence = confidence
-    self.evidenceIDs = evidenceIDs
-    self.actionItems = actionItems
-    self.nextAction = nextAction
-    self.modelID = modelID
-    self.promptProvenance = promptProvenance
-  }
-
-  init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CopilotWireCodingKey.self)
-    header = try CopilotResponseHeader(container: container)
-    summary = try container.decode(String.self, forKey: .summary)
-    state = try container.decode(String.self, forKey: .state)
-    confidence = try container.decode(Double.self, forKey: .confidence)
-    evidenceIDs = try container.decode([EvidenceID].self, forKey: .evidenceIDs)
-    actionItems = try container.decode([CopilotSuggestedActionItem].self, forKey: .actionItems)
-    nextAction = try container.decodeIfPresent(String.self, forKey: .nextAction)
-    modelID = try container.decode(String.self, forKey: .modelID)
-    promptProvenance = try container.decode(String.self, forKey: .promptProvenance)
-  }
-
-  func encode(to encoder: any Encoder) throws {
-    var container = encoder.container(keyedBy: CopilotWireCodingKey.self)
-    try header.encode(to: &container)
-    try container.encode(summary, forKey: .summary)
-    try container.encode(state, forKey: .state)
-    try container.encode(confidence, forKey: .confidence)
-    try container.encode(evidenceIDs, forKey: .evidenceIDs)
-    try container.encode(actionItems, forKey: .actionItems)
-    try container.encodeIfPresent(nextAction, forKey: .nextAction)
-    try container.encode(modelID, forKey: .modelID)
-    try container.encode(promptProvenance, forKey: .promptProvenance)
-  }
-
-  func validate(against input: CopilotAnalysisInput) throws {
-    let permittedEvidenceIDs = Set(input.evidenceIDs)
-    let evidenceByID = Dictionary(uniqueKeysWithValues: input.evidence.map { ($0.id, $0) })
-    let permittedReasons = Set(input.deterministicReasons)
-    guard (0...1).contains(confidence),
-      !summary.isEmpty,
-      !state.isEmpty,
-      !modelID.isEmpty,
-      !promptProvenance.isEmpty,
-      summary.utf8.count <= 16_384,
-      state.utf8.count <= 256,
-      nextAction?.utf8.count ?? 0 <= 8_192,
-      !summary.contains("```"),
-      !state.contains("```"),
-      !(nextAction?.contains("```") ?? false),
-      Set(evidenceIDs).count == evidenceIDs.count,
-      Set(evidenceIDs).isSubset(of: permittedEvidenceIDs),
-      Set(actionItems.map(\.id)).count == actionItems.count,
-      actionItems.allSatisfy({ action in
-        !action.id.isEmpty
-          && !action.text.isEmpty
-          && action.text.utf8.count <= 8_192
-          && !action.text.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
-          && (0...1).contains(action.confidence)
-          && (action.deadline?.timeIntervalSinceReferenceDate.isFinite ?? true)
-          && Set(action.evidenceIDs).count == action.evidenceIDs.count
-          && Set(action.evidenceIDs).isSubset(of: permittedEvidenceIDs)
-          && (action.deadline == nil || action.evidenceIDs.contains { evidenceID in
-            input.evidence.first(where: { $0.id == evidenceID })?.explicitDeadline == action.deadline
-          })
-          // A semantic-only response may carry no claims and remains
-          // review-only. Any claim it does provide must be exact evidence,
-          // not a model-supplied paraphrase or attribution.
-          && Set(action.claims.map(\.evidenceID)).count == action.claims.count
-          && action.claims.allSatisfy({ claim in
-            guard let evidence = evidenceByID[claim.evidenceID] else { return false }
-            return action.evidenceIDs.contains(claim.evidenceID)
-              && !claim.actorRole.isEmpty
-              && claim.actorRole.utf8.count <= 256
-              && claim.actorRole == evidence.actorRole
-              && claim.timestamp.timeIntervalSinceReferenceDate.isFinite
-              && claim.timestamp == evidence.timestamp
-              && !claim.quotedSpan.isEmpty
-              && claim.quotedSpan.utf8.count <= 8_192
-              && !claim.quotedSpan.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
-              && evidence.text.contains(claim.quotedSpan)
-              && !claim.deterministicReasonID.isEmpty
-              && claim.deterministicReasonID.utf8.count <= 1_024
-              && permittedReasons.contains(claim.deterministicReasonID)
-          })
-      })
-    else {
-      throw CopilotXPCError.invalidAnalysis
-    }
-  }
-}
-
 struct CopilotCancelResponse: Codable, Equatable, Sendable {
   let header: CopilotResponseHeader
   let cancelledRequestID: UUID
@@ -740,6 +399,7 @@ struct CopilotCancelResponse: Codable, Equatable, Sendable {
     self.header = header
     self.cancelledRequestID = cancelledRequestID
   }
+
 
   init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CopilotWireCodingKey.self)
@@ -774,9 +434,20 @@ protocol TriageCopilotHelping: Sendable {
   func health(_ request: CopilotHealthRequest) async throws -> CopilotHealthResponse
   func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse
   func models(_ request: CopilotModelsRequest) async throws -> CopilotModelsResponse
-  func analyze(_ request: CopilotAnalyzeRequest) async throws -> CopilotAnalysisResponse
+  func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse
   func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse
+}
+
+extension TriageCopilotHelping {
+
+
+}
+
+extension TriageCopilotHelping {
+  func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse {
+    throw CopilotXPCError.invalidResponse
+  }
 }
 
 private enum CopilotWireCodingKey: String, CodingKey {
@@ -786,11 +457,10 @@ private enum CopilotWireCodingKey: String, CodingKey {
   case organizationID = "organization_id"
   case operation, status, failure, health, authentication, models, credential
   case modelID = "model_id"
-  case input, deadline, summary, state, confidence
-  case evidenceIDs = "evidence_ids"
-  case actionItems = "action_items"
-  case nextAction = "next_action"
-  case promptProvenance = "prompt_provenance"
+  case deadline
+  case triage
+  case viewerLogin = "viewer_login"
+  case items, decisions, id, disposition, priority, reason, instructions
   case targetRequestID = "target_request_id"
   case cancelledRequestID = "cancelled_request_id"
 }
@@ -816,7 +486,7 @@ extension CopilotRequestHeader {
 
   fileprivate func encode(to container: inout KeyedEncodingContainer<CopilotWireCodingKey>) throws {
     try container.encode(protocolVersion, forKey: .protocolVersion)
-    try container.encode(requestID, forKey: .requestID)
+    try container.encode(requestID.uuidString.lowercased(), forKey: .requestID)
     try container.encode(accountID, forKey: .accountID)
     try container.encode(organizationID, forKey: .organizationID)
     try container.encode(operation, forKey: .operation)
@@ -851,4 +521,95 @@ extension CopilotResponseHeader {
     try container.encode(status, forKey: .status)
     try container.encodeIfPresent(failure, forKey: .failure)
   }
+}
+
+struct CopilotTriageReview: Codable, Equatable, Sendable {
+  let author: String
+  let state: String
+  let submittedAt: Date?
+  enum CodingKeys: String, CodingKey { case author, state; case submittedAt = "submitted_at" }
+}
+
+struct CopilotTriagePullRequest: Codable, Equatable, Sendable {
+  let isDraft: Bool
+  let reviewDecision: String?
+  let requestedReviewers: [String]
+  let latestReviews: [CopilotTriageReview]
+  let checks: String?
+  let mergeable: String?
+  let unresolvedReviewThreads: Int
+  let additions: Int
+  let deletions: Int
+  enum CodingKeys: String, CodingKey { case isDraft = "is_draft"; case reviewDecision = "review_decision"; case requestedReviewers = "requested_reviewers"; case latestReviews = "latest_reviews"; case checks, mergeable; case unresolvedReviewThreads = "unresolved_review_threads"; case additions, deletions }
+}
+
+struct CopilotTriageActivity: Codable, Equatable, Sendable {
+  let author: String
+  let createdAt: Date
+  let excerpt: String
+  enum CodingKeys: String, CodingKey { case author; case createdAt = "created_at"; case excerpt }
+}
+
+struct CopilotTriageItem: Codable, Equatable, Sendable {
+  let id: String
+  let kind: String
+  let repository: String
+  let number: Int
+  let title: String
+  let state: String
+  let author: String?
+  let updatedAt: Date
+  let relationships: [String]
+  let labels: [String]
+  let assignees: [String]
+  let body: String
+  let pullRequest: CopilotTriagePullRequest?
+  let recentActivity: [CopilotTriageActivity]
+  /// Outcomes the user's hard rules will enforce, so Copilot's explanation agrees.
+  var ruleHints: [String]? = nil
+  enum CodingKeys: String, CodingKey { case id, kind, repository, number, title, state, author, relationships, labels, assignees, body; case updatedAt = "updated_at"; case pullRequest = "pull_request"; case recentActivity = "recent_activity"; case ruleHints = "rule_hints" }
+  func validate() throws {
+    guard !id.isEmpty, !kind.isEmpty, !repository.isEmpty, number > 0, !title.isEmpty, !state.isEmpty, body.utf8.count <= 4_000,
+      Set(relationships).count == relationships.count, relationships.allSatisfy({ !$0.isEmpty }), labels.allSatisfy({ !$0.isEmpty }), assignees.allSatisfy({ !$0.isEmpty }), recentActivity.allSatisfy({ !$0.author.isEmpty && $0.excerpt.utf8.count <= 600 }), (ruleHints ?? []).count <= 10, (ruleHints ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }) else { throw CopilotXPCError.invalidResponse }
+  }
+}
+
+struct CopilotTriageItemDecision: Codable, Equatable, Sendable {
+  let id: String
+  let disposition: TriageDisposition
+  let priority: Int
+  let confidence: Double
+  let summary: String
+  let reason: String
+  let nextAction: String?
+  var instructionNote: String? = nil
+  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason; case nextAction = "next_action"; case instructionNote = "instruction_note" }
+  func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, instructionNote?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
+}
+
+struct CopilotTriageRequest: Codable, Equatable, Sendable {
+  let header: CopilotRequestHeader
+  let modelID: String?
+  let viewerLogin: String
+  let items: [CopilotTriageItem]
+  let deadline: Date
+  /// The user's free-text triage preferences; sent in a delimited system block.
+  let instructions: String?
+  enum CodingKeys: String, CodingKey { case modelID = "model_id"; case viewerLogin = "viewer_login"; case items, deadline, instructions }
+  init(accountID: AccountID, organizationID: OrganizationID, viewerLogin: String, items: [CopilotTriageItem], modelID: String? = nil, deadline: Date, instructions: String? = nil, requestID: UUID = UUID()) { header = .init(accountID: accountID, organizationID: organizationID, operation: .triage, requestID: requestID); self.modelID = modelID; self.viewerLogin = viewerLogin; self.items = items; self.deadline = deadline; self.instructions = instructions }
+  init(from decoder: any Decoder) throws { let c = try decoder.container(keyedBy: CopilotWireCodingKey.self); header = try .init(container: c); modelID = try c.decodeIfPresent(String.self, forKey: .modelID); viewerLogin = try c.decode(String.self, forKey: .viewerLogin); items = try c.decode([CopilotTriageItem].self, forKey: .items); deadline = try c.decode(Date.self, forKey: .deadline); instructions = try c.decodeIfPresent(String.self, forKey: .instructions) }
+  func encode(to encoder: any Encoder) throws { var c = encoder.container(keyedBy: CopilotWireCodingKey.self); try header.encode(to: &c); try c.encodeIfPresent(modelID, forKey: .modelID); try c.encode(viewerLogin, forKey: .viewerLogin); try c.encode(items, forKey: .items); try c.encode(deadline, forKey: .deadline); try c.encodeIfPresent(instructions, forKey: .instructions) }
+  func validate() throws { guard header.operation == .triage, !viewerLogin.isEmpty, (1...20).contains(items.count), Set(items.map(\.id)).count == items.count, (instructions?.utf8.count ?? 0) <= TriageRules.maximumInstructionBytes else { throw CopilotXPCError.invalidResponse }; try items.forEach { try $0.validate() }; guard try JSONEncoder().encode(self).count <= 120 * 1024 else { throw CopilotXPCError.invalidResponse } }
+}
+
+struct CopilotTriageResponse: Codable, Equatable, Sendable {
+  let header: CopilotResponseHeader
+  let modelID: String
+  let decisions: [CopilotTriageItemDecision]
+  enum CodingKeys: String, CodingKey { case modelID = "model_id"; case decisions }
+  init(header: CopilotResponseHeader, modelID: String, decisions: [CopilotTriageItemDecision]) { self.header = header; self.modelID = modelID; self.decisions = decisions }
+  init(from decoder: any Decoder) throws { let c = try decoder.container(keyedBy: CopilotWireCodingKey.self); header = try .init(container: c); modelID = try c.decode(String.self, forKey: .modelID); decisions = try c.decode([CopilotTriageItemDecision].self, forKey: .decisions) }
+  func encode(to encoder: any Encoder) throws { var c = encoder.container(keyedBy: CopilotWireCodingKey.self); try header.encode(to: &c); try c.encode(modelID, forKey: .modelID); try c.encode(decisions, forKey: .decisions) }
+  /// Partial responses are allowed: every decision must be for a distinct requested item.
+  func validate(against request: CopilotTriageRequest) throws { let ids = decisions.map(\.id); guard !modelID.isEmpty, !decisions.isEmpty, Set(ids).count == ids.count, Set(ids).isSubset(of: Set(request.items.map(\.id))) else { throw CopilotXPCError.invalidResponse }; try decisions.forEach { try $0.validate() } }
 }
