@@ -18,7 +18,7 @@ enum AppStartupPresentation: Equatable {
 struct RootView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
-    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
 
     var body: some View {
@@ -40,7 +40,7 @@ struct RootView: View {
         .onAppear {
             appModel.openSettings = { category in
                 navigation.openSettings(category)
-                openWindow(id: "settings")
+                openSettings()
             }
         }
     }
@@ -80,6 +80,10 @@ private struct WorkspaceView: View {
             )
         }
         .onChange(of: appModel.search) { appModel.selectFirstEntry() }
+        .sheet(item: $appModel.ruleDraft) { draft in
+            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { appModel.addRule($0) }
+                .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
+        }
         .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
         .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }

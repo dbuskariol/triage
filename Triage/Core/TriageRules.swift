@@ -129,6 +129,27 @@ struct TriageRule: Codable, Equatable, Identifiable, Sendable {
 
     var isValid: Bool { !conditions.isEmpty && conditions.allSatisfy(\.isValid) }
 
+    /// Conditions describing `item`, most useful first, for building a rule from it.
+    static func suggestedConditions(for item: PersonalWorkItem, viewer: String) -> [TriageRuleCondition] {
+        typealias Condition = TriageRuleCondition
+        var result: [Condition] = []
+        switch item.reviewRequestKind(viewer: viewer) {
+        case .team?: result.append(.init(field: .relationship, value: Condition.Field.reviewRequestedTeam))
+        case .direct?: result.append(.init(field: .relationship, value: Condition.Field.reviewRequestedDirect))
+        case nil:
+            if let relationship = item.primaryRelationship {
+                result.append(.init(field: .relationship, value: relationship.rawValue))
+            }
+        }
+        result += (item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }.prefix(2)
+            .map { .init(field: .requestedTeam, value: $0) }
+        result.append(.init(field: .repository, value: item.repository))
+        if let author = item.author { result.append(.init(field: .author, value: author)) }
+        result += item.labels.prefix(3).map { .init(field: .label, value: $0) }
+        if item.pullRequest?.isDraft == true { result.append(.init(field: .pullRequestStatus, value: "draft")) }
+        return result
+    }
+
     static func quick(_ effect: TriageRuleEffect, _ field: TriageRuleCondition.Field, _ value: String) -> TriageRule {
         TriageRule(name: "", conditions: [TriageRuleCondition(field: field, value: value)], effect: effect)
     }

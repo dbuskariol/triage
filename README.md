@@ -50,7 +50,7 @@ flowchart LR
 
 Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
 
-Select an item to see the full recommendation, pull request status, people, the formatted description, and recent activity. Click **Not right?** to teach Triage with a rule.
+Select an item to see the full recommendation, pull request status, people, the formatted description, and recent activity.
 
 ### Search
 
@@ -71,6 +71,7 @@ Or pick filters from the **Filter** menu (⊜) beside the field; applied filters
 | Switch section | ⌘1 – ⌘6 |
 | Refresh | ⌘R |
 | Search | ⌘F |
+| Create rule from item | ⌥⌘R |
 | Settings | ⌘, |
 
 Marking done or snoozing moves selection to the next item instantly.
@@ -97,7 +98,7 @@ Rule conditions (all must match):
 
 For example, *“My relationship is review requested from my team only → Lower priority”* keeps team-wide review requests from crowding out the ones addressed to you.
 
-Create rules from **Settings ▸ Rules**, by right-clicking any item (**Create Rule**), or with **Not right?** on a recommendation. The recommendation shows which rules applied and how your instructions changed the decision.
+Create a rule from any item with **Create Rule…** (detail view, right-click, or ⌥⌘R), or **Not right?** on a recommendation, which suggests moving it elsewhere. Both open the same editor with conditions suggested from the item as checkboxes and a live preview of what the rule matches. Manage all rules in **Settings ▸ Rules**. The recommendation shows which rules applied and how your instructions changed the decision.
 
 The built-in prompt is intentionally not editable: it enforces the output format, treats GitHub content as untrusted (so text in an issue can't change your instructions), and improves with app updates. See [Architecture › Prompting](Documentation/ARCHITECTURE.md#prompting).
 
@@ -112,17 +113,16 @@ Your own activity never brings done work back; a reply, review, or push from som
 
 ## Settings
 
-| Page | Options |
+Open with ⌘, or **Settings** at the bottom of the sidebar.
+
+| Tab | Options |
 |---|---|
-| **General** | Open at login · Show in menu bar · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Last and next refresh · Keyboard reference |
+| **General** | Open at login · Show in menu bar · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Privacy and local data · Keyboard reference |
 | **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · Mark work done when you handle it |
-| **Accounts** | Connected GitHub accounts, connection status, add and remove |
-| **Organizations** | Which organization's work to show |
+| **Accounts** | Connected GitHub accounts and their status · Which organization's work to show |
 | **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all |
 | **Rules** | Hard rules and Instructions for Copilot, per organization |
-| **Privacy & Data** | What stays local and what's sent to Copilot · Local data size · Show in Finder |
-| **Updates** | Automatic checks and installs · Check now |
-| **About** | Version and components |
+| **Updates** | Automatic checks and installs · Current version · Check now |
 
 ## Privacy and security
 

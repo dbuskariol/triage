@@ -87,7 +87,6 @@ struct TriageApp: App {
                     .disabled(!softwareUpdates.canCheckForUpdates)
             }
             TriageWorkspaceCommands(appModel: appModel)
-            TriageSettingsWindowCommands()
         }
 
         MenuBarExtra(isInserted: menuBarExtraInsertion) {
@@ -99,15 +98,13 @@ struct TriageApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Triage Settings", id: "settings") {
+        Settings {
             SettingsView()
                 .environmentObject(appModel)
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
-                .frame(minWidth: 720, minHeight: 560)
         }
-        .defaultSize(width: 820, height: 640)
     }
 
     /// MenuBarExtra writes its inserted state back during scene updates.
@@ -128,13 +125,3 @@ struct TriageApp: App {
     }
 }
 
-private struct TriageSettingsWindowCommands: Commands {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some Commands {
-        CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { openWindow(id: "settings") }
-                .keyboardShortcut(",", modifiers: .command)
-        }
-    }
-}

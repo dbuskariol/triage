@@ -36,7 +36,8 @@ struct InitialAvatar: View {
 
 // MARK: - Privacy & Data
 
-struct PrivacySettingsView: View {
+/// Privacy and local-data sections, shown on the General tab.
+struct PrivacySettingsSections: View {
     @State private var storageBytes: Int64?
 
     static var dataDirectory: URL {
@@ -44,7 +45,7 @@ struct PrivacySettingsView: View {
     }
 
     var body: some View {
-        Form {
+        Group {
             Section {
                 fact("lock.fill", "Stays on this Mac",
                      "Your work, Copilot’s decisions, rules, and instructions are stored in a database encrypted with a key in your Keychain.")
@@ -55,7 +56,7 @@ struct PrivacySettingsView: View {
                 fact("arrow.down.circle", "Read-only on GitHub",
                      "Triage only reads from GitHub. It never comments, approves, merges, or changes anything.")
             } header: {
-                Text("Your Privacy")
+                Text("Privacy")
             }
 
             Section {
@@ -112,43 +113,11 @@ struct PrivacySettingsView: View {
 
 // MARK: - About
 
-struct AboutSettingsView: View {
+enum AboutSettingsView {
     static var versionString: String {
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "—"
         let build = info?["CFBundleVersion"] as? String ?? "—"
         return "\(version) (\(build))"
-    }
-
-    var body: some View {
-        Form {
-            Section {
-                VStack(spacing: 10) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .frame(width: 96, height: 96)
-                        .accessibilityHidden(true)
-                    Text("Triage").font(.title.weight(.semibold))
-                    Text("Version \(Self.versionString)").foregroundStyle(.secondary).textSelection(.enabled)
-                    Text("Your GitHub work, prioritized by Copilot.")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            }
-            Section("Built With") {
-                LabeledContent("Sparkle") { Text("Secure software updates") }
-                LabeledContent("GRDB and SQLCipher") { Text("Encrypted local database") }
-                LabeledContent("GitHub Copilot SDK") { Text("AI prioritization") }
-            }
-            Section {
-                LabeledContent("System") {
-                    Text("macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
-                        .textSelection(.enabled)
-                }
-            } footer: {
-                Text("© \(Calendar.current.component(.year, from: .now)) Daniel Buskariol.")
-            }
-        }
     }
 }

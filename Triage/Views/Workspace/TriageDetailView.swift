@@ -189,9 +189,12 @@ private struct DetailActionBar: View {
                 .help("Hide until later")
             }
 
-            QuickRuleMenu(item: entry.item, actions: actions)
-                .fixedSize()
-                .help("Create a rule from this item")
+            Button {
+                actions.beginRule(from: entry, correcting: false)
+            } label: {
+                Label("Create Rule…", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .help("Create a rule for work like this (⌥⌘R)")
 
             Spacer(minLength: 0)
 
@@ -218,7 +221,6 @@ private struct RecommendationCard: View {
     let entry: TriageEntry
     let allEntries: [TriageEntry]
     let actions: any WorkspaceActions
-    @State private var isGivingFeedback = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -292,7 +294,7 @@ private struct RecommendationCard: View {
                             .foregroundStyle(.tertiary)
                     }
                     Spacer()
-                    Button("Not right?") { isGivingFeedback = true }
+                    Button("Not right?") { actions.beginRule(from: entry, correcting: true) }
                         .buttonStyle(.link)
                         .font(.caption)
                         .help("Teach Triage how to handle work like this")
@@ -307,9 +309,6 @@ private struct RecommendationCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .sheet(isPresented: $isGivingFeedback) {
-            RuleFeedbackSheet(entry: entry, allEntries: allEntries, actions: actions)
-        }
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(tint.opacity(0.07))

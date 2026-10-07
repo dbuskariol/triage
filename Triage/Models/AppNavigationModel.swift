@@ -4,19 +4,15 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
     case inbox
     case accounts
-    case organizations
     case ai
     case rules
-    case privacy
     case updates
-    case about
 
     var id: Self { self }
 
     var title: String {
         switch self {
         case .ai: "Copilot"
-        case .privacy: "Privacy & Data"
         default: rawValue.capitalized
         }
     }
@@ -24,14 +20,11 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .inbox: "tray.full"
-        case .privacy: "hand.raised"
         case .accounts: "person.crop.circle"
-        case .organizations: "building.2"
         case .ai: "sparkles"
         case .rules: "line.3.horizontal.decrease.circle"
         case .general: "gearshape"
         case .updates: "arrow.triangle.2.circlepath"
-        case .about: "info.circle"
         }
     }
 }

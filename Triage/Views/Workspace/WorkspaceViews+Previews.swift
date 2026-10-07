@@ -9,6 +9,7 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func openOnGitHub(_ entry: TriageEntry) {}
     func openCopilotSettings() {}
     func addRule(_ rule: TriageRule) {}
+    func beginRule(from entry: TriageEntry, correcting: Bool) {}
     func openRulesSettings() {}
 }
 
