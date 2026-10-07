@@ -714,4 +714,18 @@ extension CopilotHelperClientTests {
     let extra = CopilotTriageResponse(header: header, modelID: "auto", decisions: [.init(id: "unknown", disposition: .none, priority: 0, confidence: 1, summary: "No action.", reason: "It is informational.", nextAction: nil)])
     XCTAssertThrowsError(try extra.validate(against: request))
   }
+
+  /// Regression: a decision explaining how the user's instructions applied
+  /// must pass the strict wire allowlist instead of failing the whole batch.
+  func testStrictWireSchemaAcceptsInstructionNotes() throws {
+    let organization = try XCTUnwrap(OrganizationID(rawValue: "triage-org"))
+    let header = CopilotResponseHeader(requestID: UUID(), accountID: copilotTestAccountID, organizationID: organization, status: .triage)
+    var decision = CopilotTriageItemDecision(id: "node-1", disposition: .act, priority: 90, confidence: 0.9, summary: "Act.", reason: "Security work.", nextAction: nil)
+    decision.instructionNote = "You asked to treat security fixes as urgent."
+    let data = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
+    XCTAssertNoThrow(try CopilotWireSchema.validate(data, expectedStatus: .triage))
+    decision.instructionNote = String(repeating: "a", count: 201)
+    let tooLong = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
+    XCTAssertThrowsError(try CopilotWireSchema.validate(tooLong, expectedStatus: .triage))
+  }
 }
