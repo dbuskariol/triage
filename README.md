@@ -58,7 +58,7 @@ The search field at the top of the list filters instantly (⌘F). Type words to 
 
 `repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high`
 
-Suggestions turn into removable filter chips. Search **This Section** or **All Work**; results across all work show which section they're in.
+Or pick filters from the **Filter** menu (⊜) beside the field; applied filters appear as chips you can click to remove. While searching, choose **This Section** or **All Work**; results across all work show which section they're in. Press **Esc** to clear the search, and Esc again (or Return) to go back to the list.
 
 ### Keyboard
 

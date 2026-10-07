@@ -91,7 +91,8 @@ struct TriageListView: View {
             VStack(spacing: 0) {
                 WorkspaceSearchBar(
                     search: $search, focusRequest: searchFocusRequest,
-                    suggestionSource: presentation.allEntries, actions: actions
+                    suggestionSource: presentation.allEntries, actions: actions,
+                    onExit: { isListFocused = true }
                 )
                 if presentation.status.problem != nil {
                     TriageStatusView(status: presentation.status, actions: actions)
