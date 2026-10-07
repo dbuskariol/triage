@@ -134,36 +134,6 @@ actor AccountRepository {
         }
     }
 
-    func synchronizationScope(
-        for accountID: AccountID,
-        organizationID: OrganizationID
-    ) async throws -> SynchronizationScope {
-        try ensureAccountScope(accountID)
-        return try await vault.read { database in
-            guard let row = try Row.fetchOne(
-                database,
-                sql: """
-                    SELECT accounts.credential_revision, account_organizations.capability_revision
-                    FROM accounts
-                    JOIN account_organizations ON account_organizations.account_id = accounts.id
-                    WHERE accounts.id = ? AND account_organizations.organization_id = ?
-                    """,
-                arguments: [accountID.rawValue, organizationID.rawValue]
-            ),
-            let credentialRevision = CredentialRevision(rawValue: row["credential_revision"]),
-            let capabilityRevision = CapabilityRevision(rawValue: row["capability_revision"])
-            else {
-                throw AccountRepositoryError.synchronizationScopeUnavailable
-            }
-            return SynchronizationScope(
-                accountID: accountID,
-                organizationID: organizationID,
-                credentialRevision: credentialRevision,
-                capabilityRevision: capabilityRevision
-            )
-        }
-    }
-
     func accountCapabilities(for accountID: AccountID) async throws -> AccountCapabilitySnapshot? {
         try ensureAccountScope(accountID)
         return try await vault.read { database in

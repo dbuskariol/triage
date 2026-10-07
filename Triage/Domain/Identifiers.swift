@@ -1,13 +1,5 @@
 import Foundation
 
-enum GitHubTeamSlug {
-    static func isValid(_ value: String) -> Bool {
-        !value.isEmpty && value.count <= 255 && value.unicodeScalars.allSatisfy {
-            $0.isASCII && ($0.properties.isLowercase || $0.properties.numericType != nil || $0 == "-" || $0 == "_" || $0 == ":")
-        }
-    }
-}
-
 protocol TriageIdentifier: Codable, Hashable, Sendable, RawRepresentable, CustomStringConvertible
     where RawValue == String
 {
@@ -80,15 +72,6 @@ struct ActorID: TriageIdentifier {
     }
 }
 
-struct TeamID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-}
-
 struct GitHubNodeID: TriageIdentifier {
     let rawValue: String
 
@@ -108,76 +91,6 @@ struct GitHubEventID: TriageIdentifier {
 }
 
 struct RawAPISnapshotID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-
-    static func make() -> Self {
-        Self(rawValue: UUID().uuidString.lowercased())!
-    }
-}
-
-struct WorkItemID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-
-    static func make() -> Self {
-        Self(rawValue: UUID().uuidString.lowercased())!
-    }
-}
-
-struct ActionItemID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-
-    static func make() -> Self {
-        Self(rawValue: UUID().uuidString.lowercased())!
-    }
-}
-
-struct EvidenceID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-}
-
-struct SyncStreamID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-}
-
-struct SyncShardID: TriageIdentifier {
-    let rawValue: String
-
-    init?(rawValue: String) {
-        guard isValidIdentifier(rawValue) else { return nil }
-        self.rawValue = rawValue
-    }
-
-    static func make() -> Self {
-        Self(rawValue: UUID().uuidString.lowercased())!
-    }
-}
-
-struct AIRequestID: TriageIdentifier {
     let rawValue: String
 
     init?(rawValue: String) {

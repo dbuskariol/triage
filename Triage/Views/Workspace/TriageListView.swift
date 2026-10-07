@@ -12,22 +12,7 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @FocusState private var isListFocused: Bool
     @State private var statusNow = Date.now
-    @State private var handledFilter = HandledFilter.all
-
-    enum HandledFilter: String, CaseIterable, Identifiable {
-        case all = "All", byYou = "Handled by You", done = "Done", snoozed = "Snoozed"
-        var id: Self { self }
-
-        func includes(_ entry: TriageEntry) -> Bool {
-            switch (self, entry.local) {
-            case (.all, _): true
-            case (.byYou, .done): entry.handledEvidence != nil
-            case (.done, .done): entry.handledEvidence == nil
-            case (.snoozed, .snoozed): true
-            default: false
-            }
-        }
-    }
+    @Binding var handledFilter: HandledFilter
 
     private var statusSubtitle: String {
         if search.isActive {
@@ -134,13 +119,10 @@ struct TriageListView: View {
 
 
     private var entries: [TriageEntry] {
-        if search.isActive {
-            return presentation.searchResults(
-                search, section: section, sortedBy: sortField, ascending: sortAscending, viewer: viewer
-            )
-        }
-        let sorted = presentation.entries(in: section, sortedBy: sortField, ascending: sortAscending)
-        return section == .handled ? sorted.filter(handledFilter.includes) : sorted
+        presentation.visibleEntries(
+            section: section, search: search, handledFilter: handledFilter,
+            sortedBy: sortField, ascending: sortAscending, viewer: viewer
+        )
     }
 
     @ViewBuilder
@@ -387,9 +369,9 @@ struct TriageEntryRow: View {
         if !badges.isEmpty {
             HStack(spacing: 10) {
                 ForEach(badges, id: \.self) { badge in
-                    Label(badge, systemImage: Self.symbol(forBadge: badge))
+                    Label(badge.title, systemImage: badge.systemImage)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : Self.style(forBadge: badge))
+                        .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : Self.style(for: badge))
                 }
             }
             .lineLimit(1)
@@ -400,21 +382,9 @@ struct TriageEntryRow: View {
         isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(.secondary)
     }
 
-    static func symbol(forBadge badge: String) -> String {
-        switch badge {
-        case "Checks failing": "xmark.circle.fill"
-        case "Conflicts": "exclamationmark.triangle.fill"
-        case "Changes requested": "arrow.uturn.backward.circle.fill"
-        default: "pencil.circle"
-        }
-    }
-
-    static func style(forBadge badge: String) -> AnyShapeStyle {
-        switch badge {
-        case "Checks failing", "Conflicts": AnyShapeStyle(Color.red)
-        case "Changes requested": AnyShapeStyle(Color.orange)
-        default: AnyShapeStyle(.secondary)
-        }
+    static func style(for badge: WorkspaceViewPresentation.Badge) -> AnyShapeStyle {
+        if badge.isSevere { return AnyShapeStyle(Color.red) }
+        return badge.isBlocking ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary)
     }
 
     private var repositoryName: String {

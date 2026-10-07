@@ -2,7 +2,6 @@ import Foundation
 
 enum AuthBrokerProtocol {
     static let version = 1
-    static let maximumRequestBodyBytes = 16 * 1_024
     static let maximumResponseBodyBytes = 32 * 1_024
     static let requestLifetimeMilliseconds: Int64 = 60_000
     /// JavaScript transports protocol versions as `Number`, so components

@@ -349,26 +349,6 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
     return executableURL
   }
 
-  /// The account ID is carried only as a validated opaque namespace. The XPC
-  /// service does not receive an account registry or credentials, so it must
-  /// neither inspect nor infer account ownership from organization identity.
-  private func scratchOwner(from frame: Data) throws -> String {
-    try CopilotXPCFrame.validate(frame, maximumPayloadBytes: 1_048_576)
-    let payload = frame.dropFirst(MemoryLayout<UInt32>.size)
-    let request: CopilotScratchOwnerRequest
-    do {
-      request = try JSONDecoder().decode(CopilotScratchOwnerRequest.self, from: payload)
-    } catch {
-      throw CopilotXPCServiceError.malformedFrame
-    }
-    guard request.protocolVersion == 2,
-      Self.isCanonicalOpaqueAccountID(request.accountID)
-    else {
-      throw CopilotXPCServiceError.invalidAccountID
-    }
-    return request.accountID
-  }
-
   private func makePrivateDirectory(for accountID: String) throws -> URL {
     let root: URL
     if let applicationSupportDirectory {
@@ -562,16 +542,6 @@ private final class HelperSession {
     self.lastUsedAt = lastUsedAt
     self.syntheticExchange = syntheticExchange
     self.syntheticIsRunning = syntheticIsRunning
-  }
-}
-
-private struct CopilotScratchOwnerRequest: Decodable {
-  let protocolVersion: Int
-  let accountID: String
-
-  enum CodingKeys: String, CodingKey {
-    case protocolVersion = "protocol_version"
-    case accountID = "account_id"
   }
 }
 

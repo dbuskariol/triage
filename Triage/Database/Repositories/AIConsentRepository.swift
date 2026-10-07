@@ -166,24 +166,6 @@ actor AIConsentRepository {
         }
     }
 
-    func disable(
-        accountID: AccountID,
-        organizationID: OrganizationID,
-        at updatedAt: Date = .now
-    ) async throws {
-        try await save(
-            .init(
-                accountID: accountID,
-                organizationID: organizationID,
-                isEnabled: false,
-                selectedModelID: nil,
-                automaticActionConfidenceThreshold: OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
-                updatedAt: updatedAt
-            ),
-            at: updatedAt
-        )
-    }
-
     private func validateVaultAccount(_ accountID: AccountID) throws {
         guard accountID == vault.accountID else {
             throw AIConsentRepositoryError.accountScopeMismatch

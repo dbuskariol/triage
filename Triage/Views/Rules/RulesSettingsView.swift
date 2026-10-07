@@ -7,7 +7,6 @@ struct RulesSettingsView: View {
 
     @State private var instructions = ""
     @State private var editingRule: RuleDraft?
-    @State private var isAddingRule = false
     @Environment(\.triageViewerLogin) private var viewer
 
     private static let examples = [

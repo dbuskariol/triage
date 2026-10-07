@@ -548,7 +548,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     )
   }
 
-  func testSyntheticSessionReusesAuthenticatedEngineForModelsAndAnalyze() throws {
+  func testSyntheticSessionReusesAuthenticatedEngineForModelsAndTriage() throws {
     let harness = SyntheticHelperSessionHarness()
     let accountID = UUID().uuidString.lowercased()
     let process = try makeSyntheticSessionProcess(harness: harness)
@@ -560,10 +560,10 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
       accountID: accountID, organizationID: "org-1", operation: "models"
     ))
     _ = try process.exchange(frame: framedSessionRequest(
-      accountID: accountID, organizationID: "org-1", operation: "analyze"
+      accountID: accountID, organizationID: "org-1", operation: "triage"
     ))
 
-    XCTAssertEqual(harness.operations, ["authenticate", "models", "analyze"])
+    XCTAssertEqual(harness.operations, ["authenticate", "models", "triage"])
   }
 
   func testSeparateConnectionProcessesKeepAuthenticatedScopesIndependent() throws {
@@ -623,7 +623,7 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     ))
     process.cancel()
     XCTAssertThrowsError(try process.exchange(frame: framedSessionRequest(
-      accountID: accountID, organizationID: "org-1", operation: "analyze"
+      accountID: accountID, organizationID: "org-1", operation: "triage"
     ))) { error in
       // Cancel is an immediate session eviction, not a deferred operation
       // marker. A later request must authenticate again rather than inherit

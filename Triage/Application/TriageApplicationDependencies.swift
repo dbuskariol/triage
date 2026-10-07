@@ -12,10 +12,6 @@ protocol AccountSessionServing: Sendable {
         _ token: PersonalAccessToken,
         resourceOwnerOrganization: String?
     ) async throws -> AccountSessionSnapshot
-    func reconnectOAuth(
-        _ request: AuthBrokerExchangeRequest,
-        replacing account: GitHubAccount
-    ) async throws -> AccountSessionSnapshot
     func replacePersonalAccessToken(
         _ token: PersonalAccessToken,
         replacing account: GitHubAccount

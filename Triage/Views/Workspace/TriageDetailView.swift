@@ -605,7 +605,7 @@ private struct PersonChip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Avatar(login: login, size: 18)
+            InitialAvatar(text: login, size: 18)
             Text(login).font(.callout)
             if let stateSymbol {
                 Image(systemName: stateSymbol.name).foregroundStyle(stateSymbol.tint).font(.caption)
@@ -628,27 +628,6 @@ private struct PersonChip: View {
         case nil: nil
         default: ("circle", .secondary)
         }
-    }
-}
-
-/// A deterministic initials avatar; Triage never downloads profile images.
-private struct Avatar: View {
-    let login: String
-    let size: CGFloat
-
-    var body: some View {
-        Text(String(login.prefix(1)).uppercased())
-            .font(.system(size: size * 0.5, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white)
-            .frame(width: size, height: size)
-            .background(color.gradient, in: Circle())
-            .accessibilityHidden(true)
-    }
-
-    private var color: Color {
-        let palette: [Color] = [.blue, .purple, .pink, .orange, .teal, .indigo, .green, .brown]
-        let hash = login.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
-        return palette[hash % palette.count]
     }
 }
 
@@ -703,7 +682,7 @@ private struct ActivitySection: View {
                     ForEach(Array(activity.reversed().enumerated()), id: \.offset) { index, fact in
                         HStack(alignment: .top, spacing: 12) {
                             VStack(spacing: 0) {
-                                Avatar(login: fact.author, size: 26)
+                                InitialAvatar(text: fact.author, size: 26)
                                 if index < activity.count - 1 {
                                     Rectangle().fill(.quaternary).frame(width: 2).frame(maxHeight: .infinity)
                                 }
