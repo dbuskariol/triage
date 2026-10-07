@@ -50,6 +50,7 @@ struct RootView: View {
 /// recommendation for the selected item.
 private struct WorkspaceView: View {
     @EnvironmentObject private var appModel: TriageAppModel
+    @EnvironmentObject private var preferences: AppPreferences
 
     var body: some View {
         NavigationSplitView {
@@ -86,6 +87,7 @@ private struct WorkspaceView: View {
             }
         }
         .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
+        .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }
     }
 }
 

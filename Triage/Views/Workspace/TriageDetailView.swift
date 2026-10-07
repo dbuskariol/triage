@@ -181,9 +181,7 @@ private struct DetailActionBar: View {
                 .help("Mark done until something changes (⌘E)")
 
                 Menu {
-                    Button("Later Today") { actions.snooze(entry, until: .now.addingTimeInterval(4 * 3_600)) }
-                    Button("Tomorrow") { actions.snooze(entry, until: Self.tomorrowMorning) }
-                    Button("Next Week") { actions.snooze(entry, until: .now.addingTimeInterval(7 * 86_400)) }
+                    SnoozeMenuItems(entry: entry, actions: actions)
                 } label: {
                     Label("Snooze", systemImage: "moon.zzz")
                 }
@@ -212,11 +210,6 @@ private struct DetailActionBar: View {
         return true
     }
 
-    private static var tomorrowMorning: Date {
-        let calendar = Calendar.current
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) ?? .now
-        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
-    }
 }
 
 // MARK: - Copilot recommendation

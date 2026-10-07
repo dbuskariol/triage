@@ -49,7 +49,7 @@ struct TriageListView: View {
                 }
                 .onKeyPress(characters: ["s"]) { _ in
                     guard let entry = selectedEntry, section != .handled else { return .ignored }
-                    actions.snooze(entry, until: Self.tomorrowMorning)
+                    actions.snooze(entry, until: SnoozeOption.tomorrow.date())
                     return .handled
                 }
             }
@@ -74,11 +74,6 @@ struct TriageListView: View {
         selectedEntryID = entries[min(max(index + offset, 0), entries.count - 1)].id
     }
 
-    private static var tomorrowMorning: Date {
-        let calendar = Calendar.current
-        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) ?? .now
-        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
-    }
 
     private var entries: [TriageEntry] {
         presentation.entries(in: section, sortedBy: sortField, ascending: sortAscending)
@@ -223,9 +218,7 @@ struct TriageListView: View {
 
     @ViewBuilder
     private func snoozeButtons(for entry: TriageEntry) -> some View {
-        Button("Later Today") { actions.snooze(entry, until: .now.addingTimeInterval(4 * 60 * 60)) }
-        Button("Tomorrow") { actions.snooze(entry, until: .now.addingTimeInterval(24 * 60 * 60)) }
-        Button("Next Week") { actions.snooze(entry, until: .now.addingTimeInterval(7 * 24 * 60 * 60)) }
+        SnoozeMenuItems(entry: entry, actions: actions)
     }
 }
 

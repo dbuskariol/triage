@@ -37,6 +37,7 @@ final class SoftwareUpdateController: ObservableObject {
     }
 
     var canCheckForUpdates: Bool { updaterController.updater.canCheckForUpdates }
+    var lastUpdateCheckDate: Date? { updaterController.updater.lastUpdateCheckDate }
     var allowsAutomaticUpdates: Bool { updaterController.updater.allowsAutomaticUpdates }
 
     func setAutomaticallyChecksForUpdates(_ enabled: Bool) {

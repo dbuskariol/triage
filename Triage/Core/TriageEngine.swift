@@ -20,7 +20,8 @@ actor TriageEngine {
     private let store: any TriageStore
     private let makeDiscovery: DiscoveryFactory
     private let decider: any TriageDeciding
-    private let refreshInterval: Duration
+    /// `nil` means refresh only when asked (manual mode).
+    private var refreshInterval: Duration?
     private let maximumConcurrentBatches: Int
     private let maximumBatchBytes: Int
     private let retryDelay: TimeInterval
@@ -28,7 +29,9 @@ actor TriageEngine {
 
     private var scope: WorkspaceScope?
     private var loop: Task<Void, Never>?
-    private var sleeper: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
+    private var idleWaiter: CheckedContinuation<Void, Never>?
+    private var cycleFinishedAt = ContinuousClock.now
     private var refreshRequested = false
     private var status = TriageStatus.initial
     private var observers: [UUID: AsyncStream<TriageStatus>.Continuation] = [:]
@@ -37,7 +40,7 @@ actor TriageEngine {
         store: any TriageStore,
         makeDiscovery: @escaping DiscoveryFactory,
         decider: any TriageDeciding,
-        refreshInterval: Duration = .seconds(300),
+        refreshInterval: Duration? = .seconds(300),
         // The Copilot helper serves one request at a time; extra concurrency only queues.
         maximumConcurrentBatches: Int = 1,
         maximumBatchBytes: Int = 90_000,
@@ -71,7 +74,9 @@ actor TriageEngine {
         let running = loop
         loop = nil
         running?.cancel()
-        sleeper?.cancel()
+        timer?.cancel()
+        timer = nil
+        wake()
         await running?.value
         scope = nil
         status = .initial
@@ -82,7 +87,16 @@ actor TriageEngine {
     func refreshNow() {
         guard loop != nil else { return }
         refreshRequested = true
-        sleeper?.cancel()
+        wake()
+    }
+
+    /// Changes the automatic refresh interval (`nil` = manual only). Takes
+    /// effect immediately, measured from the end of the last cycle.
+    func setRefreshInterval(_ interval: Duration?) {
+        guard interval != refreshInterval else { return }
+        refreshInterval = interval
+        Self.logger.notice("refresh interval seconds=\(interval.map { Int($0.components.seconds) } ?? 0, privacy: .public)")
+        if idleWaiter != nil { scheduleTimer() }
     }
 
     func statusUpdates() -> AsyncStream<TriageStatus> {
@@ -105,16 +119,44 @@ actor TriageEngine {
             await analyze(scope)
             guard !Task.isCancelled else { return }
             status.phase = .idle
-            status.nextRefreshAt = now().addingTimeInterval(refreshInterval.timeInterval)
-            publish()
-            // Sleep until the interval elapses or `refreshNow()` cancels the sleep.
-            guard !refreshRequested else { continue }
-            let interval = refreshInterval
-            let sleep = Task { _ = try? await Task.sleep(for: interval) }
-            sleeper = sleep
-            await sleep.value
-            sleeper = nil
+            cycleFinishedAt = .now
+            scheduleTimer()
+            // Wait for the timer, `refreshNow()`, or `stop()`.
+            // Actor isolation: no suspension between this check and the wait,
+            // so `stop()` / `refreshNow()` cannot slip in and be missed.
+            guard !refreshRequested, !Task.isCancelled else { continue }
+            await withCheckedContinuation { idleWaiter = $0 }
+            timer?.cancel()
+            timer = nil
         }
+    }
+
+    private func scheduleTimer() {
+        timer?.cancel()
+        guard let interval = refreshInterval else {
+            timer = nil
+            status.nextRefreshAt = nil
+            publish()
+            return
+        }
+        let deadline = cycleFinishedAt.advanced(by: interval)
+        status.nextRefreshAt = now().addingTimeInterval(ContinuousClock.now.duration(to: deadline).timeInterval)
+        publish()
+        timer = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            guard !Task.isCancelled else { return }
+            await self?.timerFired()
+        }
+    }
+
+    private func timerFired() {
+        refreshRequested = true
+        wake()
+    }
+
+    private func wake() {
+        idleWaiter?.resume()
+        idleWaiter = nil
     }
 
     private func refresh(_ scope: WorkspaceScope) async {

@@ -1,11 +1,13 @@
 import Foundation
 
 enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general
+    case inbox
     case accounts
     case organizations
     case ai
     case rules
-    case general
+    case privacy
     case updates
     case about
 
@@ -13,13 +15,16 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .ai: "AI"
+        case .ai: "Copilot"
+        case .privacy: "Privacy & Data"
         default: rawValue.capitalized
         }
     }
 
     var systemImage: String {
         switch self {
+        case .inbox: "tray.full"
+        case .privacy: "hand.raised"
         case .accounts: "person.crop.circle"
         case .organizations: "building.2"
         case .ai: "sparkles"
@@ -50,7 +55,7 @@ final class AppNavigationModel: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         settingsCategory = defaults.string(forKey: Self.settingsCategoryKey)
-            .flatMap(SettingsCategory.init(rawValue:)) ?? .accounts
+            .flatMap(SettingsCategory.init(rawValue:)) ?? .general
     }
 
     func openSettings(_ category: SettingsCategory) {

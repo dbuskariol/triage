@@ -68,7 +68,8 @@ struct TriageProductionComposition: Sendable {
                         )
                         return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(client: client))
                     },
-                    decider: CopilotTriageDecider(resolveVault: openVault)
+                    decider: CopilotTriageDecider(resolveVault: openVault),
+                    refreshInterval: AppPreferences.refreshInterval(minutes: AppPreferences.refreshIntervalMinutes())
                 )
                 return WorkspaceRuntime(store: store, engine: engine)
             }

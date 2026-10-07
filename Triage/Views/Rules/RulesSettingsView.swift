@@ -17,22 +17,15 @@ struct RulesSettingsView: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            if let organization = appModel.selectedOrganization {
-                Text("Rules apply to \(organization.login). Hard rules take effect immediately; Copilot re-analyzes affected work in the background after you change instructions.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        Form {
+            if appModel.selectedOrganization != nil {
                 rulesSection
                 instructionsSection
-                if let error = appModel.rulesError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                }
             } else {
-                ContentUnavailableView(
-                    "No Organization Selected",
-                    systemImage: "building.2",
-                    description: Text("Select an organization in the main window to manage its rules.")
-                )
+                Section {
+                    Text("Select an organization in the main window to manage its rules.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .onAppear { instructions = appModel.rules.instructions }
@@ -56,38 +49,30 @@ struct RulesSettingsView: View {
     // MARK: Rules
 
     private var rulesSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 0) {
-                if appModel.rules.rules.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("No rules yet").font(.headline)
-                        Text("Rules always win over Copilot: mute noisy repositories or bots, keep important work in your Inbox, or nudge priority. Right-click any item to create one quickly.")
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.vertical, 6)
-                } else {
-                    ForEach(Array(appModel.rules.rules.enumerated()), id: \.element.id) { index, rule in
-                        if index > 0 { Divider() }
-                        ruleRow(rule, index: index)
-                    }
-                }
-                HStack {
-                    Button {
-                        editingRule = TriageRule(name: "", conditions: [.init(field: .repository, value: "")], effect: .alwaysInbox)
-                    } label: {
-                        Label("Add Rule…", systemImage: "plus")
-                    }
-                    Spacer()
-                    Text("\(appModel.rules.rules.count) of \(TriageRules.maximumRules)")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.top, 12)
+        Section {
+            if appModel.rules.rules.isEmpty {
+                Text("No rules yet. Right-click any item in the main window to create one quickly.")
+                    .foregroundStyle(.secondary)
             }
-            .padding(4)
-        } label: {
-            Label("Rules", systemImage: "line.3.horizontal.decrease.circle")
+            ForEach(Array(appModel.rules.rules.enumerated()), id: \.element.id) { index, rule in
+                ruleRow(rule, index: index)
+            }
+            HStack {
+                Text("\(appModel.rules.rules.count) of \(TriageRules.maximumRules)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Add Rule…") {
+                    editingRule = TriageRule(name: "", conditions: [.init(field: .repository, value: "")], effect: .alwaysInbox)
+                }
+            }
+            if let error = appModel.rulesError {
+                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Rules for \(appModel.selectedOrganization?.login ?? "")")
+        } footer: {
+            Text("Rules always win over Copilot and apply instantly: mute noisy repositories or bots, keep important work in your Inbox, or nudge priority. The first matching rule that moves an item wins.")
         }
     }
 
@@ -138,7 +123,7 @@ struct RulesSettingsView: View {
             .fixedSize()
             .accessibilityLabel("Actions for \(rule.displayName)")
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { editingRule = rule }
     }
@@ -170,62 +155,48 @@ struct RulesSettingsView: View {
     private var instructionBytes: Int { instructions.utf8.count }
 
     private var instructionsSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Tell Copilot about your role and what matters to you. These are guidance: Copilot weighs them, but its safety policy and your rules always take precedence, and text in GitHub can never change them.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                TextEditor(text: $instructions)
-                    .font(.body)
-                    .frame(minHeight: 140)
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(alignment: .topLeading) {
-                        if instructions.isEmpty {
-                            Text("e.g. \(Self.examples[0])")
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 6)
-                                .allowsHitTesting(false)
-                        }
+        Section {
+            TextEditor(text: $instructions)
+                .font(.body)
+                .frame(minHeight: 140)
+                .scrollContentBackground(.hidden)
+                .overlay(alignment: .topLeading) {
+                    if instructions.isEmpty {
+                        Text("e.g. \(Self.examples[0])")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 5)
+                            .allowsHitTesting(false)
                     }
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
-                    .accessibilityLabel("Instructions for Copilot")
-
-                HStack {
-                    Menu("Insert Example") {
-                        ForEach(Self.examples, id: \.self) { example in
-                            Button(example) {
-                                instructions += (instructions.isEmpty || instructions.hasSuffix("\n") ? "" : "\n") + example
-                            }
-                        }
-                    }
-                    .fixedSize()
-
-                    Spacer()
-
-                    Text("\(instructionBytes.formatted()) / \(TriageRules.maximumInstructionBytes.formatted())")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(instructionBytes > TriageRules.maximumInstructionBytes ? .red : .secondary)
-
-                    Button("Revert") { instructions = appModel.rules.instructions }
-                        .disabled(!hasUnsavedInstructions)
-                    Button("Save") {
-                        var rules = appModel.rules
-                        rules.instructions = instructions
-                        appModel.saveRules(rules)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!hasUnsavedInstructions || instructionBytes > TriageRules.maximumInstructionBytes)
                 }
+                .accessibilityLabel("Instructions for Copilot")
+            HStack {
+                Menu("Insert Example") {
+                    ForEach(Self.examples, id: \.self) { example in
+                        Button(example) {
+                            instructions += (instructions.isEmpty || instructions.hasSuffix("\n") ? "" : "\n") + example
+                        }
+                    }
+                }
+                .fixedSize()
+                Spacer()
+                Text("\(instructionBytes.formatted()) / \(TriageRules.maximumInstructionBytes.formatted())")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(instructionBytes > TriageRules.maximumInstructionBytes ? .red : .secondary)
+                Button("Revert") { instructions = appModel.rules.instructions }
+                    .disabled(!hasUnsavedInstructions)
+                Button("Save") {
+                    var rules = appModel.rules
+                    rules.instructions = instructions
+                    appModel.saveRules(rules)
+                }
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!hasUnsavedInstructions || instructionBytes > TriageRules.maximumInstructionBytes)
             }
-            .padding(4)
-        } label: {
-            Label("Instructions for Copilot", systemImage: "text.quote")
+        } header: {
+            Text("Instructions for Copilot")
+        } footer: {
+            Text("Tell Copilot about your role and what matters to you. Copilot weighs these, but its safety policy and your rules take precedence, and text in GitHub can never change them. Saving re-analyzes affected work in the background.")
         }
     }
+
 }
