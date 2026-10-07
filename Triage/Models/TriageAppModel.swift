@@ -80,6 +80,10 @@ final class TriageAppModel: ObservableObject {
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
     @Published var selectedSection: WorkspacePresentation.Section = .inbox
     @Published var selectedEntryID: GitHubNodeID?
+    /// Toolbar search; filters the list in place.
+    @Published var search = WorkspaceSearch()
+    /// Incremented by Edit ▸ Find (⌘F) to focus the search field.
+    @Published var searchFocusRequest = 0
 
     // MARK: Copilot
 
@@ -673,9 +677,14 @@ extension TriageAppModel {
     var visibleEntries: [TriageEntry] {
         let defaults = UserDefaults.standard
         let field = defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended
-        return presentation.entries(
-            in: selectedSection, sortedBy: field, ascending: defaults.bool(forKey: TriagePreferenceKeys.sortAscending)
-        )
+        let ascending = defaults.bool(forKey: TriagePreferenceKeys.sortAscending)
+        if search.isActive {
+            return presentation.searchResults(
+                search, section: selectedSection, sortedBy: field, ascending: ascending,
+                viewer: selectedAccount?.login ?? ""
+            )
+        }
+        return presentation.entries(in: selectedSection, sortedBy: field, ascending: ascending)
     }
 
     func selectFirstEntry() {
