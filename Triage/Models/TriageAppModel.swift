@@ -76,6 +76,8 @@ final class TriageAppModel: ObservableObject {
     /// The selected organization's triage rules and instructions.
     @Published private(set) var rules = TriageRules.empty
     @Published private(set) var rulesError: String?
+    /// Local status changes shown immediately, before the store confirms them.
+    private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
     @Published var selectedSection: WorkspacePresentation.Section = .inbox
     @Published var selectedEntryID: GitHubNodeID?
 
@@ -138,7 +140,8 @@ final class TriageAppModel: ObservableObject {
 
     var selectedEntry: TriageEntry? {
         guard let selectedEntryID else { return nil }
-        return entries.first { $0.id == selectedEntryID }
+        // The presented entry carries rule effects and optimistic changes.
+        return presentation.allEntries.first { $0.id == selectedEntryID }
     }
 
     var selectedScope: WorkspaceScope? {
@@ -268,6 +271,7 @@ final class TriageAppModel: ObservableObject {
         if let engine = runtime?.value.engine { await engine.stop() }
         runtime = nil
         rules = .empty
+        optimisticLocal = [:]
         entries = []
         status = .initial
         selectedEntryID = nil
@@ -280,6 +284,10 @@ final class TriageAppModel: ObservableObject {
                 for try await entries in try await runtime.store.entries(scope: scope) {
                     guard let self, self.runtime?.scope == scope else { return }
                     self.entries = entries
+                    // Drop optimistic changes the store has now confirmed.
+                    self.optimisticLocal = self.optimisticLocal.filter { id, local in
+                        entries.first { $0.id == id }?.local != local
+                    }
                     self.publishPresentation()
                 }
             } catch {
@@ -296,7 +304,12 @@ final class TriageAppModel: ObservableObject {
     }
 
     private func publishPresentation() {
-        let next = WorkspacePresentation(entries: entries, status: status, now: .now, rules: rules)
+        let shown = optimisticLocal.isEmpty ? entries : entries.map { entry in
+            var entry = entry
+            if let local = optimisticLocal[entry.id] { entry.local = local }
+            return entry
+        }
+        let next = WorkspacePresentation(entries: shown, status: status, now: .now, rules: rules)
         guard next != presentation else { return }
         presentation = next
         if let selectedEntryID, !entries.contains(where: { $0.id == selectedEntryID }) {
@@ -633,6 +646,34 @@ final class TriageAppModel: ObservableObject {
 
 // MARK: - Workspace actions
 
+// MARK: Selection
+
+extension TriageAppModel {
+    /// The selected section's entries in the user's chosen sort order.
+    var visibleEntries: [TriageEntry] {
+        let defaults = UserDefaults.standard
+        let field = defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended
+        return presentation.entries(
+            in: selectedSection, sortedBy: field, ascending: defaults.bool(forKey: TriagePreferenceKeys.sortAscending)
+        )
+    }
+
+    func selectFirstEntry() {
+        selectedEntryID = visibleEntries.first?.id
+    }
+
+    /// Moves selection by `offset` within the visible list (j/k navigation).
+    func moveSelection(by offset: Int) {
+        let order = visibleEntries.map(\.id)
+        guard !order.isEmpty else { return }
+        guard let current = selectedEntryID, let index = order.firstIndex(of: current) else {
+            selectedEntryID = offset >= 0 ? order.first : order.last
+            return
+        }
+        selectedEntryID = order[min(max(index + offset, 0), order.count - 1)]
+    }
+}
+
 // MARK: Rules
 
 extension TriageAppModel {
@@ -699,13 +740,25 @@ extension TriageAppModel: WorkspaceActions {
         saveRules(updated)
     }
 
+    /// Applies the change instantly, moves selection to the next item in the
+    /// list (or the previous one at the end), then saves in the background.
     private func setLocalStatus(_ status: LocalStatus, for entry: TriageEntry) {
         guard let runtime else { return }
+        let order = visibleEntries.map(\.id)
+        var nextSelection = selectedEntryID
+        if selectedEntryID == entry.id, let index = order.firstIndex(of: entry.id) {
+            nextSelection = order.indices.contains(index + 1) ? order[index + 1] : index > 0 ? order[index - 1] : nil
+        }
+        optimisticLocal[entry.id] = status
+        publishPresentation()
+        selectedEntryID = nextSelection
         Task {
             do {
                 try await runtime.value.store.setLocalStatus(status, itemID: entry.id, scope: runtime.scope)
             } catch {
                 Self.logger.error("local status save failed")
+                self.optimisticLocal[entry.id] = nil
+                self.publishPresentation()
             }
         }
     }

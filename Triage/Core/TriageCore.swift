@@ -262,7 +262,7 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
     /// presented, the user's hard rules have been applied to it.
     var decision: TriageDecision?
     var analysis: AnalysisState
-    let local: LocalStatus
+    var local: LocalStatus
     /// Names of the user's rules that matched (set by `TriageRules.apply`).
     var appliedRules: [String] = []
     var isMuted = false

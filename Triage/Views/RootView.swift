@@ -85,7 +85,7 @@ private struct WorkspaceView: View {
                     .help("Search GitHub for new and changed work now")
             }
         }
-        .onChange(of: appModel.selectedSection) { appModel.selectedEntryID = nil }
+        .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
     }
 }
 

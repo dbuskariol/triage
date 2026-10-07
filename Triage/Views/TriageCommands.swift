@@ -26,6 +26,11 @@ struct TriageWorkspaceCommands: Commands {
                 }
                 .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
+            Divider()
+            Button("Next Item") { appModel.moveSelection(by: 1) }
+                .keyboardShortcut("]", modifiers: .command)
+            Button("Previous Item") { appModel.moveSelection(by: -1) }
+                .keyboardShortcut("[", modifiers: .command)
         }
 
         CommandMenu("Item") {

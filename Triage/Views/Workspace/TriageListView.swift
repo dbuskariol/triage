@@ -7,6 +7,7 @@ struct TriageListView: View {
     let actions: any WorkspaceActions
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
+    @FocusState private var isListFocused: Bool
 
     var body: some View {
         Group {
@@ -26,6 +27,31 @@ struct TriageListView: View {
                 .listStyle(.inset)
                 .scrollEdgeEffectStyle(.hard, for: .top)
                 .accessibilityLabel("\(section.title) work")
+                .focused($isListFocused)
+                .onAppear {
+                    isListFocused = true
+                    if selectedEntryID == nil { selectedEntryID = entries.first?.id }
+                }
+                // ↑/↓ are native. Mail- and Superhuman-style keys on top:
+                .onKeyPress(characters: ["j", "k"]) { press in
+                    move(by: press.characters == "j" ? 1 : -1)
+                    return .handled
+                }
+                .onKeyPress(keys: [.delete, .deleteForward, "e"]) { _ in
+                    guard let entry = selectedEntry else { return .ignored }
+                    section == .handled ? actions.restore(entry) : actions.markDone(entry)
+                    return .handled
+                }
+                .onKeyPress(.return) {
+                    guard let entry = selectedEntry else { return .ignored }
+                    actions.openOnGitHub(entry)
+                    return .handled
+                }
+                .onKeyPress(characters: ["s"]) { _ in
+                    guard let entry = selectedEntry, section != .handled else { return .ignored }
+                    actions.snooze(entry, until: Self.tomorrowMorning)
+                    return .handled
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -33,6 +59,25 @@ struct TriageListView: View {
             TriageStatusView(status: presentation.status, actions: actions)
         }
         .navigationTitle(section.title)
+    }
+
+    private var selectedEntry: TriageEntry? {
+        selectedEntryID.flatMap { id in entries.first { $0.id == id } }
+    }
+
+    private func move(by offset: Int) {
+        guard !entries.isEmpty else { return }
+        guard let id = selectedEntryID, let index = entries.firstIndex(where: { $0.id == id }) else {
+            selectedEntryID = (offset > 0 ? entries.first : entries.last)?.id
+            return
+        }
+        selectedEntryID = entries[min(max(index + offset, 0), entries.count - 1)].id
+    }
+
+    private static var tomorrowMorning: Date {
+        let calendar = Calendar.current
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: .now)) ?? .now
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
     }
 
     private var entries: [TriageEntry] {
