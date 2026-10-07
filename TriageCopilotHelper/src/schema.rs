@@ -152,13 +152,10 @@ pub fn validate_triage_inputs(
 /// Parses model output leniently: tolerates Markdown fences or prose around the
 /// JSON array and clamps over-long text instead of discarding the whole batch.
 pub fn parse_triage_output(content: &str) -> Option<Vec<TriageItemDecision>> {
-    let start = content.find('[')?;
-    let end = content.rfind(']')?;
-    if end < start {
+    let mut decisions = strict_array(content).unwrap_or_else(|| salvage_objects(content));
+    if decisions.is_empty() {
         return None;
     }
-    let mut decisions: Vec<TriageItemDecision> =
-        serde_json::from_str(&content[start..=end]).ok()?;
     for decision in &mut decisions {
         decision.disposition = decision.disposition.trim().to_ascii_lowercase();
         decision.priority = decision.priority.clamp(0, 100);
@@ -192,6 +189,61 @@ pub fn parse_triage_output(content: &str) -> Option<Vec<TriageItemDecision>> {
             .map(|value| clamp_text(value, 200));
     }
     Some(decisions)
+}
+
+/// The whole reply (or its outermost `[...]`, or a `{"decisions": [...]}`
+/// wrapper) parsed in one go.
+fn strict_array(content: &str) -> Option<Vec<TriageItemDecision>> {
+    #[derive(Deserialize)]
+    struct Wrapper {
+        decisions: Vec<TriageItemDecision>,
+    }
+    let trimmed = content.trim();
+    if let Ok(wrapper) = serde_json::from_str::<Wrapper>(trimmed) {
+        return Some(wrapper.decisions);
+    }
+    let start = trimmed.find('[')?;
+    let end = trimmed.rfind(']')?;
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&trimmed[start..=end]).ok()
+}
+
+/// Recovers every complete decision object from a reply that is wrapped,
+/// truncated, or contains one malformed entry, so one defect never discards a
+/// whole batch. Braces inside JSON strings are ignored.
+fn salvage_objects(content: &str) -> Vec<TriageItemDecision> {
+    let bytes = content.as_bytes();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut found = Vec::new();
+    let (mut in_string, mut escaped) = (false, false);
+    for (index, &byte) in bytes.iter().enumerate() {
+        if in_string {
+            match (escaped, byte) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => starts.push(index),
+            b'}' => {
+                if let Some(start) = starts.pop() {
+                    if let Ok(decision) =
+                        serde_json::from_str::<TriageItemDecision>(&content[start..=index])
+                    {
+                        found.push(decision);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 fn clamp_text(value: &str, maximum_bytes: usize) -> String {
@@ -256,6 +308,18 @@ mod triage_contract_tests {
         assert!(decision.summary.len() <= 280 && decision.summary.ends_with('…'));
         assert_eq!(decision.next_action, None);
         assert!(super::parse_triage_output("no json here").is_none());
+
+        let one = r#"{"id":"A","disposition":"act","priority":80,"confidence":0.9,"summary":"Do {it}.","reason":"r"}"#;
+        let wrapped = format!(r#"{{"decisions":[{one}]}}"#);
+        assert_eq!(super::parse_triage_output(&wrapped).unwrap().len(), 1);
+        // Truncated mid-array: the complete first object is still recovered.
+        let truncated = format!(r#"[{one},{{"id":"B","disposition":"wa"#);
+        let salvaged = super::parse_triage_output(&truncated).unwrap();
+        assert_eq!(salvaged.len(), 1);
+        assert_eq!(salvaged[0].summary, "Do {it}.");
+        // One malformed entry does not discard the valid one.
+        let mixed = format!(r#"[{one}, {{"id": "C", "priority": "high"}}]"#);
+        assert_eq!(super::parse_triage_output(&mixed).unwrap().len(), 1);
         assert!(super::validate_triage_instructions(Some(&"a".repeat(2_001))).is_err());
         assert!(super::validate_triage_instructions(Some("Prefer security work.")).is_ok());
     }

@@ -34,6 +34,10 @@ actor TriageEngine {
     private var idleWaiter: CheckedContinuation<Void, Never>?
     private var cycleFinishedAt = ContinuousClock.now
     private var refreshRequested = false
+    /// Set when only due retries need analysis; skips the GitHub search.
+    private var analysisOnlyRequested = false
+    /// When items whose analysis failed are next due.
+    private var retryDeadline: ContinuousClock.Instant?
     private var status = TriageStatus.initial
     private var observers: [UUID: AsyncStream<TriageStatus>.Continuation] = [:]
 
@@ -117,8 +121,15 @@ actor TriageEngine {
 
     private func run(_ scope: WorkspaceScope) async {
         while !Task.isCancelled {
+            let analysisOnly = analysisOnlyRequested && !refreshRequested
             refreshRequested = false
-            await refresh(scope)
+            analysisOnlyRequested = false
+            retryDeadline = nil
+            if analysisOnly {
+                Self.logger.notice("retry pass started")
+            } else {
+                await refresh(scope)
+            }
             await analyze(scope)
             guard !Task.isCancelled else { return }
             status.phase = .idle
@@ -127,33 +138,34 @@ actor TriageEngine {
             // Wait for the timer, `refreshNow()`, or `stop()`.
             // Actor isolation: no suspension between this check and the wait,
             // so `stop()` / `refreshNow()` cannot slip in and be missed.
-            guard !refreshRequested, !Task.isCancelled else { continue }
+            guard !refreshRequested, !analysisOnlyRequested, !Task.isCancelled else { continue }
             await withCheckedContinuation { idleWaiter = $0 }
             timer?.cancel()
             timer = nil
         }
     }
 
+    /// Wakes for the next refresh or, if sooner, the next due retry (which
+    /// re-analyzes without searching GitHub again).
     private func scheduleTimer() {
         timer?.cancel()
-        guard let interval = refreshInterval else {
-            timer = nil
-            status.nextRefreshAt = nil
-            publish()
-            return
+        timer = nil
+        let refreshDeadline = refreshInterval.map { cycleFinishedAt.advanced(by: $0) }
+        status.nextRefreshAt = refreshDeadline.map {
+            now().addingTimeInterval(ContinuousClock.now.duration(to: $0).timeInterval)
         }
-        let deadline = cycleFinishedAt.advanced(by: interval)
-        status.nextRefreshAt = now().addingTimeInterval(ContinuousClock.now.duration(to: deadline).timeInterval)
         publish()
+        let retryFirst = retryDeadline.map { retry in refreshDeadline.map { retry < $0 } ?? true } ?? false
+        guard let deadline = retryFirst ? retryDeadline : refreshDeadline else { return }
         timer = Task { [weak self] in
             try? await Task.sleep(until: deadline, clock: .continuous)
             guard !Task.isCancelled else { return }
-            await self?.timerFired()
+            await self?.timerFired(analysisOnly: retryFirst)
         }
     }
 
-    private func timerFired() {
-        refreshRequested = true
+    private func timerFired(analysisOnly: Bool) {
+        if analysisOnly { analysisOnlyRequested = true } else { refreshRequested = true }
         wake()
     }
 
@@ -219,14 +231,16 @@ actor TriageEngine {
         var failedItems = 0
         var handledCount = 0
         var skippedOnce = Set<GitHubNodeID>()
-        var queue = pending
+        var rounds = batches(of: pending)
         status.phase = .analyzing(completed: 0, total: pending.count)
         publish()
 
-        // A second pass retries items Copilot skipped, right away.
-        while !queue.isEmpty, !Task.isCancelled {
-            var next = batches(of: queue).makeIterator()
-            queue = []
+        // Later rounds retry, right away, items Copilot skipped and the halves of
+        // any batch that failed, so one bad item never holds back the others.
+        while !rounds.isEmpty, !Task.isCancelled {
+            var next = rounds.makeIterator()
+            rounds = []
+            var skipped: [PersonalWorkItem] = []
             await withTaskGroup(of: BatchOutcome.self) { group in
                 func submit() -> Bool {
                     guard let batch = next.next() else { return false }
@@ -249,13 +263,14 @@ actor TriageEngine {
                             let decidedIDs = Set(decisions.map(\.itemID))
                             for item in batch where !decidedIDs.contains(item.id) {
                                 if skippedOnce.insert(item.id).inserted {
-                                    queue.append(item)
+                                    skipped.append(item)
                                 } else {
                                     // Skipped twice: benign, retried on a later cycle without alarming the user.
                                     try await store.recordAnalysisFailure(
                                         itemIDs: [item.id], reason: "Copilot skipped this item; it will be retried.",
                                         retryAt: now().addingTimeInterval(retryDelay), scope: scope
                                     )
+                                    scheduleRetry()
                                 }
                             }
                             if case .copilotUnavailable = status.problem { status.problem = nil }
@@ -267,16 +282,24 @@ actor TriageEngine {
                         // Copilot itself is unusable: stop submitting, keep items pending.
                         status.problem = .copilotUnavailable(message)
                         group.cancelAll()
-                        queue = []
+                        rounds = []
+                        skipped = []
                         publish()
                         Self.logger.error("batch outcome=copilot-unavailable")
                         continue
+                    case .failed(let items, let message) where items.count > 1:
+                        // Bisect: retry each half now to isolate whatever Copilot couldn't handle.
+                        let middle = items.count / 2
+                        rounds.append(Array(items[..<middle]))
+                        rounds.append(Array(items[middle...]))
+                        Self.logger.error("batch outcome=failed items=\(items.count, privacy: .public) action=split reason=\(message, privacy: .public)")
                     case .failed(let items, let message):
                         failedItems += items.count
                         try? await store.recordAnalysisFailure(
                             itemIDs: items.map(\.id), reason: message,
                             retryAt: now().addingTimeInterval(retryDelay), scope: scope
                         )
+                        scheduleRetry()
                         Self.logger.error("batch outcome=failed items=\(items.count, privacy: .public) reason=\(message, privacy: .public)")
                     case .cancelled:
                         continue
@@ -286,6 +309,7 @@ actor TriageEngine {
                     if case .copilotUnavailable = status.problem {} else { _ = submit() }
                 }
             }
+            if !skipped.isEmpty { rounds += batches(of: skipped) }
         }
         status.recentlyHandled = handledCount
         if handledCount > 0 { Self.logger.notice("handled-by-viewer items=\(handledCount, privacy: .public)") }
@@ -295,6 +319,11 @@ actor TriageEngine {
             status.problem = nil
         }
         publish()
+    }
+
+    private func scheduleRetry() {
+        let due = ContinuousClock.now.advanced(by: .seconds(retryDelay))
+        if retryDeadline.map({ due < $0 }) ?? true { retryDeadline = due }
     }
 
     /// For Inbox items with a next step and your activity since that decision,

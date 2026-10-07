@@ -126,6 +126,34 @@ final class TriageEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testFailedBatchIsSplitSoOneBadItemDoesNotBlockTheRest() async throws {
+        let store = MemoryStore()
+        let items = ["a", "b", "c", "bad"].map { engineItem($0, relationship: .assigned) }
+        let decider = RecordingDecider(batchSize: 4, failingIDs: ["bad"])
+        let engine = engine(store: store, items: items, decider: decider)
+        await engine.start(scope)
+        try await waitUntil { let decided = await store.decidedCount(); let failed = await store.failureCount(); return decided == 3 && failed == 1 }
+        let batches = await decider.batches
+        XCTAssertEqual(batches.first?.count, 4)
+        XCTAssertTrue(batches.contains(["bad"]), "The failing item ends up isolated.")
+        await engine.stop()
+    }
+
+    func testDueRetryReanalyzesWithoutSearchingGitHubAgain() async throws {
+        let store = MemoryStore()
+        let discovery = CountingDiscovery(items: [engineItem("flaky", relationship: .assigned)])
+        let decider = RecordingDecider(batchSize: 1, failOnceIDs: ["flaky"])
+        let engine = TriageEngine(
+            store: store, makeDiscovery: { _ in discovery }, decider: decider,
+            refreshInterval: .seconds(3_600), retryDelay: 0.2
+        )
+        await engine.start(scope)
+        try await waitUntil { await store.decidedCount() == 1 }
+        let searches = await discovery.calls
+        XCTAssertEqual(searches, 1, "A retry pass must not search GitHub again.")
+        await engine.stop()
+    }
+
     func testRefreshNowStartsAnotherCycleBeforeTheInterval() async throws {
         let store = MemoryStore()
         let discovery = CountingDiscovery(items: [engineItem("x", relationship: .assigned)])
@@ -249,13 +277,15 @@ private actor RecordingDecider: TriageDeciding {
     nonisolated let maximumBatchSize: Int
     let failingIDs: Set<String>
     let handledIDs: Set<String>
+    private var failOnceIDs: Set<String>
     private(set) var batches: [[String]] = []
     private(set) var receivedContexts: [String: TriageHandledContext] = [:]
 
-    init(batchSize: Int, failingIDs: Set<String> = [], handledIDs: Set<String> = []) {
+    init(batchSize: Int, failingIDs: Set<String> = [], handledIDs: Set<String> = [], failOnceIDs: Set<String> = []) {
         maximumBatchSize = batchSize
         self.failingIDs = failingIDs
         self.handledIDs = handledIDs
+        self.failOnceIDs = failOnceIDs
     }
 
     func decide(
@@ -264,6 +294,10 @@ private actor RecordingDecider: TriageDeciding {
     ) async throws -> [TriageDecision] {
         batches.append(items.map(\.id.rawValue))
         for (id, context) in contexts { receivedContexts[id.rawValue] = context }
+        if let once = items.first(where: { failOnceIDs.contains($0.id.rawValue) }) {
+            failOnceIDs.remove(once.id.rawValue)
+            throw URLError(.badServerResponse)
+        }
         if items.contains(where: { failingIDs.contains($0.id.rawValue) }) {
             throw URLError(.badServerResponse)
         }

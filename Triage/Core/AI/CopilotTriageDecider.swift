@@ -49,7 +49,8 @@ struct CopilotTriageAuthorization: Sendable {
 
 actor CopilotTriageDecider: TriageDeciding {
     private static let logger = Logger(subsystem: "com.triage.mac", category: "Copilot")
-    nonisolated let maximumBatchSize = 15
+    /// Smaller batches keep Copilot's structured answers complete and reliable.
+    nonisolated let maximumBatchSize = 10
     /// A full batch is one model call; allow it to finish rather than retrying it.
     static let requestTimeout: TimeInterval = 120
 
