@@ -63,7 +63,7 @@ struct WorkspaceViewsTests {
 
         #expect(
             WorkspaceViewPresentation.badges(for: entry)
-                == ["Checks failing", "Changes requested", "Conflicts", "Draft"]
+                == [.checksFailing, .changesRequested, .conflicts, .draft]
         )
     }
 }

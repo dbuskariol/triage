@@ -129,19 +129,12 @@ protocol CopilotRuntimeFileManaging: Sendable {
     func exists(_ url: URL) -> Bool
 }
 
-/// Cross-process exclusion shared by acquisition and the XPC launch boundary.
-/// Install/repair/remove take an exclusive lock.  XPC must take a shared lock
-/// from final descriptor/signature verification through `Process.run()`; it
-/// must not retain a pathname after dropping that lock.
+/// Cross-process exclusion for runtime install, repair, and removal.
 enum CopilotRuntimeInstallLock {
     static let filename = ".runtime.lock"
 
     static func withExclusiveLock<T>(root: URL, _ body: () throws -> T) throws -> T {
         try withLock(root: root, operation: LOCK_EX, body)
-    }
-
-    static func withSharedLock<T>(root: URL, _ body: () throws -> T) throws -> T {
-        try withLock(root: root, operation: LOCK_SH, body)
     }
 
     private static func withLock<T>(root: URL, operation: Int32, _ body: () throws -> T) throws -> T {

@@ -232,12 +232,11 @@ fn salvage_objects(content: &str) -> Vec<TriageItemDecision> {
             b'"' => in_string = true,
             b'{' => starts.push(index),
             b'}' => {
-                if let Some(start) = starts.pop() {
-                    if let Ok(decision) =
+                if let Some(start) = starts.pop()
+                    && let Ok(decision) =
                         serde_json::from_str::<TriageItemDecision>(&content[start..=index])
-                    {
-                        found.push(decision);
-                    }
+                {
+                    found.push(decision);
                 }
             }
             _ => {}

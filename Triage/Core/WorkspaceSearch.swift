@@ -73,12 +73,7 @@ struct SearchToken: Identifiable, Hashable, Sendable {
             }
         case .priority:
             guard let priority = entry.decision?.priority else { return false }
-            switch value.lowercased() {
-            case "high": return priority >= 70
-            case "medium": return (40..<70).contains(priority)
-            case "low": return priority < 40
-            default: return false
-            }
+            return PriorityBand(rawValue: value.lowercased()) == PriorityBand(priority)
         }
     }
 }
@@ -193,7 +188,36 @@ struct WorkspaceSearch: Equatable, Sendable {
     }
 }
 
+/// Narrows Done & Snoozed.
+enum HandledFilter: String, CaseIterable, Identifiable, Sendable {
+    case all = "All", byYou = "Handled by You", done = "Done", snoozed = "Snoozed"
+    var id: Self { self }
+
+    func includes(_ entry: TriageEntry) -> Bool {
+        switch (self, entry.local) {
+        case (.all, _): true
+        case (.byYou, .done): entry.handledEvidence != nil
+        case (.done, .done): entry.handledEvidence == nil
+        case (.snoozed, .snoozed): true
+        default: false
+        }
+    }
+}
+
 extension WorkspacePresentation {
+    /// The rows shown in the list, in order. The list view, keyboard
+    /// navigation, and "select next after Done" all use this one definition.
+    func visibleEntries(
+        section: Section, search: WorkspaceSearch, handledFilter: HandledFilter,
+        sortedBy field: WorkspaceSortField, ascending: Bool, viewer: String
+    ) -> [TriageEntry] {
+        if search.isActive {
+            return searchResults(search, section: section, sortedBy: field, ascending: ascending, viewer: viewer)
+        }
+        let sorted = entries(in: section, sortedBy: field, ascending: ascending)
+        return section == .handled ? sorted.filter(handledFilter.includes) : sorted
+    }
+
     /// Search results in the user's sort order, from the current section or all work.
     func searchResults(
         _ search: WorkspaceSearch, section: Section, sortedBy field: WorkspaceSortField, ascending: Bool, viewer: String

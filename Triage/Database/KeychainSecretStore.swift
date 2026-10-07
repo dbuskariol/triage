@@ -208,15 +208,6 @@ actor KeychainSecretStore: SecretStore {
         return try VaultKey(data: data)
     }
 
-    func createVaultKey(for accountID: AccountID) throws -> VaultKey {
-        if try readVaultKey(for: accountID) != nil {
-            throw SecretStoreError.keychain(errSecDuplicateItem)
-        }
-        let key = try VaultKey.generate()
-        try write(key.data, kind: .vaultKey, accountID: accountID, credentialID: nil)
-        return key
-    }
-
     func removeAllSecrets(for accountID: AccountID) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

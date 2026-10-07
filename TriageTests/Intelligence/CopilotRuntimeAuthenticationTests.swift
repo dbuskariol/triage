@@ -20,20 +20,6 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         }
     }
 
-    func testAIStaysBlockedUntilEveryIndependentGateIsTrue() {
-        let base = CopilotAccountAuthorizationState(
-            runtime: .ready,
-            authentication: .authenticated,
-            isEntitled: true,
-            hasOrganizationConsent: true
-        )
-        XCTAssertTrue(base.permitsAI)
-        XCTAssertFalse(CopilotAccountAuthorizationState(runtime: .missing, authentication: .authenticated, isEntitled: true, hasOrganizationConsent: true).permitsAI)
-        XCTAssertFalse(CopilotAccountAuthorizationState(runtime: .ready, authentication: .signedOut, isEntitled: true, hasOrganizationConsent: true).permitsAI)
-        XCTAssertFalse(CopilotAccountAuthorizationState(runtime: .ready, authentication: .authenticated, isEntitled: false, hasOrganizationConsent: true).permitsAI)
-        XCTAssertFalse(CopilotAccountAuthorizationState(runtime: .ready, authentication: .authenticated, isEntitled: true, hasOrganizationConsent: false).permitsAI)
-    }
-
     func testConsentAndEntitlementRejectBeforeRuntimeOrCredentialAccess() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "triage-copilot-auth-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -50,112 +36,6 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
         } verify: { XCTAssertEqual($0 as? CopilotAuthenticationError, .entitlementRequired) }
         let readCount = await secrets.readCount
         XCTAssertEqual(readCount, 0)
-    }
-
-    func testIdentityMismatchIsExplicitAndCannotPermitAI() {
-        let state = CopilotAccountAuthorizationState(
-            runtime: .ready,
-            authentication: .identityMismatch(expected: 10, actual: 11),
-            isEntitled: true,
-            hasOrganizationConsent: true
-        )
-        XCTAssertFalse(state.permitsAI)
-    }
-
-    func testAvailabilityPresentationDoesNotCallEveryIncompleteGateBlocked() {
-        let base = CopilotAccountAuthorizationState(
-            runtime: .ready,
-            authentication: .authenticated,
-            isEntitled: true,
-            hasOrganizationConsent: true
-        )
-
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: base,
-                isEffectivelyAvailable: true,
-                authenticationKind: .oauth
-            ),
-            .available
-        )
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: .init(
-                    runtime: .ready,
-                    authentication: .signedOut,
-                    isEntitled: true,
-                    hasOrganizationConsent: true
-                ),
-                isEffectivelyAvailable: false,
-                authenticationKind: .oauth
-            ),
-            .signInRequired
-        )
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: .init(
-                    runtime: .ready,
-                    authentication: .authenticated,
-                    isEntitled: true,
-                    hasOrganizationConsent: false
-                ),
-                isEffectivelyAvailable: false,
-                authenticationKind: .oauth
-            ),
-            .consentRequired
-        )
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: .init(
-                    runtime: .ready,
-                    authentication: .identityMismatch(expected: 10, actual: 11),
-                    isEntitled: true,
-                    hasOrganizationConsent: true
-                ),
-                isEffectivelyAvailable: false,
-                authenticationKind: .oauth
-            ),
-            .blocked
-        )
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: base,
-                isEffectivelyAvailable: false,
-                authenticationKind: .oauth
-            ),
-            .unavailable
-        )
-        XCTAssertEqual(
-            CopilotAvailabilityPresentation(
-                authorization: .init(
-                    runtime: .ready,
-                    authentication: .signedOut,
-                    isEntitled: true,
-                    hasOrganizationConsent: true
-                ),
-                isEffectivelyAvailable: false,
-                authenticationKind: .classicPersonalAccessToken
-            ),
-            .signInRequired
-        )
-    }
-
-    func testSignInRemainsActionableBeforeEntitlementIsKnown() {
-        for kind in [AuthenticationKind.oauth, .classicPersonalAccessToken, .fineGrainedPersonalAccessToken] {
-            XCTAssertEqual(
-                CopilotAvailabilityPresentation(
-                    authorization: .init(
-                        runtime: .ready,
-                        authentication: .signedOut,
-                        isEntitled: false,
-                        hasOrganizationConsent: true
-                    ),
-                    isEffectivelyAvailable: false,
-                    authenticationKind: kind
-                ),
-                .signInRequired
-            )
-        }
     }
 
     func testStateQueryCannotRestoreAuthenticationAfterDisconnect() async throws {
@@ -204,7 +84,6 @@ final class CopilotRuntimeAuthenticationTests: XCTestCase {
 
         XCTAssertEqual(state.runtime, .ready)
         XCTAssertEqual(state.authentication, .signedOut)
-        XCTAssertFalse(state.permitsAI)
     }
 
     func testAuthenticationIsRejectedForEntireRuntimeAcquisitionMutation() async throws {

@@ -74,7 +74,8 @@ private enum WorkspacePreviewFixture {
         section: .inbox,
         selectedEntryID: $selection,
         actions: WorkspacePreviewActions(),
-        search: .constant(WorkspaceSearch())
+        search: .constant(WorkspaceSearch()),
+        handledFilter: .constant(.all)
     )
     .frame(width: 600, height: 500)
 }

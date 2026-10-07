@@ -264,6 +264,17 @@ enum TriageDisposition: String, Codable, Sendable, CaseIterable {
     var isInbox: Bool { self == .act || self == .review }
 }
 
+/// Copilot priority bands, shared by labels, search, and rules.
+enum PriorityBand: String, CaseIterable, Sendable {
+    case high, medium, low
+
+    init(_ priority: Int) {
+        self = priority >= 70 ? .high : priority >= 40 ? .medium : .low
+    }
+
+    var title: String { rawValue.capitalized }
+}
+
 struct TriageDecision: Codable, Equatable, Sendable {
     let itemID: GitHubNodeID
     let disposition: TriageDisposition

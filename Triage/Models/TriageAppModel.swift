@@ -24,10 +24,6 @@ struct OrganizationAISettingsState: Equatable {
         self.modelSelectionNotice = modelSelectionNotice
     }
 
-    var selectedModelTitle: String {
-        guard let selectedModelID = consent.selectedModelID else { return "Auto" }
-        return availableModels.first { $0.id == selectedModelID }?.displayName ?? selectedModelID
-    }
 }
 
 /// The running workspace for one account + organization.
@@ -84,6 +80,7 @@ final class TriageAppModel: ObservableObject {
     @Published var selectedEntryID: GitHubNodeID?
     /// Toolbar search; filters the list in place.
     @Published var search = WorkspaceSearch()
+    @Published var handledFilter = HandledFilter.all
     /// Incremented by Edit ▸ Find (⌘F) to focus the search field.
     @Published var searchFocusRequest = 0
 
@@ -132,11 +129,6 @@ final class TriageAppModel: ObservableObject {
 
     var selectedOrganization: GitHubOrganization? {
         organizations.first { $0.id == selectedOrganizationID }
-    }
-
-    var selectedOrganizationAccess: OrganizationAccess? {
-        guard let selectedAccountID, let selectedOrganizationID else { return nil }
-        return organizationAccessesByAccount[selectedAccountID]?[selectedOrganizationID]
     }
 
     var selectedOrganizationAISettings: OrganizationAISettingsState? {
@@ -366,17 +358,6 @@ final class TriageAppModel: ObservableObject {
             return try await self.dependencies.accountSession.connectPersonalAccessToken(
                 token, resourceOwnerOrganization: resourceOwnerOrganization
             )
-        }
-    }
-
-    func reconnectGitHub(account: GitHubAccount, presentationAnchor: NSWindow) async {
-        await connect {
-            let configuration = try RuntimeOAuthConfiguration()
-            let request = try await self.oauthAuthorizer.authorize(
-                configuration: configuration.oauth, presentationAnchor: presentationAnchor
-            )
-            await self.dependencies.copilotRuntimeAuthorization.disconnect(accountID: account.id)
-            return try await self.dependencies.accountSession.reconnectOAuth(request, replacing: account)
         }
     }
 
@@ -689,15 +670,12 @@ extension TriageAppModel {
     /// The selected section's entries in the user's chosen sort order.
     var visibleEntries: [TriageEntry] {
         let defaults = UserDefaults.standard
-        let field = defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended
-        let ascending = defaults.bool(forKey: TriagePreferenceKeys.sortAscending)
-        if search.isActive {
-            return presentation.searchResults(
-                search, section: selectedSection, sortedBy: field, ascending: ascending,
-                viewer: selectedAccount?.login ?? ""
-            )
-        }
-        return presentation.entries(in: selectedSection, sortedBy: field, ascending: ascending)
+        return presentation.visibleEntries(
+            section: selectedSection, search: search, handledFilter: handledFilter,
+            sortedBy: defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended,
+            ascending: defaults.bool(forKey: TriagePreferenceKeys.sortAscending),
+            viewer: selectedAccount?.login ?? ""
+        )
     }
 
     func selectFirstEntry() {

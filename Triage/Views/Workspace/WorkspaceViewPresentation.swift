@@ -2,11 +2,7 @@ import Foundation
 
 enum WorkspaceViewPresentation {
     static func priorityLabel(_ priority: Int) -> String {
-        switch priority {
-        case 70...: "High"
-        case 40...: "Medium"
-        default: "Low"
-        }
+        PriorityBand(priority).title
     }
 
     static func confidenceLabel(_ confidence: Double) -> String {
@@ -26,14 +22,36 @@ enum WorkspaceViewPresentation {
         }
     }
 
-    static func badges(for entry: TriageEntry) -> [String] {
+    static func badges(for entry: TriageEntry) -> [Badge] {
         guard let facts = entry.item.pullRequest else { return [] }
-        var badges: [String] = []
-        if facts.checks == .failure || facts.checks == .error { badges.append("Checks failing") }
-        if facts.reviewDecision == .changesRequested { badges.append("Changes requested") }
-        if facts.mergeable?.uppercased() == "CONFLICTING" { badges.append("Conflicts") }
-        if facts.isDraft { badges.append("Draft") }
+        var badges: [Badge] = []
+        if facts.checks == .failure || facts.checks == .error { badges.append(.checksFailing) }
+        if facts.reviewDecision == .changesRequested { badges.append(.changesRequested) }
+        if facts.mergeable?.uppercased() == "CONFLICTING" { badges.append(.conflicts) }
+        if facts.isDraft { badges.append(.draft) }
         return badges
+    }
+
+    /// Pull request states worth flagging in a row. Only blockers get color.
+    enum Badge: String, CaseIterable, Sendable {
+        case checksFailing = "Checks failing"
+        case changesRequested = "Changes requested"
+        case conflicts = "Conflicts"
+        case draft = "Draft"
+
+        var title: String { rawValue }
+
+        var systemImage: String {
+            switch self {
+            case .checksFailing: "xmark.circle.fill"
+            case .conflicts: "exclamationmark.triangle.fill"
+            case .changesRequested: "arrow.uturn.backward.circle.fill"
+            case .draft: "pencil.circle"
+            }
+        }
+
+        var isBlocking: Bool { self != .draft }
+        var isSevere: Bool { self == .checksFailing || self == .conflicts }
     }
 
     static func statusLine(_ status: TriageStatus, now: Date = .now) -> String {

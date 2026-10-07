@@ -26,11 +26,13 @@ use crate::{
     schema::{TriageItem, TriageItemDecision},
 };
 
-/// Per-request model tuning chosen in Settings.
+/// Per-request model choice and user preferences from Settings.
 #[derive(Clone, Debug, Default)]
 pub struct TriageModelOptions {
+    pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub context_tier: Option<String>,
+    pub instructions: Option<String>,
 }
 
 /// The only capability policy accepted by Triage.
@@ -194,9 +196,7 @@ pub trait CopilotEngine: Send + Sync + 'static {
         &self,
         request_id: Uuid,
         viewer_login: String,
-        instructions: Option<String>,
         items: Vec<TriageItem>,
-        selected_model: Option<String>,
         options: TriageModelOptions,
         cancellation: CancellationState,
     ) -> Result<Vec<TriageItemDecision>, Failure>;
@@ -750,9 +750,7 @@ impl CopilotEngine for FailClosedCopilotEngine {
         &self,
         request_id: Uuid,
         viewer_login: String,
-        instructions: Option<String>,
         items: Vec<TriageItem>,
-        selected_model: Option<String>,
         options: TriageModelOptions,
         cancellation: CancellationState,
     ) -> Result<Vec<TriageItemDecision>, Failure> {
@@ -767,10 +765,13 @@ impl CopilotEngine for FailClosedCopilotEngine {
             .with_system_message(
                 SystemMessageConfig::new()
                     .with_mode("replace")
-                    .with_content(triage_system_prompt(&viewer_login, instructions.as_deref())),
+                    .with_content(triage_system_prompt(
+                        &viewer_login,
+                        options.instructions.as_deref(),
+                    )),
             );
-        let model_selector = selected_model.as_deref().unwrap_or("auto").to_owned();
-        if let Some(model) = selected_model {
+        let model_selector = options.model.as_deref().unwrap_or("auto").to_owned();
+        if let Some(model) = options.model {
             config = config.with_model(model);
         }
         if let Some(effort) = options.reasoning_effort {
@@ -1188,11 +1189,11 @@ async fn read_login_output_with_confirmation(
                     .any(|word| text.contains(word));
             if storage_prompt {
                 let mut confirmation = confirmation.lock().await;
-                if !confirmation.sent {
-                    if let Some(input) = &mut confirmation.input {
-                        input.write_all(b"y\n").await?;
-                        confirmation.sent = true;
-                    }
+                if !confirmation.sent
+                    && let Some(input) = &mut confirmation.input
+                {
+                    input.write_all(b"y\n").await?;
+                    confirmation.sent = true;
                 }
             }
         }
@@ -1299,7 +1300,7 @@ fn prune_logs(directory: &Path, keep: usize) {
             Some((metadata.modified().ok()?, entry.path()))
         })
         .collect();
-    files.sort_by(|lhs, rhs| rhs.0.cmp(&lhs.0));
+    files.sort_by_key(|file| std::cmp::Reverse(file.0));
     for (_, path) in files.into_iter().skip(keep) {
         let _ = fs::remove_file(path);
     }

@@ -23,7 +23,6 @@ enum CopilotXPCError: Error, Equatable, Sendable {
   case shutDown
   case malformedFrame
   case responseTooLarge
-  case invalidAnalysis
   case invalidAccountID
   case runtimeUnavailable
   case runtimeCorrupt

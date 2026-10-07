@@ -98,19 +98,6 @@ private enum VaultPathValidator {
         }
     }
 
-    static func ensureMigrationBackups(rootDirectory: URL, accountID: AccountID) throws {
-        let canonicalRoot = try canonicalRootDirectory(rootDirectory)
-        _ = try paths(rootDirectory: canonicalRoot, accountID: accountID)
-        do {
-            try NoFollowFilesystem.ensureDirectory(
-                at: canonicalRoot,
-                components: ["Vaults", accountID.rawValue, "MigrationBackups"]
-            )
-        } catch {
-            throw VaultError.unsafeAccountIDPath
-        }
-    }
-
     static func assertDatabaseFileIsSafe(rootDirectory: URL, accountID: AccountID) throws {
         let canonicalRoot = try canonicalRootDirectory(rootDirectory)
         do {
@@ -194,26 +181,6 @@ enum NoFollowFilesystem {
         var status = stat()
         guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
         guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
-    }
-
-    static func regularFileExists(
-        beneath root: URL,
-        directoryComponents: [String],
-        name: String
-    ) throws -> Bool {
-        let directory = try openedDirectory(beneath: root, components: directoryComponents, create: false)
-        guard let directory else { return false }
-        defer { _ = Darwin.close(directory) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-        if file == -1 {
-            guard errno == ENOENT else { throw posixError() }
-            return false
-        }
-        defer { _ = Darwin.close(file) }
-        var status = stat()
-        guard Darwin.fstat(file, &status) == 0 else { throw posixError() }
-        guard (status.st_mode & S_IFMT) == S_IFREG else { throw posixError(code: EINVAL) }
-        return true
     }
 
     /// Returns an owned descriptor for a directory reached entirely through
@@ -353,59 +320,6 @@ enum NoFollowFilesystem {
         return try operation(directory)
     }
 
-    /// Returns the kernel's current path for a held directory descriptor.
-    /// This follows the opened directory across a rename instead of resolving
-    /// the original account-owned pathname again.
-    static func currentPath(of directory: Int32) throws -> String {
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        guard Darwin.fcntl(directory, F_GETPATH, &buffer) == 0 else {
-            throw posixError()
-        }
-        let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
-        return String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
-    }
-
-    /// Supplies an app-private directory for SQLite, whose macOS VFS needs a
-    /// conventional pathname rather than `/dev/fd`. The source ciphertext is
-    /// copied from its already-held no-follow descriptor, so account path
-    /// swaps cannot change the bytes SQLCipher verifies.
-    static func withPrivateVerificationDirectory<Value>(
-        _ operation: (String, Int32) throws -> Value
-    ) throws -> Value {
-        let templatePath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("triage-vault-verify-XXXXXXXX", isDirectory: true)
-            .path
-        var template = Array(templatePath.utf8CString)
-        guard template.withUnsafeMutableBufferPointer({ Darwin.mkdtemp($0.baseAddress) }) != nil else {
-            throw posixError()
-        }
-        let terminator = template.firstIndex(of: 0) ?? template.endIndex
-        let directoryPath = String(
-            decoding: template[..<terminator].map(UInt8.init(bitPattern:)),
-            as: UTF8.self
-        )
-        let directory = Darwin.open(directoryPath, directoryFlags)
-        guard directory != -1 else {
-            _ = Darwin.rmdir(directoryPath)
-            throw posixError()
-        }
-        var status = stat()
-        guard Darwin.fstat(directory, &status) == 0,
-              (status.st_mode & S_IFMT) == S_IFDIR,
-              Darwin.fchmod(directory, 0o700) == 0
-        else {
-            _ = Darwin.close(directory)
-            _ = Darwin.rmdir(directoryPath)
-            throw posixError(code: EINVAL)
-        }
-        defer {
-            _ = Darwin.unlinkat(directory, "verified.sqlite", 0)
-            _ = Darwin.close(directory)
-            _ = Darwin.rmdir(directoryPath)
-        }
-        return try operation(directoryPath, directory)
-    }
-
     /// Descends from an already-held directory descriptor without resolving
     /// the account namespace again. The parent remains owned by the caller;
     /// only descendant descriptors opened here are closed.
@@ -436,126 +350,6 @@ enum NoFollowFilesystem {
             directory = next
         }
         return try operation(directory)
-    }
-
-    static func setRegularFilePermissions(
-        relativeTo directory: Int32,
-        name: String,
-        permissions: mode_t = 0o600
-    ) throws {
-        guard isSafeComponent(name) else { throw posixError(code: EINVAL) }
-        let file = Darwin.openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-        guard file != -1 else { throw posixError() }
-        defer { _ = Darwin.close(file) }
-        var status = stat()
-        guard Darwin.fstat(file, &status) == 0,
-              (status.st_mode & S_IFMT) == S_IFREG,
-              Darwin.fchmod(file, permissions) == 0,
-              Darwin.fsync(file) == 0
-        else { throw posixError() }
-    }
-
-    static func copyRegularFileWithinDirectoryAtomically(
-        _ directory: Int32,
-        sourceName: String,
-        destinationName: String,
-        permissions: mode_t = 0o600
-    ) throws {
-        guard isSafeComponent(sourceName), isSafeComponent(destinationName) else {
-            throw posixError(code: EINVAL)
-        }
-        let source = Darwin.openat(directory, sourceName, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-        guard source != -1 else { throw posixError() }
-        defer { _ = Darwin.close(source) }
-        var sourceStatus = stat()
-        guard Darwin.fstat(source, &sourceStatus) == 0,
-              (sourceStatus.st_mode & S_IFMT) == S_IFREG
-        else { throw posixError(code: EINVAL) }
-
-        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
-        let destination = Darwin.openat(
-            directory,
-            temporary,
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            permissions
-        )
-        guard destination != -1 else { throw posixError() }
-        defer {
-            _ = Darwin.close(destination)
-            _ = Darwin.unlinkat(directory, temporary, 0)
-        }
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { Darwin.read(source, $0.baseAddress, $0.count) }
-            guard count >= 0 else { throw posixError() }
-            guard count > 0 else { break }
-            try buffer.withUnsafeBytes { bytes in
-                var offset = 0
-                while offset < count {
-                    let written = Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
-                    guard written > 0 else { throw posixError() }
-                    offset += written
-                }
-            }
-        }
-        guard Darwin.fchmod(destination, permissions) == 0,
-              Darwin.fsync(destination) == 0,
-              Darwin.renameat(directory, temporary, directory, destinationName) == 0,
-              Darwin.fsync(directory) == 0
-        else { throw posixError() }
-    }
-
-    /// Publishes the exact regular file already opened by the caller. This is
-    /// used when SQLCipher has verified a backup through that file descriptor:
-    /// reopening the source by name would permit a replacement between
-    /// verification and installation.
-    static func copyOpenRegularFileAtomically(
-        _ source: Int32,
-        to destinationDirectory: Int32,
-        destinationName: String,
-        permissions: mode_t = 0o600
-    ) throws {
-        guard source >= 0, isSafeComponent(destinationName) else {
-            throw posixError(code: EINVAL)
-        }
-        var sourceStatus = stat()
-        guard Darwin.fstat(source, &sourceStatus) == 0,
-              (sourceStatus.st_mode & S_IFMT) == S_IFREG,
-              Darwin.lseek(source, 0, SEEK_SET) >= 0
-        else { throw posixError(code: EINVAL) }
-
-        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
-        let destination = Darwin.openat(
-            destinationDirectory,
-            temporary,
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            permissions
-        )
-        guard destination != -1 else { throw posixError() }
-        defer {
-            _ = Darwin.close(destination)
-            _ = Darwin.unlinkat(destinationDirectory, temporary, 0)
-        }
-
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { Darwin.read(source, $0.baseAddress, $0.count) }
-            guard count >= 0 else { throw posixError() }
-            guard count > 0 else { break }
-            try buffer.withUnsafeBytes { bytes in
-                var offset = 0
-                while offset < count {
-                    let written = Darwin.write(destination, bytes.baseAddress!.advanced(by: offset), count - offset)
-                    guard written > 0 else { throw posixError() }
-                    offset += written
-                }
-            }
-        }
-        guard Darwin.fchmod(destination, permissions) == 0,
-              Darwin.fsync(destination) == 0,
-              Darwin.renameat(destinationDirectory, temporary, destinationDirectory, destinationName) == 0,
-              Darwin.fsync(destinationDirectory) == 0
-        else { throw posixError() }
     }
 
     static func removeRegularFileIfPresent(relativeTo directory: Int32, name: String) throws {
@@ -610,91 +404,6 @@ enum NoFollowFilesystem {
         guard Darwin.fsync(file) == 0 else { throw posixError() }
         guard Darwin.renameat(directory, temporary, directory, name) == 0 else { throw posixError() }
         guard Darwin.fsync(directory) == 0 else { throw posixError() }
-    }
-
-    /// Copies an already-opened regular-file namespace through descriptor
-    /// relative paths. The destination is replaced only after its complete
-    /// contents have been flushed, so recovery never truncates a live vault
-    /// before a verified backup is durable.
-    static func copyRegularFileAtomically(
-        beneath root: URL,
-        sourceDirectoryComponents: [String],
-        sourceName: String,
-        destinationDirectoryComponents: [String],
-        destinationName: String,
-        permissions: mode_t = 0o600
-    ) throws {
-        guard isSafeComponent(sourceName), isSafeComponent(destinationName) else {
-            throw posixError(code: EINVAL)
-        }
-        guard let sourceDirectory = try openedDirectory(
-            beneath: root,
-            components: sourceDirectoryComponents,
-            create: false
-        ) else {
-            throw posixError(code: ENOENT)
-        }
-        defer { _ = Darwin.close(sourceDirectory) }
-        let source = Darwin.openat(sourceDirectory, sourceName, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-        guard source != -1 else { throw posixError() }
-        defer { _ = Darwin.close(source) }
-        var sourceStatus = stat()
-        guard Darwin.fstat(source, &sourceStatus) == 0,
-              (sourceStatus.st_mode & S_IFMT) == S_IFREG
-        else {
-            throw posixError(code: EINVAL)
-        }
-
-        guard let destinationDirectory = try openedDirectory(
-            beneath: root,
-            components: destinationDirectoryComponents,
-            create: true
-        ) else {
-            throw posixError(code: ENOENT)
-        }
-        defer { _ = Darwin.close(destinationDirectory) }
-        let temporary = ".\(destinationName).\(UUID().uuidString.lowercased()).partial"
-        let destination = Darwin.openat(
-            destinationDirectory,
-            temporary,
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            permissions
-        )
-        guard destination != -1 else { throw posixError() }
-        defer {
-            _ = Darwin.close(destination)
-            _ = Darwin.unlinkat(destinationDirectory, temporary, 0)
-        }
-
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes {
-                Darwin.read(source, $0.baseAddress, $0.count)
-            }
-            guard count >= 0 else { throw posixError() }
-            guard count > 0 else { break }
-            try buffer.withUnsafeBytes { bytes in
-                var offset = 0
-                while offset < count {
-                    let written = Darwin.write(
-                        destination,
-                        bytes.baseAddress!.advanced(by: offset),
-                        count - offset
-                    )
-                    guard written > 0 else { throw posixError() }
-                    offset += written
-                }
-            }
-        }
-        // Durably establish the final access mode before publishing the
-        // replacement name, then persist the parent directory entry.
-        guard Darwin.fchmod(destination, permissions) == 0,
-              Darwin.fsync(destination) == 0,
-              Darwin.renameat(destinationDirectory, temporary, destinationDirectory, destinationName) == 0,
-              Darwin.fsync(destinationDirectory) == 0
-        else {
-            throw posixError()
-        }
     }
 
     static func removeRegularFileIfPresent(
@@ -1061,16 +770,6 @@ actor VaultRegistry {
 
     func cancelRemoval(accountID: AccountID) {
         accountsBeingRemoved.remove(accountID)
-    }
-
-    /// Lifecycle state only; no database handle is exposed while an account is
-    /// being cryptographically erased.
-    func isOpen(accountID: AccountID) -> Bool {
-        openVaults[accountID] != nil
-    }
-
-    func isBeingRemoved(accountID: AccountID) -> Bool {
-        accountsBeingRemoved.contains(accountID)
     }
 
     func verifiedMigrationBackupIDs(

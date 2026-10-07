@@ -68,7 +68,8 @@ private struct WorkspaceView: View {
                 selectedEntryID: $appModel.selectedEntryID,
                 actions: appModel,
                 search: $appModel.search,
-                searchFocusRequest: appModel.searchFocusRequest
+                searchFocusRequest: appModel.searchFocusRequest,
+                handledFilter: $appModel.handledFilter
             )
             .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 560)
         } detail: {

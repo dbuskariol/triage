@@ -110,15 +110,6 @@ private struct GitHubErrorPayload: Decodable {
 enum GitHubDiagnostics {
     private static let logger = Logger(subsystem: "com.triage.mac", category: "GitHub")
 
-    enum WorkspaceSnapshotAssemblyOutcome: String, Sendable {
-        case accepted
-        case revisionRejected = "revision-rejected"
-    }
-
-    /// Records one completed full-graph assembly using aggregate-only values.
-    /// In particular, this must never receive scope, work-item, or revision
-    /// identifiers because OSLog output can be collected for support.
-
     static func recordRatePause(resource: GitHubRateLimitResource, seconds: TimeInterval) {
         logger.notice("GitHub rate-limit pause: resource=\(resource.rawValue, privacy: .public), seconds=\(seconds, privacy: .public)")
     }

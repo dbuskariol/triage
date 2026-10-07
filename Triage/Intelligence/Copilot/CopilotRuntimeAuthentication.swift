@@ -27,80 +27,12 @@ struct CopilotAccountAuthorizationState: Equatable, Sendable {
     let isEntitled: Bool
     let hasOrganizationConsent: Bool
 
-    var permitsAI: Bool {
-        guard case .ready = runtime,
-              case .authenticated = authentication
-        else { return false }
-        return isEntitled && hasOrganizationConsent
-    }
-
     static let unavailable = Self(
         runtime: .missing,
         authentication: .signedOut,
         isEntitled: false,
         hasOrganizationConsent: false
     )
-}
-
-/// A precise, non-actionable summary for UI surfaces. "Blocked" is reserved
-/// for a failed or mismatched authorization, rather than every incomplete
-/// prerequisite.
-enum CopilotAvailabilityPresentation: Equatable, Sendable {
-    case available
-    case consentRequired
-    case entitlementUnavailable
-    case runtimeUnavailable
-    case signInRequired
-    case separateSignInUnavailable
-    case verifying
-    case unavailable
-    case blocked
-
-    init(
-        authorization: CopilotAccountAuthorizationState,
-        isEffectivelyAvailable: Bool,
-        authenticationKind: AuthenticationKind
-    ) {
-        guard isEffectivelyAvailable else {
-            if !authorization.hasOrganizationConsent {
-                self = .consentRequired
-            } else if authorization.runtime != .ready {
-                self = .runtimeUnavailable
-            } else {
-                switch authorization.authentication {
-                case .signedOut, .deviceLoginRequired:
-                    self = .signInRequired
-                case .verifyingIdentity:
-                    self = .verifying
-                case .identityMismatch, .blocked, .failed:
-                    self = .blocked
-                case .authenticated:
-                    // Budget or model availability has not been established.
-                    self = authorization.isEntitled ? .unavailable : .entitlementUnavailable
-                }
-            }
-            return
-        }
-        self = .available
-    }
-
-    var title: String {
-        switch self {
-        case .available: "Available"
-        case .consentRequired: "Consent required"
-        case .entitlementUnavailable: "Entitlement unavailable"
-        case .runtimeUnavailable: "Runtime unavailable"
-        case .signInRequired: "Sign-in required"
-        case .separateSignInUnavailable: "Separate sign-in unavailable"
-        case .verifying: "Verifying"
-        case .unavailable: "Unavailable"
-        case .blocked: "Blocked"
-        }
-    }
-
-    var requiresAttention: Bool {
-        self != .available && self != .verifying
-    }
 }
 
 enum CopilotAuthenticationError: Error, Equatable, Sendable {
@@ -146,22 +78,6 @@ extension CopilotRuntimeAuthenticating {
     func restoreSession(accountID: AccountID, organizationID: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
         throw CopilotAuthenticationError.signInRequired
     }
-}
-
-/// Explicit fallback used only by tests or configurations without the signed
-/// XPC service. Production uses `CopilotXPCAuthenticator` and never falls
-/// back to PATH or a token-bearing CLI config file.
-struct UnavailableCopilotRuntimeAuthenticator: CopilotRuntimeAuthenticating {
-    func authenticateWithEphemeralCredential(accountID _: AccountID, organizationID _: OrganizationID, credential _: CopilotEphemeralCredential) async throws -> CopilotRuntimeAuthenticationResult {
-        throw CopilotAuthenticationError.deviceLoginUnavailable
-    }
-
-    func authenticateWithDeviceLogin(accountID _: AccountID, organizationID _: OrganizationID) async throws -> CopilotRuntimeAuthenticationResult {
-        throw CopilotAuthenticationError.deviceLoginUnavailable
-    }
-    func models(accountID _: AccountID, organizationID _: OrganizationID) async throws -> [CopilotModel] { throw CopilotAuthenticationError.runtimeUnavailable }
-
-    func removeSession(profileDirectory _: URL) async {}
 }
 
 /// Authenticates only through the app-owned XPC service. The credential is
@@ -756,32 +672,6 @@ actor CopilotRuntimeAuthenticationService: CopilotRuntimeAuthorizationProviding 
         }
         modelIDs["\(accountID.rawValue)/\(organizationID.rawValue)"] = Set(values.map(\.id))
         return values
-    }
-
-
-    /// The mutable Data returned by Keychain is the only credential buffer this
-    /// adapter owns. It is wiped after the supplied operation. A temporary
-    /// `SecretValue` is unavoidable at the URLSession REST identity boundary;
-    /// after that preflight, the same owned bytes are copied directly into the
-    /// single-use XPC credential, never into another Swift `String`.
-    private func withEphemeralCredential<T: Sendable>(
-        for account: GitHubAccount,
-        preflight: @Sendable (SecretValue) async throws -> GitHubUserDTO,
-        authenticate: @Sendable (GitHubUserDTO, CopilotEphemeralCredential) async throws -> T
-    ) async throws -> T? {
-        let kind: TriageSecretKind = account.authenticationKind == .oauth ? .oauthAccessToken : .personalAccessToken
-        guard var bytes = try await secretStore.read(kind: kind, accountID: account.id, credentialID: account.credentialID)
-        else { return nil }
-        defer { bytes.resetBytes(in: 0..<bytes.count) }
-        let githubUser: GitHubUserDTO
-        do {
-            // This String exists only for the URLSession identity request,
-            // whose API currently requires `SecretValue`.
-            guard let raw = String(data: bytes, encoding: .utf8), !raw.isEmpty else { return nil }
-            githubUser = try await preflight(SecretValue(raw))
-        }
-        let credential = CopilotEphemeralCredential(copying: bytes)
-        return try await authenticate(githubUser, credential)
     }
 
     private func profileDirectory(for accountID: AccountID) -> URL {

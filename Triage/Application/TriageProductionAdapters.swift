@@ -60,7 +60,16 @@ struct TriageProductionComposition: Sendable {
                         let vault = try await openVault(scope.accountID)
                         let account = try await AccountRepository(vault: vault).accounts()
                             .first { $0.id == scope.accountID }
-                        guard let account else { throw AccountCredentialReaderError.missingAccessToken }
+                        guard var account else { throw AccountCredentialReaderError.missingAccessToken }
+                        // GitHub App user tokens expire; renew before they lapse.
+                        if account.authenticationKind == .oauth, let configuration = try? RuntimeOAuthConfiguration() {
+                            account = try await OAuthCredentialRefreshService(
+                                brokerURL: configuration.brokerURL,
+                                applicationVersion: configuration.applicationVersion,
+                                secretStore: secretStore,
+                                vaultRegistry: vaultRegistry
+                            ).refreshIfNeeded(account)
+                        }
                         let token = try await AccountCredentialReader(secretStore: secretStore).accessToken(for: account)
                         let rateLimit = try await GitHubRateLimitControllerRegistry.shared.controller(
                             for: scope.accountID, vault: vault
@@ -168,26 +177,6 @@ actor TriageAccountSessionService: AccountSessionServing {
         return try await restoredSnapshot()
     }
 
-    func reconnectOAuth(
-        _ request: AuthBrokerExchangeRequest,
-        replacing account: GitHubAccount
-    ) async throws -> AccountSessionSnapshot {
-        let configuration = try RuntimeOAuthConfiguration()
-        let response = try await AuthBrokerClient(
-            baseURL: configuration.brokerURL,
-            applicationVersion: configuration.applicationVersion
-        ).exchange(request)
-        let replacement = try await AccountCredentialReplacementService(
-            secretStore: secretStore,
-            vaultRegistry: vaultRegistry
-        ).replace(oauthTokenResponse: response, for: account)
-        return try await restoredSnapshot(
-            credentialActionNotice: replacement.retiredCredentialCleanupFailed
-                ? "The new credential is active, but Triage could not erase the retired Keychain entry."
-                : nil
-        )
-    }
-
     func replacePersonalAccessToken(
         _ token: PersonalAccessToken,
         replacing account: GitHubAccount
@@ -247,23 +236,6 @@ actor TriageAccountSessionService: AccountSessionServing {
             unavailableAccountIDs: Set(result.unavailableAccountIDs),
             vaultRecoveryIssues: result.vaultRecoveryIssues,
             credentialActionNotice: credentialActionNotice
-        )
-    }
-
-    static func organizationForInventoryReplay(
-        _ value: GitHubOrganizationDTO
-    ) throws -> GitHubOrganization {
-        guard let nodeID = GitHubNodeID(rawValue: value.nodeID),
-              let organizationID = OrganizationID(rawValue: value.nodeID)
-        else {
-            throw AccountConnectionError.invalidGitHubIdentity
-        }
-        return GitHubOrganization(
-            id: organizationID,
-            githubOrganizationID: value.id,
-            nodeID: nodeID,
-            login: value.login,
-            avatarURL: value.avatarURL
         )
     }
 

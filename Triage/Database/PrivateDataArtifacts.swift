@@ -416,17 +416,6 @@ actor AccountDataRemovalService {
         }.sorted { $0.rawValue < $1.rawValue }
     }
 
-    private static func deletionJournalURL(
-        for accountID: AccountID,
-        applicationSupportDirectory: URL
-    ) -> URL {
-        applicationSupportDirectory
-            .appendingPathComponent("Triage", isDirectory: true)
-            .appendingPathComponent("Recovery", isDirectory: true)
-            .appendingPathComponent(accountID.rawValue, isDirectory: true)
-            .appendingPathComponent("account-deletion.json", isDirectory: false)
-    }
-
     private static func isOpaqueAccountID(_ accountID: AccountID) -> Bool {
         guard let value = UUID(uuidString: accountID.rawValue) else { return false }
         return value.uuidString.lowercased() == accountID.rawValue
@@ -450,25 +439,6 @@ actor AccountDataRemovalService {
                 : cacheRoot
             try assertSafePath(artifact.url, beneath: expectedRoot.deletingLastPathComponent())
         }
-    }
-
-    private static func ensurePrivateDirectory(_ directory: URL, beneath root: URL) throws {
-        try assertSafePath(directory, beneath: root)
-        if FileManager.default.fileExists(atPath: directory.path) {
-            guard try isDirectoryWithoutSymlink(directory) else {
-                throw AccountDataRemovalError.unsafeArtifactPath
-            }
-        } else {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: false,
-                attributes: [.posixPermissions: 0o700]
-            )
-        }
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: directory.path
-        )
     }
 
     private static func assertSafePath(_ path: URL, beneath root: URL) throws {
