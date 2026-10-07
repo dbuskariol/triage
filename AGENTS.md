@@ -17,14 +17,14 @@ Preserve these baseline invariants:
 
 ## Repository map
 
-- `Triage/Core`: contracts, GitHub personal-work discovery, GRDB store, AI triage, engine, and presentation.
-- `Triage/CopilotXPC` and `TriageCopilotHelper`: fail-closed authenticated Copilot helper; `triage` is its only inference operation.
-- `Triage/Views/Workspace`: SwiftUI workspace surfaces.
+- `Triage/Core`: contracts, GitHub personal-work discovery, GRDB store, AI triage, engine, rules, and presentation.
+- `Triage/CopilotXPC`, `TriageCopilotXPC`, and `TriageCopilotHelper`: fail-closed authenticated Copilot boundary; `triage` is its only inference operation and holds the fixed system prompt.
+- `Triage/Views`: SwiftUI workspace, detail, rules, settings, onboarding, and menu bar.
 - `Triage/Models` and `Triage/Services`: app state, preferences, and platform services.
 - `TriageTests`: deterministic unit tests.
 - `Package.swift`: command-line compilation and test mirror.
 - `Configuration`: bundle metadata.
-- `Documentation`: architecture and release operations.
+- `Documentation`: architecture, handoff, performance, release notes, and release operations.
 - `scripts`: verification and fail-closed release automation.
 - `.github/workflows`: Apple silicon and Intel CI plus guarded release automation.
 
@@ -37,6 +37,11 @@ Preserve these baseline invariants:
 - Add tests for behavior changes.
 - Keep generated products and DerivedData outside the repository.
 - Never commit signing keys, certificates, notarization credentials, or release secrets.
+- Run `xcodegen generate` after adding or removing source files.
+- Copilot wire fields must change in the Rust schema, the Swift Codable types, and the strict `CopilotWireSchema` allowlist together.
+- Bump `TriageRules.promptVersion` when the built-in prompt changes materially; never make it user-editable.
+- Keep observed database tables as rowid tables so live updates fire.
+- Update `README.md` and `Documentation/` when behavior or settings change.
 
 ## Verification
 

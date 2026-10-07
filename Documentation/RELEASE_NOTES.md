@@ -1,11 +1,11 @@
 # Triage 0.1.0
 
-The first release of Triage, a private, local-first macOS workspace for read-only GitHub triage.
+The first release of Triage: your GitHub work, prioritized by Copilot.
 
-- Encrypted account vaults with Keychain-backed secrets and explicit recovery paths.
-- Read-only organization refresh across issues, pull requests, reviews, discussions, projects, notifications, and team mentions.
-- Native Inbox, My Work, Reviews, Mentions, Snoozed, and All Work views with explicit source coverage and freshness.
-- Deterministic priority, ownership, dependency, response, and notification intelligence that remains useful without AI.
-- Optional organization-scoped GitHub Copilot analysis with separate OAuth authentication, bounded context, and fail-closed runtime validation.
-- Native macOS Settings, keyboard navigation, accessibility, state restoration, menu-bar behavior, and signed Sparkle updates.
-- No telemetry, tracking, advertising, hidden GitHub mutations, or uploaded diagnostics.
+- **AI-first Inbox.** Finds the issues and pull requests that involve you in an organization; Copilot sorts them into Inbox, Waiting on Others, and No Action Needed with a specific next step and reason for each.
+- **Handled detection.** When you comment, review, or push, Copilot checks whether you completed its suggested step and moves handled work to Done, with evidence and Undo. Done work returns only when someone else responds.
+- **Rules and instructions.** Hard rules (mute, always Inbox, needs action, waiting, no action, raise or lower priority) and plain-English instructions for Copilot, per organization, with attribution on every decision.
+- **Native workspace.** Sortable lists, a rich detail view with pull request status and formatted descriptions, Mail-style keyboard navigation, and instant Done and Snooze.
+- **Configurable.** Refresh interval (or manual), snooze times, automatic handling, sorting, and Copilot model, in native Settings.
+- **Private.** Encrypted local storage, Keychain credentials, read-only GitHub access, opt-in Copilot per organization, and no telemetry.
+- **Trusted updates.** Developer ID signed, notarized, and Sparkle-verified.
