@@ -93,3 +93,23 @@ private func decision(_ item: PersonalWorkItem, _ disposition: TriageDisposition
         reason: "r", nextAction: nil, fingerprint: item.fingerprint, modelID: "m", decidedAt: .now
     )
 }
+
+struct AnalyzingQueueTests {
+    @Test func analyzingListsNewRecheckedAndRetryingWorkWhileDecidedItemsStayPut() {
+        let item = rulesItem()
+        let stale = TriageEntry(item: item, decision: decision(item, .act, priority: 80), analysis: .pending, local: .active)
+        let presentation = WorkspacePresentation(entries: [stale], status: .initial, now: .now)
+        #expect(presentation.count(in: .inbox) == 1)
+        #expect(presentation.count(in: .analyzing) == 1)
+        #expect(presentation.allEntries.count == 1)
+
+        // A decision made under older preferences is queued too.
+        let current = TriageEntry(item: item, decision: decision(item, .act, priority: 80), analysis: .current, local: .active)
+        let withInstructions = WorkspacePresentation(
+            entries: [current], status: .initial, now: .now,
+            rules: TriageRules(instructions: "Security first.", rules: [])
+        )
+        #expect(withInstructions.count(in: .analyzing) == 1)
+        #expect(WorkspacePresentation(entries: [current], status: .initial, now: .now).count(in: .analyzing) == 0)
+    }
+}

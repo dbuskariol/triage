@@ -46,8 +46,8 @@ struct TriageStatusView: View {
         switch problem {
         case .copilotUnavailable(let text), .gitHubUnavailable(let text):
             text
-        case .analysisFailed:
-            "Some items will be retried automatically"
+        case .analysisFailed(let text):
+            text
         }
     }
 }

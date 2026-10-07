@@ -11,7 +11,9 @@ struct WorkspacePresentation: Equatable, Sendable {
         case waiting
         /// Informational; Copilot found nothing for the user to do.
         case informational
-        /// Not analyzed yet, or analysis failed and will retry.
+        /// Copilot's queue: new work, decided work being re-checked after new
+        /// activity or changed preferences, and failures waiting to retry.
+        /// Re-checked items also stay in their decided section.
         case analyzing
         /// Locally marked done or snoozed.
         case handled
@@ -47,7 +49,11 @@ struct WorkspacePresentation: Equatable, Sendable {
     let status: TriageStatus
 
     func entries(in section: Section) -> [TriageEntry] { entries[section] ?? [] }
-    var allEntries: [TriageEntry] { Section.allCases.flatMap { entries(in: $0) } }
+    /// Every entry once (Analyzing overlaps decided sections).
+    var allEntries: [TriageEntry] {
+        Section.allCases.filter { $0 != .analyzing }.flatMap { entries(in: $0) }
+            + entries(in: .analyzing).filter { $0.decision == nil }
+    }
     func count(in section: Section) -> Int { entries[section]?.count ?? 0 }
 
     static let empty = WorkspacePresentation(entries: [:], status: .initial)
@@ -59,10 +65,22 @@ struct WorkspacePresentation: Equatable, Sendable {
 
     /// Groups entries. Inbox is ordered by AI priority, then confidence;
     /// other sections by urgency of relationship, then recency.
-    init(entries all: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty) {
+    init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty) {
+        let digest = rules.digest
+        let all = raw.map { entry in
+            var entry = rules.apply(to: entry)
+            // Decided under different preferences: queued for re-analysis.
+            if entry.analysis == .current, let decision = entry.decision, (decision.rulesDigest ?? "") != digest {
+                entry.analysis = .pending
+            }
+            return entry
+        }
         var grouped: [Section: [TriageEntry]] = [:]
-        for entry in all.map(rules.apply) {
+        for entry in all {
             grouped[Self.section(for: entry, now: now), default: []].append(entry)
+        }
+        grouped[.analyzing] = all.filter {
+            $0.analysis != .current && $0.isVisible(at: now) && !$0.isMuted
         }
         for (section, values) in grouped {
             grouped[section] = section == .inbox
