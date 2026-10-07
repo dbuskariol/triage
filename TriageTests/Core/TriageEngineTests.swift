@@ -96,6 +96,36 @@ final class TriageEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testYourActivityOnAnInboxItemIsCheckedAndMarkedHandled() async throws {
+        let store = MemoryStore()
+        let earlier = Date(timeIntervalSinceNow: -3_600)
+        let acted = engineItem("acted", relationship: .assigned, viewerCommentAt: .now)
+        let untouched = engineItem("untouched", relationship: .assigned)
+        for item in [acted, untouched] {
+            await store.seedDecision(TriageDecision(
+                itemID: item.id, disposition: .act, priority: 80, confidence: 0.9, summary: "s", reason: "r",
+                nextAction: "Reply to @bob", fingerprint: "older", modelID: "m", decidedAt: earlier
+            ))
+        }
+        let decider = RecordingDecider(batchSize: 1, handledIDs: ["acted"])
+        let engine = engine(store: store, items: [untouched, acted], decider: decider)
+        await engine.start(scope)
+        try await waitUntil { await decider.batches.count == 2 }
+        let batches = await decider.batches
+        XCTAssertEqual(batches.first, ["acted"], "Items you acted on are analyzed first.")
+        let context = await decider.receivedContexts["acted"]
+        XCTAssertEqual(context?.previousNextAction, "Reply to @bob")
+        XCTAssertEqual(context?.viewerActivity.count, 1)
+        try await waitUntil { await store.localStatus("acted") != nil }
+        let status = await store.localStatus("acted")
+        guard case .done(_, let at, let evidence) = status else { return XCTFail("Expected done") }
+        XCTAssertNotNil(at)
+        XCTAssertEqual(evidence, "You replied.")
+        let untouchedStatus = await store.localStatus("untouched")
+        XCTAssertNil(untouchedStatus)
+        await engine.stop()
+    }
+
     func testRefreshNowStartsAnotherCycleBeforeTheInterval() async throws {
         let store = MemoryStore()
         let discovery = CountingDiscovery(items: [engineItem("x", relationship: .assigned)])
@@ -157,14 +187,16 @@ final class TriageEngineTests: XCTestCase {
 }
 
 fileprivate func engineItem(
-    _ id: String, relationship: WorkRelationship, updatedAt: Date = .now, author: String = "octocat"
+    _ id: String, relationship: WorkRelationship, updatedAt: Date = .now, author: String = "octocat",
+    viewerCommentAt: Date? = nil
 ) -> PersonalWorkItem {
     PersonalWorkItem(
         id: GitHubNodeID(rawValue: id)!, kind: .issue, repository: "github/triage", number: 1,
         title: "Item \(id)", url: URL(string: "https://github.com/github/triage/issues/1")!,
         state: .open, author: author, createdAt: updatedAt, updatedAt: updatedAt,
         relationships: [relationship], labels: [], assignees: [], body: "",
-        pullRequest: nil, recentActivity: []
+        pullRequest: nil,
+        recentActivity: viewerCommentAt.map { [ActivityFact(author: "octocat", createdAt: $0, excerpt: "Done, thanks!")] } ?? []
     )
 }
 
@@ -205,7 +237,10 @@ private struct CopilotUnavailable: TriageAvailabilityError {
 
 private struct UnavailableDecider: TriageDeciding {
     let maximumBatchSize = 5
-    func decide(_ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules) async throws -> [TriageDecision] {
+    func decide(
+        _ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules,
+        contexts: [GitHubNodeID: TriageHandledContext]
+    ) async throws -> [TriageDecision] {
         throw CopilotUnavailable()
     }
 }
@@ -213,15 +248,22 @@ private struct UnavailableDecider: TriageDeciding {
 private actor RecordingDecider: TriageDeciding {
     nonisolated let maximumBatchSize: Int
     let failingIDs: Set<String>
+    let handledIDs: Set<String>
     private(set) var batches: [[String]] = []
+    private(set) var receivedContexts: [String: TriageHandledContext] = [:]
 
-    init(batchSize: Int, failingIDs: Set<String> = []) {
+    init(batchSize: Int, failingIDs: Set<String> = [], handledIDs: Set<String> = []) {
         maximumBatchSize = batchSize
         self.failingIDs = failingIDs
+        self.handledIDs = handledIDs
     }
 
-    func decide(_ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules) async throws -> [TriageDecision] {
+    func decide(
+        _ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules,
+        contexts: [GitHubNodeID: TriageHandledContext]
+    ) async throws -> [TriageDecision] {
         batches.append(items.map(\.id.rawValue))
+        for (id, context) in contexts { receivedContexts[id.rawValue] = context }
         if items.contains(where: { failingIDs.contains($0.id.rawValue) }) {
             throw URLError(.badServerResponse)
         }
@@ -229,7 +271,9 @@ private actor RecordingDecider: TriageDeciding {
             TriageDecision(
                 itemID: $0.id, disposition: .act, priority: 50, confidence: 0.9,
                 summary: "s", reason: "r", nextAction: nil, fingerprint: $0.fingerprint,
-                modelID: "test", decidedAt: .now, rulesDigest: rules.digest
+                modelID: "test", decidedAt: .now, rulesDigest: rules.digest,
+                handled: contexts[$0.id] == nil ? nil : (handledIDs.contains($0.id.rawValue) ? .yes : .no),
+                handledEvidence: contexts[$0.id] == nil ? nil : "You replied."
             )
         }
     }
@@ -245,6 +289,18 @@ actor MemoryStore: TriageStore {
     private var savedRules = TriageRules.empty
 
     func rules(scope: WorkspaceScope) async throws -> TriageRules { savedRules }
+    func decisions(for ids: [GitHubNodeID], scope: WorkspaceScope) async throws -> [GitHubNodeID: TriageDecision] {
+        decisions.filter { ids.contains($0.key) }
+    }
+    func markHandled(
+        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Bool {
+        guard local[itemID] == nil else { return false }
+        local[itemID] = .done(fingerprint: fingerprint, at: date, handledEvidence: evidence)
+        return true
+    }
+    func localStatus(_ id: String) -> LocalStatus? { local[GitHubNodeID(rawValue: id)!] }
+    func seedDecision(_ decision: TriageDecision) { decisions[decision.itemID] = decision }
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws { savedRules = rules }
 
     func decidedCount() -> Int { decisions.count }

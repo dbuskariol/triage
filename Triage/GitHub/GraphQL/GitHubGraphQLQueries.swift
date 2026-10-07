@@ -127,7 +127,7 @@ enum GitHubGraphQLQueries {
                   }
                 }
                 latestReviews(first: 10) { nodes { author { login } state submittedAt } }
-                commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+                commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state } authors(first: 3) { nodes { user { login } } } } } }
                 reviewThreads(first: 50) { nodes { isResolved } }
               }
             }

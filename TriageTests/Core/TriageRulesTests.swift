@@ -115,3 +115,49 @@ struct AnalyzingQueueTests {
         #expect(WorkspacePresentation(entries: [currentPrompt], status: .initial, now: .now).count(in: .analyzing) == 0)
     }
 }
+
+struct HandledDetectionTests {
+    private func item(comments: [ActivityFact], reviews: [ReviewFact] = []) -> PersonalWorkItem {
+        PersonalWorkItem(
+            id: GitHubNodeID(rawValue: "PR_handled")!, kind: .pullRequest, repository: "octo/repo", number: 9,
+            title: "t", url: URL(string: "https://github.com/octo/repo/pull/9")!, state: .open, author: "alice",
+            createdAt: .distantPast, updatedAt: .now, relationships: [.reviewRequested], labels: [], assignees: [],
+            body: "",
+            pullRequest: PullRequestFacts(
+                isDraft: false, reviewDecision: nil, requestedReviewers: [], latestReviews: reviews, checks: nil,
+                mergeable: nil, unresolvedReviewThreads: 0, additions: 0, deletions: 0
+            ),
+            recentActivity: comments
+        )
+    }
+
+    @Test func yourOwnActivityNeverBringsDoneWorkBackButOthersDoes() {
+        let doneAt = Date(timeIntervalSinceNow: -600)
+        let mine = item(comments: [ActivityFact(author: "Me", createdAt: .now, excerpt: "fixed")])
+        let entry = TriageEntry(item: mine, decision: nil, analysis: .current,
+                                local: .done(fingerprint: "x", at: doneAt))
+        #expect(!entry.isVisible(at: .now, viewer: "me"))
+
+        let others = item(comments: [ActivityFact(author: "bob", createdAt: .now, excerpt: "one more thing")])
+        let returned = TriageEntry(item: others, decision: nil, analysis: .current,
+                                   local: .done(fingerprint: "x", at: doneAt))
+        #expect(returned.isVisible(at: .now, viewer: "me"))
+    }
+
+    @Test func viewerActivityListsOnlyYourRecentActions() {
+        let since = Date(timeIntervalSinceNow: -600)
+        let work = item(
+            comments: [
+                ActivityFact(author: "me", createdAt: .now, excerpt: "Rebased and fixed the test"),
+                ActivityFact(author: "me", createdAt: .distantPast, excerpt: "old"),
+                ActivityFact(author: "bob", createdAt: .now, excerpt: "thanks"),
+            ],
+            reviews: [ReviewFact(author: "me", state: "APPROVED", submittedAt: .now)]
+        )
+        let activity = work.viewerActivity(since: since, viewer: "me")
+        #expect(activity.count == 2)
+        #expect(activity[0].contains("Rebased and fixed the test"))
+        #expect(activity[1].contains("approved review"))
+        #expect(work.latestActivity(excluding: "me") != nil)
+    }
+}

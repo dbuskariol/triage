@@ -232,6 +232,20 @@ private struct RecommendationCard: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let evidence = entry.handledEvidence {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Handled by you").fontWeight(.semibold)
+                        Text(evidence).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Move Back to Inbox") { actions.restore(entry) }
+                        .controlSize(.small)
+                }
+                .padding(10)
+                .background(.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
             if let decision = entry.decision {
                 Text(decision.summary)
                     .font(.title3)

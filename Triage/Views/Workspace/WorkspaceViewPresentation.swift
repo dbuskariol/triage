@@ -45,8 +45,9 @@ enum WorkspaceViewPresentation {
         case .idle:
             guard let refreshed = status.lastRefreshAt else { return "Starting…" }
             // Under a minute reads as "Just now" rather than a ticking seconds count.
-            if now.timeIntervalSince(refreshed) < 60 { return "Updated just now" }
-            return "Updated \(refreshed.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
+            let handled = status.recentlyHandled > 0 ? " · \(status.recentlyHandled) handled by you" : ""
+            if now.timeIntervalSince(refreshed) < 60 { return "Updated just now\(handled)" }
+            return "Updated \(refreshed.formatted(.relative(presentation: .named, unitsStyle: .wide)))\(handled)"
         }
     }
 

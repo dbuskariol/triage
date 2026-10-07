@@ -25,6 +25,7 @@ actor TriageEngine {
     private let maximumConcurrentBatches: Int
     private let maximumBatchBytes: Int
     private let retryDelay: TimeInterval
+    private let autoMarkHandled: @Sendable () -> Bool
     private let now: @Sendable () -> Date
 
     private var scope: WorkspaceScope?
@@ -45,8 +46,10 @@ actor TriageEngine {
         maximumConcurrentBatches: Int = 1,
         maximumBatchBytes: Int = 90_000,
         retryDelay: TimeInterval = 120,
+        autoMarkHandled: @escaping @Sendable () -> Bool = { true },
         now: @escaping @Sendable () -> Date = Date.init
     ) {
+        self.autoMarkHandled = autoMarkHandled
         self.store = store
         self.makeDiscovery = makeDiscovery
         self.decider = decider
@@ -193,12 +196,16 @@ actor TriageEngine {
     private func analyze(_ scope: WorkspaceScope) async {
         let pending: [PersonalWorkItem]
         let rules: TriageRules
+        let contexts: [GitHubNodeID: TriageHandledContext]
         do {
             rules = try await store.rules(scope: scope)
             // Muted work is never sent to Copilot.
-            pending = try await store.itemsNeedingAnalysis(
+            let candidates = try await store.itemsNeedingAnalysis(
                 scope: scope, rulesDigest: rules.digest, at: now(), limit: 1_000
             ).filter { !rules.isMuted($0) }
+            contexts = try await handledContexts(for: candidates, scope: scope)
+            // Work you just acted on goes first, so it leaves the Inbox quickly.
+            pending = candidates.filter { contexts[$0.id] != nil } + candidates.filter { contexts[$0.id] == nil }
         } catch {
             Self.logger.error("analysis-selection outcome=failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
             return
@@ -207,71 +214,122 @@ actor TriageEngine {
             Self.logger.notice("analysis skipped pending=0")
             return
         }
-        let batches = batches(of: pending)
-        Self.logger.notice("analysis started items=\(pending.count, privacy: .public) batches=\(batches.count, privacy: .public)")
+        Self.logger.notice("analysis started items=\(pending.count, privacy: .public) withYourActivity=\(contexts.count, privacy: .public)")
         var completed = 0
         var failedItems = 0
+        var handledCount = 0
+        var skippedOnce = Set<GitHubNodeID>()
+        var queue = pending
         status.phase = .analyzing(completed: 0, total: pending.count)
         publish()
 
-        var next = batches.makeIterator()
-        await withTaskGroup(of: BatchOutcome.self) { group in
-            func submit() -> Bool {
-                guard let batch = next.next() else { return false }
-                group.addTask { [decider] in await Self.run(batch, decider: decider, scope: scope, rules: rules) }
-                return true
-            }
-            for _ in 0..<maximumConcurrentBatches {
-                guard submit() else { break }
-            }
-            while let outcome = await group.next() {
-                switch outcome {
-                case .decided(let batch, let decisions, let duration):
-                    do {
-                        try await store.saveDecisions(decisions, scope: scope)
-                        completed += decisions.count
-                        let decidedIDs = Set(decisions.map(\.itemID))
-                        let missing = batch.filter { !decidedIDs.contains($0.id) }
-                        if !missing.isEmpty {
-                            failedItems += missing.count
-                            try await store.recordAnalysisFailure(
-                                itemIDs: missing.map(\.id), reason: "Copilot skipped this item; it will be retried.",
-                                retryAt: now().addingTimeInterval(retryDelay), scope: scope
-                            )
-                        }
-                        if case .copilotUnavailable = status.problem { status.problem = nil }
-                    } catch {
-                        Self.logger.error("decision-save outcome=failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+        // A second pass retries items Copilot skipped, right away.
+        while !queue.isEmpty, !Task.isCancelled {
+            var next = batches(of: queue).makeIterator()
+            queue = []
+            await withTaskGroup(of: BatchOutcome.self) { group in
+                func submit() -> Bool {
+                    guard let batch = next.next() else { return false }
+                    let batchContexts = contexts.filter { id, _ in batch.contains { $0.id == id } }
+                    group.addTask { [decider] in
+                        await Self.run(batch, decider: decider, scope: scope, rules: rules, contexts: batchContexts)
                     }
-                    Self.logger.notice("batch outcome=decided items=\(decisions.count, privacy: .public) duration=\(String(describing: duration), privacy: .public)")
-                case .unavailable(let message):
-                    // Copilot itself is unusable: stop submitting, keep items pending.
-                    status.problem = .copilotUnavailable(message)
-                    group.cancelAll()
-                    publish()
-                    Self.logger.error("batch outcome=copilot-unavailable")
-                    continue
-                case .failed(let items, let message):
-                    failedItems += items.count
-                    try? await store.recordAnalysisFailure(
-                        itemIDs: items.map(\.id), reason: message,
-                        retryAt: now().addingTimeInterval(retryDelay), scope: scope
-                    )
-                    Self.logger.error("batch outcome=failed items=\(items.count, privacy: .public) reason=\(message, privacy: .public)")
-                case .cancelled:
-                    continue
+                    return true
                 }
-                status.phase = .analyzing(completed: completed, total: pending.count)
-                publish()
-                if case .copilotUnavailable = status.problem {} else { _ = submit() }
+                for _ in 0..<maximumConcurrentBatches {
+                    guard submit() else { break }
+                }
+                while let outcome = await group.next() {
+                    switch outcome {
+                    case .decided(let batch, let decisions, let duration):
+                        do {
+                            try await store.saveDecisions(decisions, scope: scope)
+                            completed += decisions.count
+                            handledCount += try await markHandled(decisions, batch: batch, contexts: contexts, scope: scope)
+                            let decidedIDs = Set(decisions.map(\.itemID))
+                            for item in batch where !decidedIDs.contains(item.id) {
+                                if skippedOnce.insert(item.id).inserted {
+                                    queue.append(item)
+                                } else {
+                                    // Skipped twice: benign, retried on a later cycle without alarming the user.
+                                    try await store.recordAnalysisFailure(
+                                        itemIDs: [item.id], reason: "Copilot skipped this item; it will be retried.",
+                                        retryAt: now().addingTimeInterval(retryDelay), scope: scope
+                                    )
+                                }
+                            }
+                            if case .copilotUnavailable = status.problem { status.problem = nil }
+                        } catch {
+                            Self.logger.error("decision-save outcome=failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+                        }
+                        Self.logger.notice("batch outcome=decided items=\(decisions.count, privacy: .public) duration=\(String(describing: duration), privacy: .public)")
+                    case .unavailable(let message):
+                        // Copilot itself is unusable: stop submitting, keep items pending.
+                        status.problem = .copilotUnavailable(message)
+                        group.cancelAll()
+                        queue = []
+                        publish()
+                        Self.logger.error("batch outcome=copilot-unavailable")
+                        continue
+                    case .failed(let items, let message):
+                        failedItems += items.count
+                        try? await store.recordAnalysisFailure(
+                            itemIDs: items.map(\.id), reason: message,
+                            retryAt: now().addingTimeInterval(retryDelay), scope: scope
+                        )
+                        Self.logger.error("batch outcome=failed items=\(items.count, privacy: .public) reason=\(message, privacy: .public)")
+                    case .cancelled:
+                        continue
+                    }
+                    status.phase = .analyzing(completed: min(completed, pending.count), total: pending.count)
+                    publish()
+                    if case .copilotUnavailable = status.problem {} else { _ = submit() }
+                }
             }
         }
+        status.recentlyHandled = handledCount
+        if handledCount > 0 { Self.logger.notice("handled-by-viewer items=\(handledCount, privacy: .public)") }
         if failedItems > 0, status.problem == nil {
-            status.problem = .analysisFailed("\(failedItems) item\(failedItems == 1 ? "" : "s") will be retried in \(Int(retryDelay / 60)) minutes · see Analyzing")
+            status.problem = .analysisFailed("\(failedItems) item\(failedItems == 1 ? "" : "s") couldn’t be analyzed and will retry in \(Int(retryDelay / 60)) minutes")
         } else if failedItems == 0, case .analysisFailed = status.problem {
             status.problem = nil
         }
         publish()
+    }
+
+    /// For Inbox items with a next step and your activity since that decision,
+    /// the context Copilot needs to judge whether you handled it.
+    private func handledContexts(
+        for items: [PersonalWorkItem], scope: WorkspaceScope
+    ) async throws -> [GitHubNodeID: TriageHandledContext] {
+        let previous = try await store.decisions(for: items.map(\.id), scope: scope)
+        var contexts: [GitHubNodeID: TriageHandledContext] = [:]
+        for item in items {
+            guard let decision = previous[item.id], decision.disposition.isInbox,
+                  let nextAction = decision.nextAction
+            else { continue }
+            let activity = item.viewerActivity(since: decision.decidedAt, viewer: scope.viewerLogin)
+            guard !activity.isEmpty else { continue }
+            contexts[item.id] = TriageHandledContext(previousNextAction: nextAction, viewerActivity: activity)
+        }
+        return contexts
+    }
+
+    /// Marks work done when Copilot confirms you handled its previous next step.
+    private func markHandled(
+        _ decisions: [TriageDecision], batch: [PersonalWorkItem],
+        contexts: [GitHubNodeID: TriageHandledContext], scope: WorkspaceScope
+    ) async throws -> Int {
+        guard autoMarkHandled() else { return 0 }
+        var count = 0
+        for decision in decisions where decision.handled == .yes && contexts[decision.itemID] != nil {
+            guard let item = batch.first(where: { $0.id == decision.itemID }) else { continue }
+            let evidence = decision.handledEvidence ?? "You completed the suggested next step."
+            if try await store.markHandled(itemID: item.id, fingerprint: item.fingerprint, evidence: evidence, at: now(), scope: scope) {
+                count += 1
+            }
+        }
+        return count
     }
 
     private enum BatchOutcome: Sendable {
@@ -282,11 +340,12 @@ actor TriageEngine {
     }
 
     private static func run(
-        _ batch: [PersonalWorkItem], decider: any TriageDeciding, scope: WorkspaceScope, rules: TriageRules
+        _ batch: [PersonalWorkItem], decider: any TriageDeciding, scope: WorkspaceScope, rules: TriageRules,
+        contexts: [GitHubNodeID: TriageHandledContext]
     ) async -> BatchOutcome {
         let started = ContinuousClock.now
         do {
-            let decisions = try await decider.decide(batch, scope: scope, rules: rules)
+            let decisions = try await decider.decide(batch, scope: scope, rules: rules, contexts: contexts)
             return .decided(batch, decisions, started.duration(to: .now))
         } catch is CancellationError {
             return .cancelled

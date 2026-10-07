@@ -722,6 +722,8 @@ extension CopilotHelperClientTests {
     let header = CopilotResponseHeader(requestID: UUID(), accountID: copilotTestAccountID, organizationID: organization, status: .triage)
     var decision = CopilotTriageItemDecision(id: "node-1", disposition: .act, priority: 90, confidence: 0.9, summary: "Act.", reason: "Security work.", nextAction: nil)
     decision.instructionNote = "You asked to treat security fixes as urgent."
+    decision.handled = .yes
+    decision.handledEvidence = "You approved the PR and replied to @bob."
     let data = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
     XCTAssertNoThrow(try CopilotWireSchema.validate(data, expectedStatus: .triage))
     decision.instructionNote = String(repeating: "a", count: 201)

@@ -310,7 +310,9 @@ final class TriageAppModel: ObservableObject {
             if let local = optimisticLocal[entry.id] { entry.local = local }
             return entry
         }
-        let next = WorkspacePresentation(entries: shown, status: status, now: .now, rules: rules)
+        let next = WorkspacePresentation(
+            entries: shown, status: status, now: .now, rules: rules, viewer: runtime?.scope.viewerLogin ?? ""
+        )
         guard next != presentation else { return }
         presentation = next
         if let selectedEntryID, !entries.contains(where: { $0.id == selectedEntryID }) {
@@ -728,7 +730,7 @@ extension TriageAppModel: WorkspaceActions {
     }
 
     func markDone(_ entry: TriageEntry) {
-        setLocalStatus(.done(fingerprint: entry.item.fingerprint), for: entry)
+        setLocalStatus(.done(fingerprint: entry.item.fingerprint, at: .now), for: entry)
     }
 
     func snooze(_ entry: TriageEntry, until date: Date) {

@@ -65,7 +65,7 @@ struct WorkspacePresentation: Equatable, Sendable {
 
     /// Groups entries. Inbox is ordered by AI priority, then confidence;
     /// other sections by urgency of relationship, then recency.
-    init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty) {
+    init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty, viewer: String = "") {
         let digest = rules.digest
         let all = raw.map { entry in
             var entry = rules.apply(to: entry)
@@ -77,10 +77,10 @@ struct WorkspacePresentation: Equatable, Sendable {
         }
         var grouped: [Section: [TriageEntry]] = [:]
         for entry in all {
-            grouped[Self.section(for: entry, now: now), default: []].append(entry)
+            grouped[Self.section(for: entry, now: now, viewer: viewer), default: []].append(entry)
         }
         grouped[.analyzing] = all.filter {
-            $0.analysis != .current && $0.isVisible(at: now) && !$0.isMuted
+            $0.analysis != .current && $0.isVisible(at: now, viewer: viewer) && !$0.isMuted
         }
         for (section, values) in grouped {
             grouped[section] = section == .inbox
@@ -90,8 +90,8 @@ struct WorkspacePresentation: Equatable, Sendable {
         self.init(entries: grouped, status: status)
     }
 
-    static func section(for entry: TriageEntry, now: Date) -> Section {
-        guard entry.isVisible(at: now) else { return .handled }
+    static func section(for entry: TriageEntry, now: Date, viewer: String = "") -> Section {
+        guard entry.isVisible(at: now, viewer: viewer) else { return .handled }
         guard !entry.isMuted else { return .muted }
         // A previous decision keeps the item in its section while changed
         // facts are re-analyzed, so the Inbox does not flicker.

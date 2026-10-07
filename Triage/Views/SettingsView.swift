@@ -160,6 +160,7 @@ struct SettingsView: View {
 
     @AppStorage(TriagePreferenceKeys.laterTodayHours) private var laterTodayHours = 3
     @AppStorage(TriagePreferenceKeys.tomorrowHour) private var tomorrowHour = 9
+    @AppStorage(TriagePreferenceKeys.autoDoneHandled) private var autoDoneHandled = true
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
 
@@ -200,10 +201,12 @@ struct SettingsView: View {
             }
 
             Section {
-                LabeledContent("Done items") { Text("Return automatically when something changes") }
-                LabeledContent("Inbox") { Text("Items needing action or worth a look") }
+                Toggle("Mark work done when you handle it", isOn: $autoDoneHandled)
+                LabeledContent("Done work returns") { Text("When someone else responds") }
             } header: {
-                Text("Behavior")
+                Text("Done")
+            } footer: {
+                Text("When you comment, review, or push on an Inbox item, Copilot checks whether you completed its suggested next step. If so, the item moves to Done, labeled Handled by You, with Undo. Your own activity never brings done work back.")
             }
         }
     }
