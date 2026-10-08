@@ -51,6 +51,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     func updateDockBadge(count: Int) {
         let show = bool(TriagePreferenceKeys.showDockBadge) && count > 0
+        // macOS shows Dock badges only for apps allowed to badge.
+        if show { Task { await requestAuthorizationIfNeeded() } }
         NSApp.dockTile.badgeLabel = show ? count.formatted() : nil
     }
 
@@ -104,7 +106,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private func requestAuthorizationIfNeeded() async {
         guard !hasRequestedAuthorization else { return }
         hasRequestedAuthorization = true
-        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
     // MARK: UNUserNotificationCenterDelegate
