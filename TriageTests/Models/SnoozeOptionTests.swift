@@ -48,6 +48,12 @@ struct SnoozeOptionTests {
         #expect(snoozed == date(2026, 10, 9, 9, 0))
     }
 
+    @Test func inThreeDaysIsThreeMorningsAhead() {
+        let now = date(2026, 10, 8, 19, 14)
+        let snoozed = SnoozeOption.inThreeDays.date(from: now, defaults: defaults, calendar: calendar)
+        #expect(snoozed == date(2026, 10, 11, 9, 0))
+    }
+
     @Test func inSevenDaysKeepsTheSameWeekday() {
         let now = date(2026, 10, 8, 19, 14)
         let snoozed = SnoozeOption.inSevenDays.date(from: now, defaults: defaults, calendar: calendar)
