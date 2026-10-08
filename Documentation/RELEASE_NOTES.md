@@ -1,4 +1,4 @@
-# Triage 0.2.0
+# Triage 0.1.0
 
 Triage rebuilt around an AI-first core: your GitHub work, prioritized by Copilot.
 
