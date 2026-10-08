@@ -377,6 +377,11 @@ struct CopilotModel: Codable, Equatable, Sendable, Identifiable {
 }
 
 /// The user's Copilot model choice for an organization.
+/// What a model choice is used for.
+enum CopilotPurpose: Sendable {
+  case triage, reply
+}
+
 struct CopilotModelChoice: Equatable, Sendable {
   /// `nil` is Auto.
   var modelID: String?
@@ -394,6 +399,11 @@ struct CopilotModelChoice: Equatable, Sendable {
 
   static func isValidContextTier(_ value: String?) -> Bool {
     value == nil || value == "long_context" || value == "default"
+  }
+
+  var isValid: Bool {
+    AIConsentRepository.isValidModelID(modelID)
+      && Self.isValidReasoningEffort(reasoningEffort) && Self.isValidContextTier(contextTier)
   }
 }
 
@@ -463,17 +473,17 @@ protocol TriageCopilotHelping: Sendable {
   func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse
   func models(_ request: CopilotModelsRequest) async throws -> CopilotModelsResponse
   func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse
+  func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse
   func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse
 }
 
 extension TriageCopilotHelping {
-
-
-}
-
-extension TriageCopilotHelping {
   func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse {
+    throw CopilotXPCError.invalidResponse
+  }
+
+  func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse {
     throw CopilotXPCError.invalidResponse
   }
 }
@@ -488,7 +498,8 @@ private enum CopilotWireCodingKey: String, CodingKey {
   case deadline
   case triage
   case viewerLogin = "viewer_login"
-  case items, decisions, id, disposition, priority, reason, instructions
+  case items, decisions, id, disposition, priority, reason, instructions, item, goal, draft
+  case writingStyle = "writing_style"
   case reasoningEffort = "reasoning_effort"
   case contextTier = "context_tier"
   case targetRequestID = "target_request_id"
@@ -651,4 +662,93 @@ struct CopilotTriageResponse: Codable, Equatable, Sendable {
   func encode(to encoder: any Encoder) throws { var c = encoder.container(keyedBy: CopilotWireCodingKey.self); try header.encode(to: &c); try c.encode(modelID, forKey: .modelID); try c.encode(decisions, forKey: .decisions) }
   /// Partial responses are allowed: every decision must be for a distinct requested item.
   func validate(against request: CopilotTriageRequest) throws { let ids = decisions.map(\.id); guard !modelID.isEmpty, !decisions.isEmpty, Set(ids).count == ids.count, Set(ids).isSubset(of: Set(request.items.map(\.id))) else { throw CopilotXPCError.invalidResponse }; try decisions.forEach { try $0.validate() } }
+}
+
+/// Asks Copilot to draft a reply the user will review, edit, and post themselves.
+struct CopilotDraftRequest: Codable, Equatable, Sendable {
+  static let maximumGoalBytes = 400
+  let header: CopilotRequestHeader
+  let modelID: String?
+  let viewerLogin: String
+  let item: CopilotTriageItem
+  let deadline: Date
+  /// What the reply should accomplish, usually Copilot's next action.
+  let goal: String?
+  /// The user's writing style from Settings; sent in a delimited system block.
+  let writingStyle: String?
+  let reasoningEffort: String?
+  let contextTier: String?
+
+  init(accountID: AccountID, organizationID: OrganizationID, viewerLogin: String, item: CopilotTriageItem, modelID: String? = nil, deadline: Date, goal: String? = nil, writingStyle: String? = nil, reasoningEffort: String? = nil, contextTier: String? = nil, requestID: UUID = UUID()) {
+    header = .init(accountID: accountID, organizationID: organizationID, operation: .draft, requestID: requestID)
+    self.modelID = modelID; self.viewerLogin = viewerLogin; self.item = item; self.deadline = deadline
+    self.goal = goal; self.writingStyle = writingStyle; self.reasoningEffort = reasoningEffort; self.contextTier = contextTier
+  }
+
+  init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CopilotWireCodingKey.self)
+    header = try .init(container: c)
+    modelID = try c.decodeIfPresent(String.self, forKey: .modelID)
+    viewerLogin = try c.decode(String.self, forKey: .viewerLogin)
+    item = try c.decode(CopilotTriageItem.self, forKey: .item)
+    deadline = try c.decode(Date.self, forKey: .deadline)
+    goal = try c.decodeIfPresent(String.self, forKey: .goal)
+    writingStyle = try c.decodeIfPresent(String.self, forKey: .writingStyle)
+    reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    contextTier = try c.decodeIfPresent(String.self, forKey: .contextTier)
+  }
+
+  func encode(to encoder: any Encoder) throws {
+    var c = encoder.container(keyedBy: CopilotWireCodingKey.self)
+    try header.encode(to: &c)
+    try c.encodeIfPresent(modelID, forKey: .modelID)
+    try c.encode(viewerLogin, forKey: .viewerLogin)
+    try c.encode(item, forKey: .item)
+    try c.encode(deadline, forKey: .deadline)
+    try c.encodeIfPresent(goal, forKey: .goal)
+    try c.encodeIfPresent(writingStyle, forKey: .writingStyle)
+    try c.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+    try c.encodeIfPresent(contextTier, forKey: .contextTier)
+  }
+
+  func validate() throws {
+    guard header.operation == .draft, !viewerLogin.isEmpty,
+      (goal?.utf8.count ?? 0) <= Self.maximumGoalBytes,
+      (writingStyle?.utf8.count ?? 0) <= TriageRules.maximumInstructionBytes,
+      CopilotModelChoice.isValidReasoningEffort(reasoningEffort), CopilotModelChoice.isValidContextTier(contextTier)
+    else { throw CopilotXPCError.invalidResponse }
+    try item.validate()
+    guard try JSONEncoder().encode(self).count <= 32 * 1024 else { throw CopilotXPCError.invalidResponse }
+  }
+}
+
+struct CopilotDraftResponse: Codable, Equatable, Sendable {
+  static let maximumDraftBytes = 8_000
+  let header: CopilotResponseHeader
+  let modelID: String
+  let draft: String
+
+  init(header: CopilotResponseHeader, modelID: String, draft: String) {
+    self.header = header; self.modelID = modelID; self.draft = draft
+  }
+
+  init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CopilotWireCodingKey.self)
+    header = try .init(container: c)
+    modelID = try c.decode(String.self, forKey: .modelID)
+    draft = try c.decode(String.self, forKey: .draft)
+  }
+
+  func encode(to encoder: any Encoder) throws {
+    var c = encoder.container(keyedBy: CopilotWireCodingKey.self)
+    try header.encode(to: &c)
+    try c.encode(modelID, forKey: .modelID)
+    try c.encode(draft, forKey: .draft)
+  }
+
+  func validate() throws {
+    guard !modelID.isEmpty, !draft.isEmpty, draft.utf8.count <= Self.maximumDraftBytes else {
+      throw CopilotXPCError.invalidResponse
+    }
+  }
 }

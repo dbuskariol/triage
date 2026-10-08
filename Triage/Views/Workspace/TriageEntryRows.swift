@@ -44,6 +44,7 @@ struct TriageEntryMenu: View {
             Menu("Snooze") { SnoozeMenuItems(entry: entry, actions: actions) }
             Divider()
             Button("Open on GitHub") { actions.openOnGitHub(entry) }
+            Button("Draft Reply…") { actions.beginDraft(for: entry) }
         }
         Divider()
         Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }

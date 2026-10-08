@@ -730,4 +730,14 @@ extension CopilotHelperClientTests {
     let tooLong = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
     XCTAssertThrowsError(try CopilotWireSchema.validate(tooLong, expectedStatus: .triage))
   }
+
+  func testDraftResponsesAreStrictlyAllowlisted() throws {
+    func frame(_ extra: String) -> Data {
+      Data(#"{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"a","organization_id":"o","status":"draft","model_id":"auto","draft":"Thanks!"\#(extra)}"#.utf8)
+    }
+    XCTAssertNoThrow(try CopilotWireSchema.validate(frame(""), expectedStatus: .draft))
+    XCTAssertThrowsError(try CopilotWireSchema.validate(frame(#","decisions":[]"#), expectedStatus: .draft))
+    let empty = Data(#"{"protocol_version":2,"status":"draft","model_id":"auto","draft":""}"#.utf8)
+    XCTAssertThrowsError(try CopilotWireSchema.validate(empty, expectedStatus: .draft))
+  }
 }

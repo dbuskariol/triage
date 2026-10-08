@@ -27,6 +27,8 @@ struct OrganizationAIConsent: Equatable, Sendable {
     let reasoningEffort: String?
     /// `"long_context"` or `nil` for the default tier.
     let contextTier: String?
+    /// The model for Draft Reply; `nil` uses the triage choice.
+    let replyChoice: CopilotModelChoice?
     /// Organization-local safety floor for automatic Inbox actions.  This is
     /// not a helper instruction and never lowers the product-wide minimum.
     let automaticActionConfidenceThreshold: Double
@@ -39,9 +41,11 @@ struct OrganizationAIConsent: Equatable, Sendable {
         selectedModelID: String?,
         reasoningEffort: String? = nil,
         contextTier: String? = nil,
+        replyChoice: CopilotModelChoice? = nil,
         automaticActionConfidenceThreshold: Double = Self.minimumAutomaticActionConfidenceThreshold,
         updatedAt: Date?
     ) {
+        self.replyChoice = replyChoice
         self.accountID = accountID
         self.organizationID = organizationID
         self.isEnabled = isEnabled
@@ -51,6 +55,13 @@ struct OrganizationAIConsent: Equatable, Sendable {
         self.automaticActionConfidenceThreshold = automaticActionConfidenceThreshold
         self.updatedAt = updatedAt
     }
+
+    var triageChoice: CopilotModelChoice {
+        CopilotModelChoice(modelID: selectedModelID, reasoningEffort: reasoningEffort, contextTier: contextTier)
+    }
+
+    /// The model used to draft replies.
+    var effectiveReplyChoice: CopilotModelChoice { replyChoice ?? triageChoice }
 
     static func disabled(accountID: AccountID, organizationID: OrganizationID) -> Self {
         .init(
@@ -83,7 +94,8 @@ actor AIConsentRepository {
             guard let row = try Row.fetchOne(
                 database,
                 sql: """
-                    SELECT enabled, selected_model, reasoning_effort, context_tier, automatic_action_confidence_threshold, updated_at_ms
+                    SELECT enabled, selected_model, reasoning_effort, context_tier, automatic_action_confidence_threshold, updated_at_ms,
+                           reply_custom, reply_model, reply_reasoning_effort, reply_context_tier
                     FROM ai_consents
                     WHERE account_id = ? AND organization_id = ?
                     """,
@@ -97,7 +109,11 @@ actor AIConsentRepository {
             let selectedModelID: String? = row["selected_model"]
             let reasoningEffort: String? = row["reasoning_effort"]
             let contextTier: String? = row["context_tier"]
-            guard let enabled: Bool = row["enabled"],
+            let replyCustom: Bool = row["reply_custom"] ?? false
+            let replyChoice = replyCustom ? CopilotModelChoice(
+                modelID: row["reply_model"], reasoningEffort: row["reply_reasoning_effort"], contextTier: row["reply_context_tier"]
+            ) : nil
+            guard replyChoice?.isValid ?? true, let enabled: Bool = row["enabled"],
                   let automaticActionConfidenceThreshold: Double = row["automatic_action_confidence_threshold"],
                   let milliseconds: Int64 = row["updated_at_ms"],
                   let updatedAt = Self.date(milliseconds: milliseconds),
@@ -115,6 +131,7 @@ actor AIConsentRepository {
                 selectedModelID: enabled ? selectedModelID : nil,
                 reasoningEffort: enabled ? reasoningEffort : nil,
                 contextTier: enabled ? contextTier : nil,
+                replyChoice: enabled ? replyChoice : nil,
                 automaticActionConfidenceThreshold: automaticActionConfidenceThreshold,
                 updatedAt: updatedAt
             )
@@ -129,10 +146,12 @@ actor AIConsentRepository {
         let selectedModelID = consent.isEnabled ? consent.selectedModelID : nil
         guard Self.isValidModelID(selectedModelID),
               CopilotModelChoice.isValidReasoningEffort(consent.reasoningEffort),
-              CopilotModelChoice.isValidContextTier(consent.contextTier)
+              CopilotModelChoice.isValidContextTier(consent.contextTier),
+              consent.replyChoice?.isValid ?? true
         else {
             throw AIConsentRepositoryError.invalidModelID
         }
+        let reply = consent.isEnabled ? consent.replyChoice : nil
         let reasoningEffort = consent.isEnabled ? consent.reasoningEffort : nil
         let contextTier = consent.isEnabled ? consent.contextTier : nil
         guard Self.isValidAutomaticActionConfidenceThreshold(consent.automaticActionConfidenceThreshold) else {
@@ -142,15 +161,19 @@ actor AIConsentRepository {
             try Self.validateConnectedOrganization(consent.accountID, consent.organizationID, in: database)
             try database.execute(
                 sql: """
-                    INSERT INTO ai_consents (account_id, organization_id, enabled, selected_model, reasoning_effort, context_tier, automatic_action_confidence_threshold, updated_at_ms)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO ai_consents (account_id, organization_id, enabled, selected_model, reasoning_effort, context_tier, automatic_action_confidence_threshold, updated_at_ms, reply_custom, reply_model, reply_reasoning_effort, reply_context_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_id, organization_id) DO UPDATE SET
                         enabled = excluded.enabled,
                         selected_model = excluded.selected_model,
                         reasoning_effort = excluded.reasoning_effort,
                         context_tier = excluded.context_tier,
                         automatic_action_confidence_threshold = excluded.automatic_action_confidence_threshold,
-                        updated_at_ms = excluded.updated_at_ms
+                        updated_at_ms = excluded.updated_at_ms,
+                        reply_custom = excluded.reply_custom,
+                        reply_model = excluded.reply_model,
+                        reply_reasoning_effort = excluded.reply_reasoning_effort,
+                        reply_context_tier = excluded.reply_context_tier
                     """,
                 arguments: [
                     consent.accountID.rawValue,
@@ -160,7 +183,11 @@ actor AIConsentRepository {
                     reasoningEffort,
                     contextTier,
                     consent.automaticActionConfidenceThreshold,
-                    Self.milliseconds(updatedAt)
+                    Self.milliseconds(updatedAt),
+                    reply != nil,
+                    reply?.modelID,
+                    reply?.reasoningEffort,
+                    reply?.contextTier
                 ]
             )
         }

@@ -81,6 +81,16 @@ actor CopilotHelperClient: TriageCopilotHelping {
     return response
   }
 
+  func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse {
+    let timeout = request.deadline.timeIntervalSinceNow
+    guard timeout > 0 else { throw CopilotXPCError.operationTimedOut }
+    try request.validate()
+    let response: CopilotDraftResponse = try await exchange(request, expectedStatus: .draft, timeout: timeout)
+    try response.validate()
+    guard request.modelID == nil || response.modelID == request.modelID else { throw CopilotXPCError.invalidResponse }
+    return response
+  }
+
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse {
     guard let activeOperation,
       activeOperation.requestID == request.targetRequestID,
@@ -374,6 +384,7 @@ private protocol CopilotRequestContaining {
 extension CopilotHealthRequest: CopilotRequestContaining {}
 extension CopilotModelsRequest: CopilotRequestContaining {}
 extension CopilotTriageRequest: CopilotRequestContaining {}
+extension CopilotDraftRequest: CopilotRequestContaining {}
 extension CopilotCancelRequest: CopilotRequestContaining {}
 extension CopilotShutdownRequest: CopilotRequestContaining {}
 
@@ -385,6 +396,7 @@ extension CopilotHealthResponse: CopilotResponseContaining {}
 extension CopilotAuthenticationResponse: CopilotResponseContaining {}
 extension CopilotModelsResponse: CopilotResponseContaining {}
 extension CopilotTriageResponse: CopilotResponseContaining {}
+extension CopilotDraftResponse: CopilotResponseContaining {}
 extension CopilotCancelResponse: CopilotResponseContaining {}
 extension CopilotShutdownResponse: CopilotResponseContaining {}
 
@@ -540,6 +552,8 @@ enum CopilotWireSchema {
       operationFields = ["models"]
     case .triage:
       operationFields = ["model_id", "decisions"]
+    case .draft:
+      operationFields = ["model_id", "draft"]
     case .cancelled:
       operationFields = ["cancelled_request_id"]
     case .shutdown:
@@ -552,6 +566,12 @@ enum CopilotWireSchema {
       throw CopilotXPCError.invalidResponse
     }
     if actualStatus == .triage, expectedStatus == .triage { try validateTriage(object) }
+    if actualStatus == .draft, expectedStatus == .draft {
+      guard let model = object["model_id"] as? String, !model.isEmpty,
+        let draft = object["draft"] as? String, !draft.isEmpty,
+        draft.utf8.count <= CopilotDraftResponse.maximumDraftBytes
+      else { throw CopilotXPCError.invalidResponse }
+    }
   }
 
 

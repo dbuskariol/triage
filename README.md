@@ -14,7 +14,9 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 - **Specific calls to action.** Every item says what to do and why now: *“@bob has waited 3 days for your review; CI is green.”*
 - **Knows when you've handled it.** Comment, review, or push, and Copilot checks whether you completed its suggested step. Done work comes back only when someone *else* responds.
 - **Your rules win.** Mute noisy repos or bots, keep critical work in the Inbox, and tell Copilot what matters to you in plain English.
-- **Fast and fluid.** Mail-style keyboard navigation, instant Done and Snooze, live updates as Copilot works.
+- **Start the day with a Briefing.** What needs you, what's waited longest, quick wins, follow-ups to nudge, and what you finished today. End the week with a Weekly Review.
+- **Get through it fast.** Focus mode works through a list one item at a time, Copilot drafts replies in your voice for you to edit and post, and effort estimates surface the quick wins.
+- **Fast and fluid.** Mail-style keyboard navigation, saved searches, instant Done and Snooze, notifications and a Dock badge for what needs you.
 - **Private and read-only.** Encrypted local storage, Keychain credentials, no analytics, no GitHub writes.
 
 ## How it works
@@ -37,6 +39,14 @@ flowchart LR
 
 ## Using Triage
 
+### Briefing and Weekly Review
+
+**Briefing** (⌘0) is the overview for the start of your day: counts of what needs your action, quick wins, and overdue follow-ups, then cards for *Needs Your Action*, *Waiting on You Longest*, *Quick Wins*, *Follow Up* (waiting on others with no movement), *New Since Yesterday*, and *Handled Today*. **Focus on What Needs You** works through the action items one at a time.
+
+**Weekly Review** (⌘9) shows what you got through in the last 7 days, open work by repository, what's waited on you longest, and work that has gone quiet.
+
+Both fill the window. Clicking an item opens it in its list with its details; **Show All** and the headline numbers open the filtered list behind them. **Back** and **Forward** (⌘[ ⌘]) return you, like Finder.
+
 ### Sections
 
 | Section | What's in it |
@@ -51,13 +61,23 @@ flowchart LR
 
 Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
 
-Select an item to see the full recommendation, pull request status, people, the formatted description, and recent activity.
+Select an item to see the full recommendation (including Copilot's effort estimate: *Quick*, *Under an hour*, or *Deep work*), pull request status, people, related work it references or is referenced by, the formatted description, and recent activity. **Group By** in the sort menu groups any list by effort, repository, or why it's yours.
+
+### Focus
+
+Focus (⇧⌘F, or the target button above the list) shows one item at a time from the current list. **J**/**K** move, **E** marks done, **S** snoozes until tomorrow, **O** opens on GitHub, and **Esc** exits. Items you finish anywhere drop out of the queue.
+
+### Draft Reply
+
+**Draft Reply…** (⌥⌘D) asks Copilot for a reply that accomplishes the item's next step, written as you and in your writing style. Edit it, then **Copy** or **Copy and Open on GitHub**. Triage never posts for you; bracketed placeholders such as *[ETA]* mark details only you can supply.
 
 ### Search
 
 The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, people, labels, and Copilot's notes, or use GitHub-style filters:
 
-`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high`
+`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
+
+**Save** keeps the current search in the sidebar as a saved search that stays up to date across all your work. Type in the search field to narrow it further; right-click it to rename or delete.
 
 Or pick filters from the **Filter** menu (⊜) beside the field; applied filters appear as chips you can click to remove. While searching, choose **This Section** or **All Work**; results across all work show which section they're in. Press **Esc** to clear the search, and Esc again (or Return) to go back to the list.
 
@@ -65,11 +85,15 @@ Or pick filters from the **Filter** menu (⊜) beside the field; applied filters
 
 | Action | Keys |
 |---|---|
-| Next / previous item | ↓ ↑ or J K, ⌘] ⌘[ |
+| Next / previous item | ↓ ↑ or J K, ⌥⌘↓ ⌥⌘↑ |
+| Back / forward | ⌘[ ⌘] |
+| Briefing / Weekly Review | ⌘0 / ⌘9 |
+| Focus on the current list | ⇧⌘F |
+| Draft reply | ⌥⌘D |
 | Mark done (restore in Done) | E or ⌫, ⌘E |
 | Snooze until tomorrow | S, ⇧⌘S |
 | Open on GitHub | ↩ or ⌘O |
-| Switch section | ⌘1 – ⌘6 |
+| Switch section | ⌘1 – ⌘7 |
 | Refresh | ⌘R |
 | Search | ⌘F |
 | Create rule from item | ⌥⌘R |
@@ -119,9 +143,10 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 | Tab | Options |
 |---|---|
 | **General** | Open at login · Show in menu bar · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Privacy and local data · Keyboard reference |
-| **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · Mark work done when you handle it |
+| **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · When to suggest a follow-up · Mark work done when you handle it |
+| **Notifications** | Notify when work newly needs your action · Daily follow-up reminder · Quiet hours · Dock badge |
 | **Accounts** | Connected GitHub accounts and their status · Which organization's work to show |
-| **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all |
+| **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all · Draft Replies: the same model or a separate one, and your writing style |
 | **Rules** | Hard rules and Instructions for Copilot, per organization |
 | **Updates** | Automatic checks and installs · Current version · Check now |
 

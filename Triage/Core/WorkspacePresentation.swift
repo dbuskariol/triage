@@ -213,6 +213,8 @@ protocol WorkspaceActions: AnyObject {
     /// "Not right?") suggests moving the item somewhere else.
     func beginRule(from entry: TriageEntry, correcting: Bool)
     func openRulesSettings()
+    /// Opens the reply drafter for `entry`.
+    func beginDraft(for entry: TriageEntry)
     /// Opens a list, optionally filtered.
     func open(_ destination: WorkspaceDestination, search: WorkspaceSearch)
     /// Works through `entries` one at a time in Focus.

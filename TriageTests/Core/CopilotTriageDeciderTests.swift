@@ -46,6 +46,35 @@ final class CopilotTriageDeciderTests: XCTestCase {
         }
     }
 
+    func testDraftSendsGoalAndStyleOnItsOwnSession() async throws {
+        let helper = FakeTriageHelper()
+        let writer = CopilotDraftWriter(
+            makeHelper: { helper },
+            authorize: { _ in CopilotTriageAuthorization(isConsentGranted: true, selectedModelID: nil) }
+        )
+        let draft = try await writer.draft(deciderItem("A"), goal: "Answer @bob", writingStyle: "  Brief.  ", scope: deciderScope)
+        XCTAssertEqual(draft, "Thanks @bob, [ETA].")
+        let request = await helper.lastDraft
+        XCTAssertEqual(request?.goal, "Answer @bob")
+        XCTAssertEqual(request?.writingStyle, "Brief.")
+        XCTAssertEqual(request?.item.id, "A")
+        let counts = await helper.counts
+        XCTAssertEqual(counts.authenticate, 1)
+    }
+
+    func testDraftRequiresConsent() async {
+        let writer = CopilotDraftWriter(
+            makeHelper: { FakeTriageHelper() },
+            authorize: { _ in CopilotTriageAuthorization(isConsentGranted: false, selectedModelID: nil) }
+        )
+        do {
+            _ = try await writer.draft(deciderItem("A"), goal: nil, writingStyle: nil, scope: deciderScope)
+            XCTFail("Expected consent error")
+        } catch {
+            XCTAssertEqual(error as? TriageDecisionError, .consentRequired)
+        }
+    }
+
     private func makeDecider(_ helper: FakeTriageHelper) -> CopilotTriageDecider {
         CopilotTriageDecider(
             makeHelper: { helper },
@@ -75,6 +104,7 @@ private actor FakeTriageHelper: TriageCopilotHelping {
     private var failNextTriage: Bool
     private var authenticateCount = 0
     private(set) var triageRequestIDs: [UUID] = []
+    private(set) var lastDraft: CopilotDraftRequest?
 
     init(login: String = "me", failFirstTriageWithMissingSession: Bool = false, dropLastDecision: Bool = false) {
         self.login = login
@@ -112,6 +142,16 @@ private actor FakeTriageHelper: TriageCopilotHelping {
                 CopilotTriageItemDecision(id: $0.id, disposition: .review, priority: 50, confidence: 0.8,
                                           summary: "Summary", reason: "Reason", nextAction: "Next")
             }
+        )
+    }
+
+    func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse {
+        lastDraft = request
+        return CopilotDraftResponse(
+            header: .init(requestID: request.header.requestID, accountID: request.header.accountID,
+                          organizationID: request.header.organizationID, status: .draft),
+            modelID: "auto",
+            draft: "Thanks @bob, [ETA]."
         )
     }
 }

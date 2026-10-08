@@ -62,13 +62,21 @@ Stale items keep their previous decision and section while Copilot re-checks the
 
 Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. The first matching rule with a disposition effect wins (*Always Inbox* never downgrades *Needs Action*); priority adjustments accumulate (±25 each, clamped 0–100). *Mute* moves items to the Muted section and the engine never sends them to Copilot. Matching rules are also sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome.
 
+## Workspace navigation
+
+`WorkspaceDestination` is the sidebar selection: a list `Section`, a saved search, the Briefing, or the Weekly Review. Lists pair with the detail column in a resizable split; the Briefing and Review are full-width dashboards whose items open in their list (`show(_:)`). Destination changes are recorded for Back and Forward. `WorkspaceBriefing` and `WorkspaceReview` are pure values derived from the same `WorkspacePresentation` as the lists, and `WorkInsights` holds the shared derivations (references between items, waiting times, follow-ups, done dates, grouping). Saved searches are stored per organization in user defaults.
+
+## Notifications
+
+`AttentionTracker` (pure, persisted per organization) decides what is news: the first update only takes a baseline, an item is announced once when it first needs action, and again only if it leaves and returns. More than three at once become one summary. Follow-up reminders are at most daily, and quiet hours suppress delivery. `AttentionNotifier` posts local notifications and sets the Dock badge to the number of items needing action.
+
 ## Done, snooze, and handled detection
 
 `LocalStatus.done` records when the item was marked done. Done work becomes visible again only when someone **other than the viewer** comments, reviews, or pushes after that time. The viewer's own follow-up never resurfaces it.
 
 When an Inbox item with a next step has viewer activity since its decision, the engine sends Copilot the previous `next_action` and a plain list of what the viewer did. Copilot returns `handled: yes | partial | no` with one sentence of evidence. On `yes`, the store marks the item done with that evidence (unless the user already set a status), the UI labels it **Handled by You**, and **Move Back to Inbox** undoes it. This is controlled by *Settings ▸ Inbox ▸ Mark work done when you handle it*.
 
-Done, Snooze, and Restore update the UI optimistically and save in the background.
+Done and Snoozed are separate sections: Done is newest first with a *Handled by You* / *Marked Done* filter; Snoozed is ordered by when items return. Done, Snooze, and Restore update the UI optimistically and save in the background.
 
 ## Prompting
 
@@ -81,13 +89,15 @@ Copilot receives four layers, highest precedence first:
 
 Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers are tolerated; every complete decision is salvaged from a truncated or partly malformed reply; over-long text is clamped. Unreadable replies report only their shape (length and first character), never content. Parsed output is then validated strictly on both sides of the XPC boundary. A partial response saves the valid decisions and retries the rest.
 
+**Draft Reply** uses a separate fixed prompt: write as the viewer, ground every statement in the item, never invent facts or commitments, and leave bracketed placeholders for details only the viewer knows. The item's next action is the goal, and the user's writing style (*Settings ▸ Copilot ▸ Draft Replies*) follows in a delimited `<writing_style>` block. Output is trimmed and unwrapped, limited to 8,000 bytes, and never posted.
+
 ## Copilot boundary
 
-`TriageCopilotXPC` launches the signed Rust `TriageCopilotHelper` with a verified, pinned Copilot runtime. The helper supports only `health`, `authenticate`, `models`, `triage`, `cancel`, and `shutdown`. It runs Copilot with all tools denied and no file, MCP, or extra network access. One authenticated session per account and organization is reused across batches and recreated if it expires. The Copilot sign-in is separate from the GitHub connection and stored in an account-private profile.
+`TriageCopilotXPC` launches the signed Rust `TriageCopilotHelper` with a verified, pinned Copilot runtime. The helper supports only `health`, `authenticate`, `models`, `triage`, `draft`, `cancel`, and `shutdown`. Triage and drafts share one session runner in the helper. In the app, `CopilotHelperSession` owns one authenticated connection; the triage decider and the draft writer each have their own, so a draft never waits behind a triage batch. It runs Copilot with all tools denied and no file, MCP, or extra network access. One authenticated session per account and organization is reused across batches and recreated if it expires. The Copilot sign-in is separate from the GitHub connection and stored in an account-private profile.
 
 **Versions.** The helper uses the Rust `github-copilot-sdk` (pinned exactly, `runtime` feature only) and a pinned Copilot CLI release whose archive and executable SHA-256 digests are checked by both the app and the XPC service, along with GitHub's Developer ID signature. Updating the CLI means updating the version and all four digests in `CopilotRuntimeAcquisition.swift` and `CopilotHelperProcess.swift`, verified against the release's `SHA256SUMS.txt`. When an app update changes the pin, a previously installed runtime is upgraded automatically and superseded versions are deleted.
 
-**Model options.** Each organization stores a model, reasoning effort, and context tier. Settings offers only the efforts and tiers the selected model reports through the SDK, and the helper applies them to each session.
+**Model options.** Each organization stores a model, reasoning effort, and context tier for prioritizing, and optionally a separate set for Draft Reply (otherwise drafts use the prioritizing choice). Settings offers only the efforts and tiers the selected model reports through the SDK, and the helper applies them to each session.
 
 **Disk hygiene.** Every triage session is disconnected and deleted through the SDK after its batch. After each sign-in, sessions left by an interrupted run are listed and deleted through the SDK, the CLI runs at error-only log level, and only its five newest log files are kept.
 

@@ -220,6 +220,13 @@ private struct DetailActionBar: View {
             }
 
             Button {
+                actions.beginDraft(for: entry)
+            } label: {
+                Label("Draft Reply…", systemImage: "sparkles")
+            }
+            .help("Have Copilot draft a reply you can edit (⌥⌘D)")
+
+            Button {
                 actions.beginRule(from: entry, correcting: false)
             } label: {
                 Label("Create Rule…", systemImage: "line.3.horizontal.decrease.circle")

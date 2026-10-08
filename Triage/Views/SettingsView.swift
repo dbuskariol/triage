@@ -97,7 +97,7 @@ struct SettingsView: View {
         case .inbox: 700
         case .notifications: 560
         case .accounts: 640
-        case .ai: 700
+        case .ai: 860
         case .rules: 760
         case .updates: 460
         }
@@ -380,17 +380,13 @@ struct SettingsView: View {
                         get: { state?.consent.isEnabled ?? false },
                         set: { enabled in Task { await appModel.recordSelectedOrganizationAIConsent(enabled) } }
                     ))
-                    Picker("Model", selection: Binding(
-                        get: { state?.consent.selectedModelID ?? "auto" },
-                        set: { id in Task { await appModel.selectSelectedOrganizationCopilotModel(id == "auto" ? nil : id) } }
-                    )) {
-                        Text("Auto").tag("auto")
-                        ForEach(state?.availableModels ?? []) { model in
-                            Text(model.displayName).tag(model.id)
-                        }
+                    CopilotModelChoiceRows(
+                        choice: state?.consent.triageChoice ?? .auto,
+                        models: state?.availableModels ?? [],
+                        isEnabled: state?.consent.isEnabled == true
+                    ) { choice in
+                        Task { await appModel.saveSelectedOrganizationCopilotChoice(choice, for: .triage) }
                     }
-                    .disabled(state?.consent.isEnabled != true)
-                    modelTuning(state)
                     LabeledContent("Rules and instructions") {
                         Button("Edit…") { navigation.settingsCategory = .rules }
                     }
@@ -408,54 +404,15 @@ struct SettingsView: View {
                     Text("Select an organization before configuring Copilot.").foregroundStyle(.secondary)
                 }
             }
+
+            if let state = appModel.selectedOrganizationAISettings, state.consent.isEnabled {
+                DraftReplySettingsSection(consent: state.consent, models: state.availableModels) { choice in
+                    Task { await appModel.saveSelectedOrganizationCopilotChoice(choice, for: .reply) }
+                }
+            }
         }
         .task(id: appModel.selectedOrganizationID) {
             await appModel.refreshSelectedOrganizationAIStatus()
-        }
-    }
-
-    /// Reasoning effort and long context, shown only for what the selected model supports.
-    @ViewBuilder
-    private func modelTuning(_ state: OrganizationAISettingsState?) -> some View {
-        let consent = state?.consent
-        let model = state?.availableModels.first { $0.id == consent?.selectedModelID }
-        let efforts = model?.supportedReasoningEfforts ?? []
-        if consent?.isEnabled == true, consent?.selectedModelID == nil {
-            Text("Choose a specific model to adjust reasoning effort and context length.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        if let consent, consent.isEnabled, !efforts.isEmpty {
-            Picker("Reasoning effort", selection: Binding(
-                get: { consent.reasoningEffort ?? "" },
-                set: { effort in
-                    Task {
-                        await appModel.saveSelectedOrganizationCopilotChoice(.init(
-                            modelID: consent.selectedModelID,
-                            reasoningEffort: effort.isEmpty ? nil : effort,
-                            contextTier: consent.contextTier
-                        ))
-                    }
-                }
-            )) {
-                Text(model?.defaultReasoningEffort.map { "Default (\($0.capitalized))" } ?? "Default").tag("")
-                ForEach(efforts, id: \.self) { Text($0.capitalized).tag($0) }
-            }
-        }
-        if let consent, consent.isEnabled, model?.supportsLongContext == true {
-            Toggle("Long context", isOn: Binding(
-                get: { consent.contextTier == "long_context" },
-                set: { isOn in
-                    Task {
-                        await appModel.saveSelectedOrganizationCopilotChoice(.init(
-                            modelID: consent.selectedModelID,
-                            reasoningEffort: consent.reasoningEffort,
-                            contextTier: isOn ? "long_context" : nil
-                        ))
-                    }
-                }
-            ))
-            .help("Gives Copilot a larger context window for long descriptions and discussions. May use more premium requests.")
         }
     }
 

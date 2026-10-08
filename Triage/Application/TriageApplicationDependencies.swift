@@ -90,9 +90,14 @@ struct TriageApplicationDependencies: Sendable {
     let accountSession: any AccountSessionServing
     let copilotRuntimeAuthorization: any CopilotRuntimeAuthorizationProviding
     let consent: @Sendable (WorkspaceScope) async throws -> OrganizationAIConsent
-    let saveConsent: @Sendable (WorkspaceScope, _ isEnabled: Bool, _ choice: CopilotModelChoice) async throws -> Void
+    /// Saves consent with the triage model and the reply model (`nil` = same as triage).
+    let saveConsent: @Sendable (WorkspaceScope, _ isEnabled: Bool, _ triage: CopilotModelChoice, _ reply: CopilotModelChoice?) async throws -> Void
     let makeWorkspace: @Sendable (WorkspaceScope) async throws -> WorkspaceRuntime
     var purgeAccountNavigationState: AccountNavigationStatePurging = { _ in }
+    /// Drafts a reply for an item: (scope, item, goal, writing style).
+    var draftReply: @Sendable (WorkspaceScope, PersonalWorkItem, String?, String?) async throws -> String = { _, _, _, _ in
+        throw TriageDecisionError.runtimeUnavailable
+    }
 }
 
 enum AccountSessionSnapshotError: Error, Equatable, Sendable {
