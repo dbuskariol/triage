@@ -21,6 +21,8 @@ enum TriagePreferenceKeys {
     static let quietHoursEnd = "notifications.quiet-hours-end"
     static let writingStyle = "drafts.writing-style"
     static let onboardingCompleted = "interface.onboarding.completed"
+    static let launchDestination = "interface.launch-destination"
+    static let lastDestination = "interface.last-destination"
 }
 
 @MainActor

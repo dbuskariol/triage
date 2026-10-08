@@ -82,6 +82,7 @@ final class TriageAppModel: ObservableObject {
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
     @Published var destination = WorkspaceDestination.section(.inbox) {
         didSet {
+            defaults.set(destination.storageValue, forKey: TriagePreferenceKeys.lastDestination)
             guard destination != oldValue, !isTraversingHistory else { return }
             backHistory.append(.init(destination: oldValue, selectedEntryID: selectedEntryID))
             if backHistory.count > 50 { backHistory.removeFirst() }
@@ -144,6 +145,10 @@ final class TriageAppModel: ObservableObject {
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
             .flatMap(OrganizationID.init(rawValue:))
         savedSearches = selectedOrganizationID.map { SavedSearchStore(organizationID: $0).load(defaults: defaults) } ?? []
+        let launch = defaults.string(forKey: TriagePreferenceKeys.launchDestination).flatMap(LaunchDestination.init) ?? .inbox
+        destination = launch.resolve(
+            lastViewed: defaults.string(forKey: TriagePreferenceKeys.lastDestination), savedSearches: savedSearches
+        )
     }
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
