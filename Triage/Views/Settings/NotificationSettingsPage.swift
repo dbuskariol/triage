@@ -47,6 +47,8 @@ struct NotificationSettingsPage: View {
                 Toggle("Show work needing your action on the Dock icon", isOn: $showDockBadge)
             } header: {
                 Text("Dock")
+            } footer: {
+                Text("Requires Badges to be allowed for Triage in System Settings ▸ Notifications.")
             }
 
             Section {
