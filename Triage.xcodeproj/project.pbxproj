@@ -122,6 +122,7 @@
 		BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51CCBC527DBD7C20ECD99955 /* TriageApp.swift */; };
 		C456BE7D94C6C310182F71F1 /* CopilotXPCCallerValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */; };
 		C70DF6C9BAC43A7C2BF981F3 /* TriageEntryRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E59DA2CC1518F03EA1FCBC /* TriageEntryRows.swift */; };
+		CA97549D8440527006107522 /* EntryStatusColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67ED489BC9446914E7611C8 /* EntryStatusColumn.swift */; };
 		CB8977237CA5B88F54D6278D /* CopilotXPCInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */; };
 		CBF6521337FB51C2B4CFFA36 /* RelativeTimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05F71A5285A53A8BD5FE9028 /* RelativeTimeTests.swift */; };
 		CDEF9112C0DC73D739F78D79 /* WorkspaceViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4496D533D578A4695215DA26 /* WorkspaceViewsTests.swift */; };
@@ -288,6 +289,7 @@
 		9D6886D6609A537B627DF3E3 /* AIConsentRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIConsentRepository.swift; sourceTree = "<group>"; };
 		9F2CFFDE8AE4D6F2E72426D1 /* CopilotModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotModelSettings.swift; sourceTree = "<group>"; };
 		A07052B04A11F30A982F01E0 /* TriageAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageAppModel.swift; sourceTree = "<group>"; };
+		A67ED489BC9446914E7611C8 /* EntryStatusColumn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryStatusColumn.swift; sourceTree = "<group>"; };
 		A78010B578BC387829A2CFB9 /* CopilotTriageDecider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotTriageDecider.swift; sourceTree = "<group>"; };
 		A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthTests.swift; sourceTree = "<group>"; };
 		AA8B599FF039595D3A21079C /* WorkspaceViews+Previews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WorkspaceViews+Previews.swift"; sourceTree = "<group>"; };
@@ -444,6 +446,7 @@
 				86A14272CD0E6EA3B9AC0FB5 /* BriefingView.swift */,
 				1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */,
 				294EE70D8BB694DF03F568A8 /* DraftReplySheet.swift */,
+				A67ED489BC9446914E7611C8 /* EntryStatusColumn.swift */,
 				FCDBE483415D40F0CFC8CC2A /* FocusView.swift */,
 				8BB56D15457DC43BCC10832D /* MarkdownText.swift */,
 				CFFF01166BFEB1E4E4570284 /* MultipleSelectionView.swift */,
@@ -1072,6 +1075,7 @@
 				3ABE0BAEB34FB0FC696F7351 /* CredentialLifecycle.swift in Sources */,
 				8559468EB89030738DB4A0F3 /* DashboardComponents.swift in Sources */,
 				5C05772694436759D92261AC /* DraftReplySheet.swift in Sources */,
+				CA97549D8440527006107522 /* EntryStatusColumn.swift in Sources */,
 				44BD374DB36F8C7B6DE34615 /* FocusView.swift in Sources */,
 				435A91DA37F58881611CC413 /* GRDBTriageStore.swift in Sources */,
 				E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */,

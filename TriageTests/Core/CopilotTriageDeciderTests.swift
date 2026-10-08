@@ -29,6 +29,20 @@ final class CopilotTriageDeciderTests: XCTestCase {
         XCTAssertEqual(Set(requestIDs).count, 2)
     }
 
+    func testDroppedConnectionReconnectsOnceWithAFreshHelper() async throws {
+        let broken = FakeTriageHelper(failAuthenticateWith: .helperUnavailable)
+        let healthy = FakeTriageHelper()
+        let helpers = HelperQueue([broken, healthy])
+        let decider = CopilotTriageDecider(
+            makeHelper: { helpers.next() },
+            authorize: { _ in CopilotTriageAuthorization(isConsentGranted: true, selectedModelID: nil) }
+        )
+        let decisions = try await decider.decide([deciderItem("A")], scope: deciderScope, rules: .empty)
+        XCTAssertEqual(decisions.map(\.itemID.rawValue), ["A"])
+        let counts = await healthy.counts
+        XCTAssertEqual(counts.triage, 1)
+    }
+
     func testPartialResponseKeepsDecidedItems() async throws {
         let helper = FakeTriageHelper(dropLastDecision: true)
         let decisions = try await makeDecider(helper).decide([deciderItem("A"), deciderItem("B")], scope: deciderScope, rules: .empty)
@@ -98,6 +112,16 @@ private func deciderItem(_ id: String) -> PersonalWorkItem {
     )
 }
 
+/// Hands out helpers in order, like reconnecting after a dropped connection.
+private final class HelperQueue: @unchecked Sendable {
+    private var helpers: [FakeTriageHelper]
+    private let lock = NSLock()
+    init(_ helpers: [FakeTriageHelper]) { self.helpers = helpers }
+    func next() -> any TriageCopilotHelping {
+        lock.withLock { helpers.count > 1 ? helpers.removeFirst() : helpers[0] }
+    }
+}
+
 private actor FakeTriageHelper: TriageCopilotHelping {
     private let login: String
     private let dropLastDecision: Bool
@@ -106,7 +130,11 @@ private actor FakeTriageHelper: TriageCopilotHelping {
     private(set) var triageRequestIDs: [UUID] = []
     private(set) var lastDraft: CopilotDraftRequest?
 
-    init(login: String = "me", failFirstTriageWithMissingSession: Bool = false, dropLastDecision: Bool = false) {
+    private let failAuthenticateWith: CopilotXPCError?
+
+    init(login: String = "me", failFirstTriageWithMissingSession: Bool = false, dropLastDecision: Bool = false,
+         failAuthenticateWith: CopilotXPCError? = nil) {
+        self.failAuthenticateWith = failAuthenticateWith
         self.login = login
         self.dropLastDecision = dropLastDecision
         failNextTriage = failFirstTriageWithMissingSession
@@ -121,6 +149,7 @@ private actor FakeTriageHelper: TriageCopilotHelping {
 
     func authenticate(_ request: CopilotAuthenticateRequest) async throws -> CopilotAuthenticationResponse {
         authenticateCount += 1
+        if let failAuthenticateWith { throw failAuthenticateWith }
         return CopilotAuthenticationResponse(
             header: .init(requestID: request.header.requestID, accountID: request.header.accountID,
                           organizationID: request.header.organizationID, status: .authentication),
