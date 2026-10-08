@@ -79,7 +79,7 @@ final class TriageAppModel: ObservableObject {
     /// The rule editor started from an item, if open.
     @Published var ruleDraft: RuleDraft?
     /// Local status changes shown immediately, before the store confirms them.
-    private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
+    private var optimistic = OptimisticChanges()
     @Published var destination = WorkspaceDestination.section(.inbox) {
         didSet {
             defaults.set(destination.storageValue, forKey: TriagePreferenceKeys.lastDestination)
@@ -302,7 +302,7 @@ final class TriageAppModel: ObservableObject {
         if let engine = runtime?.value.engine { await engine.stop() }
         runtime = nil
         rules = .empty
-        optimisticLocal = [:]
+        optimistic = OptimisticChanges()
         entries = []
         status = .initial
         selectedEntryID = nil
@@ -316,10 +316,9 @@ final class TriageAppModel: ObservableObject {
                     guard let self, self.runtime?.scope == scope else { return }
                     self.entries = entries
                     // Drop optimistic changes the store has now confirmed.
-                    self.optimisticLocal = self.optimisticLocal.filter { id, local in
-                        entries.first { $0.id == id }?.local != local
-                    }
+                    self.optimistic.dropConfirmed(by: entries)
                     self.publishPresentation()
+                    self.takeReadBaselineIfNeeded(scope: scope)
                 }
             } catch {
                 Self.logger.error("entries stream failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
@@ -335,11 +334,7 @@ final class TriageAppModel: ObservableObject {
     }
 
     private func publishPresentation() {
-        let shown = optimisticLocal.isEmpty ? entries : entries.map { entry in
-            var entry = entry
-            if let local = optimisticLocal[entry.id] { entry.local = local }
-            return entry
-        }
+        let shown = optimistic.apply(to: entries)
         let next = WorkspacePresentation(
             entries: shown, status: status, now: .now, rules: rules, viewer: runtime?.scope.viewerLogin ?? ""
         )
@@ -937,6 +932,35 @@ extension TriageAppModel: WorkspaceActions {
 
     /// Applies the change instantly, moves selection to the next item in the
     /// list (or the previous one at the end), then saves in the background.
+    /// The first time an organization's work loads, everything already there
+    /// starts as read, so the blue dot means "new since you started using it"
+    /// rather than flagging the whole backlog.
+    private func takeReadBaselineIfNeeded(scope: WorkspaceScope) {
+        let key = "\(TriagePreferenceKeys.readBaseline).\(scope.accountID.rawValue).\(scope.organizationID.rawValue)"
+        guard !entries.isEmpty, !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
+        setRead(presentation.allEntries, true)
+    }
+
+    func setRead(_ entries: [TriageEntry], _ isRead: Bool) {
+        guard let runtime else { return }
+        let changed = entries.filter { $0.isUnread == isRead }
+        guard !changed.isEmpty else { return }
+        let date: Date? = isRead ? .now : nil
+        changed.forEach { optimistic.setRead(date, for: $0.id) }
+        publishPresentation()
+        let ids = changed.map(\.id)
+        Task {
+            do {
+                try await runtime.value.store.setReadAt(date, itemIDs: ids, scope: runtime.scope)
+            } catch {
+                Self.logger.error("read state save failed")
+                ids.forEach { self.optimistic.clearRead(for: $0) }
+                self.publishPresentation()
+            }
+        }
+    }
+
     private func setLocalStatus(_ status: LocalStatus, for entry: TriageEntry) {
         guard let runtime else { return }
         let order = visibleEntries.map(\.id)
@@ -944,7 +968,7 @@ extension TriageAppModel: WorkspaceActions {
         if selectedEntryID == entry.id, let index = order.firstIndex(of: entry.id) {
             nextSelection = order.indices.contains(index + 1) ? order[index + 1] : index > 0 ? order[index - 1] : nil
         }
-        optimisticLocal[entry.id] = status
+        optimistic.set(status, for: entry.id)
         publishPresentation()
         selectedEntryID = nextSelection
         Task {
@@ -952,7 +976,7 @@ extension TriageAppModel: WorkspaceActions {
                 try await runtime.value.store.setLocalStatus(status, itemID: entry.id, scope: runtime.scope)
             } catch {
                 Self.logger.error("local status save failed")
-                self.optimisticLocal[entry.id] = nil
+                self.optimistic.set(nil, for: entry.id)
                 self.publishPresentation()
             }
         }

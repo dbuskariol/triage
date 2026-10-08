@@ -77,6 +77,19 @@ struct TriageWorkspaceCommands: Commands {
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(appModel.selectedEntry == nil)
 
+            Button(appModel.selectedEntry?.isUnread == true ? "Mark as Read" : "Mark as Unread") {
+                guard let entry = appModel.selectedEntry else { return }
+                appModel.setRead([entry], entry.isUnread)
+            }
+            .keyboardShortcut("u", modifiers: [.command, .shift])
+            .disabled(appModel.selectedEntry == nil)
+
+            Button("Mark All as Read") { appModel.setRead(appModel.visibleEntries, true) }
+                .keyboardShortcut("u", modifiers: [.command, .option, .shift])
+                .disabled(!appModel.visibleEntries.contains(where: \.isUnread))
+
+            Divider()
+
             Button("Draft Reply…") {
                 guard let entry = appModel.selectedEntry else { return }
                 appModel.beginDraft(for: entry)

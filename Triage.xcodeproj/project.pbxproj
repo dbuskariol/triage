@@ -45,6 +45,7 @@
 		44BD374DB36F8C7B6DE34615 /* FocusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCDBE483415D40F0CFC8CC2A /* FocusView.swift */; };
 		463F21701DBBD3456B2362B8 /* TriageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDA3A2AB9CA28768B15E6CE8 /* TriageDetailView.swift */; };
 		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
+		4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AF305EE4595199A034B4462 /* OptimisticChanges.swift */; };
 		4D07060943DD35CDF4F1F898 /* WorkspaceSortMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1D01831E8F9F2A8F3CE7A0 /* WorkspaceSortMenu.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4DF3F1CAE8F0E929CB4DCA3F /* TriageCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43224A6207C64C0892546655 /* TriageCommands.swift */; };
@@ -259,6 +260,7 @@
 		86A14272CD0E6EA3B9AC0FB5 /* BriefingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BriefingView.swift; sourceTree = "<group>"; };
 		89EB0458B411E6A895FE992B /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageCopilotXPCListener.swift; sourceTree = "<group>"; };
+		8AF305EE4595199A034B4462 /* OptimisticChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticChanges.swift; sourceTree = "<group>"; };
 		8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotIPC.swift; sourceTree = "<group>"; };
 		8B3E06ED25385991E677C772 /* GitHubPersonalWorkDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubPersonalWorkDiscovery.swift; sourceTree = "<group>"; };
 		8BB56D15457DC43BCC10832D /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
@@ -409,6 +411,7 @@
 			isa = PBXGroup;
 			children = (
 				C6AF26C67EA04CCB86479224 /* AttentionTracker.swift */,
+				8AF305EE4595199A034B4462 /* OptimisticChanges.swift */,
 				8CDCFD7E51264B4705CAF4C7 /* TriageCore.swift */,
 				63146E95371A9BF3474C6E1C /* TriageEngine.swift */,
 				6C847E2A0F9CB9226F78C821 /* TriageRules.swift */,
@@ -1073,6 +1076,7 @@
 				5942E5936789D4F38F413A23 /* OAuthCredentialRefreshService.swift in Sources */,
 				5A14FEEF8BA270CA72856C07 /* OnboardingFlowView.swift in Sources */,
 				DE8B11DECA51A55BC9ADC661 /* OnboardingStep.swift in Sources */,
+				4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */,
 				8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */,
 				82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */,
 				DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */,

@@ -59,6 +59,8 @@ Both fill the window. Clicking an item opens it in its list with its details; **
 | **Done** | Work you finished or that Triage marked *Handled by You*. Filter by how it was finished. |
 | **Muted** | Work hidden by your mute rules (appears only when non-empty). |
 
+A **blue dot** means unread: you haven't viewed the item since someone else last commented, reviewed, or pushed. Your own activity never marks work unread. An **orange flag** means Copilot says it needs your action. The sidebar counts unread items; hover for the total.
+
 Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
 
 Select an item to see the full recommendation (including Copilot's effort estimate: *Quick*, *Under an hour*, or *Deep work*), pull request status, people, related work it references or is referenced by, the formatted description, and recent activity. **Group By** in the sort menu groups any list by effort, repository, or why it's yours.
@@ -75,7 +77,7 @@ Focus (⇧⌘F, or the target button above the list) shows one item at a time fr
 
 The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, people, labels, and Copilot's notes, or use GitHub-style filters:
 
-`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
+`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` `is:unread` `is:read` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
 
 **Save** keeps the current search in the sidebar as a saved search that stays up to date across all your work. Type in the search field to narrow it further; right-click it to rename or delete.
 
@@ -92,6 +94,8 @@ Or pick filters from the **Filter** menu (⊜) beside the field; applied filters
 | Draft reply | ⌥⌘D |
 | Mark done (restore in Done) | E or ⌫, ⌘E |
 | Snooze until tomorrow | S, ⇧⌘S |
+| Mark as read or unread | U, ⇧⌘U |
+| Mark all as read | ⌥⇧⌘U |
 | Open on GitHub | ↩ or ⌘O |
 | Switch section | ⌘1 – ⌘7 |
 | Refresh | ⌘R |
@@ -143,7 +147,7 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 | Tab | Options |
 |---|---|
 | **General** | Open at login · Show in menu bar · Show on launch (Briefing, Inbox, or where you left off) · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Privacy and local data · Keyboard reference |
-| **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · When to suggest a follow-up · Mark work done when you handle it |
+| **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · When to suggest a follow-up · Mark work done when you handle it · Mark items as read immediately, after 2 seconds, or only manually |
 | **Notifications** | Notify when work newly needs your action · Daily follow-up reminder · Quiet hours · Dock badge |
 | **Accounts** | Connected GitHub accounts and their status · Which organization's work to show |
 | **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all · Draft Replies: the same model or a separate one, and your writing style |

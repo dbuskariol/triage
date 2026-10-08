@@ -319,6 +319,7 @@ actor MemoryStore: TriageStore {
     private var decisions: [GitHubNodeID: TriageDecision] = [:]
     private var failures: [GitHubNodeID: (fingerprint: String, retryAt: Date)] = [:]
     private var local: [GitHubNodeID: LocalStatus] = [:]
+    private var readAt: [GitHubNodeID: Date] = [:]
     private var refreshedAt: Date?
     private var savedRules = TriageRules.empty
 
@@ -383,12 +384,17 @@ actor MemoryStore: TriageStore {
         local[itemID] = status
     }
 
+    func setReadAt(_ date: Date?, itemIDs: [GitHubNodeID], scope: WorkspaceScope) async throws {
+        for id in itemIDs { readAt[id] = date }
+    }
+
     func entries(scope: WorkspaceScope) async throws -> AsyncThrowingStream<[TriageEntry], Error> {
         let snapshot = items.values.map { item in
             TriageEntry(
                 item: item, decision: decisions[item.id],
                 analysis: decisions[item.id]?.fingerprint == item.fingerprint ? .current : .pending,
-                local: local[item.id] ?? .active
+                local: local[item.id] ?? .active,
+                readAt: readAt[item.id]
             )
         }
         return AsyncThrowingStream { continuation in

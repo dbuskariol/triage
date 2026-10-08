@@ -14,7 +14,7 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(objects, [
             "account_capabilities", "account_organizations", "accounts", "ai_consents", "capabilities",
             "organizations", "rate_limit_buckets", "rate_limit_secondary_cooldowns", "schema_migrations",
-            "triage_analysis_failures", "triage_decisions", "triage_items", "triage_local_status",
+            "triage_analysis_failures", "triage_decisions", "triage_items", "triage_local_status", "triage_read_state",
             "triage_refreshes", "triage_rules", "vault_metadata"
         ])
         let migrations = try await vault.read { database in

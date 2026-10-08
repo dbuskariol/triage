@@ -16,6 +16,10 @@ struct TriageEntryRows: View {
                 .tag(entry.id)
                 .contextMenu { TriageEntryMenu(entry: entry, isHandled: setAsideIDs.contains(entry.id), actions: actions) }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipes(for: entry) }
+                .swipeActions(edge: .leading) {
+                    Button(entry.isUnread ? "Read" : "Unread") { actions.setRead([entry], entry.isUnread) }
+                        .tint(.blue)
+                }
         }
     }
 
@@ -37,6 +41,8 @@ struct TriageEntryMenu: View {
     let actions: any WorkspaceActions
 
     var body: some View {
+        Button(entry.isUnread ? "Mark as Read" : "Mark as Unread") { actions.setRead([entry], entry.isUnread) }
+        Divider()
         if isHandled {
             Button("Restore") { actions.restore(entry) }
         } else {
@@ -57,7 +63,8 @@ extension WorkspacePresentation {
 }
 
 /// Mail- and Superhuman-style keys on top of the native ↑/↓: j/k move,
-/// e/⌫ Done (or Restore), s snoozes until tomorrow, Return opens on GitHub.
+/// e/⌫ Done (or Restore), s snoozes until tomorrow, u toggles unread,
+/// Return opens on GitHub.
 private struct TriageListKeys: ViewModifier {
     let entries: [TriageEntry]
     @Binding var selectedEntryID: GitHubNodeID?
@@ -73,6 +80,11 @@ private struct TriageListKeys: ViewModifier {
             .onKeyPress(keys: [.delete, .deleteForward, "e"]) { _ in
                 guard let entry = selected else { return .ignored }
                 setAsideIDs.contains(entry.id) ? actions.restore(entry) : actions.markDone(entry)
+                return .handled
+            }
+            .onKeyPress(characters: ["u"]) { _ in
+                guard let entry = selected else { return .ignored }
+                actions.setRead([entry], entry.isUnread)
                 return .handled
             }
             .onKeyPress(.return) {

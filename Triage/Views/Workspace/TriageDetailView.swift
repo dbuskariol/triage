@@ -11,43 +11,58 @@ struct TriageDetailView: View {
 
     var body: some View {
         if let entry {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    DetailHeader(item: entry.item)
-                    DetailActionBar(entry: entry, actions: actions)
-                    // Wide windows get a GitHub-style two-column layout; narrow
-                    // windows fall back to a single readable column.
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 28) {
-                            primaryColumn(entry)
-                                .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity, alignment: .leading)
-                            secondaryColumn(entry, tileColumns: 1)
-                                .frame(width: 280, alignment: .leading)
-                        }
-                        VStack(alignment: .leading, spacing: 20) {
-                            RecommendationCard(entry: entry, allEntries: allEntries, actions: actions)
-                            secondaryColumn(entry, tileColumns: nil)
-                            DescriptionSection(text: entry.item.body)
-                            ActivitySection(activity: entry.item.recentActivity)
-                        }
+            content(entry)
+                // Viewing details marks the item read, after the user's chosen delay.
+                .task(id: entry.id) {
+                    guard entry.isUnread, let delay = MarkReadPolicy.current().delay else { return }
+                    try? await Task.sleep(for: delay)
+                    guard !Task.isCancelled else { return }
+                    actions.setRead([entry], true)
+                }
+        } else {
+            empty
+        }
+    }
+
+    private func content(_ entry: TriageEntry) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                DetailHeader(item: entry.item)
+                DetailActionBar(entry: entry, actions: actions)
+                // Wide windows get a GitHub-style two-column layout; narrow
+                // windows fall back to a single readable column.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 28) {
+                        primaryColumn(entry)
+                            .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity, alignment: .leading)
+                        secondaryColumn(entry, tileColumns: 1)
+                            .frame(width: 280, alignment: .leading)
+                    }
+                    VStack(alignment: .leading, spacing: 20) {
+                        RecommendationCard(entry: entry, allEntries: allEntries, actions: actions)
+                        secondaryColumn(entry, tileColumns: nil)
+                        DescriptionSection(text: entry.item.body)
+                        ActivitySection(activity: entry.item.recentActivity)
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 24)
-                .frame(maxWidth: 1_120, alignment: .leading)
-                .frame(maxWidth: .infinity)
             }
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .id(entry.id)
-        } else {
-            ContentUnavailableView(
-                inboxIsEmpty ? "You’re all caught up" : "No Selection",
-                systemImage: inboxIsEmpty ? "checkmark.circle" : "sparkles",
-                description: Text(inboxIsEmpty
-                    ? "Copilot will bring new work here when it needs you."
-                    : "Select an item to see Copilot’s recommendation.")
-            )
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 1_120, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .id(entry.id)
+    }
+
+    private var empty: some View {
+        ContentUnavailableView(
+            inboxIsEmpty ? "You’re all caught up" : "No Selection",
+            systemImage: inboxIsEmpty ? "checkmark.circle" : "sparkles",
+            description: Text(inboxIsEmpty
+                ? "Copilot will bring new work here when it needs you."
+                : "Select an item to see Copilot’s recommendation.")
+        )
     }
 }
 

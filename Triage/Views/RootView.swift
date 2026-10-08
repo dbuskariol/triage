@@ -70,7 +70,8 @@ private struct WorkspaceView: View {
                 selection: $appModel.destination,
                 savedSearches: appModel.savedSearches,
                 onRenameSavedSearch: appModel.renameSavedSearch,
-                onDeleteSavedSearch: appModel.deleteSavedSearch
+                onDeleteSavedSearch: appModel.deleteSavedSearch,
+                onMarkAllRead: { appModel.setRead(appModel.presentation.entries(in: $0), true) }
             ) {
                 WorkspacePickers()
             }
