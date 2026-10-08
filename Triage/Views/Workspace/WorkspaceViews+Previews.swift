@@ -14,6 +14,7 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func show(_ entry: TriageEntry) {}
     func saveSearch(named name: String) {}
     func startFocus(_ entries: [TriageEntry]) {}
+    func open(_ destination: WorkspaceDestination, search: WorkspaceSearch) {}
 }
 
 private enum WorkspacePreviewFixture {
@@ -78,7 +79,7 @@ private enum WorkspacePreviewFixture {
         selectedEntryID: $selection,
         actions: WorkspacePreviewActions(),
         search: .constant(WorkspaceSearch()),
-        handledFilter: .constant(.all)
+        doneFilter: .constant(.all)
     )
     .frame(width: 600, height: 500)
 }

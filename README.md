@@ -45,7 +45,8 @@ flowchart LR
 | **Waiting on Others** | The next move belongs to someone else. |
 | **No Action Needed** | FYI, stale, or informational. |
 | **Analyzing** | Copilot's queue: new work, items being re-checked after new activity, and retries. |
-| **Done & Snoozed** | Work you finished, snoozed, or that Triage marked *Handled by You*. Filter by type. |
+| **Snoozed** | Work hidden until the time you chose; it returns sooner if someone responds. |
+| **Done** | Work you finished or that Triage marked *Handled by You*. Filter by how it was finished. |
 | **Muted** | Work hidden by your mute rules (appears only when non-empty). |
 
 Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).

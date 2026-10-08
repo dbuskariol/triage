@@ -80,7 +80,18 @@ final class TriageAppModel: ObservableObject {
     @Published var ruleDraft: RuleDraft?
     /// Local status changes shown immediately, before the store confirms them.
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
-    @Published var destination = WorkspaceDestination.section(.inbox)
+    @Published var destination = WorkspaceDestination.section(.inbox) {
+        didSet {
+            guard destination != oldValue, !isTraversingHistory else { return }
+            backHistory.append(.init(destination: oldValue, selectedEntryID: selectedEntryID))
+            if backHistory.count > 50 { backHistory.removeFirst() }
+            forwardHistory.removeAll()
+        }
+    }
+    /// Finder-style Back and Forward through destinations.
+    @Published private(set) var backHistory: [NavigationPoint] = []
+    @Published private(set) var forwardHistory: [NavigationPoint] = []
+    private var isTraversingHistory = false
     /// Items being worked through in Focus, if Focus is on.
     @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
@@ -88,7 +99,7 @@ final class TriageAppModel: ObservableObject {
     @Published var selectedEntryID: GitHubNodeID?
     /// Toolbar search; filters the list in place.
     @Published var search = WorkspaceSearch()
-    @Published var handledFilter = HandledFilter.all
+    @Published var doneFilter = DoneFilter.all
     /// Incremented by Edit ▸ Find (⌘F) to focus the search field.
     @Published var searchFocusRequest = 0
 
@@ -712,7 +723,7 @@ extension TriageAppModel {
         }
         let defaults = UserDefaults.standard
         return presentation.visibleEntries(
-            section: selectedSection, search: effectiveSearch, handledFilter: handledFilter,
+            section: selectedSection, search: effectiveSearch, doneFilter: doneFilter,
             sortedBy: defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended,
             ascending: defaults.bool(forKey: TriagePreferenceKeys.sortAscending),
             grouping: defaults.string(forKey: TriagePreferenceKeys.grouping).flatMap(WorkspaceGrouping.init) ?? .none,
@@ -720,8 +731,33 @@ extension TriageAppModel {
         )
     }
 
+    /// Keeps the selection when it is still on screen; otherwise selects the first row.
     func selectFirstEntry() {
-        selectedEntryID = visibleEntries.first?.id
+        let visible = visibleEntries
+        guard !visible.contains(where: { $0.id == selectedEntryID }) else { return }
+        selectedEntryID = visible.first?.id
+    }
+
+    func goBack() { traverse(from: \.backHistory, to: \.forwardHistory) }
+    func goForward() { traverse(from: \.forwardHistory, to: \.backHistory) }
+
+    private func traverse(
+        from source: ReferenceWritableKeyPath<TriageAppModel, [NavigationPoint]>,
+        to target: ReferenceWritableKeyPath<TriageAppModel, [NavigationPoint]>
+    ) {
+        guard let point = self[keyPath: source].popLast() else { return }
+        self[keyPath: target].append(.init(destination: destination, selectedEntryID: selectedEntryID))
+        isTraversingHistory = true
+        destination = point.destination
+        isTraversingHistory = false
+        selectedEntryID = point.selectedEntryID
+    }
+
+    /// Opens a list, optionally filtered, e.g. a Briefing card's Show All.
+    func open(_ destination: WorkspaceDestination, search: WorkspaceSearch) {
+        self.search = search
+        self.destination = destination
+        selectFirstEntry()
     }
 
     /// Moves selection by `offset` within the visible list (j/k navigation).
@@ -824,7 +860,12 @@ extension TriageAppModel: WorkspaceActions {
     }
 
     func show(_ entry: TriageEntry) {
-        if !visibleEntries.contains(where: { $0.id == entry.id }) {
+        let isListed: Bool
+        switch destination {
+        case .section, .savedSearch: isListed = visibleEntries.contains { $0.id == entry.id }
+        case .briefing, .review: isListed = false
+        }
+        if !isListed {
             search = WorkspaceSearch(scope: search.scope)
             if let section = presentation.section(containing: entry) { destination = .section(section) }
         }

@@ -1,128 +1,105 @@
 import SwiftUI
 
-/// The Briefing: what needs you right now, in one calm list.
+/// The Briefing: what needs you right now, at a glance. Every item opens in
+/// its list with its details, and every card leads to the full list.
 struct BriefingView: View {
     let presentation: WorkspacePresentation
-    @Binding var selectedEntryID: GitHubNodeID?
     let actions: any WorkspaceActions
     let followUpDays: Int
     @Environment(\.triageViewerLogin) private var viewer
-    @FocusState private var isFocused: Bool
 
     var body: some View {
         let briefing = WorkspaceBriefing(presentation: presentation, viewer: viewer, followUpDays: followUpDays, now: .now)
-        Group {
+        DashboardPage(title: "Briefing", subtitle: Date.now.formatted(.dateTime.weekday(.wide).month(.wide).day())) {
+            header(briefing)
+            StatTiles(stats: [
+                .init(title: "Need Your Action", value: briefing.needsActionCount.formatted(),
+                      systemImage: "exclamationmark.circle", tint: .orange,
+                      action: { open(.section(.inbox), [.init(kind: .is, value: "action")]) }),
+                .init(title: "Quick Wins", value: briefing.quickWinCount.formatted(), systemImage: "bolt",
+                      action: { open(.section(.inbox), [.init(kind: .effort, value: TriageEffort.quick.rawValue)]) }),
+                .init(title: "Follow Ups", value: briefing.followUpCount.formatted(), systemImage: "arrowshape.turn.up.right",
+                      action: { open(.section(.waiting)) }),
+                .init(title: "In Inbox", value: presentation.count(in: .inbox).formatted(), systemImage: "tray",
+                      action: { open(.section(.inbox)) }),
+            ])
             if briefing.parts.isEmpty {
                 ContentUnavailableView(
                     "Nothing needs you",
                     systemImage: "sun.max",
                     description: Text("Your Inbox is clear and nothing is overdue.")
                 )
+                .frame(maxWidth: .infinity, minHeight: 240)
             } else {
-                List(selection: $selectedEntryID) {
-                    Section {
-                        StatTiles(stats: [
-                            .init(title: "Need Action", value: briefing.needsActionCount, systemImage: "exclamationmark.circle"),
-                            .init(title: "Quick Wins", value: briefing.quickWinCount, systemImage: "bolt"),
-                            .init(title: "Follow Ups", value: briefing.followUpCount, systemImage: "arrowshape.turn.up.right"),
-                        ])
-                        .listRowSeparator(.hidden)
-                        if let needsAction = briefing.parts.first(where: { $0.kind == .needsAction }) {
-                            Button {
-                                actions.startFocus(needsAction.entries)
-                            } label: {
-                                Label("Focus on \(needsAction.entries.count) Needing Action", systemImage: "scope")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .controlSize(.large)
-                            .buttonStyle(.borderedProminent)
-                            .listRowSeparator(.hidden)
-                        }
-                    }
+                DashboardGrid {
                     ForEach(briefing.parts) { part in
-                        Section {
-                            TriageEntryRows(
+                        DashboardCard(
+                            title: part.title, systemImage: part.systemImage, count: part.entries.count,
+                            footer: part.footer,
+                            onShowAll: part.entries.count > WorkspaceBriefing.partLimit ? showAll(part.kind) : nil
+                        ) {
+                            DashboardEntryList(
                                 entries: Array(part.entries.prefix(WorkspaceBriefing.partLimit)),
-                                selectedEntryID: selectedEntryID,
-                                handledIDs: presentation.handledIDs,
-                                actions: actions
+                                presentation: presentation, actions: actions
                             )
-                        } header: {
-                            SectionHeader(title: part.title, systemImage: part.systemImage, count: part.entries.count)
-                        } footer: {
-                            Text(part.footer).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
-                .listStyle(.inset)
-                .focused($isFocused)
-                .onAppear { isFocused = true }
-                .triageListKeys(entries: briefing.orderedEntries, selection: $selectedEntryID,
-                                handledIDs: presentation.handledIDs, actions: actions)
-                .accessibilityLabel("Briefing")
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle("Briefing")
-        .navigationSubtitle(Date.now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
     }
-}
 
-/// A list section header with an icon and a count, shared by the Briefing and Review.
-struct SectionHeader: View {
-    let title: String
-    let systemImage: String
-    var count: Int?
-
-    var body: some View {
-        HStack {
-            Label(title, systemImage: systemImage)
+    private func header(_ briefing: WorkspaceBriefing) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(greeting)
+                    .font(.largeTitle.weight(.bold))
+                Text(summary(briefing))
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
-            if let count {
-                Text(count, format: .number).monospacedDigit().foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-/// A row of headline numbers.
-struct StatTiles: View {
-    struct Stat: Identifiable {
-        let title: String
-        let value: String
-        let systemImage: String
-        var id: String { title }
-
-        init(title: String, value: Int, systemImage: String) {
-            self.init(title: title, text: value.formatted(), systemImage: systemImage)
-        }
-
-        init(title: String, text: String, systemImage: String) {
-            self.title = title
-            value = text
-            self.systemImage = systemImage
-        }
-    }
-
-    let stats: [Stat]
-
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
-            ForEach(stats) { stat in
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(stat.title, systemImage: stat.systemImage)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Text(stat.value)
-                        .font(.title2.weight(.semibold).monospacedDigit())
+            if let needsAction = briefing.parts.first(where: { $0.kind == .needsAction }) {
+                Button {
+                    actions.startFocus(needsAction.entries)
+                } label: {
+                    Label("Focus on What Needs You", systemImage: "scope")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-                .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
-                .accessibilityElement(children: .combine)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .help("Work through items needing your action one at a time (⇧⌘F)")
             }
         }
-        .padding(.vertical, 4)
+    }
+
+    private var greeting: String {
+        switch Calendar.current.component(.hour, from: .now) {
+        case 5..<12: "Good morning"
+        case 12..<17: "Good afternoon"
+        default: "Good evening"
+        }
+    }
+
+    private func summary(_ briefing: WorkspaceBriefing) -> String {
+        switch briefing.needsActionCount {
+        case 0: "Nothing is blocked on you right now."
+        case 1: "1 item needs your action."
+        default: "\(briefing.needsActionCount) items need your action."
+        }
+    }
+
+    private func showAll(_ kind: WorkspaceBriefing.Part.Kind) -> (() -> Void)? {
+        switch kind {
+        case .needsAction: { open(.section(.inbox), [.init(kind: .is, value: "action")]) }
+        case .waitingOnYou: { open(.section(.inbox)) }
+        case .quickWins: { open(.section(.inbox), [.init(kind: .effort, value: TriageEffort.quick.rawValue)]) }
+        case .followUps: { open(.section(.waiting)) }
+        case .handledToday: { open(.section(.done)) }
+        case .newToday: nil
+        }
+    }
+
+    private func open(_ destination: WorkspaceDestination, _ tokens: [SearchToken] = []) {
+        actions.open(destination, search: WorkspaceSearch(tokens: tokens))
     }
 }

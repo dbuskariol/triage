@@ -15,8 +15,10 @@ struct WorkspacePresentation: Equatable, Sendable {
         /// activity or changed preferences, and failures waiting to retry.
         /// Re-checked items also stay in their decided section.
         case analyzing
-        /// Locally marked done or snoozed.
-        case handled
+        /// Hidden until a chosen time, or until someone else responds.
+        case snoozed
+        /// Marked done, by you or automatically when you handled it on GitHub.
+        case done
         /// Hidden by one of the user's mute rules; never analyzed.
         case muted
 
@@ -28,7 +30,8 @@ struct WorkspacePresentation: Equatable, Sendable {
             case .waiting: "Waiting on Others"
             case .informational: "No Action Needed"
             case .analyzing: "Analyzing"
-            case .handled: "Done & Snoozed"
+            case .done: "Done"
+            case .snoozed: "Snoozed"
             case .muted: "Muted"
             }
         }
@@ -37,9 +40,10 @@ struct WorkspacePresentation: Equatable, Sendable {
             switch self {
             case .inbox: "tray.full"
             case .waiting: "hourglass"
-            case .informational: "checkmark.circle"
+            case .informational: "info.circle"
             case .analyzing: "sparkles"
-            case .handled: "archivebox"
+            case .done: "checkmark.circle"
+            case .snoozed: "moon.zzz"
             case .muted: "speaker.slash"
             }
         }
@@ -83,15 +87,27 @@ struct WorkspacePresentation: Equatable, Sendable {
             $0.analysis != .current && $0.isVisible(at: now, viewer: viewer) && !$0.isMuted
         }
         for (section, values) in grouped {
-            grouped[section] = section == .inbox
-                ? values.sorted(by: Self.priorityOrder)
-                : values.sorted(by: Self.urgencyOrder)
+            grouped[section] = switch section {
+            case .inbox: values.sorted(by: Self.priorityOrder)
+            // Most recently finished first; soonest to return first.
+            case .done: values.sorted { (WorkInsights.doneDate($0) ?? .distantPast) > (WorkInsights.doneDate($1) ?? .distantPast) }
+            case .snoozed: values.sorted { (Self.snoozedUntil($0) ?? .distantFuture) < (Self.snoozedUntil($1) ?? .distantFuture) }
+            default: values.sorted(by: Self.urgencyOrder)
+            }
         }
         self.init(entries: grouped, status: status)
     }
 
+    static func snoozedUntil(_ entry: TriageEntry) -> Date? {
+        if case .snoozed(let until) = entry.local { return until }
+        return nil
+    }
+
     static func section(for entry: TriageEntry, now: Date, viewer: String = "") -> Section {
-        guard entry.isVisible(at: now, viewer: viewer) else { return .handled }
+        guard entry.isVisible(at: now, viewer: viewer) else {
+            if case .snoozed = entry.local { return .snoozed }
+            return .done
+        }
         guard !entry.isMuted else { return .muted }
         // A previous decision keeps the item in its section while changed
         // facts are re-analyzed, so the Inbox does not flicker.
@@ -197,6 +213,8 @@ protocol WorkspaceActions: AnyObject {
     /// "Not right?") suggests moving the item somewhere else.
     func beginRule(from entry: TriageEntry, correcting: Bool)
     func openRulesSettings()
+    /// Opens a list, optionally filtered.
+    func open(_ destination: WorkspaceDestination, search: WorkspaceSearch)
     /// Works through `entries` one at a time in Focus.
     func startFocus(_ entries: [TriageEntry])
     /// Saves the current search to the sidebar.

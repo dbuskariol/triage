@@ -93,7 +93,7 @@ struct FocusView: View {
 
     /// Queue entries that still need you, in their original order.
     private var remainingEntries: [TriageEntry] {
-        let finished = presentation.handledIDs.union(presentation.entries(in: .muted).map(\.id))
+        let finished = presentation.setAsideIDs.union(presentation.entries(in: .muted).map(\.id))
         let byID = Dictionary(presentation.allEntries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return queue.compactMap { byID[$0] }.filter { !finished.contains($0.id) }
     }

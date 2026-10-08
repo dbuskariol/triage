@@ -15,7 +15,7 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
     @FocusState private var isListFocused: Bool
     @State private var statusNow = Date.now
-    @Binding var handledFilter: HandledFilter
+    @Binding var doneFilter: DoneFilter
     @State private var isNamingSavedSearch = false
     @State private var savedSearchName = ""
 
@@ -58,7 +58,7 @@ struct TriageListView: View {
                     if selectedEntryID == nil { selectedEntryID = entries.first?.id }
                 }
                 .triageListKeys(entries: entries, selection: $selectedEntryID,
-                                handledIDs: handledIDs, actions: actions)
+                                setAsideIDs: setAsideIDs, actions: actions)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -77,9 +77,9 @@ struct TriageListView: View {
                 if presentation.status.problem != nil {
                     TriageStatusView(status: presentation.status, actions: actions)
                 }
-                if section == .handled, !search.isActive {
-                    Picker("Show", selection: $handledFilter) {
-                        ForEach(HandledFilter.allCases) { Text($0.rawValue).tag($0) }
+                if section == .done, !search.isActive {
+                    Picker("Show", selection: $doneFilter) {
+                        ForEach(DoneFilter.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
@@ -109,7 +109,7 @@ struct TriageListView: View {
 
     private func rows(_ group: [TriageEntry]) -> some View {
         TriageEntryRows(
-            entries: group, selectedEntryID: selectedEntryID, handledIDs: handledIDs, actions: actions,
+            entries: group, selectedEntryID: selectedEntryID, setAsideIDs: setAsideIDs, actions: actions,
             sectionLabel: { entry in
                 effectiveSearch.isActive && effectiveSearch.scope == .all
                     ? presentation.section(containing: entry)?.title : nil
@@ -117,7 +117,7 @@ struct TriageListView: View {
         )
     }
 
-    private var handledIDs: Set<GitHubNodeID> { presentation.handledIDs }
+    private var setAsideIDs: Set<GitHubNodeID> { presentation.setAsideIDs }
 
     /// A saved search refined by the field, or the field alone.
     private var effectiveSearch: WorkspaceSearch {
@@ -126,7 +126,7 @@ struct TriageListView: View {
 
     private var entries: [TriageEntry] {
         presentation.visibleEntries(
-            section: section, search: effectiveSearch, handledFilter: handledFilter,
+            section: section, search: effectiveSearch, doneFilter: doneFilter,
             sortedBy: sortField, ascending: sortAscending, grouping: grouping, viewer: viewer
         )
     }
@@ -229,7 +229,8 @@ struct TriageListView: View {
         case .waiting: "Nothing is waiting on others"
         case .informational: "Nothing else needs your attention"
         case .analyzing: "Nothing is being analyzed"
-        case .handled: "No completed or snoozed work"
+        case .done: "Nothing done yet"
+        case .snoozed: "Nothing is snoozed"
         case .muted: "Nothing is muted"
         case .inbox: "You’re all caught up"
         }
@@ -240,7 +241,8 @@ struct TriageListView: View {
         case .waiting: "Copilot will keep work here when the next step belongs to someone else."
         case .informational: "Copilot will keep low-priority updates here."
         case .analyzing: "New work will appear here while Copilot reviews it."
-        case .handled: "Items you finish or snooze will stay here."
+        case .done: "Work you finish, here or on GitHub, appears here until someone else responds."
+        case .snoozed: "Snoozed work returns at the time you chose, or sooner if someone responds."
         case .muted: "Work matching your mute rules appears here. Manage rules in Settings."
         case .inbox: lastUpdatedText
         }
@@ -332,6 +334,12 @@ struct TriageEntryRow: View {
     private var chips: some View {
         let badges = WorkspaceViewPresentation.badges(for: entry)
         let effort = entry.decision?.nextAction != nil && entry.handledEvidence == nil ? entry.decision?.effort : nil
+        if let until = WorkspacePresentation.snoozedUntil(entry) {
+            Label("Until \(until.formatted(.relative(presentation: .named)))", systemImage: "moon.zzz")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(secondary)
+                .help(until.formatted(date: .complete, time: .shortened))
+        }
         if entry.handledEvidence != nil {
             Label("Handled by you", systemImage: "checkmark.circle.fill")
                 .font(.caption.weight(.medium))

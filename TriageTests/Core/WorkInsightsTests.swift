@@ -74,7 +74,7 @@ struct WorkInsightsTests {
 
         let presentation = WorkspacePresentation(entries: [.inbox: [deep, quick1, none, quick2]], status: .initial)
         let visible = presentation.visibleEntries(
-            section: .inbox, search: WorkspaceSearch(), handledFilter: .all,
+            section: .inbox, search: WorkspaceSearch(), doneFilter: .all,
             sortedBy: .recommended, ascending: false, grouping: .effort, viewer: "me"
         )
         #expect(visible.map(\.id.rawValue) == groups.flatMap(\.entries).map(\.id.rawValue))
@@ -91,7 +91,7 @@ struct WorkInsightsTests {
         let stale = entry("S", updatedDaysAgo: 5)
         let doneToday = entry("D", local: .done(fingerprint: "f", at: now.addingTimeInterval(-60), handledEvidence: nil))
         let presentation = WorkspacePresentation(
-            entries: [.inbox: [act, quick], .waiting: [stale], .handled: [doneToday]], status: .initial
+            entries: [.inbox: [act, quick], .waiting: [stale], .done: [doneToday]], status: .initial
         )
         let briefing = WorkspaceBriefing(presentation: presentation, viewer: "me", followUpDays: 3, now: now)
         let kinds = Dictionary(uniqueKeysWithValues: briefing.parts.map { ($0.kind, $0.entries.map(\.id.rawValue)) })
@@ -108,7 +108,7 @@ struct WorkInsightsTests {
         let markedDone = entry("M", local: .done(fingerprint: "f", at: now.addingTimeInterval(-2 * 86_400), handledEvidence: nil))
         let stale = entry("S", updatedDaysAgo: 20)
         let presentation = WorkspacePresentation(
-            entries: [.inbox: [stale], .handled: [handledByYou, markedDone]], status: .initial
+            entries: [.inbox: [stale], .done: [handledByYou, markedDone]], status: .initial
         )
         let review = WorkspaceReview(presentation: presentation, viewer: "me", now: now)
         #expect(review.days.count == 7)
@@ -187,5 +187,17 @@ struct WorkInsightsTests {
         let daytime = QuietHours(start: 9, end: 17)
         #expect(daytime.contains(at(12), calendar: calendar))
         #expect(!daytime.contains(at(18), calendar: calendar))
+    }
+
+    @Test func doneAndSnoozedAreSeparateSectionsInTheirOwnOrder() {
+        let later = entry("L", local: .snoozed(until: now.addingTimeInterval(7 * 86_400)))
+        let soon = entry("S", local: .snoozed(until: now.addingTimeInterval(3_600)))
+        let older = entry("O", local: .done(fingerprint: "f", at: now.addingTimeInterval(-86_400), handledEvidence: nil))
+        let newer = entry("N", local: .done(fingerprint: "f", at: now.addingTimeInterval(-60), handledEvidence: "You replied"))
+        let presentation = WorkspacePresentation(entries: [later, older, soon, newer], status: .initial, now: now)
+        #expect(presentation.entries(in: .snoozed).map(\.id.rawValue) == ["S", "L"])
+        #expect(presentation.entries(in: .done).map(\.id.rawValue) == ["N", "O"])
+        #expect(presentation.setAsideIDs.count == 4)
+        #expect(presentation.entries(in: .done).filter(DoneFilter.byYou.includes).map(\.id.rawValue) == ["N"])
     }
 }

@@ -82,6 +82,7 @@
 		82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACBE230946C1056771FE56F /* PersonalAccessToken.swift */; };
 		8373EB0834DD2496DBCDFFB6 /* AccountCredentialReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */; };
 		84B4B373D50F4210E31BCCA2 /* WorkspaceSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BCAB0A97E839C9FC49A33B2 /* WorkspaceSidebarView.swift */; };
+		8559468EB89030738DB4A0F3 /* DashboardComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */; };
 		86C27F2AEAD8B377C934DFB7 /* CopilotXPCInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */; };
 		88B1EEB64CA5AB2E1811D6DC /* WorkInsights.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14AD97D4FF1F004296DFFCF4 /* WorkInsights.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
@@ -189,6 +190,7 @@
 		1B612974F6C076D28C56A297 /* AttentionNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionNotifier.swift; sourceTree = "<group>"; };
 		1CC47AE55CA5D1EEE6B4F120 /* CredentialLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLifecycleTests.swift; sourceTree = "<group>"; };
 		1D8BBCAD56C03D23E2FEDD17 /* TriageCopilotXPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageCopilotXPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardComponents.swift; sourceTree = "<group>"; };
 		1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = TriageCopilotXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 		26D488FD99BFD1BA3771B6C4 /* CopilotRuntimeAcquisitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotRuntimeAcquisitionTests.swift; sourceTree = "<group>"; };
 		26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationModel.swift; sourceTree = "<group>"; };
@@ -410,6 +412,7 @@
 			isa = PBXGroup;
 			children = (
 				86A14272CD0E6EA3B9AC0FB5 /* BriefingView.swift */,
+				1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */,
 				FCDBE483415D40F0CFC8CC2A /* FocusView.swift */,
 				8BB56D15457DC43BCC10832D /* MarkdownText.swift */,
 				36F8E0219806178D603CFE83 /* ReviewView.swift */,
@@ -1021,6 +1024,7 @@
 				2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */,
 				1C59180E03E9DAA11D2EC10B /* CopilotXPCServiceClient.swift in Sources */,
 				3ABE0BAEB34FB0FC696F7351 /* CredentialLifecycle.swift in Sources */,
+				8559468EB89030738DB4A0F3 /* DashboardComponents.swift in Sources */,
 				44BD374DB36F8C7B6DE34615 /* FocusView.swift in Sources */,
 				435A91DA37F58881611CC413 /* GRDBTriageStore.swift in Sources */,
 				E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */,
