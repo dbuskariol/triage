@@ -10,6 +10,8 @@ struct WorkspaceSearchBar: View {
     let actions: any WorkspaceActions
     /// Called when the user leaves the field with Esc or Return.
     var onExit: () -> Void = {}
+    /// Saves the search to the sidebar; `nil` hides Save.
+    var onSave: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -42,6 +44,11 @@ struct WorkspaceSearchBar: View {
                     .controlSize(.small)
                     .fixedSize()
                     Spacer(minLength: 0)
+                    if let onSave {
+                        Button("Save", action: onSave)
+                            .buttonStyle(.link)
+                            .help("Save this search to the sidebar")
+                    }
                     Button("Clear") { search = WorkspaceSearch(scope: search.scope) }
                         .buttonStyle(.link)
                         .controlSize(.small)
@@ -63,7 +70,7 @@ struct WorkspaceSearchBar: View {
     /// Every filter, grouped like GitHub's, plus values from current work.
     private var filterMenu: some View {
         Menu {
-            ForEach([SearchToken.Kind.is, .status, .priority], id: \.self) { kind in
+            ForEach([SearchToken.Kind.is, .status, .priority, .effort], id: \.self) { kind in
                 Section(Self.sectionTitle(kind)) {
                     ForEach(SearchToken.knownValues[kind] ?? [], id: \.0) { value, title in
                         toggle(SearchToken(kind: kind, value: value), title: title)
@@ -128,6 +135,7 @@ struct WorkspaceSearchBar: View {
         case .is: "Type and relationship"
         case .status: "Pull request status"
         case .priority: "Priority"
+        case .effort: "Effort"
         case .repo: "Repository"
         case .author: "Author"
         case .label: "Label"

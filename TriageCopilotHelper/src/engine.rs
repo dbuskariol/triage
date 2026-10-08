@@ -569,8 +569,10 @@ Good summary: "@bob has waited 3 days for your review of the pagination fix; CI 
 
 Handled check: an item may include previous_next_action (the step you suggested last time) and viewer_activity (what {viewer} has done since). For those items only, set "handled": "yes" if that activity completed the step and nothing further is needed from {viewer} now, "partial" if some of it remains, or "no"; and "handled_evidence": one sentence citing what {viewer} did (e.g. "You approved the PR and replied to @bob's thread."). If handled is yes, the disposition is usually wait or none. Omit both fields (null) for items without viewer_activity.
 
+Effort: estimate the user's next step only, as "quick" (under 5 minutes: a reply, an approval, a small fix), "short" (under an hour: a focused review or change), or "deep" (needs a block of time: a large review, design work, a hard bug). Use null when there is no next step.
+
 An item may carry rule_hints: outcomes the user's own rules will enforce; keep your summary and reason consistent with them.
-Output exactly one decision per input: {"id":"input id","disposition":"act|review|wait|none","priority":0,"confidence":0.0,"summary":"...","reason":"...","next_action":"... or null","instruction_note":"one short sentence on how the user's preferences changed this decision, or null","handled":"yes|partial|no or null","handled_evidence":"... or null"}."#;
+Output exactly one decision per input: {"id":"input id","disposition":"act|review|wait|none","priority":0,"confidence":0.0,"summary":"...","reason":"...","next_action":"... or null","instruction_note":"one short sentence on how the user's preferences changed this decision, or null","handled":"yes|partial|no or null","handled_evidence":"... or null","effort":"quick|short|deep or null"}."#;
 
 /// Fixed policy first; the user's own preferences follow in a clearly
 /// delimited, lower-precedence block. GitHub data arrives only in the user

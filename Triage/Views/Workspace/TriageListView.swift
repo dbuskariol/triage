@@ -3,6 +3,8 @@ import SwiftUI
 struct TriageListView: View {
     let presentation: WorkspacePresentation
     let section: WorkspacePresentation.Section
+    /// When set, the list shows this saved search instead of `section`.
+    var savedSearch: SavedSearch?
     @Binding var selectedEntryID: GitHubNodeID?
     let actions: any WorkspaceActions
     @Binding var search: WorkspaceSearch
@@ -10,14 +12,17 @@ struct TriageListView: View {
     @Environment(\.triageViewerLogin) private var viewer
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
+    @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
     @FocusState private var isListFocused: Bool
     @State private var statusNow = Date.now
     @Binding var handledFilter: HandledFilter
+    @State private var isNamingSavedSearch = false
+    @State private var savedSearchName = ""
 
     private var statusSubtitle: String {
-        if search.isActive {
+        if effectiveSearch.isActive {
             let count = entries.count
-            return "\(count) result\(count == 1 ? "" : "s")\(search.scope == .all ? " in all work" : "")"
+            return "\(count) result\(count == 1 ? "" : "s")\(effectiveSearch.scope == .all ? " in all work" : "")"
         }
         return WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
     }
@@ -28,47 +33,32 @@ struct TriageListView: View {
                 emptyState
             } else {
                 List(selection: $selectedEntryID) {
-                    ForEach(entries) { entry in
-                        TriageEntryRow(
-                            entry: entry, isSelected: entry.id == selectedEntryID,
-                            sectionLabel: search.isActive && search.scope == .all
-                                ? presentation.section(containing: entry)?.title : nil
-                        )
-                            .tag(entry.id)
-                            .contextMenu { actionMenu(for: entry) }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                swipeActions(for: entry)
+                    ForEach(Array(grouping.groups(entries).enumerated()), id: \.offset) { _, group in
+                        if grouping == .none {
+                            rows(group.entries)
+                        } else {
+                            Section {
+                                rows(group.entries)
+                            } header: {
+                                HStack {
+                                    Text(group.title)
+                                    Spacer()
+                                    Text(group.entries.count, format: .number).foregroundStyle(.secondary)
+                                }
                             }
+                        }
                     }
                 }
                 .listStyle(.inset)
                 .scrollEdgeEffectStyle(.hard, for: .top)
-                .accessibilityLabel("\(section.title) work")
+                .accessibilityLabel("\(savedSearch?.name ?? section.title) work")
                 .focused($isListFocused)
                 .onAppear {
                     isListFocused = true
                     if selectedEntryID == nil { selectedEntryID = entries.first?.id }
                 }
-                // ↑/↓ are native. Mail- and Superhuman-style keys on top:
-                .onKeyPress(characters: ["j", "k"]) { press in
-                    move(by: press.characters == "j" ? 1 : -1)
-                    return .handled
-                }
-                .onKeyPress(keys: [.delete, .deleteForward, "e"]) { _ in
-                    guard let entry = selectedEntry else { return .ignored }
-                    section == .handled ? actions.restore(entry) : actions.markDone(entry)
-                    return .handled
-                }
-                .onKeyPress(.return) {
-                    guard let entry = selectedEntry else { return .ignored }
-                    actions.openOnGitHub(entry)
-                    return .handled
-                }
-                .onKeyPress(characters: ["s"]) { _ in
-                    guard let entry = selectedEntry, section != .handled else { return .ignored }
-                    actions.snooze(entry, until: SnoozeOption.tomorrow.date())
-                    return .handled
-                }
+                .triageListKeys(entries: entries, selection: $selectedEntryID,
+                                handledIDs: handledIDs, actions: actions)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -77,7 +67,11 @@ struct TriageListView: View {
                 WorkspaceSearchBar(
                     search: $search, focusRequest: searchFocusRequest,
                     suggestionSource: presentation.allEntries, actions: actions,
-                    onExit: { isListFocused = true }
+                    onExit: { isListFocused = true },
+                    onSave: {
+                        savedSearchName = effectiveSearch.summary
+                        isNamingSavedSearch = true
+                    }
                 )
                 if presentation.status.problem != nil {
                     TriageStatusView(status: presentation.status, actions: actions)
@@ -93,7 +87,15 @@ struct TriageListView: View {
                 }
             }
         }
-        .navigationTitle(section.title)
+        .navigationTitle(savedSearch?.name ?? section.title)
+        .alert("Save Search", isPresented: $isNamingSavedSearch) {
+            TextField("Name", text: $savedSearchName)
+            Button("Save") { actions.saveSearch(named: savedSearchName) }
+                .disabled(savedSearchName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The search appears in the sidebar and stays up to date.")
+        }
         .navigationSubtitle(statusSubtitle)
         .task(id: presentation.status) {
             // Keep "Updated N minutes ago" current while idle.
@@ -104,30 +106,33 @@ struct TriageListView: View {
         }
     }
 
-    private var selectedEntry: TriageEntry? {
-        selectedEntryID.flatMap { id in entries.first { $0.id == id } }
+    private func rows(_ group: [TriageEntry]) -> some View {
+        TriageEntryRows(
+            entries: group, selectedEntryID: selectedEntryID, handledIDs: handledIDs, actions: actions,
+            sectionLabel: { entry in
+                effectiveSearch.isActive && effectiveSearch.scope == .all
+                    ? presentation.section(containing: entry)?.title : nil
+            }
+        )
     }
 
-    private func move(by offset: Int) {
-        guard !entries.isEmpty else { return }
-        guard let id = selectedEntryID, let index = entries.firstIndex(where: { $0.id == id }) else {
-            selectedEntryID = (offset > 0 ? entries.first : entries.last)?.id
-            return
-        }
-        selectedEntryID = entries[min(max(index + offset, 0), entries.count - 1)].id
-    }
+    private var handledIDs: Set<GitHubNodeID> { presentation.handledIDs }
 
+    /// A saved search refined by the field, or the field alone.
+    private var effectiveSearch: WorkspaceSearch {
+        savedSearch.map { $0.search.refined(by: search) } ?? search
+    }
 
     private var entries: [TriageEntry] {
         presentation.visibleEntries(
-            section: section, search: search, handledFilter: handledFilter,
-            sortedBy: sortField, ascending: sortAscending, viewer: viewer
+            section: section, search: effectiveSearch, handledFilter: handledFilter,
+            sortedBy: sortField, ascending: sortAscending, grouping: grouping, viewer: viewer
         )
     }
 
     @ViewBuilder
     private var emptyState: some View {
-        if search.isActive {
+        if effectiveSearch.isActive {
             ContentUnavailableView.search(text: search.text)
         } else {
             sectionEmptyState
@@ -239,42 +244,6 @@ struct TriageListView: View {
         case .inbox: lastUpdatedText
         }
     }
-
-    @ViewBuilder
-    private func actionMenu(for entry: TriageEntry) -> some View {
-        if section == .handled {
-            Button("Restore") { actions.restore(entry) }
-        } else {
-            Button("Done") { actions.markDone(entry) }
-                .keyboardShortcut("d", modifiers: [.command, .shift])
-            Menu("Snooze") {
-                snoozeButtons(for: entry)
-            }
-            Divider()
-            Button("Open on GitHub") { actions.openOnGitHub(entry) }
-        }
-        Divider()
-        Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }
-    }
-
-    @ViewBuilder
-    private func swipeActions(for entry: TriageEntry) -> some View {
-        if section == .handled {
-            Button("Restore") { actions.restore(entry) }
-                .tint(.blue)
-        } else {
-            Button("Done") { actions.markDone(entry) }
-                .tint(.green)
-            Menu("Snooze") {
-                snoozeButtons(for: entry)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func snoozeButtons(for entry: TriageEntry) -> some View {
-        SnoozeMenuItems(entry: entry, actions: actions)
-    }
 }
 
 struct TriageEntryRow: View {
@@ -361,6 +330,12 @@ struct TriageEntryRow: View {
     @ViewBuilder
     private var chips: some View {
         let badges = WorkspaceViewPresentation.badges(for: entry)
+        if let effort = entry.decision?.effort, entry.decision?.nextAction != nil, entry.handledEvidence == nil {
+            Label(effort.title, systemImage: effort.systemImage)
+                .font(.caption)
+                .foregroundStyle(secondary)
+                .help(effort.detail)
+        }
         if entry.handledEvidence != nil {
             Label("Handled by you", systemImage: "checkmark.circle.fill")
                 .font(.caption.weight(.medium))

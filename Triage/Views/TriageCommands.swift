@@ -25,12 +25,16 @@ struct TriageWorkspaceCommands: Commands {
         }
 
         CommandMenu("Go To") {
+            Button("Briefing") { appModel.destination = .briefing }
+                .keyboardShortcut("0", modifiers: .command)
             ForEach(Array(WorkspacePresentation.Section.allCases.enumerated()), id: \.element) { index, section in
                 Button(section.title) {
-                    appModel.selectedSection = section
+                    appModel.destination = .section(section)
                 }
                 .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
+            Button("Weekly Review") { appModel.destination = .review }
+                .keyboardShortcut("9", modifiers: .command)
             Divider()
             Button("Next Item") { appModel.moveSelection(by: 1) }
                 .keyboardShortcut("]", modifiers: .command)

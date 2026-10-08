@@ -99,6 +99,8 @@ pub struct TriageItemDecision {
     pub handled: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handled_evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 impl TriageItem {
     fn validate(&self) -> Result<(), ValidationError> {
@@ -175,6 +177,11 @@ pub fn parse_triage_output(content: &str) -> Option<Vec<TriageItemDecision>> {
             .as_deref()
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| matches!(value.as_str(), "yes" | "partial" | "no"));
+        decision.effort = decision
+            .effort
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "quick" | "short" | "deep"));
         decision.handled_evidence = decision
             .handled_evidence
             .as_deref()
@@ -357,6 +364,7 @@ mod triage_contract_tests {
             instruction_note: None,
             handled: None,
             handled_evidence: None,
+            effort: None,
         }
     }
     #[test]

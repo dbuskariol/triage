@@ -301,11 +301,43 @@ struct TriageDecision: Codable, Equatable, Sendable {
     /// next step (only set when there was such activity), with evidence.
     var handled: HandledState? = nil
     var handledEvidence: String? = nil
+    var effort: TriageEffort? = nil
 }
 
 struct TriageHandledContext: Equatable, Sendable {
     let previousNextAction: String
     let viewerActivity: [String]
+}
+
+/// Copilot's estimate of the time the next step takes.
+enum TriageEffort: String, Codable, CaseIterable, Identifiable, Sendable {
+    case quick, short, deep
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .quick: "Quick"
+        case .short: "Under an hour"
+        case .deep: "Deep work"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .quick: "Under 5 minutes"
+        case .short: "Under an hour"
+        case .deep: "Needs focused time"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .quick: "bolt"
+        case .short: "clock"
+        case .deep: "brain.head.profile"
+        }
+    }
 }
 
 enum HandledState: String, Codable, Sendable {

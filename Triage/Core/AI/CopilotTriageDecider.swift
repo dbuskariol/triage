@@ -185,7 +185,8 @@ actor CopilotTriageDecider: TriageDeciding {
                     instructionNote: decision.instructionNote,
                     // Only meaningful when we asked (the viewer acted since the last decision).
                     handled: contexts[item.id] == nil ? nil : decision.handled,
-                    handledEvidence: contexts[item.id] == nil ? nil : decision.handledEvidence
+                    handledEvidence: contexts[item.id] == nil ? nil : decision.handledEvidence,
+                    effort: decision.effort
                 )
             }
         } catch let error as TriageDecisionError {

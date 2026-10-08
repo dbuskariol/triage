@@ -56,21 +56,36 @@ private struct WorkspaceView: View {
         NavigationSplitView {
             WorkspaceSidebarView(
                 presentation: appModel.presentation,
-                selection: $appModel.selectedSection
+                selection: $appModel.destination,
+                savedSearches: appModel.savedSearches,
+                onRenameSavedSearch: appModel.renameSavedSearch,
+                onDeleteSavedSearch: appModel.deleteSavedSearch
             ) {
                 WorkspacePickers()
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } content: {
-            TriageListView(
-                presentation: appModel.presentation,
-                section: appModel.selectedSection,
-                selectedEntryID: $appModel.selectedEntryID,
-                actions: appModel,
-                search: $appModel.search,
-                searchFocusRequest: appModel.searchFocusRequest,
-                handledFilter: $appModel.handledFilter
-            )
+            Group {
+                switch appModel.destination {
+                case .briefing:
+                    BriefingView(presentation: appModel.presentation, selectedEntryID: $appModel.selectedEntryID,
+                                 actions: appModel, followUpDays: appModel.followUpDays)
+                case .review:
+                    ReviewView(presentation: appModel.presentation, selectedEntryID: $appModel.selectedEntryID,
+                               actions: appModel)
+                case .section, .savedSearch:
+                    TriageListView(
+                        presentation: appModel.presentation,
+                        section: appModel.selectedSection,
+                        savedSearch: appModel.selectedSavedSearch,
+                        selectedEntryID: $appModel.selectedEntryID,
+                        actions: appModel,
+                        search: $appModel.search,
+                        searchFocusRequest: appModel.searchFocusRequest,
+                        handledFilter: $appModel.handledFilter
+                    )
+                }
+            }
             .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 560)
         } detail: {
             TriageDetailView(
@@ -86,7 +101,7 @@ private struct WorkspaceView: View {
                 .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         }
         .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
-        .onChange(of: appModel.selectedSection) { appModel.selectFirstEntry() }
+        .onChange(of: appModel.destination) { appModel.selectFirstEntry() }
         .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }
     }
 }
