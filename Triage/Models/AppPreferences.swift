@@ -140,16 +140,54 @@ enum SnoozeOption: CaseIterable, Identifiable {
         case .laterToday:
             let hours = defaults.object(forKey: TriagePreferenceKeys.laterTodayHours) as? Int ?? 3
             return now.addingTimeInterval(TimeInterval(max(1, hours) * 3_600))
-        case .tomorrow, .nextWeek:
-            let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
-            let days = self == .tomorrow ? 1 : 7
-            let day = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: now)) ?? now
+        case .tomorrow:
+            let hour = Self.preferredMorningHour(defaults)
+            let day = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
             return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+        case .nextWeek:
+            return Self.nextMonday(
+                from: now,
+                hour: Self.preferredMorningHour(defaults),
+                calendar: calendar
+            )
         }
     }
 
     /// e.g. "Tomorrow, 9:00 AM" for menus.
     func subtitle(from now: Date = .now) -> String {
         date(from: now).formatted(.dateTime.weekday(.wide).hour().minute())
+    }
+
+    /// Shared by Tomorrow and Next Week. Settings stores this as `tomorrowHour`.
+    nonisolated static func preferredMorningHour(_ defaults: UserDefaults) -> Int {
+        let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
+        return min(23, max(0, hour))
+    }
+
+    /// Next week's Monday at `hour`:00. If today is Monday, that's next Monday,
+    /// not later this morning.
+    nonisolated static func nextMonday(
+        from now: Date,
+        hour: Int,
+        calendar: Calendar
+    ) -> Date {
+        let mondayWeekday = calendar.component(
+            .weekday,
+            from: calendar.date(from: DateComponents(year: 2024, month: 1, day: 1)) ?? now
+        )
+        var matching = DateComponents()
+        matching.weekday = mondayWeekday
+        matching.hour = hour
+        matching.minute = 0
+        matching.second = 0
+        let upcoming = calendar.nextDate(
+            after: now,
+            matching: matching,
+            matchingPolicy: .nextTime
+        ) ?? now
+        if calendar.isDate(upcoming, inSameDayAs: now) {
+            return calendar.date(byAdding: .day, value: 7, to: upcoming) ?? upcoming
+        }
+        return upcoming
     }
 }
