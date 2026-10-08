@@ -152,7 +152,7 @@ struct SettingsView: View {
                 shortcut("Snooze until tomorrow", "S")
                 shortcut("Open on GitHub", "↩  or  ⌘O")
                 shortcut("Briefing", "⌘0")
-                shortcut("Switch section", "⌘1 – ⌘6")
+                shortcut("Switch section", "⌘1 – ⌘7")
                 shortcut("Weekly Review", "⌘9")
                 shortcut("Focus on the current list", "⇧⌘F")
                 shortcut("Refresh", "⌘R")

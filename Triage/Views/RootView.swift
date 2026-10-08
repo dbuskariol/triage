@@ -57,8 +57,8 @@ struct RootView: View {
     }
 }
 
-/// The main window: AI sections, the selected section's list, and Copilot's
-/// recommendation for the selected item.
+/// The main window: the sidebar, then either a full-width dashboard
+/// (Briefing, Weekly Review) or a list beside the selected item's details.
 private struct WorkspaceView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var preferences: AppPreferences
@@ -75,36 +75,31 @@ private struct WorkspaceView: View {
                 WorkspacePickers()
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
-        } content: {
+        } detail: {
             Group {
                 switch appModel.destination {
                 case .briefing:
-                    BriefingView(presentation: appModel.presentation, selectedEntryID: $appModel.selectedEntryID,
-                                 actions: appModel, followUpDays: appModel.followUpDays)
+                    BriefingView(presentation: appModel.presentation, actions: appModel,
+                                 followUpDays: appModel.followUpDays)
                 case .review:
-                    ReviewView(presentation: appModel.presentation, selectedEntryID: $appModel.selectedEntryID,
-                               actions: appModel)
+                    ReviewView(presentation: appModel.presentation, actions: appModel)
                 case .section, .savedSearch:
-                    TriageListView(
-                        presentation: appModel.presentation,
-                        section: appModel.selectedSection,
-                        savedSearch: appModel.selectedSavedSearch,
-                        selectedEntryID: $appModel.selectedEntryID,
-                        actions: appModel,
-                        search: $appModel.search,
-                        searchFocusRequest: appModel.searchFocusRequest,
-                        handledFilter: $appModel.handledFilter
-                    )
+                    WorkspaceListAndDetail()
                 }
             }
-            .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 560)
-        } detail: {
-            TriageDetailView(
-                entry: appModel.selectedEntry,
-                inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
-                allEntries: appModel.presentation.allEntries,
-                actions: appModel
-            )
+            .toolbar {
+                ToolbarItemGroup(placement: .navigation) {
+                    ControlGroup {
+                        Button { appModel.goBack() } label: { Label("Back", systemImage: "chevron.backward") }
+                            .disabled(appModel.backHistory.isEmpty)
+                            .help("Back (⌘[)")
+                        Button { appModel.goForward() } label: { Label("Forward", systemImage: "chevron.forward") }
+                            .disabled(appModel.forwardHistory.isEmpty)
+                            .help("Forward (⌘])")
+                    }
+                    .controlGroupStyle(.navigation)
+                }
+            }
         }
         .onChange(of: appModel.search) { appModel.selectFirstEntry() }
         .sheet(item: $appModel.ruleDraft) { draft in
@@ -114,6 +109,34 @@ private struct WorkspaceView: View {
         .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         .onChange(of: appModel.destination) { appModel.selectFirstEntry() }
         .onChange(of: preferences.refreshIntervalMinutes) { _, minutes in appModel.setRefreshInterval(minutes: minutes) }
+    }
+}
+
+/// A list section or saved search beside the selected item's details.
+private struct WorkspaceListAndDetail: View {
+    @EnvironmentObject private var appModel: TriageAppModel
+
+    var body: some View {
+        HSplitView {
+            TriageListView(
+                presentation: appModel.presentation,
+                section: appModel.selectedSection,
+                savedSearch: appModel.selectedSavedSearch,
+                selectedEntryID: $appModel.selectedEntryID,
+                actions: appModel,
+                search: $appModel.search,
+                searchFocusRequest: appModel.searchFocusRequest,
+                doneFilter: $appModel.doneFilter
+            )
+            .frame(minWidth: 320, idealWidth: 400, maxWidth: 560)
+            TriageDetailView(
+                entry: appModel.selectedEntry,
+                inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
+                allEntries: appModel.presentation.allEntries,
+                actions: appModel
+            )
+            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 

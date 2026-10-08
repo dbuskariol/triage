@@ -207,18 +207,16 @@ struct WorkspaceSearch: Equatable, Codable, Sendable {
     }
 }
 
-/// Narrows Done & Snoozed.
-enum HandledFilter: String, CaseIterable, Identifiable, Sendable {
-    case all = "All", byYou = "Handled by You", done = "Done", snoozed = "Snoozed"
+/// Narrows the Done section by how the work was finished.
+enum DoneFilter: String, CaseIterable, Identifiable, Sendable {
+    case all = "All", byYou = "Handled by You", marked = "Marked Done"
     var id: Self { self }
 
     func includes(_ entry: TriageEntry) -> Bool {
-        switch (self, entry.local) {
-        case (.all, _): true
-        case (.byYou, .done): entry.handledEvidence != nil
-        case (.done, .done): entry.handledEvidence == nil
-        case (.snoozed, .snoozed): true
-        default: false
+        switch self {
+        case .all: true
+        case .byYou: entry.handledEvidence != nil
+        case .marked: entry.handledEvidence == nil
         }
     }
 }
@@ -227,7 +225,7 @@ extension WorkspacePresentation {
     /// The rows shown in the list, in order. The list view, keyboard
     /// navigation, and "select next after Done" all use this one definition.
     func visibleEntries(
-        section: Section, search: WorkspaceSearch, handledFilter: HandledFilter,
+        section: Section, search: WorkspaceSearch, doneFilter: DoneFilter,
         sortedBy field: WorkspaceSortField, ascending: Bool, grouping: WorkspaceGrouping = .none, viewer: String
     ) -> [TriageEntry] {
         let rows: [TriageEntry]
@@ -235,7 +233,7 @@ extension WorkspacePresentation {
             rows = searchResults(search, section: section, sortedBy: field, ascending: ascending, viewer: viewer)
         } else {
             let sorted = entries(in: section, sortedBy: field, ascending: ascending)
-            rows = section == .handled ? sorted.filter(handledFilter.includes) : sorted
+            rows = section == .done ? sorted.filter(doneFilter.includes) : sorted
         }
         // Grouped lists read top to bottom group by group; navigation follows that order.
         return grouping == .none ? rows : grouping.groups(rows).flatMap(\.entries)

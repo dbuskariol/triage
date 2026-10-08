@@ -26,7 +26,8 @@ struct WorkspaceSidebarView<Pickers: View>: View {
                 row(.waiting)
                 row(.informational)
                 row(.analyzing, showsBadge: presentation.count(in: .analyzing) > 0)
-                row(.handled)
+                row(.snoozed, showsBadge: presentation.count(in: .snoozed) > 0)
+                row(.done)
                 if presentation.count(in: .muted) > 0 || selection == .section(.muted) {
                     row(.muted, showsBadge: true)
                 }

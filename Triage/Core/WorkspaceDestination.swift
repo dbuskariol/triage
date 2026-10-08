@@ -9,6 +9,22 @@ enum WorkspaceDestination: Hashable, Sendable {
     case savedSearch(UUID)
 }
 
+extension WorkspaceDestination {
+    /// Dashboards fill the window; lists pair with the detail column.
+    var isDashboard: Bool {
+        switch self {
+        case .briefing, .review: true
+        case .section, .savedSearch: false
+        }
+    }
+}
+
+/// A place in Back/Forward history.
+struct NavigationPoint: Equatable, Sendable {
+    let destination: WorkspaceDestination
+    let selectedEntryID: GitHubNodeID?
+}
+
 /// A named search kept in the sidebar.
 struct SavedSearch: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
@@ -100,7 +116,7 @@ struct WorkspaceBriefing: Sendable {
             .filter { $0.item.createdAt >= dayAgo || $0.item.updatedAt >= dayAgo }
             .sorted { $0.item.updatedAt > $1.item.updatedAt }
         let startOfDay = Calendar.current.startOfDay(for: now)
-        let handled = presentation.entries(in: .handled)
+        let handled = presentation.entries(in: .done)
             .filter { (WorkInsights.doneDate($0) ?? .distantPast) >= startOfDay }
             .sorted { (WorkInsights.doneDate($0) ?? .distantPast) > (WorkInsights.doneDate($1) ?? .distantPast) }
 
@@ -153,7 +169,7 @@ struct WorkspaceReview: Sendable {
     init(presentation: WorkspacePresentation, viewer: String, now: Date, calendar: Calendar = .current) {
         let today = calendar.startOfDay(for: now)
         let starts = (0..<7).reversed().compactMap { calendar.date(byAdding: .day, value: -$0, to: today) }
-        let done = presentation.entries(in: .handled).compactMap { entry in
+        let done = presentation.entries(in: .done).compactMap { entry in
             WorkInsights.doneDate(entry).map { (date: $0, byYou: entry.handledEvidence != nil) }
         }
         days = starts.map { start in

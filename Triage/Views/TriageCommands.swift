@@ -42,10 +42,17 @@ struct TriageWorkspaceCommands: Commands {
             .keyboardShortcut("f", modifiers: [.command, .shift])
             .disabled(appModel.focusQueue == nil && appModel.visibleEntries.isEmpty)
             Divider()
-            Button("Next Item") { appModel.moveSelection(by: 1) }
-                .keyboardShortcut("]", modifiers: .command)
-            Button("Previous Item") { appModel.moveSelection(by: -1) }
+            Button("Back") { appModel.goBack() }
                 .keyboardShortcut("[", modifiers: .command)
+                .disabled(appModel.backHistory.isEmpty)
+            Button("Forward") { appModel.goForward() }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(appModel.forwardHistory.isEmpty)
+            Divider()
+            Button("Next Item") { appModel.moveSelection(by: 1) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            Button("Previous Item") { appModel.moveSelection(by: -1) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
         }
 
         CommandMenu("Item") {

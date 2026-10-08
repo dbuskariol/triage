@@ -6,7 +6,7 @@ struct TriageEntryRows: View {
     let entries: [TriageEntry]
     let selectedEntryID: GitHubNodeID?
     /// Done and snoozed items offer Restore instead of Done and Snooze.
-    let handledIDs: Set<GitHubNodeID>
+    let setAsideIDs: Set<GitHubNodeID>
     let actions: any WorkspaceActions
     var sectionLabel: (TriageEntry) -> String? = { _ in nil }
 
@@ -14,14 +14,30 @@ struct TriageEntryRows: View {
         ForEach(entries) { entry in
             TriageEntryRow(entry: entry, isSelected: entry.id == selectedEntryID, sectionLabel: sectionLabel(entry))
                 .tag(entry.id)
-                .contextMenu { menu(for: entry) }
+                .contextMenu { TriageEntryMenu(entry: entry, isHandled: setAsideIDs.contains(entry.id), actions: actions) }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipes(for: entry) }
         }
     }
 
     @ViewBuilder
-    private func menu(for entry: TriageEntry) -> some View {
-        if handledIDs.contains(entry.id) {
+    private func swipes(for entry: TriageEntry) -> some View {
+        if setAsideIDs.contains(entry.id) {
+            Button("Restore") { actions.restore(entry) }.tint(.blue)
+        } else {
+            Button("Done") { actions.markDone(entry) }.tint(.green)
+            Menu("Snooze") { SnoozeMenuItems(entry: entry, actions: actions) }
+        }
+    }
+}
+
+/// The item context menu, shared by every list and dashboard.
+struct TriageEntryMenu: View {
+    let entry: TriageEntry
+    let isHandled: Bool
+    let actions: any WorkspaceActions
+
+    var body: some View {
+        if isHandled {
             Button("Restore") { actions.restore(entry) }
         } else {
             Button("Done") { actions.markDone(entry) }
@@ -32,20 +48,11 @@ struct TriageEntryRows: View {
         Divider()
         Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }
     }
-
-    @ViewBuilder
-    private func swipes(for entry: TriageEntry) -> some View {
-        if handledIDs.contains(entry.id) {
-            Button("Restore") { actions.restore(entry) }.tint(.blue)
-        } else {
-            Button("Done") { actions.markDone(entry) }.tint(.green)
-            Menu("Snooze") { SnoozeMenuItems(entry: entry, actions: actions) }
-        }
-    }
 }
 
 extension WorkspacePresentation {
-    var handledIDs: Set<GitHubNodeID> { Set(entries(in: .handled).map(\.id)) }
+    /// Done or snoozed work, which offers Restore instead of Done and Snooze.
+    var setAsideIDs: Set<GitHubNodeID> { Set((entries(in: .done) + entries(in: .snoozed)).map(\.id)) }
 }
 
 /// Mail- and Superhuman-style keys on top of the native ↑/↓: j/k move,
@@ -53,7 +60,7 @@ extension WorkspacePresentation {
 private struct TriageListKeys: ViewModifier {
     let entries: [TriageEntry]
     @Binding var selectedEntryID: GitHubNodeID?
-    let handledIDs: Set<GitHubNodeID>
+    let setAsideIDs: Set<GitHubNodeID>
     let actions: any WorkspaceActions
 
     func body(content: Content) -> some View {
@@ -64,7 +71,7 @@ private struct TriageListKeys: ViewModifier {
             }
             .onKeyPress(keys: [.delete, .deleteForward, "e"]) { _ in
                 guard let entry = selected else { return .ignored }
-                handledIDs.contains(entry.id) ? actions.restore(entry) : actions.markDone(entry)
+                setAsideIDs.contains(entry.id) ? actions.restore(entry) : actions.markDone(entry)
                 return .handled
             }
             .onKeyPress(.return) {
@@ -73,7 +80,7 @@ private struct TriageListKeys: ViewModifier {
                 return .handled
             }
             .onKeyPress(characters: ["s"]) { _ in
-                guard let entry = selected, !handledIDs.contains(entry.id) else { return .ignored }
+                guard let entry = selected, !setAsideIDs.contains(entry.id) else { return .ignored }
                 actions.snooze(entry, until: SnoozeOption.tomorrow.date())
                 return .handled
             }
@@ -97,8 +104,8 @@ extension View {
     /// Adds the shared triage keys; `entries` must be in display order.
     func triageListKeys(
         entries: [TriageEntry], selection: Binding<GitHubNodeID?>,
-        handledIDs: Set<GitHubNodeID>, actions: any WorkspaceActions
+        setAsideIDs: Set<GitHubNodeID>, actions: any WorkspaceActions
     ) -> some View {
-        modifier(TriageListKeys(entries: entries, selectedEntryID: selection, handledIDs: handledIDs, actions: actions))
+        modifier(TriageListKeys(entries: entries, selectedEntryID: selection, setAsideIDs: setAsideIDs, actions: actions))
     }
 }
