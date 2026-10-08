@@ -102,6 +102,11 @@ private struct WorkspaceView: View {
             }
         }
         .onChange(of: appModel.search) { appModel.selectFirstEntry() }
+        .sheet(item: $appModel.draftEntry) { entry in
+            DraftReplySheet(entry: entry, generate: { try await appModel.draftReply(for: entry) }) {
+                appModel.openOnGitHub(entry)
+            }
+        }
         .sheet(item: $appModel.ruleDraft) { draft in
             RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { appModel.addRule($0) }
                 .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")

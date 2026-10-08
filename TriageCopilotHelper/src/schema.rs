@@ -132,6 +132,36 @@ pub fn validate_triage_instructions(instructions: Option<&str>) -> Result<(), Va
     Ok(())
 }
 
+pub const MAX_DRAFT_GOAL_BYTES: usize = 400;
+pub const MAX_DRAFT_BYTES: usize = 8_000;
+
+pub fn validate_draft_inputs(
+    viewer_login: &str,
+    item: &TriageItem,
+    goal: Option<&str>,
+    writing_style: Option<&str>,
+) -> Result<(), ValidationError> {
+    validate_triage_inputs(viewer_login, std::slice::from_ref(item))?;
+    if goal.is_some_and(|value| value.len() > MAX_DRAFT_GOAL_BYTES) {
+        return Err(ValidationError::new("draft goal is too long"));
+    }
+    validate_triage_instructions(writing_style)
+}
+
+/// A drafted reply ready to paste: trimmed, without a wrapping code fence or
+/// quotes. `None` when empty or too long.
+pub fn clean_draft_output(content: &str) -> Option<String> {
+    let mut text = content.trim();
+    if let Some(inner) = text.strip_prefix("```") {
+        let inner = inner.split_once('\n').map_or("", |(_, rest)| rest);
+        text = inner.trim_end().strip_suffix("```").unwrap_or(inner).trim();
+    }
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        text = text[1..text.len() - 1].trim();
+    }
+    (!text.is_empty() && text.len() <= MAX_DRAFT_BYTES).then(|| text.to_owned())
+}
+
 pub fn validate_triage_inputs(
     viewer_login: &str,
     items: &[TriageItem],
@@ -385,5 +415,20 @@ mod triage_contract_tests {
         );
         assert!(ids(vec![decision("three")]).is_err());
         assert!(ids(vec![]).is_err());
+    }
+
+    #[test]
+    fn drafts_are_trimmed_and_unwrapped() {
+        assert_eq!(
+            clean_draft_output("  Thanks @bob!  ").as_deref(),
+            Some("Thanks @bob!")
+        );
+        assert_eq!(
+            clean_draft_output("```markdown\nLooks good to me.\n```").as_deref(),
+            Some("Looks good to me.")
+        );
+        assert_eq!(clean_draft_output("\"Done.\"").as_deref(), Some("Done."));
+        assert_eq!(clean_draft_output("   "), None);
+        assert_eq!(clean_draft_output(&"a".repeat(MAX_DRAFT_BYTES + 1)), None);
     }
 }

@@ -14,6 +14,7 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func show(_ entry: TriageEntry) {}
     func saveSearch(named name: String) {}
     func startFocus(_ entries: [TriageEntry]) {}
+    func beginDraft(for entry: TriageEntry) {}
     func open(_ destination: WorkspaceDestination, search: WorkspaceSearch) {}
 }
 

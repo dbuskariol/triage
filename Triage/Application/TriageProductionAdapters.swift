@@ -23,7 +23,8 @@ struct TriageProductionComposition: Sendable {
             }
             return try await vaultRegistry.open(accountID: accountID, vaultKey: key)
         }
-        return TriageApplicationDependencies(
+        let drafts = CopilotDraftWriter(authorize: CopilotTriageAuthorization.resolver(openVault))
+        var dependencies = TriageApplicationDependencies(
             accountSession: TriageAccountSessionService(
                 vaultRegistry: vaultRegistry,
                 secretStore: secretStore,
@@ -39,7 +40,7 @@ struct TriageProductionComposition: Sendable {
                 try await AIConsentRepository(vault: openVault(scope.accountID))
                     .consent(for: scope.accountID, organizationID: scope.organizationID)
             },
-            saveConsent: { scope, isEnabled, choice in
+            saveConsent: { scope, isEnabled, choice, reply in
                 try await AIConsentRepository(vault: openVault(scope.accountID)).save(.init(
                     accountID: scope.accountID,
                     organizationID: scope.organizationID,
@@ -47,6 +48,7 @@ struct TriageProductionComposition: Sendable {
                     selectedModelID: choice.modelID,
                     reasoningEffort: choice.reasoningEffort,
                     contextTier: choice.contextTier,
+                    replyChoice: reply,
                     automaticActionConfidenceThreshold: OrganizationAIConsent.minimumAutomaticActionConfidenceThreshold,
                     updatedAt: .now
                 ))
@@ -88,6 +90,10 @@ struct TriageProductionComposition: Sendable {
                 return WorkspaceRuntime(store: store, engine: engine)
             }
         )
+        dependencies.draftReply = { scope, item, goal, style in
+            try await drafts.draft(item, goal: goal, writingStyle: style, scope: scope)
+        }
+        return dependencies
     }
 }
 

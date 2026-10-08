@@ -237,8 +237,10 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
     let maximumRuntime: DispatchTimeInterval =
       switch request.operation {
       case "authenticate": .seconds(320)
-      // One triage request analyzes up to 15 items in a single model call.
+      // One triage request analyzes up to 10 items in a single model call.
       case "triage": .seconds(150)
+      // One reply for one item; reasoning models can take a while.
+      case "draft": .seconds(120)
       default: Self.maximumRuntime
       }
     timeout.schedule(deadline: .now() + maximumRuntime)

@@ -18,7 +18,7 @@ use crate::{
     },
     schema::{
         TriageItem, TriageItemDecision, ValidationError, retain_valid_triage_outputs,
-        validate_triage_inputs, validate_triage_instructions,
+        validate_draft_inputs, validate_triage_inputs, validate_triage_instructions,
     },
 };
 
@@ -95,32 +95,40 @@ impl WireRequest {
         }
         validate_identifier(&self.account_id, "account_id")?;
         validate_identifier(&self.organization_id, "organization_id")?;
-        if let RequestOperation::Triage {
-            viewer_login,
-            items,
-            instructions,
-            reasoning_effort,
-            context_tier,
-            ..
-        } = &self.operation
-        {
-            if reasoning_effort.as_ref().is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > 16
-                    || !value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-            }) || context_tier
-                .as_deref()
-                .is_some_and(|value| !matches!(value, "default" | "long_context"))
-            {
-                return Err(ProtocolError::InvalidRequest(ValidationError::new(
-                    "triage model options are invalid",
-                )));
+        match &self.operation {
+            RequestOperation::Triage {
+                viewer_login,
+                items,
+                instructions,
+                reasoning_effort,
+                context_tier,
+                ..
+            } => {
+                validate_model_options(reasoning_effort.as_deref(), context_tier.as_deref())?;
+                validate_triage_inputs(viewer_login, items)
+                    .map_err(ProtocolError::InvalidRequest)?;
+                validate_triage_instructions(instructions.as_deref())
+                    .map_err(ProtocolError::InvalidRequest)?;
             }
-            validate_triage_inputs(viewer_login, items).map_err(ProtocolError::InvalidRequest)?;
-            validate_triage_instructions(instructions.as_deref())
+            RequestOperation::Draft {
+                viewer_login,
+                item,
+                goal,
+                writing_style,
+                reasoning_effort,
+                context_tier,
+                ..
+            } => {
+                validate_model_options(reasoning_effort.as_deref(), context_tier.as_deref())?;
+                validate_draft_inputs(
+                    viewer_login,
+                    item,
+                    goal.as_deref(),
+                    writing_style.as_deref(),
+                )
                 .map_err(ProtocolError::InvalidRequest)?;
+            }
+            _ => {}
         }
         if let RequestOperation::Authenticate {
             credential: Some(credential),
@@ -133,6 +141,27 @@ impl WireRequest {
         }
         Ok(())
     }
+}
+
+fn validate_model_options(
+    reasoning_effort: Option<&str>,
+    context_tier: Option<&str>,
+) -> Result<(), ProtocolError> {
+    let invalid_effort = reasoning_effort.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 16
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    });
+    let invalid_tier =
+        context_tier.is_some_and(|value| !matches!(value, "default" | "long_context"));
+    if invalid_effort || invalid_tier {
+        return Err(ProtocolError::InvalidRequest(ValidationError::new(
+            "model options are invalid",
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +177,21 @@ pub enum RequestOperation {
         deadline: DateTime<Utc>,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_tier: Option<String>,
+    },
+    Draft {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
+        viewer_login: String,
+        item: Box<TriageItem>,
+        deadline: DateTime<Utc>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        goal: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        writing_style: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +247,31 @@ struct TriageRequest {
 enum TriageOperation {
     #[serde(rename = "triage")]
     Triage,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftWireRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: DraftOperation,
+    model_id: Option<String>,
+    viewer_login: String,
+    item: TriageItem,
+    deadline: DateTime<Utc>,
+    #[serde(default)]
+    goal: Option<String>,
+    #[serde(default)]
+    writing_style: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    context_tier: Option<String>,
+}
+#[derive(Deserialize)]
+enum DraftOperation {
+    #[serde(rename = "draft")]
+    Draft,
 }
 
 #[derive(Deserialize)]
@@ -303,6 +372,10 @@ pub enum ResponseResult {
     Triage {
         model_id: String,
         decisions: Vec<TriageItemDecision>,
+    },
+    Draft {
+        model_id: String,
+        draft: String,
     },
     Authentication {
         authentication: AuthenticationResponse,
@@ -437,6 +510,31 @@ fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
                     items: request.items,
                     deadline: request.deadline,
                     instructions: request.instructions,
+                    reasoning_effort: request.reasoning_effort,
+                    context_tier: request.context_tier,
+                },
+            })
+        }
+        "draft" => {
+            if payload.len() > 32 * 1024 {
+                return Err(ProtocolError::InvalidRequest(ValidationError::new(
+                    "draft request exceeds 32 KiB",
+                )));
+            }
+            let request: DraftWireRequest = decode_typed(payload)?;
+            let DraftOperation::Draft = request.operation;
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation: RequestOperation::Draft {
+                    model_id: request.model_id,
+                    viewer_login: request.viewer_login,
+                    item: Box::new(request.item),
+                    deadline: request.deadline,
+                    goal: request.goal,
+                    writing_style: request.writing_style,
                     reasoning_effort: request.reasoning_effort,
                     context_tier: request.context_tier,
                 },
@@ -608,9 +706,48 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                         }
                         match &mut request.operation {
                         RequestOperation::Triage { model_id, viewer_login, items, deadline, instructions, reasoning_effort, context_tier } => {
-                            let model_id = model_id.clone(); let viewer_login = viewer_login.clone(); let items = items.clone(); let deadline = *deadline; let instructions = instructions.clone(); let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: instructions.clone() };
-                            cancellation.begin(request.request_id, cancellation_scope(&request)); let task_engine = Arc::clone(&engine); let cancellation_engine = Arc::clone(&engine); let task_cancellation = cancellation.clone();
-                            analyses.spawn(async move { let remaining = deadline.signed_duration_since(Utc::now()); let result = if remaining <= chrono::Duration::zero() { Err(Failure::new(FailureCode::Cancelled, "Triage deadline elapsed")) } else { let work = task_engine.triage(request.request_id, viewer_login, items.clone(), options, task_cancellation.clone()); tokio::pin!(work); let timer = tokio::time::sleep(std::time::Duration::from_millis(remaining.num_milliseconds() as u64)); tokio::pin!(timer); tokio::select! { value = &mut work => value, _ = &mut timer => { task_cancellation.cancel(request.request_id); let _ = cancellation_engine.cancel(request.request_id).await; Err(Failure::new(FailureCode::Cancelled, "Triage deadline elapsed")) } } }; let response = match result { Ok(decisions) => match retain_valid_triage_outputs(decisions, &items) { Ok(decisions) => WireResponse::for_request(&request, ResponseResult::Triage { model_id: model_id.unwrap_or_else(|| "auto".to_owned()), decisions }), Err(_) => WireResponse::failure(&request, Failure::new(FailureCode::ValidationFailed, "Triage failed output validation")) }, Err(failure) => WireResponse::failure(&request, failure) }; task_cancellation.finish(request.request_id); response });
+                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: instructions.clone() };
+                            let model_id = model_id.clone();
+                            let viewer_login = viewer_login.clone();
+                            let items = items.clone();
+                            let deadline = *deadline;
+                            cancellation.begin(request.request_id, cancellation_scope(&request));
+                            let task_engine = Arc::clone(&engine);
+                            let cancellation_engine = Arc::clone(&engine);
+                            let task_cancellation = cancellation.clone();
+                            analyses.spawn(async move {
+                                let work = task_engine.triage(request.request_id, viewer_login, items.clone(), options, task_cancellation.clone());
+                                let result = run_until_deadline(work, deadline, request.request_id, &task_cancellation, cancellation_engine.as_ref()).await;
+                                let response = match result {
+                                    Ok(decisions) => match retain_valid_triage_outputs(decisions, &items) {
+                                        Ok(decisions) => WireResponse::for_request(&request, ResponseResult::Triage { model_id: model_id.unwrap_or_else(|| "auto".to_owned()), decisions }),
+                                        Err(_) => WireResponse::failure(&request, Failure::new(FailureCode::ValidationFailed, "Triage failed output validation")),
+                                    },
+                                    Err(failure) => WireResponse::failure(&request, failure),
+                                };
+                                task_cancellation.finish(request.request_id);
+                                response
+                            });
+                        }
+                        RequestOperation::Draft { model_id, viewer_login, item, deadline, goal, writing_style, reasoning_effort, context_tier } => {
+                            let draft_request = crate::engine::DraftRequest { viewer_login: viewer_login.clone(), item: (**item).clone(), goal: goal.clone(), writing_style: writing_style.clone() };
+                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: None };
+                            let model_id = model_id.clone();
+                            let deadline = *deadline;
+                            cancellation.begin(request.request_id, cancellation_scope(&request));
+                            let task_engine = Arc::clone(&engine);
+                            let cancellation_engine = Arc::clone(&engine);
+                            let task_cancellation = cancellation.clone();
+                            analyses.spawn(async move {
+                                let work = task_engine.draft(request.request_id, draft_request, options, task_cancellation.clone());
+                                let result = run_until_deadline(work, deadline, request.request_id, &task_cancellation, cancellation_engine.as_ref()).await;
+                                let response = match result {
+                                    Ok(draft) => WireResponse::for_request(&request, ResponseResult::Draft { model_id: model_id.unwrap_or_else(|| "auto".to_owned()), draft }),
+                                    Err(failure) => WireResponse::failure(&request, failure),
+                                };
+                                task_cancellation.finish(request.request_id);
+                                response
+                            });
                         }
                         RequestOperation::Authenticate { credential, allow_browser } => {
                             let credential = credential.take();
@@ -652,6 +789,34 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
         }
     }
     Ok(())
+}
+
+/// Runs `work` until it finishes or `deadline` passes; on timeout the
+/// request is cancelled in the engine so its session is torn down.
+async fn run_until_deadline<E: CopilotEngine, T>(
+    work: impl std::future::Future<Output = Result<T, Failure>>,
+    deadline: DateTime<Utc>,
+    request_id: Uuid,
+    cancellation: &CancellationState,
+    engine: &E,
+) -> Result<T, Failure> {
+    let remaining = deadline.signed_duration_since(Utc::now());
+    if remaining <= chrono::Duration::zero() {
+        return Err(Failure::new(FailureCode::Cancelled, "Deadline elapsed"));
+    }
+    tokio::pin!(work);
+    let timer = tokio::time::sleep(std::time::Duration::from_millis(
+        remaining.num_milliseconds() as u64,
+    ));
+    tokio::pin!(timer);
+    tokio::select! {
+        value = &mut work => value,
+        _ = &mut timer => {
+            cancellation.cancel(request_id);
+            let _ = engine.cancel(request_id).await;
+            Err(Failure::new(FailureCode::Cancelled, "Deadline elapsed"))
+        }
+    }
 }
 
 fn write_engine_response<W: Write>(
@@ -778,6 +943,15 @@ mod tests {
         ) -> Result<Vec<TriageItemDecision>, Failure> {
             Err(Failure::new(FailureCode::Internal, "unused"))
         }
+        async fn draft(
+            &self,
+            _: Uuid,
+            _: crate::engine::DraftRequest,
+            _: crate::engine::TriageModelOptions,
+            _: CancellationState,
+        ) -> Result<String, Failure> {
+            Err(Failure::new(FailureCode::Internal, "unused"))
+        }
         async fn authenticate(
             &self,
             _: Option<EphemeralCredential>,
@@ -808,6 +982,45 @@ mod tests {
 
         assert!(analyses.is_empty());
         assert_eq!(engine.shutdowns.load(Ordering::SeqCst), 1);
+    }
+
+    fn draft_payload(extra: &str) -> Vec<u8> {
+        let payload = format!(
+            r#"{{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"account-1","organization_id":"organization-1","operation":"draft","viewer_login":"octocat","deadline":"2030-01-01T00:00:00Z","goal":"Answer @bob","writing_style":"Brief.","item":{{"id":"I_1","kind":"issue","repository":"octo/widgets","number":1,"title":"Bug","state":"open","author":"bob","updated_at":"2030-01-01T00:00:00Z","relationships":["mentioned"],"labels":[],"assignees":[],"body":"Can you look?","pull_request":null,"recent_activity":[]}}{extra}}}"#
+        );
+        let mut framed = Vec::new();
+        write_frame(&mut framed, payload.as_bytes()).unwrap();
+        framed
+    }
+
+    #[test]
+    fn draft_requests_decode_strictly() {
+        let decoded = read_request(&mut draft_payload("").as_slice())
+            .unwrap()
+            .unwrap();
+        let RequestOperation::Draft {
+            item,
+            goal,
+            writing_style,
+            ..
+        } = decoded.operation
+        else {
+            panic!("expected draft");
+        };
+        assert_eq!(item.id, "I_1");
+        assert_eq!(goal.as_deref(), Some("Answer @bob"));
+        assert_eq!(writing_style.as_deref(), Some("Brief."));
+        assert!(read_request(&mut draft_payload(r#","extra":1"#).as_slice()).is_err());
+        let response = serde_json::to_value(WireResponse::for_request(
+            &request(RequestOperation::Health),
+            ResponseResult::Draft {
+                model_id: "auto".to_owned(),
+                draft: "Thanks!".to_owned(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(response["status"], "draft");
+        assert_eq!(response["draft"], "Thanks!");
     }
 
     #[test]

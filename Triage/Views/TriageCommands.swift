@@ -70,6 +70,13 @@ struct TriageWorkspaceCommands: Commands {
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(appModel.selectedEntry == nil)
 
+            Button("Draft Reply…") {
+                guard let entry = appModel.selectedEntry else { return }
+                appModel.beginDraft(for: entry)
+            }
+            .keyboardShortcut("d", modifiers: [.command, .option])
+            .disabled(appModel.selectedEntry == nil)
+
             Button("Create Rule…") {
                 guard let entry = appModel.selectedEntry else { return }
                 appModel.beginRule(from: entry, correcting: false)

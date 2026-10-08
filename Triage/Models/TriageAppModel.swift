@@ -92,6 +92,8 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var backHistory: [NavigationPoint] = []
     @Published private(set) var forwardHistory: [NavigationPoint] = []
     private var isTraversingHistory = false
+    /// The item whose reply is being drafted, if the drafter is open.
+    @Published var draftEntry: TriageEntry?
     /// Items being worked through in Focus, if Focus is on.
     @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
@@ -510,7 +512,7 @@ final class TriageAppModel: ObservableObject {
     func recordSelectedOrganizationAIConsent(_ isEnabled: Bool) async {
         guard let scope = selectedScope else { return }
         do {
-            try await dependencies.saveConsent(scope, isEnabled, .auto)
+            try await dependencies.saveConsent(scope, isEnabled, .auto, nil)
             if !isEnabled { await runtime?.value.engine.stop() }
             await refreshSelectedOrganizationAIStatus()
             if isEnabled, let runtime, runtime.scope == scope {
@@ -522,16 +524,15 @@ final class TriageAppModel: ObservableObject {
         }
     }
 
-    func selectSelectedOrganizationCopilotModel(_ modelID: String?) async {
-        // A different model may not support the previous effort or tier.
-        await saveSelectedOrganizationCopilotChoice(.init(modelID: modelID, reasoningEffort: nil, contextTier: nil))
-    }
-
-    /// Saves model, reasoning effort, and context tier for the selected organization.
-    func saveSelectedOrganizationCopilotChoice(_ choice: CopilotModelChoice) async {
+    /// Saves the model, reasoning effort, and context tier the selected
+    /// organization uses for prioritizing or for Draft Reply (`nil` = same as prioritizing).
+    func saveSelectedOrganizationCopilotChoice(_ choice: CopilotModelChoice?, for purpose: CopilotPurpose = .triage) async {
         guard let scope = selectedScope else { return }
+        let consent = selectedOrganizationAISettings?.consent
+        let triage = purpose == .triage ? (choice ?? .auto) : (consent?.triageChoice ?? .auto)
+        let reply = purpose == .reply ? choice : consent?.replyChoice
         do {
-            try await dependencies.saveConsent(scope, true, choice)
+            try await dependencies.saveConsent(scope, true, triage, reply)
             await refreshSelectedOrganizationAIStatus()
         } catch {
             copilotAuthenticationError = "The Copilot model selection could not be saved."
@@ -873,6 +874,19 @@ extension TriageAppModel: WorkspaceActions {
     }
 
     var followUpDays: Int { AttentionNotifier.followUpDays(.standard) }
+
+    func beginDraft(for entry: TriageEntry) {
+        draftEntry = entry
+    }
+
+    /// Asks Copilot for a reply to `entry` in the user's writing style.
+    func draftReply(for entry: TriageEntry) async throws -> String {
+        guard let scope = runtime?.scope else { throw TriageDecisionError.runtimeUnavailable }
+        return try await dependencies.draftReply(
+            scope, entry.item, entry.decision?.nextAction,
+            defaults.string(forKey: TriagePreferenceKeys.writingStyle)
+        )
+    }
 
     func startFocus(_ entries: [TriageEntry]) {
         guard !entries.isEmpty else { return }

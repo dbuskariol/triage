@@ -42,12 +42,54 @@ struct CopilotTriageAuthorization: Sendable {
     let selectedModelID: String?
     let reasoningEffort: String?
     let contextTier: String?
+    /// The model for Draft Reply.
+    let reply: CopilotModelChoice
 
-    init(isConsentGranted: Bool, selectedModelID: String?, reasoningEffort: String? = nil, contextTier: String? = nil) {
+    init(isConsentGranted: Bool, selectedModelID: String?, reasoningEffort: String? = nil, contextTier: String? = nil, reply: CopilotModelChoice? = nil) {
+        self.reply = reply ?? CopilotModelChoice(modelID: selectedModelID, reasoningEffort: reasoningEffort, contextTier: contextTier)
         self.isConsentGranted = isConsentGranted
         self.selectedModelID = selectedModelID
         self.reasoningEffort = reasoningEffort
         self.contextTier = contextTier
+    }
+}
+
+extension CopilotTriageAuthorization {
+    /// Reads the organization's consent and model choice from its vault.
+    static func resolver(
+        _ resolveVault: @escaping @Sendable (AccountID) async throws -> AccountVault
+    ) -> @Sendable (WorkspaceScope) async throws -> CopilotTriageAuthorization {
+        { scope in
+            let vault = try await resolveVault(scope.accountID)
+            let consent = try await AIConsentRepository(vault: vault).consent(
+                for: scope.accountID,
+                organizationID: scope.organizationID
+            )
+            return CopilotTriageAuthorization(
+                isConsentGranted: consent.isEnabled,
+                selectedModelID: consent.selectedModelID,
+                reasoningEffort: consent.reasoningEffort,
+                contextTier: consent.contextTier,
+                reply: consent.effectiveReplyChoice
+            )
+        }
+    }
+
+    /// Authorization for `scope`, or the user-facing reason Copilot can't run.
+    static func require(
+        _ authorize: @Sendable (WorkspaceScope) async throws -> CopilotTriageAuthorization,
+        scope: WorkspaceScope
+    ) async throws -> CopilotTriageAuthorization {
+        let authorization: CopilotTriageAuthorization
+        do {
+            authorization = try await authorize(scope)
+        } catch let error as TriageDecisionError {
+            throw error
+        } catch {
+            throw TriageDecisionError.runtimeUnavailable
+        }
+        guard authorization.isConsentGranted else { throw TriageDecisionError.consentRequired }
+        return authorization
     }
 }
 
@@ -58,53 +100,27 @@ actor CopilotTriageDecider: TriageDeciding {
     /// A full batch is one model call; allow it to finish rather than retrying it.
     static let requestTimeout: TimeInterval = 120
 
-    private let makeHelper: @Sendable () -> any TriageCopilotHelping
     private let authorize: @Sendable (WorkspaceScope) async throws -> CopilotTriageAuthorization
     private let now: @Sendable () -> Date
-    /// The XPC service keeps one authenticated helper session; authenticating
-    /// again replaces it. Authenticate once and reuse the session.
-    private var authenticatedScope: WorkspaceScope?
     /// One XPC connection owns one helper session; reuse it across batches.
-    private var helper: (any TriageCopilotHelping)?
+    private let session: CopilotHelperSession
 
     init(
-        makeHelper: @escaping @Sendable () -> any TriageCopilotHelping = {
-            CopilotHelperClient(
-                transport: CopilotXPCFrameTransport(service: CopilotXPCServiceClient())
-            )
-        },
+        makeHelper: @escaping @Sendable () -> any TriageCopilotHelping = CopilotHelperSession.production,
         authorize: @escaping @Sendable (WorkspaceScope) async throws -> CopilotTriageAuthorization,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
-        self.makeHelper = makeHelper
+        session = CopilotHelperSession(makeHelper: makeHelper)
         self.authorize = authorize
         self.now = now
     }
 
     init(
         resolveVault: @escaping @Sendable (AccountID) async throws -> AccountVault,
-        makeHelper: @escaping @Sendable () -> any TriageCopilotHelping = {
-            CopilotHelperClient(
-                transport: CopilotXPCFrameTransport(service: CopilotXPCServiceClient())
-            )
-        },
+        makeHelper: @escaping @Sendable () -> any TriageCopilotHelping = CopilotHelperSession.production,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
-        self.makeHelper = makeHelper
-        self.now = now
-        self.authorize = { scope in
-            let vault = try await resolveVault(scope.accountID)
-            let consent = try await AIConsentRepository(vault: vault).consent(
-                for: scope.accountID,
-                organizationID: scope.organizationID
-            )
-            return CopilotTriageAuthorization(
-                isConsentGranted: consent.isEnabled,
-                selectedModelID: consent.selectedModelID,
-                reasoningEffort: consent.reasoningEffort,
-                contextTier: consent.contextTier
-            )
-        }
+        self.init(makeHelper: makeHelper, authorize: CopilotTriageAuthorization.resolver(resolveVault), now: now)
     }
 
     func decide(
@@ -117,26 +133,13 @@ actor CopilotTriageDecider: TriageDeciding {
             throw TriageDecisionError.invalidResponse
         }
 
-        let authorization: CopilotTriageAuthorization
-        do {
-            authorization = try await authorize(scope)
-        } catch let error as TriageDecisionError {
-            throw error
-        } catch {
-            throw TriageDecisionError.runtimeUnavailable
-        }
-
-        guard authorization.isConsentGranted else {
-            throw TriageDecisionError.consentRequired
-        }
-
-        let helper = self.helper ?? makeHelper()
-        self.helper = helper
+        let authorization = try await CopilotTriageAuthorization.require(authorize, scope: scope)
         do {
             let wireItems = items.map { Self.item($0, hints: rules.hints(for: $0, viewer: scope.viewerLogin), context: contexts[$0.id]) }
             let instructions = rules.trimmedInstructions
-            let makeRequest = { [now] in
-                CopilotTriageRequest(
+            let now = self.now
+            let response = try await session.run(scope: scope) { helper in
+                try await helper.triage(CopilotTriageRequest(
                     accountID: scope.accountID,
                     organizationID: scope.organizationID,
                     viewerLogin: scope.viewerLogin,
@@ -146,20 +149,7 @@ actor CopilotTriageDecider: TriageDeciding {
                     instructions: instructions,
                     reasoningEffort: authorization.reasoningEffort,
                     contextTier: authorization.contextTier
-                )
-            }
-            if authenticatedScope != scope {
-                try await authenticate(helper, scope: scope)
-            }
-            let response: CopilotTriageResponse
-            do {
-                response = try await helper.triage(makeRequest())
-            } catch CopilotXPCError.runtimeUnavailable {
-                // The session ended (idle expiry, sign-in elsewhere). Re-establish once.
-                Self.logger.notice("triage session missing; re-authenticating")
-                authenticatedScope = nil
-                try await authenticate(helper, scope: scope)
-                response = try await helper.triage(makeRequest())
+                ))
             }
             let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id.rawValue, $0) })
             if response.decisions.count < items.count {
@@ -192,42 +182,12 @@ actor CopilotTriageDecider: TriageDeciding {
         } catch let error as TriageDecisionError {
             Self.logger.error("triage failed reason=\(String(describing: error), privacy: .public)")
             throw error
-        } catch let error as CopilotXPCError {
-            Self.logger.error("triage failed xpcError=\(String(describing: error), privacy: .public)")
-            authenticatedScope = nil
-            self.helper = nil
-            switch error {
-            case .operationTimedOut:
-                throw TriageDecisionError.timedOut
-            case .runtimeUnavailable, .helperUnavailable, .processExited:
-                throw TriageDecisionError.runtimeUnavailable
-            default:
-                throw TriageDecisionError.invalidResponse
-            }
-        } catch {
-            Self.logger.error("triage failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
-            authenticatedScope = nil
-            self.helper = nil
-            throw TriageDecisionError.runtimeUnavailable
         }
     }
 
-    private func authenticate(_ helper: any TriageCopilotHelping, scope: WorkspaceScope) async throws {
-        let authentication = try await helper.authenticate(
-            .init(accountID: scope.accountID, organizationID: scope.organizationID, allowsBrowser: false)
-        ).authentication
-        guard authentication.isAuthenticated,
-              authentication.login.caseInsensitiveCompare(scope.viewerLogin) == .orderedSame
-        else {
-            authenticatedScope = nil
-            throw TriageDecisionError.signInRequired
-        }
-        authenticatedScope = scope
-        Self.logger.notice("Copilot session authenticated")
-    }
-
-    private static func item(
-        _ item: PersonalWorkItem, hints: [String], context: TriageHandledContext?
+    /// The wire form of an item; shared with drafts.
+    static func item(
+        _ item: PersonalWorkItem, hints: [String] = [], context: TriageHandledContext? = nil
     ) -> CopilotTriageItem {
         CopilotTriageItem(
             id: item.id.rawValue,

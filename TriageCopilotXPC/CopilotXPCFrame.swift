@@ -190,6 +190,7 @@ enum CopilotXPCFrame {
     case authenticate
     case models
     case triage
+    case draft
     case cancel
     case shutdown
   }

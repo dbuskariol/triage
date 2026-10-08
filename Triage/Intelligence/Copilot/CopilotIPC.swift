@@ -10,7 +10,7 @@ enum CopilotIPC {
 }
 
 enum CopilotOperation: String, Codable, Sendable {
-    case health, authenticate, models, triage, cancel, shutdown
+    case health, authenticate, models, triage, draft, cancel, shutdown
 }
 
 struct CopilotWireRequest: Codable, Sendable {
@@ -39,7 +39,7 @@ struct CopilotWireRequest: Codable, Sendable {
 }
 
 enum CopilotResponseStatus: String, Codable, Sendable {
-    case health, authentication, models, triage, cancelled, shutdown, failure
+    case health, authentication, models, triage, draft, cancelled, shutdown, failure
 }
 
 struct CopilotHealth: Codable, Equatable, Sendable {

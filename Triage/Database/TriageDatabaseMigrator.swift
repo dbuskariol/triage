@@ -15,7 +15,7 @@ enum TriageDatabaseMigrationError: Error, Equatable, Sendable {
 /// leaves the vault exactly as it was.
 enum TriageDatabaseMigrator {
     /// Bump when `tables` or `indexes` change.
-    static let schemaVersion = "v2-005-schema"
+    static let schemaVersion = "v2-006-schema"
     static let migrationCount = 1
 
     private struct Table {
@@ -100,6 +100,10 @@ enum TriageDatabaseMigrator {
             context_tier TEXT,
             updated_at_ms INTEGER NOT NULL,
             automatic_action_confidence_threshold REAL NOT NULL DEFAULT 0.92,
+            reply_custom INTEGER NOT NULL DEFAULT 0 CHECK (reply_custom IN (0, 1)),
+            reply_model TEXT,
+            reply_reasoning_effort TEXT,
+            reply_context_tier TEXT,
             PRIMARY KEY (account_id, organization_id)
             """),
         Table(name: "rate_limit_buckets", body: """
