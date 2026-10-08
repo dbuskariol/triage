@@ -81,6 +81,8 @@ final class TriageAppModel: ObservableObject {
     /// Local status changes shown immediately, before the store confirms them.
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
     @Published var destination = WorkspaceDestination.section(.inbox)
+    /// Items being worked through in Focus, if Focus is on.
+    @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
     @Published private(set) var savedSearches: [SavedSearch] = []
     @Published var selectedEntryID: GitHubNodeID?
@@ -101,6 +103,11 @@ final class TriageAppModel: ObservableObject {
 
     /// Opens Settings at a category; installed by the window scene.
     var openSettings: ((SettingsCategory) -> Void)?
+    /// Brings the main window forward; installed by the window scene.
+    var openMainWindow: (() -> Void)?
+    /// Receives each new presentation (notifications and the Dock badge);
+    /// installed by the application delegate, never in tests.
+    var onPresentationChange: ((WorkspacePresentation, OrganizationID?) -> Void)?
 
     private let dependencies: TriageApplicationDependencies
     private let defaults: UserDefaults
@@ -320,6 +327,7 @@ final class TriageAppModel: ObservableObject {
         )
         guard next != presentation else { return }
         presentation = next
+        onPresentationChange?(next, runtime?.scope.organizationID)
         if let selectedEntryID, !entries.contains(where: { $0.id == selectedEntryID }) {
             self.selectedEntryID = nil
         }
@@ -823,9 +831,22 @@ extension TriageAppModel: WorkspaceActions {
         selectedEntryID = entry.id
     }
 
-    var followUpDays: Int {
-        let days = UserDefaults.standard.integer(forKey: TriagePreferenceKeys.followUpDays)
-        return days > 0 ? days : TriagePreferenceKeys.defaultFollowUpDays
+    var followUpDays: Int { AttentionNotifier.followUpDays(.standard) }
+
+    func startFocus(_ entries: [TriageEntry]) {
+        guard !entries.isEmpty else { return }
+        focusQueue = entries.map(\.id)
+    }
+
+    /// Re-applies notification and Dock badge preferences after they change.
+    func refreshAttention() {
+        onPresentationChange?(presentation, runtime?.scope.organizationID)
+    }
+
+    /// Shows an item by ID, e.g. from a notification.
+    func show(itemID: GitHubNodeID) {
+        openMainWindow?()
+        if let entry = presentation.allEntries.first(where: { $0.id == itemID }) { show(entry) }
     }
 
     func openRulesSettings() {

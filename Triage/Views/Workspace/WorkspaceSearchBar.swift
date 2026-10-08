@@ -10,6 +10,8 @@ struct WorkspaceSearchBar: View {
     let actions: any WorkspaceActions
     /// Called when the user leaves the field with Esc or Return.
     var onExit: () -> Void = {}
+    /// Starts Focus on the list below.
+    var focusOn: () -> Void = {}
     /// Saves the search to the sidebar; `nil` hides Save.
     var onSave: (() -> Void)?
 
@@ -19,6 +21,14 @@ struct WorkspaceSearchBar: View {
                 NativeSearchField(text: $search.text, focusRequest: focusRequest, onExit: onExit)
                     .frame(maxWidth: .infinity)
                 filterMenu
+                Button {
+                    focusOn()
+                } label: {
+                    Image(systemName: "scope")
+                }
+                .buttonStyle(.borderless)
+                .help("Work through this list one item at a time (⇧⌘F)")
+                .accessibilityLabel("Focus")
                 WorkspaceSortToolbarMenu()
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)

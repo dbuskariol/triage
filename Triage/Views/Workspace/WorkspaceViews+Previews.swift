@@ -13,6 +13,7 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func openRulesSettings() {}
     func show(_ entry: TriageEntry) {}
     func saveSearch(named name: String) {}
+    func startFocus(_ entries: [TriageEntry]) {}
 }
 
 private enum WorkspacePreviewFixture {
