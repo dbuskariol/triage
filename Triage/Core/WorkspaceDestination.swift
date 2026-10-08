@@ -10,11 +10,59 @@ enum WorkspaceDestination: Hashable, Sendable {
 }
 
 extension WorkspaceDestination {
+    /// A stable string for saving the last destination.
+    var storageValue: String {
+        switch self {
+        case .section(let section): "section:\(section.rawValue)"
+        case .briefing: "briefing"
+        case .review: "review"
+        case .savedSearch(let id): "saved:\(id.uuidString)"
+        }
+    }
+
+    init?(storageValue: String) {
+        let parts = storageValue.split(separator: ":", maxSplits: 1).map(String.init)
+        switch (parts.first, parts.count > 1 ? parts[1] : nil) {
+        case ("briefing", nil): self = .briefing
+        case ("review", nil): self = .review
+        case ("section", let raw?): guard let section = WorkspacePresentation.Section(rawValue: raw) else { return nil }; self = .section(section)
+        case ("saved", let raw?): guard let id = UUID(uuidString: raw) else { return nil }; self = .savedSearch(id)
+        default: return nil
+        }
+    }
+
     /// Dashboards fill the window; lists pair with the detail column.
     var isDashboard: Bool {
         switch self {
         case .briefing, .review: true
         case .section, .savedSearch: false
+        }
+    }
+}
+
+/// What the main window shows when Triage opens.
+enum LaunchDestination: String, CaseIterable, Identifiable, Sendable {
+    case briefing, inbox, lastViewed
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .briefing: "Briefing"
+        case .inbox: "Inbox"
+        case .lastViewed: "Where you left off"
+        }
+    }
+
+    /// The destination to open. A missing saved search falls back to the Inbox.
+    func resolve(lastViewed: String?, savedSearches: [SavedSearch]) -> WorkspaceDestination {
+        switch self {
+        case .briefing: return .briefing
+        case .inbox: return .section(.inbox)
+        case .lastViewed:
+            guard let destination = lastViewed.flatMap(WorkspaceDestination.init(storageValue:)) else { return .section(.inbox) }
+            if case .savedSearch(let id) = destination, !savedSearches.contains(where: { $0.id == id }) { return .section(.inbox) }
+            return destination
         }
     }
 }

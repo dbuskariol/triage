@@ -116,6 +116,9 @@ struct SettingsView: View {
                     errorLabel(error)
                 }
                 Toggle("Show in menu bar", isOn: $preferences.showMenuBarExtra)
+                Picker("Show on launch", selection: $launchDestination) {
+                    ForEach(LaunchDestination.allCases) { Text($0.title).tag($0) }
+                }
             } header: {
                 Text("Startup")
             }
@@ -170,6 +173,8 @@ struct SettingsView: View {
             Text(keys).font(.body.monospaced()).foregroundStyle(.secondary)
         }
     }
+
+    @AppStorage(TriagePreferenceKeys.launchDestination) private var launchDestination = LaunchDestination.inbox
 
     // MARK: Inbox
 

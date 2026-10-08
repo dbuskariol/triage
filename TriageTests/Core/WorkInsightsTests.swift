@@ -200,4 +200,17 @@ struct WorkInsightsTests {
         #expect(presentation.setAsideIDs.count == 4)
         #expect(presentation.entries(in: .done).filter(DoneFilter.byYou.includes).map(\.id.rawValue) == ["N"])
     }
+
+    @Test func launchDestinationResolvesAndRoundTrips() {
+        let saved = SavedSearch(name: "S", search: WorkspaceSearch(text: "x"))
+        for destination in [WorkspaceDestination.briefing, .review, .section(.waiting), .savedSearch(saved.id)] {
+            #expect(WorkspaceDestination(storageValue: destination.storageValue) == destination)
+        }
+        #expect(LaunchDestination.briefing.resolve(lastViewed: "review", savedSearches: []) == .briefing)
+        #expect(LaunchDestination.lastViewed.resolve(lastViewed: "section:done", savedSearches: []) == .section(.done))
+        #expect(LaunchDestination.lastViewed.resolve(lastViewed: saved.id.uuidString, savedSearches: []) == .section(.inbox))
+        #expect(LaunchDestination.lastViewed.resolve(lastViewed: WorkspaceDestination.savedSearch(saved.id).storageValue, savedSearches: []) == .section(.inbox))
+        #expect(LaunchDestination.lastViewed.resolve(lastViewed: WorkspaceDestination.savedSearch(saved.id).storageValue, savedSearches: [saved]) == .savedSearch(saved.id))
+        #expect(LaunchDestination.lastViewed.resolve(lastViewed: nil, savedSearches: []) == .section(.inbox))
+    }
 }
