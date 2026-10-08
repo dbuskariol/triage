@@ -111,6 +111,18 @@ actor GRDBTriageStore: TriageStore {
             )
             try database.execute(
                 sql: """
+                    DELETE FROM triage_read_state
+                    WHERE account_id = ? AND organization_id = ? AND node_id IN (
+                        SELECT node_id FROM triage_items
+                        WHERE account_id = ? AND organization_id = ?
+                          AND is_active = 0 AND last_seen_at_ms < ?
+                    )
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue,
+                            scope.accountID.rawValue, scope.organizationID.rawValue, cutoff]
+            )
+            try database.execute(
+                sql: """
                     DELETE FROM triage_items
                     WHERE account_id = ? AND organization_id = ?
                       AND is_active = 0 AND last_seen_at_ms < ?
@@ -259,6 +271,32 @@ actor GRDBTriageStore: TriageStore {
         }
     }
 
+    func setReadAt(_ date: Date?, itemIDs: [GitHubNodeID], scope: WorkspaceScope) async throws {
+        guard !itemIDs.isEmpty else { return }
+        try await validate(scope)
+        try await vault.writeTransaction { database in
+            for itemID in itemIDs {
+                let arguments: StatementArguments = [scope.accountID.rawValue, scope.organizationID.rawValue, itemID.rawValue]
+                if let date {
+                    try database.execute(
+                        sql: """
+                            INSERT INTO triage_read_state (account_id, organization_id, node_id, read_at_ms)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(account_id, organization_id, node_id) DO UPDATE SET
+                                read_at_ms = excluded.read_at_ms
+                            """,
+                        arguments: arguments + [Self.milliseconds(date)]
+                    )
+                } else {
+                    try database.execute(
+                        sql: "DELETE FROM triage_read_state WHERE account_id = ? AND organization_id = ? AND node_id = ?",
+                        arguments: arguments
+                    )
+                }
+            }
+        }
+    }
+
     func entries(scope: WorkspaceScope) async throws -> AsyncThrowingStream<[TriageEntry], Error> {
         try await validate(scope)
         let decoder = decoder
@@ -388,7 +426,7 @@ actor GRDBTriageStore: TriageStore {
                 SELECT item.item_json, item.fingerprint AS item_fingerprint,
                        decision.decision_json, decision.fingerprint AS decision_fingerprint,
                        failure.fingerprint AS failure_fingerprint, failure.reason, failure.retry_at_ms,
-                       local.status_json
+                       local.status_json, read.read_at_ms
                 FROM triage_items AS item
                 LEFT JOIN triage_decisions AS decision
                   ON decision.account_id = item.account_id AND decision.organization_id = item.organization_id
@@ -399,6 +437,9 @@ actor GRDBTriageStore: TriageStore {
                 LEFT JOIN triage_local_status AS local
                   ON local.account_id = item.account_id AND local.organization_id = item.organization_id
                  AND local.node_id = item.node_id
+                LEFT JOIN triage_read_state AS read
+                  ON read.account_id = item.account_id AND read.organization_id = item.organization_id
+                 AND read.node_id = item.node_id
                 WHERE item.account_id = ? AND item.organization_id = ? AND item.is_active = 1
                 ORDER BY item.urgency_rank, item.updated_at_ms DESC
                 """,
@@ -424,7 +465,8 @@ actor GRDBTriageStore: TriageStore {
                 } else {
                     analysis = .pending
                 }
-                return TriageEntry(item: item, decision: decision, analysis: analysis, local: local)
+                let readAt = (row["read_at_ms"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
+                return TriageEntry(item: item, decision: decision, analysis: analysis, local: local, readAt: readAt)
             } catch {
                 logger.error("Skipping malformed triage entry.")
                 return nil

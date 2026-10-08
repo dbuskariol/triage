@@ -378,6 +378,10 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
     /// Names of the user's rules that matched (set by `TriageRules.apply`).
     var appliedRules: [String] = []
     var isMuted = false
+    /// When the viewer last viewed this item's details.
+    var readAt: Date?
+    /// Whether the item is new to the viewer (set by `WorkspacePresentation`).
+    var isUnread = false
 
     var id: GitHubNodeID { item.id }
 
@@ -391,6 +395,13 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
             else { fingerprint != item.fingerprint }
         case .snoozed(let until): until <= date
         }
+    }
+
+    /// Unread until viewed, and again when someone *other than* `viewer`
+    /// acts after that, so your own follow-up never marks it unread.
+    func hasUnreadActivity(viewer: String) -> Bool {
+        guard let readAt else { return true }
+        return (item.latestActivity(excluding: viewer) ?? .distantPast) > readAt
     }
 
     var handledEvidence: String? {
@@ -461,6 +472,8 @@ protocol TriageStore: Sendable {
         itemIDs: [GitHubNodeID], reason: String, retryAt: Date, scope: WorkspaceScope
     ) async throws
     func setLocalStatus(_ status: LocalStatus, itemID: GitHubNodeID, scope: WorkspaceScope) async throws
+    /// Records that `itemIDs` were read at `date`, or marks them unread when `date` is nil.
+    func setReadAt(_ date: Date?, itemIDs: [GitHubNodeID], scope: WorkspaceScope) async throws
     /// Emits all active entries immediately and again whenever they change.
     func entries(scope: WorkspaceScope) async throws -> AsyncThrowingStream<[TriageEntry], Error>
     func lastRefreshAt(scope: WorkspaceScope) async throws -> Date?

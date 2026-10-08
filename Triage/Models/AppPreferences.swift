@@ -23,6 +23,8 @@ enum TriagePreferenceKeys {
     static let onboardingCompleted = "interface.onboarding.completed"
     static let launchDestination = "interface.launch-destination"
     static let lastDestination = "interface.last-destination"
+    static let markReadPolicy = "inbox.mark-read"
+    static let readBaseline = "inbox.read-baseline"
 }
 
 @MainActor
@@ -88,6 +90,34 @@ extension AppPreferences {
         case 60: "Every hour"
         default: "Every \(minutes) minutes"
         }
+    }
+}
+
+/// When viewing an item's details marks it read, like Mail.
+enum MarkReadPolicy: String, CaseIterable, Identifiable, Sendable {
+    case immediately, afterDelay, manually
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .immediately: "Immediately"
+        case .afterDelay: "After viewing for 2 seconds"
+        case .manually: "Only when I mark them"
+        }
+    }
+
+    /// How long details must stay on screen; `nil` never marks automatically.
+    var delay: Duration? {
+        switch self {
+        case .immediately: .zero
+        case .afterDelay: .seconds(2)
+        case .manually: nil
+        }
+    }
+
+    static func current(_ defaults: UserDefaults = .standard) -> Self {
+        defaults.string(forKey: TriagePreferenceKeys.markReadPolicy).flatMap(Self.init) ?? .afterDelay
     }
 }
 

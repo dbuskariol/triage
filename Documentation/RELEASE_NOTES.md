@@ -11,6 +11,7 @@ Triage rebuilt around an AI-first core: your GitHub work, prioritized by Copilot
 - **Saved searches, grouping, and related work.** Keep searches in the sidebar, group lists by effort, repository, or relationship, and see linked issues and pull requests.
 - **Notifications.** Local notifications when work newly needs you, a daily follow-up reminder, quiet hours, and a Dock badge.
 - **Setup Assistant.** A guided first launch connects GitHub, your organization, Copilot, notifications, and Mac preferences, and can be run again from the Help menu.
+- **Unread, like Mail.** A blue dot marks work you haven't seen since someone else acted, an orange flag marks what needs your action, and the sidebar counts unread.
 - **Configurable.** Refresh interval (or manual), snooze times, automatic handling, sorting, and Copilot model, in native Settings.
 - **Private.** Encrypted local storage, Keychain credentials, read-only GitHub access, opt-in Copilot per organization, and no telemetry.
 - **Trusted updates.** Developer ID signed, notarized, and Sparkle-verified.

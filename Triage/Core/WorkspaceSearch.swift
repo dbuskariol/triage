@@ -33,6 +33,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             ("review", "Review requested"), ("direct", "Review requested from you directly"),
             ("team", "Review requested from your team only"), ("assigned", "Assigned to you"),
             ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("action", "Needs your action"),
+            ("unread", "Unread"), ("read", "Read"),
         ],
         .status: [
             ("conflicts", "Has conflicts"), ("failing", "Checks failing"),
@@ -63,6 +64,8 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             case "mine": return item.relationships.contains(.authored)
             case "mentioned": return item.relationships.contains(.mentioned)
             case "action": return entry.decision?.disposition == .act
+            case "unread": return entry.isUnread
+            case "read": return !entry.isUnread
             default: return false
             }
         case .status:

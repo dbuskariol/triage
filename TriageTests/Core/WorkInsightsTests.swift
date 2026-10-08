@@ -213,4 +213,44 @@ struct WorkInsightsTests {
         #expect(LaunchDestination.lastViewed.resolve(lastViewed: WorkspaceDestination.savedSearch(saved.id).storageValue, savedSearches: [saved]) == .savedSearch(saved.id))
         #expect(LaunchDestination.lastViewed.resolve(lastViewed: nil, savedSearches: []) == .section(.inbox))
     }
+
+    // MARK: Unread
+
+    @Test func unreadUntilViewedAndAgainOnlyWhenSomeoneElseActs() {
+        let earlier = ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-3_600), excerpt: "?")
+        var work = entry("A", comments: [earlier])
+        #expect(work.hasUnreadActivity(viewer: "me"))
+        work.readAt = now.addingTimeInterval(-60)
+        #expect(!work.hasUnreadActivity(viewer: "me"))
+
+        var mine = entry("A", comments: [earlier, ActivityFact(author: "me", createdAt: now, excerpt: "done")])
+        mine.readAt = work.readAt
+        #expect(!mine.hasUnreadActivity(viewer: "me"))
+
+        var theirs = entry("B", comments: [earlier, ActivityFact(author: "bob", createdAt: now, excerpt: "and?")])
+        theirs.readAt = work.readAt
+        #expect(theirs.hasUnreadActivity(viewer: "me"))
+
+        let presentation = WorkspacePresentation(entries: [work, theirs], status: .initial, now: now, viewer: "me")
+        let unread = presentation.allEntries.filter(\.isUnread)
+        #expect(unread.map(\.id.rawValue) == ["B"])
+        #expect(WorkspaceSearch(text: "is:unread").matches(unread[0], viewer: "me"))
+    }
+
+    @Test func optimisticReadChangesApplyUntilTheStoreConfirms() {
+        let work = entry("A")
+        var changes = OptimisticChanges()
+        changes.setRead(now, for: work.id)
+        #expect(changes.apply(to: [work]).first?.readAt == now)
+        var stored = work
+        stored.readAt = now.addingTimeInterval(-0.0004)
+        changes.dropConfirmed(by: [stored])
+        #expect(changes.isEmpty)
+
+        changes.setRead(nil, for: work.id)
+        changes.dropConfirmed(by: [stored])
+        #expect(!changes.isEmpty)
+        changes.dropConfirmed(by: [work])
+        #expect(changes.isEmpty)
+    }
 }

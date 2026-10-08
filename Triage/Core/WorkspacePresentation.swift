@@ -59,6 +59,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             + entries(in: .analyzing).filter { $0.decision == nil }
     }
     func count(in section: Section) -> Int { entries[section]?.count ?? 0 }
+    func unreadCount(in section: Section) -> Int { entries(in: section).filter(\.isUnread).count }
 
     static let empty = WorkspacePresentation(entries: [:], status: .initial)
 
@@ -73,6 +74,7 @@ struct WorkspacePresentation: Equatable, Sendable {
         let digest = rules.digest
         let all = raw.map { entry in
             var entry = rules.apply(to: entry, viewer: viewer)
+            entry.isUnread = entry.hasUnreadActivity(viewer: viewer)
             // Decided under different preferences: queued for re-analysis.
             if entry.analysis == .current, let decision = entry.decision, (decision.rulesDigest ?? "") != digest {
                 entry.analysis = .pending
@@ -213,6 +215,8 @@ protocol WorkspaceActions: AnyObject {
     /// "Not right?") suggests moving the item somewhere else.
     func beginRule(from entry: TriageEntry, correcting: Bool)
     func openRulesSettings()
+    /// Marks entries read or unread.
+    func setRead(_ entries: [TriageEntry], _ isRead: Bool)
     /// Opens the reply drafter for `entry`.
     func beginDraft(for entry: TriageEntry)
     /// Opens a list, optionally filtered.

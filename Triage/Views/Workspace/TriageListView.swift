@@ -259,14 +259,14 @@ struct TriageEntryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            priorityIndicator
+            unreadIndicator
                 .frame(width: 10)
                 .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 5) {
                 sourceLine
                 Text(entry.item.title)
-                    .font(.headline)
+                    .font(entry.isUnread ? .headline : .body.weight(.medium))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 copilotLine
@@ -300,6 +300,7 @@ struct TriageEntryRow: View {
                     .padding(.horizontal, 5)
                     .background(.quaternary, in: Capsule())
             }
+            actionFlag
             Text(entry.item.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
                 .font(.caption)
                 .foregroundStyle(secondary)
@@ -376,18 +377,25 @@ struct TriageEntryRow: View {
         entry.item.repository.split(separator: "/").last.map(String.init) ?? entry.item.repository
     }
 
+    /// Mail's convention: a blue dot means unread, nothing else.
     @ViewBuilder
-    private var priorityIndicator: some View {
-        let color: Color = isSelected ? .white : .accentColor
-        switch entry.decision?.disposition {
-        case .act:
-            Circle().fill(color).frame(width: 9, height: 9)
-                .help("Needs your action")
-        case .review:
-            Circle().strokeBorder(color, lineWidth: 1.5).frame(width: 9, height: 9)
-                .help("Worth a look")
-        default:
+    private var unreadIndicator: some View {
+        if entry.isUnread {
+            Circle().fill(isSelected ? Color.white : Color.accentColor).frame(width: 9, height: 9)
+                .help("Unread")
+        } else {
             Color.clear.frame(width: 9, height: 9)
+        }
+    }
+
+    /// Needs-action work is flagged, separately from unread.
+    @ViewBuilder
+    private var actionFlag: some View {
+        if entry.decision?.disposition == .act {
+            Image(systemName: "flag.fill")
+                .font(.caption)
+                .foregroundStyle(isSelected ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.orange))
+                .help("Needs your action")
         }
     }
 
@@ -395,7 +403,8 @@ struct TriageEntryRow: View {
         let priority = entry.decision.map { WorkspaceViewPresentation.priorityLabel($0.priority) } ?? "Pending"
         let reason = entry.decision?.reason ?? WorkspaceViewPresentation.analysisLabel(entry.analysis) ?? ""
         let nextAction = entry.decision?.nextAction.map { "Next action: \($0)" } ?? ""
-        return [entry.item.title, "Priority \(priority)", reason, nextAction]
+        let state = [entry.isUnread ? "Unread" : nil, entry.decision?.disposition == .act ? "Needs your action" : nil]
+        return (state.compactMap { $0 } + [entry.item.title, "Priority \(priority)", reason, nextAction])
             .filter { !$0.isEmpty }
             .joined(separator: ". ")
     }

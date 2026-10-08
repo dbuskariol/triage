@@ -6,6 +6,7 @@ struct WorkspaceSidebarView<Pickers: View>: View {
     var savedSearches: [SavedSearch] = []
     var onRenameSavedSearch: (SavedSearch.ID, String) -> Void = { _, _ in }
     var onDeleteSavedSearch: (SavedSearch.ID) -> Void = { _ in }
+    var onMarkAllRead: (WorkspacePresentation.Section) -> Void = { _ in }
     @ViewBuilder let pickers: () -> Pickers
     @State private var renaming: SavedSearch?
     @State private var newName = ""
@@ -19,14 +20,14 @@ struct WorkspaceSidebarView<Pickers: View>: View {
             Section {
                 Label("Briefing", systemImage: "sun.horizon")
                     .tag(WorkspaceDestination.briefing)
-                row(.inbox, showsBadge: true)
+                row(.inbox)
             }
 
             Section("Other work") {
                 row(.waiting)
                 row(.informational)
                 row(.analyzing, showsBadge: presentation.count(in: .analyzing) > 0)
-                row(.snoozed, showsBadge: presentation.count(in: .snoozed) > 0)
+                row(.snoozed)
                 row(.done)
                 if presentation.count(in: .muted) > 0 || selection == .section(.muted) {
                     row(.muted, showsBadge: true)
@@ -75,25 +76,34 @@ struct WorkspaceSidebarView<Pickers: View>: View {
         }
     }
 
+    /// Lists show how many items are unread, like Mail; Analyzing and Muted show their size.
     private func row(_ section: WorkspacePresentation.Section, showsBadge: Bool = false) -> some View {
-        Label {
+        let countsUnread = ![.analyzing, .muted].contains(section)
+        let badge = countsUnread ? presentation.unreadCount(in: section) : presentation.count(in: section)
+        let total = presentation.count(in: section)
+        let spoken = countsUnread ? "\(badge) unread of \(total)" : "\(total) items"
+        return Label {
             HStack {
                 Text(section.title)
                 Spacer(minLength: 8)
-                if showsBadge {
-                    Text(presentation.count(in: section), format: .number)
+                if (countsUnread || showsBadge), badge > 0 {
+                    Text(badge, format: .number)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel("\(presentation.count(in: section)) items")
                 }
             }
         } icon: {
             Image(systemName: section.systemImage)
         }
         .tag(WorkspaceDestination.section(section))
-        .accessibilityLabel(
-            showsBadge ? "\(section.title), \(presentation.count(in: section)) items" : section.title
-        )
+        .help(countsUnread ? "\(badge) unread, \(total) total" : "\(total) items")
+        .contextMenu {
+            if countsUnread {
+                Button("Mark All as Read") { onMarkAllRead(section) }
+                    .disabled(badge == 0)
+            }
+        }
+        .accessibilityLabel("\(section.title), \(spoken)")
     }
 }
 

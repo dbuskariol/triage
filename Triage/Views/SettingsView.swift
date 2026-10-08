@@ -94,7 +94,7 @@ struct SettingsView: View {
     private static func idealHeight(_ category: SettingsCategory) -> CGFloat {
         switch category {
         case .general: 820
-        case .inbox: 700
+        case .inbox: 800
         case .notifications: 560
         case .accounts: 640
         case .ai: 860
@@ -153,6 +153,7 @@ struct SettingsView: View {
                 shortcut("Next or previous item", "↓ ↑  or  j k")
                 shortcut("Mark done", "E  or  ⌫")
                 shortcut("Snooze until tomorrow", "S")
+                shortcut("Mark as read or unread", "U  or  ⇧⌘U")
                 shortcut("Open on GitHub", "↩  or  ⌘O")
                 shortcut("Briefing", "⌘0")
                 shortcut("Switch section", "⌘1 – ⌘7")
@@ -181,6 +182,7 @@ struct SettingsView: View {
     @AppStorage(TriagePreferenceKeys.laterTodayHours) private var laterTodayHours = 3
     @AppStorage(TriagePreferenceKeys.tomorrowHour) private var tomorrowHour = 9
     @AppStorage(TriagePreferenceKeys.autoDoneHandled) private var autoDoneHandled = true
+    @AppStorage(TriagePreferenceKeys.markReadPolicy) private var markReadPolicy = MarkReadPolicy.afterDelay
     @AppStorage(TriagePreferenceKeys.followUpDays) private var followUpDays = TriagePreferenceKeys.defaultFollowUpDays
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
@@ -238,6 +240,16 @@ struct SettingsView: View {
                 Text("Done")
             } footer: {
                 Text("When you comment, review, or push on an Inbox item, Copilot checks whether you completed its suggested next step. If so, the item moves to Done, labeled Handled by You, with Undo. Your own activity never brings done work back.")
+            }
+
+            Section {
+                Picker("Mark items as read", selection: $markReadPolicy) {
+                    ForEach(MarkReadPolicy.allCases) { Text($0.title).tag($0) }
+                }
+            } header: {
+                Text("Unread")
+            } footer: {
+                Text("A blue dot marks work you haven't seen. It returns when someone else comments, reviews, or pushes; your own activity never does. Press U to toggle.")
             }
         }
     }
