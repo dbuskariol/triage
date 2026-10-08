@@ -48,6 +48,13 @@ struct SnoozeOptionTests {
         #expect(snoozed == date(2026, 10, 9, 9, 0))
     }
 
+    @Test func inSevenDaysKeepsTheSameWeekday() {
+        let now = date(2026, 10, 8, 19, 14)
+        let snoozed = SnoozeOption.inSevenDays.date(from: now, defaults: defaults, calendar: calendar)
+        #expect(snoozed == date(2026, 10, 15, 9, 0))
+        #expect(calendar.component(.weekday, from: snoozed) == calendar.component(.weekday, from: now))
+    }
+
     private func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) -> Date {
         calendar.date(
             from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute)

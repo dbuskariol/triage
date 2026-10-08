@@ -123,7 +123,7 @@ enum MarkReadPolicy: String, CaseIterable, Identifiable, Sendable {
 
 /// Snooze times shared by every snooze control, using the user's preferences.
 enum SnoozeOption: CaseIterable, Identifiable {
-    case laterToday, tomorrow, nextWeek
+    case laterToday, tomorrow, nextWeek, inSevenDays
 
     var id: Self { self }
 
@@ -132,6 +132,7 @@ enum SnoozeOption: CaseIterable, Identifiable {
         case .laterToday: "Later Today"
         case .tomorrow: "Tomorrow"
         case .nextWeek: "Next Week"
+        case .inSevenDays: "In 7 Days"
         }
     }
 
@@ -141,15 +142,15 @@ enum SnoozeOption: CaseIterable, Identifiable {
             let hours = defaults.object(forKey: TriagePreferenceKeys.laterTodayHours) as? Int ?? 3
             return now.addingTimeInterval(TimeInterval(max(1, hours) * 3_600))
         case .tomorrow:
-            let hour = Self.preferredMorningHour(defaults)
-            let day = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
-            return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+            return Self.morning(daysFromNow: 1, from: now, defaults: defaults, calendar: calendar)
         case .nextWeek:
             return Self.nextMonday(
                 from: now,
                 hour: Self.preferredMorningHour(defaults),
                 calendar: calendar
             )
+        case .inSevenDays:
+            return Self.morning(daysFromNow: 7, from: now, defaults: defaults, calendar: calendar)
         }
     }
 
@@ -158,10 +159,21 @@ enum SnoozeOption: CaseIterable, Identifiable {
         date(from: now).formatted(.dateTime.weekday(.wide).hour().minute())
     }
 
-    /// Shared by Tomorrow and Next Week. Settings stores this as `tomorrowHour`.
+    /// Shared by Tomorrow, Next Week, and In 7 Days. Settings stores this as `tomorrowHour`.
     nonisolated static func preferredMorningHour(_ defaults: UserDefaults) -> Int {
         let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
         return min(23, max(0, hour))
+    }
+
+    nonisolated static func morning(
+        daysFromNow days: Int,
+        from now: Date,
+        defaults: UserDefaults,
+        calendar: Calendar
+    ) -> Date {
+        let hour = preferredMorningHour(defaults)
+        let day = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: now)) ?? now
+        return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
     }
 
     /// Next week's Monday at `hour`:00. If today is Monday, that's next Monday,
