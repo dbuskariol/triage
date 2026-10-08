@@ -56,7 +56,7 @@
 	<key>SUFeedURL</key>
 	<string>https://github.com/dbuskariol/triage/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>o/xUkcfZRy82oUiBWH26qcTeUQVPE+5WdolswYxvXTo=</string>
+	<string>y1pw4pUmvpPulu4n3n38OPksdFlxw8cQRTKr765xK/o=</string>
 	<key>SURequireSignedFeed</key>
 	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
