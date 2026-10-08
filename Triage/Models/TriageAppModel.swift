@@ -99,7 +99,14 @@ final class TriageAppModel: ObservableObject {
     @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
     @Published private(set) var savedSearches: [SavedSearch] = []
-    @Published var selectedEntryID: GitHubNodeID?
+    /// The selected rows. ⌘-click, ⇧-click, and ⌘A select several.
+    @Published var selection: Set<GitHubNodeID> = []
+
+    /// The one selected item, or nil when none or several are selected.
+    var selectedEntryID: GitHubNodeID? {
+        get { selection.count == 1 ? selection.first : nil }
+        set { selection = newValue.map { [$0] } ?? [] }
+    }
     /// Toolbar search; filters the list in place.
     @Published var search = WorkspaceSearch()
     @Published var doneFilter = DoneFilter.all
@@ -172,6 +179,16 @@ final class TriageAppModel: ObservableObject {
         guard let selectedEntryID else { return nil }
         // The presented entry carries rule effects and optimistic changes.
         return presentation.allEntries.first { $0.id == selectedEntryID }
+    }
+
+    /// Every selected entry, in list order.
+    var selectedEntries: [TriageEntry] {
+        guard !selection.isEmpty else { return [] }
+        return presentation.allEntries.filter { selection.contains($0.id) }
+            .sorted { lhs, rhs in
+                let order = visibleEntries.map(\.id)
+                return (order.firstIndex(of: lhs.id) ?? .max) < (order.firstIndex(of: rhs.id) ?? .max)
+            }
     }
 
     var selectedScope: WorkspaceScope? {
@@ -341,9 +358,8 @@ final class TriageAppModel: ObservableObject {
         guard next != presentation else { return }
         presentation = next
         onPresentationChange?(next, runtime?.scope.organizationID)
-        if let selectedEntryID, !entries.contains(where: { $0.id == selectedEntryID }) {
-            self.selectedEntryID = nil
-        }
+        let existing = Set(entries.map(\.id))
+        if !selection.isSubset(of: existing) { selection.formIntersection(existing) }
     }
 
     // MARK: Accounts
@@ -732,11 +748,11 @@ extension TriageAppModel {
         )
     }
 
-    /// Keeps the selection when it is still on screen; otherwise selects the first row.
+    /// Keeps whatever part of the selection is still on screen; otherwise selects the first row.
     func selectFirstEntry() {
-        let visible = visibleEntries
-        guard !visible.contains(where: { $0.id == selectedEntryID }) else { return }
-        selectedEntryID = visible.first?.id
+        let visible = Set(visibleEntries.map(\.id))
+        let kept = selection.intersection(visible)
+        selection = kept.isEmpty ? (visibleEntries.first.map { [$0.id] } ?? []) : kept
     }
 
     func goBack() { traverse(from: \.backHistory, to: \.forwardHistory) }
@@ -763,13 +779,8 @@ extension TriageAppModel {
 
     /// Moves selection by `offset` within the visible list (j/k navigation).
     func moveSelection(by offset: Int) {
-        let order = visibleEntries.map(\.id)
-        guard !order.isEmpty else { return }
-        guard let current = selectedEntryID, let index = order.firstIndex(of: current) else {
-            selectedEntryID = offset >= 0 ? order.first : order.last
-            return
-        }
-        selectedEntryID = order[min(max(index + offset, 0), order.count - 1)]
+        guard let next = ListSelection.moved(selection, in: visibleEntries.map(\.id), by: offset) else { return }
+        selectedEntryID = next
     }
 }
 
@@ -839,16 +850,16 @@ extension TriageAppModel: WorkspaceActions {
         Task { await engine.refreshNow() }
     }
 
-    func markDone(_ entry: TriageEntry) {
-        setLocalStatus(.done(fingerprint: entry.item.fingerprint, at: .now), for: entry)
+    func markDone(_ entries: [TriageEntry]) {
+        setLocalStatus(for: entries) { .done(fingerprint: $0.item.fingerprint, at: .now) }
     }
 
-    func snooze(_ entry: TriageEntry, until date: Date) {
-        setLocalStatus(.snoozed(until: date), for: entry)
+    func snooze(_ entries: [TriageEntry], until date: Date) {
+        setLocalStatus(for: entries) { _ in .snoozed(until: date) }
     }
 
-    func restore(_ entry: TriageEntry) {
-        setLocalStatus(.active, for: entry)
+    func restore(_ entries: [TriageEntry]) {
+        setLocalStatus(for: entries) { _ in .active }
     }
 
     func openOnGitHub(_ entry: TriageEntry) {
@@ -932,14 +943,16 @@ extension TriageAppModel: WorkspaceActions {
 
     /// Applies the change instantly, moves selection to the next item in the
     /// list (or the previous one at the end), then saves in the background.
-    /// The first time an organization's work loads, everything already there
-    /// starts as read, so the blue dot means "new since you started using it"
-    /// rather than flagging the whole backlog.
+    /// The first time an organization's work loads: the Inbox needs you, so
+    /// it starts unread; the backlog in every other section starts read.
     private func takeReadBaselineIfNeeded(scope: WorkspaceScope) {
         let key = "\(TriagePreferenceKeys.readBaseline).\(scope.accountID.rawValue).\(scope.organizationID.rawValue)"
         guard !entries.isEmpty, !defaults.bool(forKey: key) else { return }
         defaults.set(true, forKey: key)
-        setRead(presentation.allEntries, true)
+        let inbox = presentation.entries(in: .inbox)
+        let inboxIDs = Set(inbox.map(\.id))
+        setRead(presentation.allEntries.filter { !inboxIDs.contains($0.id) }, true)
+        setRead(inbox, false)
     }
 
     func setRead(_ entries: [TriageEntry], _ isRead: Bool) {
@@ -961,23 +974,27 @@ extension TriageAppModel: WorkspaceActions {
         }
     }
 
-    private func setLocalStatus(_ status: LocalStatus, for entry: TriageEntry) {
-        guard let runtime else { return }
-        let order = visibleEntries.map(\.id)
-        var nextSelection = selectedEntryID
-        if selectedEntryID == entry.id, let index = order.firstIndex(of: entry.id) {
-            nextSelection = order.indices.contains(index + 1) ? order[index + 1] : index > 0 ? order[index - 1] : nil
-        }
-        optimistic.set(status, for: entry.id)
+    /// Applies a local status to `entries` immediately and saves in the
+    /// background. If the selection leaves the list, the next remaining row
+    /// is selected, like Mail.
+    private func setLocalStatus(for entries: [TriageEntry], _ status: (TriageEntry) -> LocalStatus) {
+        guard let runtime, !entries.isEmpty else { return }
+        let nextSelection = ListSelection.afterRemoving(
+            Set(entries.map(\.id)), from: selection, in: visibleEntries.map(\.id)
+        )
+        let changes = entries.map { ($0.id, status($0)) }
+        changes.forEach { optimistic.set($0.1, for: $0.0) }
         publishPresentation()
-        selectedEntryID = nextSelection
+        selection = nextSelection
         Task {
-            do {
-                try await runtime.value.store.setLocalStatus(status, itemID: entry.id, scope: runtime.scope)
-            } catch {
-                Self.logger.error("local status save failed")
-                self.optimistic.set(nil, for: entry.id)
-                self.publishPresentation()
+            for (id, status) in changes {
+                do {
+                    try await runtime.value.store.setLocalStatus(status, itemID: id, scope: runtime.scope)
+                } catch {
+                    Self.logger.error("local status save failed")
+                    self.optimistic.set(nil, for: id)
+                    self.publishPresentation()
+                }
             }
         }
     }

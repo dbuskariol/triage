@@ -76,18 +76,28 @@ struct WorkspaceSidebarView<Pickers: View>: View {
         }
     }
 
-    /// Lists show how many items are unread, like Mail; Analyzing and Muted show their size.
+    /// The Inbox shows how much is in it; any list with unread work adds a
+    /// blue unread count. Analyzing and Muted show their size.
     private func row(_ section: WorkspacePresentation.Section, showsBadge: Bool = false) -> some View {
-        let countsUnread = ![.analyzing, .muted].contains(section)
-        let badge = countsUnread ? presentation.unreadCount(in: section) : presentation.count(in: section)
+        let tracksUnread = ![.analyzing, .muted].contains(section)
+        let unread = tracksUnread ? presentation.unreadCount(in: section) : 0
         let total = presentation.count(in: section)
-        let spoken = countsUnread ? "\(badge) unread of \(total)" : "\(total) items"
+        let showsTotal = section == .inbox || showsBadge
         return Label {
-            HStack {
+            HStack(spacing: 6) {
                 Text(section.title)
                 Spacer(minLength: 8)
-                if (countsUnread || showsBadge), badge > 0 {
-                    Text(badge, format: .number)
+                if unread > 0 {
+                    Text(unread, format: .number)
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor, in: Capsule())
+                        .help("\(unread) unread")
+                }
+                if showsTotal, total > 0 {
+                    Text(total, format: .number)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -96,14 +106,14 @@ struct WorkspaceSidebarView<Pickers: View>: View {
             Image(systemName: section.systemImage)
         }
         .tag(WorkspaceDestination.section(section))
-        .help(countsUnread ? "\(badge) unread, \(total) total" : "\(total) items")
         .contextMenu {
-            if countsUnread {
+            if tracksUnread {
                 Button("Mark All as Read") { onMarkAllRead(section) }
-                    .disabled(badge == 0)
+                    .disabled(unread == 0)
             }
         }
-        .accessibilityLabel("\(section.title), \(spoken)")
+        .accessibilityLabel([section.title, unread > 0 ? "\(unread) unread" : nil, showsTotal ? "\(total) items" : nil]
+            .compactMap { $0 }.joined(separator: ", "))
     }
 }
 

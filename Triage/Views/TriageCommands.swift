@@ -63,26 +63,19 @@ struct TriageWorkspaceCommands: Commands {
         }
 
         CommandMenu("Item") {
-            Button("Mark Done") {
-                guard let entry = appModel.selectedEntry else { return }
-                appModel.markDone(entry)
-            }
-            .keyboardShortcut("e", modifiers: .command)
-            .disabled(appModel.selectedEntry == nil)
+            let selected = appModel.selectedEntries
+            Button("Mark Done") { appModel.markDone(selected) }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(selected.isEmpty)
 
-            Button("Snooze Until Tomorrow") {
-                guard let entry = appModel.selectedEntry else { return }
-                appModel.snooze(entry, until: SnoozeOption.tomorrow.date())
-            }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(appModel.selectedEntry == nil)
+            Button("Snooze Until Tomorrow") { appModel.snooze(selected, until: SnoozeOption.tomorrow.date()) }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(selected.isEmpty)
 
-            Button(appModel.selectedEntry?.isUnread == true ? "Mark as Read" : "Mark as Unread") {
-                guard let entry = appModel.selectedEntry else { return }
-                appModel.setRead([entry], entry.isUnread)
-            }
-            .keyboardShortcut("u", modifiers: [.command, .shift])
-            .disabled(appModel.selectedEntry == nil)
+            let anyUnread = selected.contains(where: \.isUnread)
+            Button(anyUnread || selected.isEmpty ? "Mark as Read" : "Mark as Unread") { appModel.setRead(selected, anyUnread) }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+                .disabled(selected.isEmpty)
 
             Button("Mark All as Read") { appModel.setRead(appModel.visibleEntries, true) }
                 .keyboardShortcut("u", modifiers: [.command, .option, .shift])
@@ -104,12 +97,9 @@ struct TriageWorkspaceCommands: Commands {
             .keyboardShortcut("r", modifiers: [.command, .option])
             .disabled(appModel.selectedEntry == nil)
 
-            Button("Open on GitHub") {
-                guard let entry = appModel.selectedEntry else { return }
-                appModel.openOnGitHub(entry)
-            }
-            .keyboardShortcut("o", modifiers: .command)
-            .disabled(appModel.selectedEntry == nil)
+            Button("Open on GitHub") { appModel.openOnGitHub(selected) }
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(selected.isEmpty)
         }
     }
 }

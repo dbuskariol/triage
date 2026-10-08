@@ -59,7 +59,9 @@ Both fill the window. Clicking an item opens it in its list with its details; **
 | **Done** | Work you finished or that Triage marked *Handled by You*. Filter by how it was finished. |
 | **Muted** | Work hidden by your mute rules (appears only when non-empty). |
 
-A **blue dot** means unread: you haven't viewed the item since someone else last commented, reviewed, or pushed. Your own activity never marks work unread. An **orange flag** means Copilot says it needs your action. The sidebar counts unread items; hover for the total.
+A **blue dot** means unread: you haven't viewed the item since someone else last commented, reviewed, or pushed. Your own activity never marks work unread. An **orange flag** means Copilot says it needs your action. The Inbox shows how many items it holds, and any list with unread work adds a blue unread count. Times are compact (`25m`, `2h`, `5d`, `3mo`); hover for the exact date.
+
+**Select several items** with ⌘-click, ⇧-click, or ⌘A to mark them done, snooze, restore, mark read or unread, open them on GitHub, or work through them in Focus, from the right-click menu, the Item menu, the keyboard, or the summary that replaces the detail panel.
 
 Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
 
@@ -96,7 +98,8 @@ Or pick filters from the **Filter** menu (⊜) beside the field; applied filters
 | Snooze until tomorrow | S, ⇧⌘S |
 | Mark as read or unread | U, ⇧⌘U |
 | Mark all as read | ⌥⇧⌘U |
-| Open on GitHub | ↩ or ⌘O |
+| Open on GitHub | ↩ or ⌘O, or double-click |
+| Select several | ⌘-click, ⇧-click, ⇧↓ ⇧↑, ⌘A |
 | Switch section | ⌘1 – ⌘7 |
 | Refresh | ⌘R |
 | Search | ⌘F |

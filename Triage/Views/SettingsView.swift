@@ -509,7 +509,7 @@ struct SettingsView: View {
     }
 
     private func relative(_ date: Date?) -> String? {
-        date?.formatted(.relative(presentation: .named))
+        date.map { RelativeTime.phrase($0) }
     }
 
     private func connectWithGitHub() {

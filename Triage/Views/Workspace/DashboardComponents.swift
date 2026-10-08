@@ -95,7 +95,7 @@ private struct DashboardEntryButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .contextMenu { TriageEntryMenu(entry: entry, isHandled: isHandled, actions: actions) }
+        .contextMenu { TriageEntryMenu(entries: [entry], setAsideIDs: isHandled ? [entry.id] : [], actions: actions) }
         .help("Show \(entry.item.reference)")
     }
 }

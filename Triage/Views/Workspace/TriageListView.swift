@@ -5,7 +5,7 @@ struct TriageListView: View {
     let section: WorkspacePresentation.Section
     /// When set, the list shows this saved search instead of `section`.
     var savedSearch: SavedSearch?
-    @Binding var selectedEntryID: GitHubNodeID?
+    @Binding var selection: Set<GitHubNodeID>
     let actions: any WorkspaceActions
     @Binding var search: WorkspaceSearch
     var searchFocusRequest = 0
@@ -32,7 +32,7 @@ struct TriageListView: View {
             if entries.isEmpty {
                 emptyState
             } else {
-                List(selection: $selectedEntryID) {
+                List(selection: $selection) {
                     ForEach(Array(grouping.groups(entries).enumerated()), id: \.offset) { _, group in
                         if grouping == .none {
                             rows(group.entries)
@@ -55,9 +55,10 @@ struct TriageListView: View {
                 .focused($isListFocused)
                 .onAppear {
                     isListFocused = true
-                    if selectedEntryID == nil { selectedEntryID = entries.first?.id }
+                    if selection.isEmpty, let first = entries.first { selection = [first.id] }
                 }
-                .triageListKeys(entries: entries, selection: $selectedEntryID,
+                .triageContextMenu(entries: entries, setAsideIDs: setAsideIDs, actions: actions)
+                .triageListKeys(entries: entries, selection: $selection,
                                 setAsideIDs: setAsideIDs, actions: actions)
             }
         }
@@ -109,7 +110,7 @@ struct TriageListView: View {
 
     private func rows(_ group: [TriageEntry]) -> some View {
         TriageEntryRows(
-            entries: group, selectedEntryID: selectedEntryID, setAsideIDs: setAsideIDs, actions: actions,
+            entries: group, selection: selection, setAsideIDs: setAsideIDs, actions: actions,
             sectionLabel: { entry in
                 effectiveSearch.isActive && effectiveSearch.scope == .all
                     ? presentation.section(containing: entry)?.title : nil
@@ -221,7 +222,7 @@ struct TriageListView: View {
         guard let date = presentation.status.lastRefreshAt else {
             return "Copilot will show work here when it finds something for you."
         }
-        return "Last updated \(date.formatted(.relative(presentation: .named, unitsStyle: .wide)))."
+        return "Last updated \(RelativeTime.phrase(date))."
     }
 
     private var emptyTitle: String {
@@ -301,9 +302,10 @@ struct TriageEntryRow: View {
                     .background(.quaternary, in: Capsule())
             }
             actionFlag
-            Text(entry.item.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
-                .font(.caption)
+            Text(RelativeTime.compact(entry.item.updatedAt))
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(secondary)
+                .help("Updated \(RelativeTime.exact(entry.item.updatedAt))")
         }
         .lineLimit(1)
     }
@@ -336,7 +338,7 @@ struct TriageEntryRow: View {
         let badges = WorkspaceViewPresentation.badges(for: entry)
         let effort = entry.decision?.nextAction != nil && entry.handledEvidence == nil ? entry.decision?.effort : nil
         if let until = WorkspacePresentation.snoozedUntil(entry) {
-            Label("Until \(until.formatted(.relative(presentation: .named)))", systemImage: "moon.zzz")
+            Label("Until \(RelativeTime.phrase(until))", systemImage: "moon.zzz")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(secondary)
                 .help(until.formatted(date: .complete, time: .shortened))
