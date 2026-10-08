@@ -128,19 +128,30 @@ private struct WorkspaceListAndDetail: View {
                 presentation: appModel.presentation,
                 section: appModel.selectedSection,
                 savedSearch: appModel.selectedSavedSearch,
-                selectedEntryID: $appModel.selectedEntryID,
+                selection: $appModel.selection,
                 actions: appModel,
                 search: $appModel.search,
                 searchFocusRequest: appModel.searchFocusRequest,
                 doneFilter: $appModel.doneFilter
             )
             .frame(minWidth: 320, idealWidth: 400, maxWidth: 560)
-            TriageDetailView(
-                entry: appModel.selectedEntry,
-                inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
-                allEntries: appModel.presentation.allEntries,
-                actions: appModel
-            )
+            Group {
+                if appModel.selection.count > 1 {
+                    MultipleSelectionView(
+                        entries: appModel.selectedEntries,
+                        setAsideIDs: appModel.presentation.setAsideIDs,
+                        actions: appModel,
+                        select: { appModel.selectedEntryID = $0.id }
+                    )
+                } else {
+                    TriageDetailView(
+                        entry: appModel.selectedEntry,
+                        inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
+                        allEntries: appModel.presentation.allEntries,
+                        actions: appModel
+                    )
+                }
+            }
             .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
         }
     }

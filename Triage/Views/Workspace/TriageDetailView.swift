@@ -146,7 +146,7 @@ private struct DetailHeader: View {
         let kind = item.kind == .pullRequest ? "Pull request" : "Issue"
         let author = item.author.map { " by \($0)" } ?? ""
         let opened = item.createdAt.formatted(date: .abbreviated, time: .omitted)
-        let updated = item.updatedAt.formatted(.relative(presentation: .named))
+        let updated = RelativeTime.phrase(item.updatedAt)
         return "\(kind)\(author) · Opened \(opened) · Updated \(updated)"
     }
 }
@@ -226,7 +226,7 @@ private struct DetailActionBar: View {
                 .help("Mark done until something changes (⌘E)")
 
                 Menu {
-                    SnoozeMenuItems(entry: entry, actions: actions)
+                    SnoozeMenuItems(entries: [entry], actions: actions)
                 } label: {
                     Label("Snooze", systemImage: "moon.zzz")
                 }
@@ -349,7 +349,7 @@ private struct RecommendationCard: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("Analyzed \(decision.decidedAt.formatted(.relative(presentation: .named)))")
+                        Text("Analyzed \(RelativeTime.phrase(decision.decidedAt))")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }
@@ -750,7 +750,8 @@ private struct ActivitySection: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
                                     Text(fact.author).font(.callout.weight(.semibold))
-                                    Text(fact.createdAt.formatted(.relative(presentation: .named)))
+                                    Text(RelativeTime.compact(fact.createdAt))
+                                        .help(RelativeTime.exact(fact.createdAt))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }

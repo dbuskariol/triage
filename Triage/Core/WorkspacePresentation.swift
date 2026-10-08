@@ -204,9 +204,10 @@ extension WorkspacePresentation {
 @MainActor
 protocol WorkspaceActions: AnyObject {
     func refreshNow()
-    func markDone(_ entry: TriageEntry)
-    func snooze(_ entry: TriageEntry, until date: Date)
-    func restore(_ entry: TriageEntry)
+    /// Bulk actions apply to every entry, in one step.
+    func markDone(_ entries: [TriageEntry])
+    func snooze(_ entries: [TriageEntry], until date: Date)
+    func restore(_ entries: [TriageEntry])
     func openOnGitHub(_ entry: TriageEntry)
     func openCopilotSettings()
     /// Adds a hard rule for the selected organization (quick rules, feedback).
@@ -227,4 +228,11 @@ protocol WorkspaceActions: AnyObject {
     func saveSearch(named name: String)
     /// Selects `entry`, switching to the section that contains it.
     func show(_ entry: TriageEntry)
+}
+
+extension WorkspaceActions {
+    func markDone(_ entry: TriageEntry) { markDone([entry]) }
+    func snooze(_ entry: TriageEntry, until date: Date) { snooze([entry], until: date) }
+    func restore(_ entry: TriageEntry) { restore([entry]) }
+    func openOnGitHub(_ entries: [TriageEntry]) { entries.forEach(openOnGitHub) }
 }

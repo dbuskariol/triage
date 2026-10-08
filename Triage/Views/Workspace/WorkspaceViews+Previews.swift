@@ -3,9 +3,9 @@ import SwiftUI
 @MainActor
 private final class WorkspacePreviewActions: WorkspaceActions {
     func refreshNow() {}
-    func markDone(_ entry: TriageEntry) {}
-    func snooze(_ entry: TriageEntry, until date: Date) {}
-    func restore(_ entry: TriageEntry) {}
+    func markDone(_ entries: [TriageEntry]) {}
+    func snooze(_ entries: [TriageEntry], until date: Date) {}
+    func restore(_ entries: [TriageEntry]) {}
     func openOnGitHub(_ entry: TriageEntry) {}
     func openCopilotSettings() {}
     func addRule(_ rule: TriageRule) {}
@@ -74,11 +74,11 @@ private enum WorkspacePreviewFixture {
 }
 
 #Preview("Workspace list") {
-    @Previewable @State var selection: GitHubNodeID? = WorkspacePreviewFixture.entry.id
+    @Previewable @State var selection: Set<GitHubNodeID> = [WorkspacePreviewFixture.entry.id]
     TriageListView(
         presentation: WorkspacePreviewFixture.presentation,
         section: .inbox,
-        selectedEntryID: $selection,
+        selection: $selection,
         actions: WorkspacePreviewActions(),
         search: .constant(WorkspaceSearch()),
         doneFilter: .constant(.all)

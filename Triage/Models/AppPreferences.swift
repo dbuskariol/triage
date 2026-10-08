@@ -24,7 +24,7 @@ enum TriagePreferenceKeys {
     static let launchDestination = "interface.launch-destination"
     static let lastDestination = "interface.last-destination"
     static let markReadPolicy = "inbox.mark-read"
-    static let readBaseline = "inbox.read-baseline"
+    static let readBaseline = "inbox.read-baseline-v2"
 }
 
 @MainActor

@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// Snooze choices for menus, showing exactly when each one ends.
+/// The snooze choices, shared by every snooze menu.
 struct SnoozeMenuItems: View {
-    let entry: TriageEntry
+    let entries: [TriageEntry]
     let actions: any WorkspaceActions
 
     var body: some View {
         ForEach(SnoozeOption.allCases) { option in
             Button {
-                actions.snooze(entry, until: option.date())
+                actions.snooze(entries, until: option.date())
             } label: {
                 Text(option.title)
                 Text(option.subtitle())

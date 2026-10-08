@@ -65,7 +65,7 @@ enum WorkspaceViewPresentation {
             // Under a minute reads as "Just now" rather than a ticking seconds count.
             let handled = status.recentlyHandled > 0 ? " · \(status.recentlyHandled) handled by you" : ""
             if now.timeIntervalSince(refreshed) < 60 { return "Updated just now\(handled)" }
-            return "Updated \(refreshed.formatted(.relative(presentation: .named, unitsStyle: .wide)))\(handled)"
+            return "Updated \(RelativeTime.phrase(refreshed))\(handled)"
         }
     }
 
@@ -76,7 +76,7 @@ enum WorkspaceViewPresentation {
         case .failed(let reason, let retryAt):
             retryAt <= now
                 ? "\(reason) · Retrying now"
-                : "\(reason) · Retry \(retryAt.formatted(.relative(presentation: .named, unitsStyle: .wide)))"
+                : "\(reason) · Retry \(RelativeTime.phrase(retryAt))"
         case .current:
             nil
         }

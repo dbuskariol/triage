@@ -1,10 +1,11 @@
 import SwiftUI
 
-/// Selectable rows with the standard context menu and swipe actions, shared
-/// by the section lists, saved searches, the Briefing, and the Review.
+/// List rows with swipe actions, shared by the section lists and saved
+/// searches. The context menu is attached to the list so it acts on the
+/// whole selection.
 struct TriageEntryRows: View {
     let entries: [TriageEntry]
-    let selectedEntryID: GitHubNodeID?
+    let selection: Set<GitHubNodeID>
     /// Done and snoozed items offer Restore instead of Done and Snooze.
     let setAsideIDs: Set<GitHubNodeID>
     let actions: any WorkspaceActions
@@ -12,9 +13,8 @@ struct TriageEntryRows: View {
 
     var body: some View {
         ForEach(entries) { entry in
-            TriageEntryRow(entry: entry, isSelected: entry.id == selectedEntryID, sectionLabel: sectionLabel(entry))
+            TriageEntryRow(entry: entry, isSelected: selection.contains(entry.id), sectionLabel: sectionLabel(entry))
                 .tag(entry.id)
-                .contextMenu { TriageEntryMenu(entry: entry, isHandled: setAsideIDs.contains(entry.id), actions: actions) }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipes(for: entry) }
                 .swipeActions(edge: .leading) {
                     Button(entry.isUnread ? "Read" : "Unread") { actions.setRead([entry], entry.isUnread) }
@@ -29,31 +29,39 @@ struct TriageEntryRows: View {
             Button("Restore") { actions.restore(entry) }.tint(.blue)
         } else {
             Button("Done") { actions.markDone(entry) }.tint(.green)
-            Menu("Snooze") { SnoozeMenuItems(entry: entry, actions: actions) }
+            Menu("Snooze") { SnoozeMenuItems(entries: [entry], actions: actions) }
         }
     }
 }
 
-/// The item context menu, shared by every list and dashboard.
+/// The item menu, for one entry or a whole selection. Actions that only make
+/// sense for one item appear only when one is chosen. Shared by list context
+/// menus, dashboards, and the multiple-selection panel.
 struct TriageEntryMenu: View {
-    let entry: TriageEntry
-    let isHandled: Bool
+    let entries: [TriageEntry]
+    let setAsideIDs: Set<GitHubNodeID>
     let actions: any WorkspaceActions
 
     var body: some View {
-        Button(entry.isUnread ? "Mark as Read" : "Mark as Unread") { actions.setRead([entry], entry.isUnread) }
+        let anyUnread = entries.contains(where: \.isUnread)
+        let allSetAside = entries.allSatisfy { setAsideIDs.contains($0.id) }
+        Button(anyUnread ? "Mark as Read" : "Mark as Unread") { actions.setRead(entries, anyUnread) }
         Divider()
-        if isHandled {
-            Button("Restore") { actions.restore(entry) }
+        if allSetAside {
+            Button("Restore") { actions.restore(entries) }
         } else {
-            Button("Done") { actions.markDone(entry) }
-            Menu("Snooze") { SnoozeMenuItems(entry: entry, actions: actions) }
-            Divider()
-            Button("Open on GitHub") { actions.openOnGitHub(entry) }
-            Button("Draft Reply…") { actions.beginDraft(for: entry) }
+            Button("Done") { actions.markDone(entries) }
+            Menu("Snooze") { SnoozeMenuItems(entries: entries, actions: actions) }
         }
         Divider()
-        Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }
+        Button(entries.count == 1 ? "Open on GitHub" : "Open \(entries.count) on GitHub") { actions.openOnGitHub(entries) }
+        if let entry = entries.first, entries.count == 1 {
+            Button("Draft Reply…") { actions.beginDraft(for: entry) }
+            Divider()
+            Button("Create Rule…") { actions.beginRule(from: entry, correcting: false) }
+        } else if entries.count > 1 {
+            Button("Focus on These") { actions.startFocus(entries) }
+        }
     }
 }
 
@@ -62,63 +70,79 @@ extension WorkspacePresentation {
     var setAsideIDs: Set<GitHubNodeID> { Set((entries(in: .done) + entries(in: .snoozed)).map(\.id)) }
 }
 
-/// Mail- and Superhuman-style keys on top of the native ↑/↓: j/k move,
-/// e/⌫ Done (or Restore), s snoozes until tomorrow, u toggles unread,
-/// Return opens on GitHub.
+/// Mail- and Superhuman-style keys on top of the native ↑/↓ (⇧ extends, ⌘A
+/// selects all): j/k move, e/⌫ Done (or Restore), s snoozes until tomorrow,
+/// u toggles unread, Return opens on GitHub. Actions apply to the selection.
 private struct TriageListKeys: ViewModifier {
     let entries: [TriageEntry]
-    @Binding var selectedEntryID: GitHubNodeID?
+    @Binding var selection: Set<GitHubNodeID>
     let setAsideIDs: Set<GitHubNodeID>
     let actions: any WorkspaceActions
 
     func body(content: Content) -> some View {
         content
             .onKeyPress(characters: ["j", "k"]) { press in
-                move(by: press.characters == "j" ? 1 : -1)
+                if let next = ListSelection.moved(selection, in: entries.map(\.id), by: press.characters == "j" ? 1 : -1) {
+                    selection = [next]
+                }
                 return .handled
             }
             .onKeyPress(keys: [.delete, .deleteForward, "e"]) { _ in
-                guard let entry = selected else { return .ignored }
-                setAsideIDs.contains(entry.id) ? actions.restore(entry) : actions.markDone(entry)
-                return .handled
-            }
-            .onKeyPress(characters: ["u"]) { _ in
-                guard let entry = selected else { return .ignored }
-                actions.setRead([entry], entry.isUnread)
-                return .handled
-            }
-            .onKeyPress(.return) {
-                guard let entry = selected else { return .ignored }
-                actions.openOnGitHub(entry)
+                let chosen = selected
+                guard !chosen.isEmpty else { return .ignored }
+                chosen.allSatisfy { setAsideIDs.contains($0.id) } ? actions.restore(chosen) : actions.markDone(chosen)
                 return .handled
             }
             .onKeyPress(characters: ["s"]) { _ in
-                guard let entry = selected, !setAsideIDs.contains(entry.id) else { return .ignored }
-                actions.snooze(entry, until: SnoozeOption.tomorrow.date())
+                let chosen = selected.filter { !setAsideIDs.contains($0.id) }
+                guard !chosen.isEmpty else { return .ignored }
+                actions.snooze(chosen, until: SnoozeOption.tomorrow.date())
                 return .handled
+            }
+            .onKeyPress(characters: ["u"]) { _ in
+                let chosen = selected
+                guard !chosen.isEmpty else { return .ignored }
+                actions.setRead(chosen, chosen.contains(where: \.isUnread))
+                return .handled
+            }
+            .onKeyPress(.return) {
+                let chosen = selected
+                guard !chosen.isEmpty else { return .ignored }
+                actions.openOnGitHub(chosen)
+                return .handled
+            }
+            .onExitCommand {
+                if selection.count > 1, let first = selected.first { selection = [first.id] }
             }
     }
 
-    private var selected: TriageEntry? {
-        selectedEntryID.flatMap { id in entries.first { $0.id == id } }
-    }
-
-    private func move(by offset: Int) {
-        guard !entries.isEmpty else { return }
-        guard let id = selectedEntryID, let index = entries.firstIndex(where: { $0.id == id }) else {
-            selectedEntryID = (offset > 0 ? entries.first : entries.last)?.id
-            return
-        }
-        selectedEntryID = entries[min(max(index + offset, 0), entries.count - 1)].id
+    /// Selected entries in display order.
+    private var selected: [TriageEntry] {
+        entries.filter { selection.contains($0.id) }
     }
 }
 
 extension View {
     /// Adds the shared triage keys; `entries` must be in display order.
     func triageListKeys(
-        entries: [TriageEntry], selection: Binding<GitHubNodeID?>,
+        entries: [TriageEntry], selection: Binding<Set<GitHubNodeID>>,
         setAsideIDs: Set<GitHubNodeID>, actions: any WorkspaceActions
     ) -> some View {
-        modifier(TriageListKeys(entries: entries, selectedEntryID: selection, setAsideIDs: setAsideIDs, actions: actions))
+        modifier(TriageListKeys(entries: entries, selection: selection, setAsideIDs: setAsideIDs, actions: actions))
+    }
+
+    /// The item menu for the clicked rows (or the selection they belong to),
+    /// and double-click to open on GitHub.
+    func triageContextMenu(
+        entries: [TriageEntry], setAsideIDs: Set<GitHubNodeID>, actions: any WorkspaceActions
+    ) -> some View {
+        contextMenu(forSelectionType: GitHubNodeID.self) { ids in
+            let chosen = entries.filter { ids.contains($0.id) }
+            if !chosen.isEmpty {
+                TriageEntryMenu(entries: chosen, setAsideIDs: setAsideIDs, actions: actions)
+            }
+        } primaryAction: { ids in
+            actions.openOnGitHub(entries.filter { ids.contains($0.id) })
+        }
     }
 }
