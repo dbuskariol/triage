@@ -279,8 +279,11 @@ actor TriageEngine {
                         }
                         Self.logger.notice("batch outcome=decided items=\(decisions.count, privacy: .public) duration=\(String(describing: duration), privacy: .public)")
                     case .unavailable(let message):
-                        // Copilot itself is unusable: stop submitting, keep items pending.
+                        // Copilot itself is unusable: stop submitting, keep items
+                        // pending, and check again shortly rather than waiting
+                        // for the next refresh.
                         status.problem = .copilotUnavailable(message)
+                        scheduleRetry()
                         group.cancelAll()
                         rounds = []
                         skipped = []

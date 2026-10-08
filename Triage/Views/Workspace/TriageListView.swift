@@ -301,11 +301,7 @@ struct TriageEntryRow: View {
                     .padding(.horizontal, 5)
                     .background(.quaternary, in: Capsule())
             }
-            actionFlag
-            Text(RelativeTime.compact(entry.item.updatedAt))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(secondary)
-                .help("Updated \(RelativeTime.exact(entry.item.updatedAt))")
+            EntryStatusColumn(entry: entry, isSelected: isSelected)
         }
         .lineLimit(1)
     }
@@ -387,17 +383,6 @@ struct TriageEntryRow: View {
                 .help("Unread")
         } else {
             Color.clear.frame(width: 9, height: 9)
-        }
-    }
-
-    /// Needs-action work is flagged, separately from unread.
-    @ViewBuilder
-    private var actionFlag: some View {
-        if entry.decision?.disposition == .act {
-            Image(systemName: "flag.fill")
-                .font(.caption)
-                .foregroundStyle(isSelected ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.orange))
-                .help("Needs your action")
         }
     }
 

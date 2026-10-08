@@ -24,6 +24,27 @@ actor CopilotHelperSession {
         scope: WorkspaceScope,
         _ request: @Sendable (any TriageCopilotHelping) async throws -> Response
     ) async throws -> Response {
+        do {
+            return try await attempt(scope: scope, request)
+        } catch CopilotXPCError.helperUnavailable, CopilotXPCError.processExited {
+            // The connection dropped (the service restarted, the app was
+            // updated, the Mac slept). Reconnect once before reporting it.
+            Self.logger.notice("Copilot helper connection lost; reconnecting")
+            reset()
+            do {
+                return try await attempt(scope: scope, request)
+            } catch let error as CopilotXPCError {
+                throw map(error)
+            }
+        } catch let error as CopilotXPCError {
+            throw map(error)
+        }
+    }
+
+    private func attempt<Response: Sendable>(
+        scope: WorkspaceScope,
+        _ request: @Sendable (any TriageCopilotHelping) async throws -> Response
+    ) async throws -> Response {
         let helper = self.helper ?? makeHelper()
         self.helper = helper
         do {
@@ -44,15 +65,19 @@ actor CopilotHelperSession {
         } catch let error as CopilotXPCError {
             Self.logger.error("Copilot request failed xpcError=\(String(describing: error), privacy: .public)")
             reset()
-            switch error {
-            case .operationTimedOut: throw TriageDecisionError.timedOut
-            case .runtimeUnavailable, .helperUnavailable, .processExited: throw TriageDecisionError.runtimeUnavailable
-            default: throw TriageDecisionError.invalidResponse
-            }
+            throw error
         } catch {
             Self.logger.error("Copilot request failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
             reset()
             throw TriageDecisionError.runtimeUnavailable
+        }
+    }
+
+    private func map(_ error: CopilotXPCError) -> TriageDecisionError {
+        switch error {
+        case .operationTimedOut: .timedOut
+        case .runtimeUnavailable, .helperUnavailable, .processExited: .runtimeUnavailable
+        default: .invalidResponse
         }
     }
 

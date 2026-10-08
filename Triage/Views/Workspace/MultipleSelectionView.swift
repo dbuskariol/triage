@@ -123,12 +123,7 @@ struct MultipleSelectionView: View {
                             Text(entry.item.reference).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if entry.decision?.disposition == .act {
-                            Image(systemName: "flag.fill").font(.caption).foregroundStyle(.orange)
-                        }
-                        Text(RelativeTime.compact(entry.item.updatedAt))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                        EntryStatusColumn(entry: entry)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
