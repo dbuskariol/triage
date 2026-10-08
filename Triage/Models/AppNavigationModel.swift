@@ -3,6 +3,7 @@ import Foundation
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
     case inbox
+    case notifications
     case accounts
     case ai
     case rules
@@ -20,6 +21,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .inbox: "tray.full"
+        case .notifications: "bell.badge"
         case .accounts: "person.crop.circle"
         case .ai: "sparkles"
         case .rules: "line.3.horizontal.decrease.circle"

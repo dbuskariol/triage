@@ -27,6 +27,17 @@ struct BriefingView: View {
                             .init(title: "Follow Ups", value: briefing.followUpCount, systemImage: "arrowshape.turn.up.right"),
                         ])
                         .listRowSeparator(.hidden)
+                        if let needsAction = briefing.parts.first(where: { $0.kind == .needsAction }) {
+                            Button {
+                                actions.startFocus(needsAction.entries)
+                            } label: {
+                                Label("Focus on \(needsAction.entries.count) Needing Action", systemImage: "scope")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .controlSize(.large)
+                            .buttonStyle(.borderedProminent)
+                            .listRowSeparator(.hidden)
+                        }
                     }
                     ForEach(briefing.parts) { part in
                         Section {

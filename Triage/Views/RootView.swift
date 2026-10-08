@@ -19,6 +19,7 @@ struct RootView: View {
     @EnvironmentObject private var appModel: TriageAppModel
     @EnvironmentObject private var navigation: AppNavigationModel
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
 
     var body: some View {
@@ -29,7 +30,13 @@ struct RootView: View {
                 hasConnectedAccount: appModel.hasConnectedAccount
             ) {
             case .workspace:
-                WorkspaceView()
+                if let queue = appModel.focusQueue {
+                    FocusView(presentation: appModel.presentation, queue: queue, actions: appModel) {
+                        appModel.focusQueue = nil
+                    }
+                } else {
+                    WorkspaceView()
+                }
             case .restoring:
                 ProgressView("Opening Triage")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -41,6 +48,10 @@ struct RootView: View {
             appModel.openSettings = { category in
                 navigation.openSettings(category)
                 openSettings()
+            }
+            appModel.openMainWindow = {
+                openWindow(id: WorkspaceWindowRestoration.mainWindowFrameIdentifier)
+                NSApp.activate()
             }
         }
     }

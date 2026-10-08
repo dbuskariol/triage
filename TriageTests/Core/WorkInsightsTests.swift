@@ -135,4 +135,57 @@ struct WorkInsightsTests {
         #expect(refined.tokens.count == 1)
         #expect(refined.scope == .all)
     }
+
+    // MARK: Attention
+
+    private func undecided(_ id: String) -> TriageEntry {
+        var entry = entry(id)
+        entry.decision = nil
+        return entry
+    }
+
+    @Test func attentionTakesABaselineThenAnnouncesOnlyNewActionItems() {
+        var tracker = AttentionTracker()
+        let existing = entry("A", disposition: .act)
+        let pending = undecided("P")
+        let empty = tracker.update(with: WorkspacePresentation(entries: [:], status: .initial))
+        let baseline = tracker.update(with: WorkspacePresentation(entries: [.inbox: [existing], .analyzing: [pending]], status: .initial))
+        #expect(empty.isEmpty && baseline.isEmpty)
+
+        // A baseline item's first decision is not news; a brand-new item is.
+        let pendingDecided = entry("P", disposition: .act)
+        let fresh = entry("N", disposition: .act)
+        let next = WorkspacePresentation(entries: [.inbox: [existing, pendingDecided, fresh]], status: .initial)
+        let announced = tracker.update(with: next).map(\.id.rawValue)
+        let repeated = tracker.update(with: next)
+        #expect(announced == ["N"])
+        #expect(repeated.isEmpty)
+
+        // Leaving and returning is news again.
+        _ = tracker.update(with: WorkspacePresentation(entries: [.inbox: [existing, pendingDecided]], status: .initial))
+        let returned = tracker.update(with: next).map(\.id.rawValue)
+        #expect(returned == ["N"])
+    }
+
+    @Test func followUpRemindersAreDaily() {
+        var tracker = AttentionTracker()
+        let none = tracker.followUpReminderDue(count: 0, now: now)
+        let first = tracker.followUpReminderDue(count: 2, now: now)
+        let sameDay = tracker.followUpReminderDue(count: 2, now: now.addingTimeInterval(60))
+        let nextDay = tracker.followUpReminderDue(count: 2, now: now.addingTimeInterval(86_400))
+        #expect(!none && first && !sameDay && nextDay)
+    }
+
+    @Test func quietHoursWrapPastMidnight() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+        func at(_ hour: Int) -> Date { calendar.date(bySettingHour: hour, minute: 30, second: 0, of: now)! }
+        let overnight = QuietHours(start: 19, end: 8)
+        #expect(overnight.contains(at(22), calendar: calendar))
+        #expect(overnight.contains(at(3), calendar: calendar))
+        #expect(!overnight.contains(at(12), calendar: calendar))
+        let daytime = QuietHours(start: 9, end: 17)
+        #expect(daytime.contains(at(12), calendar: calendar))
+        #expect(!daytime.contains(at(18), calendar: calendar))
+    }
 }

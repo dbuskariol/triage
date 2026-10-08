@@ -83,6 +83,7 @@ struct SettingsView: View {
         switch category {
         case .general: generalPage
         case .inbox: inboxPage
+        case .notifications: NotificationSettingsPage()
         case .accounts: accountsPage
         case .ai: aiPage
         case .rules: RulesSettingsView()
@@ -93,7 +94,8 @@ struct SettingsView: View {
     private static func idealHeight(_ category: SettingsCategory) -> CGFloat {
         switch category {
         case .general: 820
-        case .inbox: 620
+        case .inbox: 700
+        case .notifications: 560
         case .accounts: 640
         case .ai: 700
         case .rules: 760
@@ -149,7 +151,10 @@ struct SettingsView: View {
                 shortcut("Mark done", "E  or  ⌫")
                 shortcut("Snooze until tomorrow", "S")
                 shortcut("Open on GitHub", "↩  or  ⌘O")
+                shortcut("Briefing", "⌘0")
                 shortcut("Switch section", "⌘1 – ⌘6")
+                shortcut("Weekly Review", "⌘9")
+                shortcut("Focus on the current list", "⇧⌘F")
                 shortcut("Refresh", "⌘R")
             }
         }
@@ -171,6 +176,7 @@ struct SettingsView: View {
     @AppStorage(TriagePreferenceKeys.laterTodayHours) private var laterTodayHours = 3
     @AppStorage(TriagePreferenceKeys.tomorrowHour) private var tomorrowHour = 9
     @AppStorage(TriagePreferenceKeys.autoDoneHandled) private var autoDoneHandled = true
+    @AppStorage(TriagePreferenceKeys.followUpDays) private var followUpDays = TriagePreferenceKeys.defaultFollowUpDays
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
 
@@ -208,6 +214,16 @@ struct SettingsView: View {
                 Text("Snooze")
             } footer: {
                 Text("Snoozed work returns to its section at this time. Anything new on the item brings it back sooner.")
+            }
+
+            Section {
+                Picker("Suggest a follow-up after", selection: $followUpDays) {
+                    ForEach([1, 2, 3, 5, 7, 14], id: \.self) { Text("\($0) day\($0 == 1 ? "" : "s")").tag($0) }
+                }
+            } header: {
+                Text("Follow-ups")
+            } footer: {
+                Text("Work waiting on others with no movement for this long appears under Follow Up in the Briefing.")
             }
 
             Section {

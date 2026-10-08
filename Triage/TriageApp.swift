@@ -6,10 +6,17 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
     private weak var appModel: TriageAppModel?
     private var terminationTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
+    private var attention: AttentionNotifier?
 
     func install(appModel: TriageAppModel) {
         self.appModel = appModel
         guard wakeObserver == nil else { return }
+        let attention = AttentionNotifier()
+        attention.onOpen = { [weak appModel] id in appModel?.show(itemID: id) }
+        appModel.onPresentationChange = { presentation, organizationID in
+            attention.process(presentation, organizationID: organizationID)
+        }
+        self.attention = attention
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in

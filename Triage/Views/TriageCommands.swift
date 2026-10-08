@@ -36,6 +36,12 @@ struct TriageWorkspaceCommands: Commands {
             Button("Weekly Review") { appModel.destination = .review }
                 .keyboardShortcut("9", modifiers: .command)
             Divider()
+            Button(appModel.focusQueue == nil ? "Focus on This List" : "Exit Focus") {
+                if appModel.focusQueue == nil { appModel.startFocus(appModel.visibleEntries) } else { appModel.focusQueue = nil }
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .disabled(appModel.focusQueue == nil && appModel.visibleEntries.isEmpty)
+            Divider()
             Button("Next Item") { appModel.moveSelection(by: 1) }
                 .keyboardShortcut("]", modifiers: .command)
             Button("Previous Item") { appModel.moveSelection(by: -1) }

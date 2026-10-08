@@ -68,6 +68,7 @@ struct TriageListView: View {
                     search: $search, focusRequest: searchFocusRequest,
                     suggestionSource: presentation.allEntries, actions: actions,
                     onExit: { isListFocused = true },
+                    focusOn: { actions.startFocus(entries) },
                     onSave: {
                         savedSearchName = effectiveSearch.summary
                         isNamingSavedSearch = true
@@ -330,23 +331,24 @@ struct TriageEntryRow: View {
     @ViewBuilder
     private var chips: some View {
         let badges = WorkspaceViewPresentation.badges(for: entry)
-        if let effort = entry.decision?.effort, entry.decision?.nextAction != nil, entry.handledEvidence == nil {
-            Label(effort.title, systemImage: effort.systemImage)
-                .font(.caption)
-                .foregroundStyle(secondary)
-                .help(effort.detail)
-        }
+        let effort = entry.decision?.nextAction != nil && entry.handledEvidence == nil ? entry.decision?.effort : nil
         if entry.handledEvidence != nil {
             Label("Handled by you", systemImage: "checkmark.circle.fill")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(Color.green))
         }
-        if !badges.isEmpty {
+        if !badges.isEmpty || effort != nil {
             HStack(spacing: 10) {
                 ForEach(badges, id: \.self) { badge in
                     Label(badge.title, systemImage: badge.systemImage)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(isSelected ? AnyShapeStyle(Color.white.opacity(0.85)) : Self.style(for: badge))
+                }
+                if let effort {
+                    Label(effort.title, systemImage: effort.systemImage)
+                        .font(.caption)
+                        .foregroundStyle(secondary)
+                        .help(effort.detail)
                 }
             }
             .lineLimit(1)
