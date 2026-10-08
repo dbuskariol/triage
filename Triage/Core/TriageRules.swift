@@ -12,7 +12,7 @@ struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
     /// Bump when the triage prompt changes materially, so existing decisions
     /// are re-analyzed in the background with the improved prompt.
-    static let promptVersion = "prompt-3"
+    static let promptVersion = "prompt-4"
     static let maximumRules = 100
     static let empty = TriageRules(instructions: "", rules: [])
 
@@ -99,7 +99,8 @@ struct TriageRules: Codable, Equatable, Sendable {
             nextAction: decision.nextAction, fingerprint: decision.fingerprint, modelID: decision.modelID,
             decidedAt: decision.decidedAt, rulesDigest: decision.rulesDigest,
             instructionNote: decision.instructionNote,
-            handled: decision.handled, handledEvidence: decision.handledEvidence
+            handled: decision.handled, handledEvidence: decision.handledEvidence,
+            effort: decision.effort
         )
         return result
     }

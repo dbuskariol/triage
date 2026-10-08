@@ -559,7 +559,7 @@ enum CopilotWireSchema {
   private static func validateTriage(_ object: [String: Any]) throws {
     guard let model = object["model_id"] as? String, !model.isEmpty,
       let decisions = object["decisions"] as? [[String: Any]], (1...20).contains(decisions.count) else { throw CopilotXPCError.invalidResponse }
-    let fields: Set<String> = ["id", "disposition", "priority", "confidence", "summary", "reason", "next_action", "instruction_note", "handled", "handled_evidence"]
+    let fields: Set<String> = ["id", "disposition", "priority", "confidence", "summary", "reason", "next_action", "instruction_note", "handled", "handled_evidence", "effort"]
     var ids = Set<String>()
     for decision in decisions {
       guard Set(decision.keys).isSubset(of: fields), let id = decision["id"] as? String, !id.isEmpty, ids.insert(id).inserted,
@@ -574,7 +574,8 @@ enum CopilotWireSchema {
         (decision["instruction_note"] as? String)?.utf8.count ?? 0 <= 200,
         decision["handled"] == nil || decision["handled"] is NSNull || ["yes", "partial", "no"].contains(decision["handled"] as? String ?? ""),
         decision["handled_evidence"] == nil || decision["handled_evidence"] is String || decision["handled_evidence"] is NSNull,
-        (decision["handled_evidence"] as? String)?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse }
+        (decision["handled_evidence"] as? String)?.utf8.count ?? 0 <= 200,
+        decision["effort"] == nil || decision["effort"] is NSNull || ["quick", "short", "deep"].contains(decision["effort"] as? String ?? "") else { throw CopilotXPCError.invalidResponse }
     }
   }
 

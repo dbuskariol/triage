@@ -11,6 +11,8 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func addRule(_ rule: TriageRule) {}
     func beginRule(from entry: TriageEntry, correcting: Bool) {}
     func openRulesSettings() {}
+    func show(_ entry: TriageEntry) {}
+    func saveSearch(named name: String) {}
 }
 
 private enum WorkspacePreviewFixture {
@@ -90,7 +92,7 @@ private enum WorkspacePreviewFixture {
 }
 
 #Preview("Workspace sidebar") {
-    @Previewable @State var section = WorkspacePresentation.Section.inbox
+    @Previewable @State var section = WorkspaceDestination.section(.inbox)
     WorkspaceSidebarView(
         presentation: WorkspacePreviewFixture.presentation,
         selection: $section

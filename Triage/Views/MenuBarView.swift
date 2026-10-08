@@ -24,7 +24,7 @@ struct MenuBarView: View {
             } else {
                 ForEach(inboxEntries) { entry in
                     Button {
-                        appModel.selectedSection = .inbox
+                        appModel.destination = .section(.inbox)
                         appModel.selectedEntryID = entry.id
                         openMainWindow()
                     } label: {

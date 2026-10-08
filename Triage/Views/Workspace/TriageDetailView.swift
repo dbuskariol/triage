@@ -66,6 +66,36 @@ extension TriageDetailView {
                 PullRequestStatusGrid(facts: facts, columns: tileColumns)
             }
             PeopleSection(item: entry.item, isCompact: tileColumns != nil)
+            RelatedSection(related: WorkInsights.relatedEntries(allEntries)[entry.id] ?? [], actions: actions)
+        }
+    }
+}
+
+/// Other work this item references or is referenced by.
+private struct RelatedSection: View {
+    let related: [TriageEntry]
+    let actions: any WorkspaceActions
+
+    var body: some View {
+        if !related.isEmpty {
+            DetailSection("Related") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(related.prefix(8)) { entry in
+                        Button {
+                            actions.show(entry)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(entry.item.title).lineLimit(1)
+                                Text(entry.item.reference).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show \(entry.item.reference)")
+                    }
+                }
+            }
         }
     }
 }
@@ -279,6 +309,14 @@ private struct RecommendationCard: View {
                           value: Double(decision.priority) / 100, tint: tint)
                     Meter(title: "Confidence", label: WorkspaceViewPresentation.confidenceLabel(decision.confidence),
                           value: decision.confidence, tint: .secondary)
+                    if let effort = decision.effort {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Effort").font(.caption).foregroundStyle(.secondary)
+                            Label(effort.title, systemImage: effort.systemImage)
+                                .font(.caption.weight(.medium))
+                                .help(effort.detail)
+                        }
+                    }
                 }
 
                 attribution(decision)

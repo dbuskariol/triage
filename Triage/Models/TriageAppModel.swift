@@ -56,7 +56,11 @@ final class TriageAppModel: ObservableObject {
         didSet { defaults.set(selectedAccountID?.rawValue, forKey: PreferenceKey.selectedAccountID) }
     }
     @Published private(set) var selectedOrganizationID: OrganizationID? {
-        didSet { defaults.set(selectedOrganizationID?.rawValue, forKey: PreferenceKey.selectedOrganizationID) }
+        didSet {
+            defaults.set(selectedOrganizationID?.rawValue, forKey: PreferenceKey.selectedOrganizationID)
+            savedSearches = selectedOrganizationID.map { SavedSearchStore(organizationID: $0).load(defaults: defaults) } ?? []
+            if case .savedSearch = destination { destination = .section(.inbox) }
+        }
     }
     @Published private(set) var connectionError: String?
     @Published private(set) var credentialActionNotice: String?
@@ -76,7 +80,9 @@ final class TriageAppModel: ObservableObject {
     @Published var ruleDraft: RuleDraft?
     /// Local status changes shown immediately, before the store confirms them.
     private var optimisticLocal: [GitHubNodeID: LocalStatus] = [:]
-    @Published var selectedSection: WorkspacePresentation.Section = .inbox
+    @Published var destination = WorkspaceDestination.section(.inbox)
+    /// The selected organization's saved searches, shown in the sidebar.
+    @Published private(set) var savedSearches: [SavedSearch] = []
     @Published var selectedEntryID: GitHubNodeID?
     /// Toolbar search; filters the list in place.
     @Published var search = WorkspaceSearch()
@@ -117,6 +123,7 @@ final class TriageAppModel: ObservableObject {
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID).flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
             .flatMap(OrganizationID.init(rawValue:))
+        savedSearches = selectedOrganizationID.map { SavedSearchStore(organizationID: $0).load(defaults: defaults) } ?? []
     }
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
@@ -667,13 +674,40 @@ extension TriageAppModel {
 // MARK: Selection
 
 extension TriageAppModel {
-    /// The selected section's entries in the user's chosen sort order.
+    /// The list section shown for the current destination (saved searches
+    /// span all work; the Briefing and Review aren't lists).
+    var selectedSection: WorkspacePresentation.Section {
+        if case .section(let section) = destination { section } else { .inbox }
+    }
+
+    var selectedSavedSearch: SavedSearch? {
+        guard case .savedSearch(let id) = destination else { return nil }
+        return savedSearches.first { $0.id == id }
+    }
+
+    /// The search applied to the list: a saved search refined by the field, or the field alone.
+    var effectiveSearch: WorkspaceSearch {
+        selectedSavedSearch.map { $0.search.refined(by: search) } ?? search
+    }
+
+    /// The rows in display order for the current destination, for keyboard navigation.
     var visibleEntries: [TriageEntry] {
+        let viewer = selectedAccount?.login ?? ""
+        switch destination {
+        case .briefing:
+            return WorkspaceBriefing(presentation: presentation, viewer: viewer,
+                                     followUpDays: followUpDays, now: .now).orderedEntries
+        case .review:
+            return WorkspaceReview(presentation: presentation, viewer: viewer, now: .now).orderedEntries
+        case .section, .savedSearch:
+            break
+        }
         let defaults = UserDefaults.standard
         return presentation.visibleEntries(
-            section: selectedSection, search: search, handledFilter: handledFilter,
+            section: selectedSection, search: effectiveSearch, handledFilter: handledFilter,
             sortedBy: defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended,
             ascending: defaults.bool(forKey: TriagePreferenceKeys.sortAscending),
+            grouping: defaults.string(forKey: TriagePreferenceKeys.grouping).flatMap(WorkspaceGrouping.init) ?? .none,
             viewer: selectedAccount?.login ?? ""
         )
     }
@@ -691,6 +725,37 @@ extension TriageAppModel {
             return
         }
         selectedEntryID = order[min(max(index + offset, 0), order.count - 1)]
+    }
+}
+
+// MARK: Saved searches
+
+extension TriageAppModel {
+    /// Saves the current search as a sidebar smart folder and selects it.
+    func saveSearch(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard effectiveSearch.isActive, !trimmed.isEmpty else { return }
+        let saved = SavedSearch(name: trimmed, search: effectiveSearch)
+        updateSavedSearches(savedSearches + [saved])
+        search = WorkspaceSearch()
+        destination = .savedSearch(saved.id)
+    }
+
+    func renameSavedSearch(_ id: SavedSearch.ID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        updateSavedSearches(savedSearches.map { $0.id == id ? SavedSearch(id: id, name: trimmed, search: $0.search) : $0 })
+    }
+
+    func deleteSavedSearch(_ id: SavedSearch.ID) {
+        if destination == .savedSearch(id) { destination = .section(.inbox) }
+        updateSavedSearches(savedSearches.filter { $0.id != id })
+    }
+
+    private func updateSavedSearches(_ searches: [SavedSearch]) {
+        guard let organizationID = selectedOrganizationID else { return }
+        savedSearches = searches
+        SavedSearchStore(organizationID: organizationID).save(searches, defaults: defaults)
     }
 }
 
@@ -748,6 +813,19 @@ extension TriageAppModel: WorkspaceActions {
 
     func openCopilotSettings() {
         openSettings?(.ai)
+    }
+
+    func show(_ entry: TriageEntry) {
+        if !visibleEntries.contains(where: { $0.id == entry.id }) {
+            search = WorkspaceSearch(scope: search.scope)
+            if let section = presentation.section(containing: entry) { destination = .section(section) }
+        }
+        selectedEntryID = entry.id
+    }
+
+    var followUpDays: Int {
+        let days = UserDefaults.standard.integer(forKey: TriagePreferenceKeys.followUpDays)
+        return days > 0 ? days : TriagePreferenceKeys.defaultFollowUpDays
     }
 
     func openRulesSettings() {

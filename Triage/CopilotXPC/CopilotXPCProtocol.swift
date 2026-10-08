@@ -619,7 +619,8 @@ struct CopilotTriageItemDecision: Codable, Equatable, Sendable {
   var instructionNote: String? = nil
   var handled: HandledState? = nil
   var handledEvidence: String? = nil
-  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason, handled; case nextAction = "next_action"; case instructionNote = "instruction_note"; case handledEvidence = "handled_evidence" }
+  var effort: TriageEffort? = nil
+  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason, handled, effort; case nextAction = "next_action"; case instructionNote = "instruction_note"; case handledEvidence = "handled_evidence" }
   func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, instructionNote?.utf8.count ?? 0 <= 200, handledEvidence?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
 }
 

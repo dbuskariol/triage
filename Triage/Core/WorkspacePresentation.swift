@@ -197,4 +197,8 @@ protocol WorkspaceActions: AnyObject {
     /// "Not right?") suggests moving the item somewhere else.
     func beginRule(from entry: TriageEntry, correcting: Bool)
     func openRulesSettings()
+    /// Saves the current search to the sidebar.
+    func saveSearch(named name: String)
+    /// Selects `entry`, switching to the section that contains it.
+    func show(_ entry: TriageEntry)
 }

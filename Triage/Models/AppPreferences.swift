@@ -4,12 +4,22 @@ import ServiceManagement
 enum TriagePreferenceKeys {
     static let showMenuBarExtra = "interface.show-menu-bar-extra"
     static let sortField = "interface.sort-field"
+    static let grouping = "interface.grouping"
     static let refreshIntervalMinutes = "sync.refresh-interval-minutes"
     static let refreshWhenActive = "sync.refresh-when-active"
     static let laterTodayHours = "inbox.later-today-hours"
     static let tomorrowHour = "inbox.tomorrow-hour"
     static let autoDoneHandled = "inbox.auto-done-handled"
     static let sortAscending = "interface.sort-ascending"
+    static let followUpDays = "inbox.follow-up-days"
+    static let defaultFollowUpDays = 3
+    static let showDockBadge = "interface.show-dock-badge"
+    static let notifyNeedsAction = "notifications.needs-action"
+    static let notifyFollowUps = "notifications.follow-ups"
+    static let quietHoursEnabled = "notifications.quiet-hours"
+    static let quietHoursStart = "notifications.quiet-hours-start"
+    static let quietHoursEnd = "notifications.quiet-hours-end"
+    static let writingStyle = "drafts.writing-style"
 }
 
 @MainActor

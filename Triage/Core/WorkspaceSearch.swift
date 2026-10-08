@@ -2,9 +2,9 @@ import Foundation
 
 /// A filter chip in the search field, or a GitHub-style `key:value` qualifier
 /// typed as text. Both match the same way.
-struct SearchToken: Identifiable, Hashable, Sendable {
-    enum Kind: String, CaseIterable, Sendable {
-        case repo, author, label, team, `is`, status, priority
+struct SearchToken: Identifiable, Hashable, Codable, Sendable {
+    enum Kind: String, CaseIterable, Codable, Sendable {
+        case repo, author, label, team, `is`, status, priority, effort
     }
 
     let kind: Kind
@@ -22,6 +22,7 @@ struct SearchToken: Identifiable, Hashable, Sendable {
         case .is: "line.3.horizontal.decrease"
         case .status: "exclamationmark.triangle"
         case .priority: "flag"
+        case .effort: "clock"
         }
     }
 
@@ -38,6 +39,7 @@ struct SearchToken: Identifiable, Hashable, Sendable {
             ("approved", "Approved"), ("changes", "Changes requested"),
         ],
         .priority: [("high", "High priority"), ("medium", "Medium priority"), ("low", "Low priority")],
+        .effort: TriageEffort.allCases.map { ($0.rawValue, "\($0.title) · \($0.detail)") },
     ]
 
     func matches(_ entry: TriageEntry, viewer: String) -> Bool {
@@ -74,19 +76,36 @@ struct SearchToken: Identifiable, Hashable, Sendable {
         case .priority:
             guard let priority = entry.decision?.priority else { return false }
             return PriorityBand(rawValue: value.lowercased()) == PriorityBand(priority)
+        case .effort:
+            return entry.decision?.effort?.rawValue == value.lowercased()
         }
     }
 }
 
 /// The workspace search: free text plus tokens, within one section or all work.
-struct WorkspaceSearch: Equatable, Sendable {
-    enum Scope: Hashable, Sendable { case section, all }
+struct WorkspaceSearch: Equatable, Codable, Sendable {
+    enum Scope: String, Hashable, Codable, Sendable { case section, all }
 
     var text = ""
     var tokens: [SearchToken] = []
     var scope = Scope.section
 
     var isActive: Bool { !text.trimmingCharacters(in: .whitespaces).isEmpty || !tokens.isEmpty }
+
+    /// This search across all work, narrowed by `other` (a saved search
+    /// refined by whatever is typed in the search field).
+    func refined(by other: WorkspaceSearch) -> WorkspaceSearch {
+        WorkspaceSearch(
+            text: [text, other.text].filter { !$0.isEmpty }.joined(separator: " "),
+            tokens: tokens + other.tokens.filter { !tokens.contains($0) },
+            scope: .all
+        )
+    }
+
+    /// A short description for naming a saved search.
+    var summary: String {
+        (tokens.map(\.title) + [text.trimmingCharacters(in: .whitespaces)]).filter { !$0.isEmpty }.joined(separator: " ")
+    }
 
     /// Splits typed text into plain terms and `key:value` qualifiers (quotes
     /// keep phrases together: `"account takeover"`).
@@ -144,7 +163,7 @@ struct WorkspaceSearch: Equatable, Sendable {
             case .author: entries.compactMap(\.item.author)
             case .label: entries.flatMap(\.item.labels)
             case .team: entries.flatMap { ($0.item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") } }
-            case .is, .status, .priority: SearchToken.knownValues[kind]?.map(\.0) ?? []
+            case .is, .status, .priority, .effort: SearchToken.knownValues[kind]?.map(\.0) ?? []
             }
         }
         let kinds = kind.map { [$0] } ?? [.repo, .author, .label, .team, .is, .status]
@@ -209,13 +228,17 @@ extension WorkspacePresentation {
     /// navigation, and "select next after Done" all use this one definition.
     func visibleEntries(
         section: Section, search: WorkspaceSearch, handledFilter: HandledFilter,
-        sortedBy field: WorkspaceSortField, ascending: Bool, viewer: String
+        sortedBy field: WorkspaceSortField, ascending: Bool, grouping: WorkspaceGrouping = .none, viewer: String
     ) -> [TriageEntry] {
+        let rows: [TriageEntry]
         if search.isActive {
-            return searchResults(search, section: section, sortedBy: field, ascending: ascending, viewer: viewer)
+            rows = searchResults(search, section: section, sortedBy: field, ascending: ascending, viewer: viewer)
+        } else {
+            let sorted = entries(in: section, sortedBy: field, ascending: ascending)
+            rows = section == .handled ? sorted.filter(handledFilter.includes) : sorted
         }
-        let sorted = entries(in: section, sortedBy: field, ascending: ascending)
-        return section == .handled ? sorted.filter(handledFilter.includes) : sorted
+        // Grouped lists read top to bottom group by group; navigation follows that order.
+        return grouping == .none ? rows : grouping.groups(rows).flatMap(\.entries)
     }
 
     /// Search results in the user's sort order, from the current section or all work.

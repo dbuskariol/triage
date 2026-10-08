@@ -5,6 +5,7 @@ import SwiftUI
 struct WorkspaceSortMenuContent: View {
     @AppStorage(TriagePreferenceKeys.sortField) private var field = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var ascending = false
+    @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
 
     var body: some View {
         Picker("Sort By", selection: Binding(
@@ -27,6 +28,11 @@ struct WorkspaceSortMenuContent: View {
         }
         .pickerStyle(.inline)
         .disabled(!field.supportsDirection)
+
+        Picker("Group By", selection: $grouping) {
+            ForEach(WorkspaceGrouping.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.menu)
     }
 }
 
