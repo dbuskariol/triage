@@ -2,6 +2,27 @@ import AppKit
 import OSLog
 @preconcurrency import UserNotifications
 
+/// Notification permission, shared by the notifier, Settings, and onboarding.
+enum NotificationPermission {
+    static func status() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
+    /// Shows the system prompt once; later calls return the stored answer.
+    @discardableResult
+    static func request() async -> Bool {
+        (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+    }
+
+    @MainActor
+    static func openSystemSettings() {
+        let id = Bundle.main.bundleIdentifier ?? ""
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
 /// Posts local notifications for work that newly needs you and keeps the
 /// Dock badge in step with the Briefing's "Need Action" count. Nothing leaves
 /// the Mac: notifications are local and contain only titles you can already see.
@@ -106,7 +127,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private func requestAuthorizationIfNeeded() async {
         guard !hasRequestedAuthorization else { return }
         hasRequestedAuthorization = true
-        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        await NotificationPermission.request()
     }
 
     // MARK: UNUserNotificationCenterDelegate

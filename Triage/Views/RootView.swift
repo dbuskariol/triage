@@ -20,7 +20,7 @@ struct RootView: View {
     @EnvironmentObject private var navigation: AppNavigationModel
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("interface.onboarding.completed") private var hasCompletedOnboarding = false
+    @AppStorage(TriagePreferenceKeys.onboardingCompleted) private var hasCompletedOnboarding = false
 
     var body: some View {
         Group {

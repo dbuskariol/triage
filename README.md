@@ -160,10 +160,15 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 
 ## Getting started
 
-1. Download and open Triage (macOS 26 or later).
-2. **Connect GitHub** with your browser, or a personal access token.
-3. Pick an organization. Your work appears within about a minute.
-4. In **Settings ▸ Copilot**, turn on Copilot for the organization and connect. Copilot then prioritizes your work in the background.
+Download and open Triage (macOS 26 or later). The Setup Assistant walks you through everything in about two minutes:
+
+1. **GitHub.** Connect with your browser, or a personal access token.
+2. **Organization.** Choose whose work to show.
+3. **Copilot.** Allow Copilot for the organization, install the verified runtime, and sign in.
+4. **Notifications.** Allow notifications and the Dock badge, and choose what you hear about.
+5. **Your Mac.** Open at login, the menu bar, and how often to check GitHub.
+
+Only GitHub and an organization are required; everything else can be set up later in Settings. Run the assistant again anytime from **Help ▸ Setup Assistant**. When you finish, Triage opens your Briefing.
 
 Requires a GitHub account with GitHub Copilot access for AI prioritization.
 
