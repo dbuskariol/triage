@@ -20,6 +20,7 @@ enum TriagePreferenceKeys {
     static let quietHoursStart = "notifications.quiet-hours-start"
     static let quietHoursEnd = "notifications.quiet-hours-end"
     static let writingStyle = "drafts.writing-style"
+    static let onboardingCompleted = "interface.onboarding.completed"
 }
 
 @MainActor

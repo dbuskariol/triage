@@ -19,6 +19,13 @@ struct TriageWorkspaceCommands: Commands {
             }
         }
 
+        CommandGroup(before: .help) {
+            Button("Setup Assistant…") {
+                UserDefaults.standard.set(false, forKey: TriagePreferenceKeys.onboardingCompleted)
+                appModel.openMainWindow?()
+            }
+        }
+
         CommandGroup(after: .textEditing) {
             Button("Find…") { appModel.searchFocusRequest += 1 }
                 .keyboardShortcut("f", modifiers: .command)

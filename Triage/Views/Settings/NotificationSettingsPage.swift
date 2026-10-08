@@ -56,17 +56,13 @@ struct NotificationSettingsPage: View {
                     Text("Banner style, sounds, and Notification Center grouping are managed by macOS.")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Open System Settings…") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(Bundle.main.bundleIdentifier ?? "")") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
+                    Button("Open System Settings…") { NotificationPermission.openSystemSettings() }
                 }
             }
         }
         .onChange(of: showDockBadge) { appModel.refreshAttention() }
         .task {
-            authorization = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            authorization = await NotificationPermission.status()
         }
     }
 
