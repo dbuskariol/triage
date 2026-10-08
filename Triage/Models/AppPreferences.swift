@@ -123,7 +123,7 @@ enum MarkReadPolicy: String, CaseIterable, Identifiable, Sendable {
 
 /// Snooze times shared by every snooze control, using the user's preferences.
 enum SnoozeOption: CaseIterable, Identifiable {
-    case laterToday, tomorrow, nextWeek, inSevenDays
+    case laterToday, tomorrow, inThreeDays, nextWeek, inSevenDays
 
     var id: Self { self }
 
@@ -131,6 +131,7 @@ enum SnoozeOption: CaseIterable, Identifiable {
         switch self {
         case .laterToday: "Later Today"
         case .tomorrow: "Tomorrow"
+        case .inThreeDays: "In 3 Days"
         case .nextWeek: "Next Week"
         case .inSevenDays: "In 7 Days"
         }
@@ -143,6 +144,8 @@ enum SnoozeOption: CaseIterable, Identifiable {
             return now.addingTimeInterval(TimeInterval(max(1, hours) * 3_600))
         case .tomorrow:
             return Self.morning(daysFromNow: 1, from: now, defaults: defaults, calendar: calendar)
+        case .inThreeDays:
+            return Self.morning(daysFromNow: 3, from: now, defaults: defaults, calendar: calendar)
         case .nextWeek:
             return Self.nextMonday(
                 from: now,
@@ -159,7 +162,7 @@ enum SnoozeOption: CaseIterable, Identifiable {
         date(from: now).formatted(.dateTime.weekday(.wide).hour().minute())
     }
 
-    /// Shared by Tomorrow, Next Week, and In 7 Days. Settings stores this as `tomorrowHour`.
+    /// Shared by Tomorrow, In 3 Days, Next Week, and In 7 Days. Settings stores this as `tomorrowHour`.
     nonisolated static func preferredMorningHour(_ defaults: UserDefaults) -> Int {
         let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
         return min(23, max(0, hour))
