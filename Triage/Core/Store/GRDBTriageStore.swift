@@ -358,22 +358,32 @@ actor GRDBTriageStore: TriageStore {
     }
 
     func markHandled(
-        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+        _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool {
         try await validate(scope)
-        let status = try encoder.encode(LocalStatus.done(fingerprint: fingerprint, at: date, handledEvidence: evidence))
+        let status = try encoder.encode(LocalStatus.done(fingerprint: item.fingerprint, at: date, handledEvidence: evidence))
         let at = milliseconds(date)
+        let decoder = self.decoder
         return try await vault.writeTransaction { database in
-            // Never override a status the user set (done, snoozed) themselves.
+            let arguments: StatementArguments = [scope.accountID.rawValue, scope.organizationID.rawValue, item.id.rawValue]
+            // Never override a status the user set while it still applies.
+            if let existing = try Data.fetchOne(
+                database,
+                sql: "SELECT status_json FROM triage_local_status WHERE account_id = ? AND organization_id = ? AND node_id = ?",
+                arguments: arguments
+            ), try decoder.decode(LocalStatus.self, from: existing).hides(item, at: date, viewer: viewer) {
+                return false
+            }
             try database.execute(
                 sql: """
                     INSERT INTO triage_local_status (account_id, organization_id, node_id, status_json, updated_at_ms)
                     VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, organization_id, node_id) DO NOTHING
+                    ON CONFLICT(account_id, organization_id, node_id) DO UPDATE SET
+                        status_json = excluded.status_json, updated_at_ms = excluded.updated_at_ms
                     """,
-                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, itemID.rawValue, status, at]
+                arguments: arguments + [status, at]
             )
-            return database.changesCount > 0
+            return true
         }
     }
 

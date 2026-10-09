@@ -328,10 +328,10 @@ actor MemoryStore: TriageStore {
         decisions.filter { ids.contains($0.key) }
     }
     func markHandled(
-        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+        _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool {
-        guard local[itemID] == nil else { return false }
-        local[itemID] = .done(fingerprint: fingerprint, at: date, handledEvidence: evidence)
+        if let existing = local[item.id], existing.hides(item, at: date, viewer: viewer) { return false }
+        local[item.id] = .done(fingerprint: item.fingerprint, at: date, handledEvidence: evidence)
         return true
     }
     func localStatus(_ id: String) -> LocalStatus? { local[GitHubNodeID(rawValue: id)!] }

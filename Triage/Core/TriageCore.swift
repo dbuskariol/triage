@@ -356,6 +356,20 @@ enum LocalStatus: Codable, Equatable, Sendable {
     case done(fingerprint: String, at: Date? = nil, handledEvidence: String? = nil)
     /// Hidden until the date passes.
     case snoozed(until: Date)
+
+    /// Whether this status still sets `item` aside. Done work stays hidden
+    /// until someone *other than* `viewer` acts on it, so your own follow-up
+    /// never brings it back; snoozed work until the date passes. A status that
+    /// no longer hides its item has expired: the item is active again.
+    func hides(_ item: PersonalWorkItem, at date: Date, viewer: String) -> Bool {
+        switch self {
+        case .active: false
+        case .done(let fingerprint, let doneAt, _):
+            if let doneAt { (item.latestActivity(excluding: viewer) ?? .distantPast) <= doneAt }
+            else { fingerprint == item.fingerprint }
+        case .snoozed(let until): until > date
+        }
+    }
 }
 
 enum AnalysisState: Equatable, Sendable {
@@ -385,16 +399,8 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
 
     var id: GitHubNodeID { item.id }
 
-    /// Done work stays hidden until someone *other than* `viewer` acts on it,
-    /// so your own follow-up never brings it back.
     func isVisible(at date: Date, viewer: String = "") -> Bool {
-        switch local {
-        case .active: true
-        case .done(let fingerprint, let doneAt, _):
-            if let doneAt { (item.latestActivity(excluding: viewer) ?? .distantPast) > doneAt }
-            else { fingerprint != item.fingerprint }
-        case .snoozed(let until): until <= date
-        }
+        !local.hides(item, at: date, viewer: viewer)
     }
 
     /// Unread until viewed, and again when someone *other than* `viewer`
@@ -480,10 +486,11 @@ protocol TriageStore: Sendable {
     func rules(scope: WorkspaceScope) async throws -> TriageRules
     /// Current decisions for `ids` (any fingerprint).
     func decisions(for ids: [GitHubNodeID], scope: WorkspaceScope) async throws -> [GitHubNodeID: TriageDecision]
-    /// Marks an active item done because the viewer handled it. Returns false
-    /// (and changes nothing) if the user already set a local status.
+    /// Marks `item` done because `viewer` handled it. Returns false (and
+    /// changes nothing) while a status the user set still hides the item; an
+    /// expired status (done work that came back, an elapsed snooze) is replaced.
     func markHandled(
-        itemID: GitHubNodeID, fingerprint: String, evidence: String, at date: Date, scope: WorkspaceScope
+        _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws
 }

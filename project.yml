@@ -58,11 +58,11 @@ targets:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: Triage/Triage.entitlements
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Configuration/Triage-Info.plist
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-        MARKETING_VERSION: 0.1.0
+        MARKETING_VERSION: 0.1.1
         PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac
         PRODUCT_NAME: Triage
         SKIP_INSTALL: NO
@@ -82,11 +82,11 @@ targets:
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: TriageCopilotXPC/TriageCopilotXPC.entitlements
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Configuration/TriageCopilotXPC-Info.plist
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @loader_path/../Frameworks"
-        MARKETING_VERSION: 0.1.0
+        MARKETING_VERSION: 0.1.1
         PRODUCT_BUNDLE_IDENTIFIER: com.triage.mac.TriageCopilotXPC
         PRODUCT_NAME: TriageCopilotXPC
         SKIP_INSTALL: YES

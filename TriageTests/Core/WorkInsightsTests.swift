@@ -253,4 +253,30 @@ struct WorkInsightsTests {
         changes.dropConfirmed(by: [work])
         #expect(changes.isEmpty)
     }
+
+    // MARK: Expired statuses
+
+    @Test func doneWorkThatCameBackIsActiveWithoutItsHandledLabel() {
+        let handledAt = now.addingTimeInterval(-3_600)
+        let answered = entry("A", comments: [ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-60), excerpt: "Thanks, one more thing")],
+                             disposition: .act, local: .done(fingerprint: "f", at: handledAt, handledEvidence: "You replied"))
+        let stillDone = entry("B", comments: [ActivityFact(author: "me", createdAt: now.addingTimeInterval(-60), excerpt: "Also done")],
+                              disposition: .act, local: .done(fingerprint: "f", at: handledAt, handledEvidence: "You replied"))
+        let presentation = WorkspacePresentation(entries: [answered, stillDone], status: .initial, now: now, viewer: "me")
+        let inbox = presentation.entries(in: .inbox)
+        #expect(inbox.map(\.id.rawValue) == ["A"])
+        #expect(inbox.first?.handledEvidence == nil)
+        #expect(inbox.first?.local == .active)
+        #expect(presentation.entries(in: .done).first?.handledEvidence == "You replied")
+    }
+
+    @Test func statusesHideOnlyWhileTheyApply() {
+        let item = entry("A", comments: [ActivityFact(author: "bob", createdAt: now, excerpt: "?")]).item
+        #expect(LocalStatus.done(fingerprint: "f", at: now.addingTimeInterval(60)).hides(item, at: now, viewer: "me"))
+        #expect(!LocalStatus.done(fingerprint: "f", at: now.addingTimeInterval(-60)).hides(item, at: now, viewer: "me"))
+        #expect(LocalStatus.done(fingerprint: "f", at: now.addingTimeInterval(-60)).hides(item, at: now, viewer: "bob"))
+        #expect(LocalStatus.snoozed(until: now.addingTimeInterval(1)).hides(item, at: now, viewer: "me"))
+        #expect(!LocalStatus.snoozed(until: now).hides(item, at: now, viewer: "me"))
+        #expect(!LocalStatus.active.hides(item, at: now, viewer: "me"))
+    }
 }
