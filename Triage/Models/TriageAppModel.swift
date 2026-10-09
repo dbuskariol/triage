@@ -95,6 +95,8 @@ final class TriageAppModel: ObservableObject {
     private var isTraversingHistory = false
     /// The item whose reply is being drafted, if the drafter is open.
     @Published var draftEntry: TriageEntry?
+    /// A notification target waiting for its work to load.
+    private var pendingTarget: AttentionTarget?
     /// Items being worked through in Focus, if Focus is on.
     @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
@@ -358,6 +360,7 @@ final class TriageAppModel: ObservableObject {
         guard next != presentation else { return }
         presentation = next
         onPresentationChange?(next, runtime?.scope.organizationID)
+        resolvePendingTarget()
         let existing = Set(entries.map(\.id))
         if !selection.isSubset(of: existing) { selection.formIntersection(existing) }
     }
@@ -909,10 +912,32 @@ extension TriageAppModel: WorkspaceActions {
         onPresentationChange?(presentation, runtime?.scope.organizationID)
     }
 
-    /// Shows an item by ID, e.g. from a notification.
-    func show(itemID: GitHubNodeID) {
+    /// Opens what a notification points to. Switches to its organization if
+    /// needed; if its work hasn't loaded yet (Triage was just launched, or is
+    /// switching organizations), opens it as soon as it arrives.
+    func open(_ target: AttentionTarget) {
         openMainWindow?()
-        if let entry = presentation.allEntries.first(where: { $0.id == itemID }) { show(entry) }
+        if target.organizationID != selectedOrganizationID { selectOrganization(target.organizationID) }
+        pendingTarget = target
+        resolvePendingTarget()
+    }
+
+    private func resolvePendingTarget() {
+        guard let target = pendingTarget, target.organizationID == runtime?.scope.organizationID else { return }
+        switch target.kind {
+        case .item(let id):
+            if let entry = presentation.allEntries.first(where: { $0.id == id }) {
+                show(entry)
+            } else if presentation.allEntries.isEmpty {
+                return // Still loading; try again when work arrives.
+            }
+            // Loaded without it: the item is no longer tracked, so just open Triage.
+        case .needsAction:
+            open(.section(.inbox), search: WorkspaceSearch(tokens: [SearchToken(kind: .is, value: "action")]))
+        case .followUps:
+            destination = .briefing
+        }
+        pendingTarget = nil
     }
 
     func openRulesSettings() {

@@ -6,17 +6,34 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
     private weak var appModel: TriageAppModel?
     private var terminationTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
+    /// Created before launch finishes so it is the notification delegate in
+    /// time to receive the click that launched Triage.
     private var attention: AttentionNotifier?
+    /// A notification click received before the workspace was installed.
+    private var pendingTarget: AttentionTarget?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !TriageApp.isRunningTests else { return }
+        let attention = AttentionNotifier()
+        attention.onOpen = { [weak self] target in
+            guard let self else { return }
+            if let appModel { appModel.open(target) } else { pendingTarget = target }
+        }
+        self.attention = attention
+    }
 
     func install(appModel: TriageAppModel) {
         self.appModel = appModel
         guard wakeObserver == nil else { return }
-        let attention = AttentionNotifier()
-        attention.onOpen = { [weak appModel] id in appModel?.show(itemID: id) }
-        appModel.onPresentationChange = { presentation, organizationID in
-            attention.process(presentation, organizationID: organizationID)
+        if let attention {
+            appModel.onPresentationChange = { presentation, organizationID in
+                attention.process(presentation, organizationID: organizationID)
+            }
         }
-        self.attention = attention
+        if let pendingTarget {
+            appModel.open(pendingTarget)
+            self.pendingTarget = nil
+        }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -127,7 +144,7 @@ struct TriageApp: App {
     }
 
     /// The XCTest host launches the app; it must not touch Keychain or GitHub.
-    private static var isRunningTests: Bool {
+    static var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 }

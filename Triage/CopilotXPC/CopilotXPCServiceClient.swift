@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// XPC caller for the fixed, app-embedded service. It accepts only complete
 /// frames and has no path, command, or environment configuration surface.
@@ -76,12 +77,17 @@ actor CopilotXPCServiceClient: CopilotXPCFrameService {
   /// callers need to present or fence have a public identity; everything else
   /// is helper-unavailable. Never forward an NSError description from the
   /// privileged service.
+  private nonisolated static let logger = Logger(subsystem: "com.triage.mac", category: "Copilot")
+
   nonisolated static func mapServiceError(_ error: Error) -> CopilotXPCError {
     let error = error as NSError
+    // The domain and code are stable and path-free, so they are safe to log.
+    logger.error("service error domain=\(error.domain, privacy: .public) code=\(error.code, privacy: .public)")
     guard error.domain == "com.triage.mac.copilot-xpc" else {
       return .helperUnavailable
     }
     switch error.code {
+    case 1: return .callerRejected
     case 2: return .malformedFrame
     case 10: return .operationCancelled
     case 11: return .operationTimedOut

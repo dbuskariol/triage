@@ -1,10 +1,13 @@
 import Foundation
+import OSLog
 
 final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked Sendable {
   private static let queue = DispatchQueue(
     label: "com.triage.mac.copilot-xpc",
     qos: .userInitiated
   )
+  /// Failures are logged by stable code only; never paths, frames, or secrets.
+  private static let logger = Logger(subsystem: "com.triage.mac", category: "CopilotXPC")
   private let callerValidator: () throws -> Void
   private let helperProcess: any CopilotHelperProcessing
 
@@ -30,9 +33,11 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked S
     do {
       try callerValidator()
     } catch let error as CopilotXPCServiceError {
+      Self.logger.error("caller rejected error=\(String(describing: error), privacy: .public)")
       reply(nil, error.nsError)
       return
     } catch {
+      Self.logger.error("caller rejected error=callerNotAuthorized")
       reply(nil, CopilotXPCServiceError.callerNotAuthorized.nsError)
       return
     }
@@ -57,8 +62,10 @@ final class TriageCopilotXPCService: NSObject, TriageCopilotHelper, @unchecked S
           }
         }
       } catch let error as CopilotXPCServiceError {
+        Self.logger.error("exchange failed error=\(String(describing: error), privacy: .public)")
         reply(nil, error.nsError)
       } catch {
+        Self.logger.error("exchange failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
         reply(nil, CopilotXPCServiceError.helperUnavailable.nsError)
       }
     }

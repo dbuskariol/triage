@@ -279,4 +279,16 @@ struct WorkInsightsTests {
         #expect(!LocalStatus.snoozed(until: now).hides(item, at: now, viewer: "me"))
         #expect(!LocalStatus.active.hides(item, at: now, viewer: "me"))
     }
+
+    // MARK: Notification targets
+
+    @Test func notificationTargetsRoundTripThroughUserInfo() throws {
+        let organization = try #require(OrganizationID(rawValue: "O_1"))
+        let item = try #require(GitHubNodeID(rawValue: "I_1"))
+        for kind in [AttentionTarget.Kind.item(item), .needsAction, .followUps] {
+            let target = AttentionTarget(kind, organizationID: organization)
+            #expect(AttentionTarget(userInfo: target.userInfo) == target)
+        }
+        #expect(AttentionTarget(userInfo: ["itemID": "I_1"]) == nil)
+    }
 }

@@ -67,6 +67,53 @@ enum LaunchDestination: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Where a notification click leads, in the organization it was posted for.
+struct AttentionTarget: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case item(GitHubNodeID)
+        /// The work that needs your action (summary and follow-up notifications).
+        case needsAction
+        case followUps
+    }
+
+    let kind: Kind
+    let organizationID: OrganizationID
+
+    private enum Key {
+        static let kind = "kind"
+        static let item = "itemID"
+        static let organization = "organizationID"
+    }
+
+    /// The notification's `userInfo`: plain strings only.
+    var userInfo: [String: String] {
+        var info = [Key.organization: organizationID.rawValue]
+        switch kind {
+        case .item(let id): info[Key.kind] = "item"; info[Key.item] = id.rawValue
+        case .needsAction: info[Key.kind] = "needsAction"
+        case .followUps: info[Key.kind] = "followUps"
+        }
+        return info
+    }
+
+    init(_ kind: Kind, organizationID: OrganizationID) {
+        self.kind = kind
+        self.organizationID = organizationID
+    }
+
+    init?(userInfo: [AnyHashable: Any]) {
+        guard let organization = (userInfo[Key.organization] as? String).flatMap(OrganizationID.init(rawValue:)) else { return nil }
+        switch userInfo[Key.kind] as? String {
+        case "item":
+            guard let id = (userInfo[Key.item] as? String).flatMap(GitHubNodeID.init(rawValue:)) else { return nil }
+            self.init(.item(id), organizationID: organization)
+        case "needsAction": self.init(.needsAction, organizationID: organization)
+        case "followUps": self.init(.followUps, organizationID: organization)
+        default: return nil
+        }
+    }
+}
+
 /// A place in Back/Forward history.
 struct NavigationPoint: Equatable, Sendable {
     let destination: WorkspaceDestination

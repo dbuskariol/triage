@@ -7,7 +7,18 @@ import OSLog
 protocol TriageAvailabilityError: Error {
     /// `true` when Copilot cannot be used at all (consent, sign-in, runtime).
     var pausesAnalysis: Bool { get }
+    /// `true` when only reopening Triage can fix it.
+    var requiresRelaunch: Bool { get }
     var userMessage: String { get }
+}
+
+extension TriageAvailabilityError {
+    var requiresRelaunch: Bool { false }
+
+    /// How the problem is shown.
+    var problem: TriageStatus.Problem {
+        requiresRelaunch ? .relaunchRequired(userMessage) : .copilotUnavailable(userMessage)
+    }
 }
 
 /// Runs the whole AI-first loop for one workspace:
@@ -273,16 +284,16 @@ actor TriageEngine {
                                     scheduleRetry()
                                 }
                             }
-                            if case .copilotUnavailable = status.problem { status.problem = nil }
+                            if status.problem?.blocksAnalysis == true { status.problem = nil }
                         } catch {
                             Self.logger.error("decision-save outcome=failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
                         }
                         Self.logger.notice("batch outcome=decided items=\(decisions.count, privacy: .public) duration=\(String(describing: duration), privacy: .public)")
-                    case .unavailable(let message):
+                    case .unavailable(let problem):
                         // Copilot itself is unusable: stop submitting, keep items
                         // pending, and check again shortly rather than waiting
                         // for the next refresh.
-                        status.problem = .copilotUnavailable(message)
+                        status.problem = problem
                         scheduleRetry()
                         group.cancelAll()
                         rounds = []
@@ -309,7 +320,7 @@ actor TriageEngine {
                     }
                     status.phase = .analyzing(completed: min(completed, pending.count), total: pending.count)
                     publish()
-                    if case .copilotUnavailable = status.problem {} else { _ = submit() }
+                    if status.problem?.blocksAnalysis != true { _ = submit() }
                 }
             }
             if !skipped.isEmpty { rounds += batches(of: skipped) }
@@ -367,7 +378,7 @@ actor TriageEngine {
     private enum BatchOutcome: Sendable {
         case decided([PersonalWorkItem], [TriageDecision], Duration)
         case failed([PersonalWorkItem], String)
-        case unavailable(String)
+        case unavailable(TriageStatus.Problem)
         case cancelled
     }
 
@@ -382,7 +393,7 @@ actor TriageEngine {
         } catch is CancellationError {
             return .cancelled
         } catch let error as any TriageAvailabilityError where error.pausesAnalysis {
-            return .unavailable(error.userMessage)
+            return .unavailable(error.problem)
         } catch {
             return .failed(batch, message(for: error))
         }

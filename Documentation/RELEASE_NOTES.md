@@ -5,6 +5,8 @@
 - **Full comments in Recent activity.** Long comments are no longer cut off; they fold behind Show More, like the description.
 - **Scroll bar setting.** Settings ▸ General ▸ Show scroll bars: use the system setting, show them only when scrolling, or always. Applies the next time Triage opens.
 - **Copilot reconnects on its own** after an app update or a restart of its helper, instead of pausing analysis.
+- **Notifications open their work.** Clicking a notification opens the item, even when the click launches Triage or arrives before your work has loaded. Summary notifications open the work that needs your action; follow-up reminders open the Briefing.
+- **Clear message when Triage is replaced while open.** If Triage is updated or reinstalled while it is running, Copilot asks you to reopen Triage, with a Quit button, instead of reporting that the Copilot runtime is unavailable.
 
 ## Triage 0.1.0
 

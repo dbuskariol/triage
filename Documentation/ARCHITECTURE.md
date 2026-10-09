@@ -68,7 +68,7 @@ Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so
 
 ## Notifications
 
-`AttentionTracker` (pure, persisted per organization) decides what is news: the first update only takes a baseline, an item is announced once when it first needs action, and again only if it leaves and returns. More than three at once become one summary. Follow-up reminders are at most daily, and quiet hours suppress delivery. `AttentionNotifier` posts local notifications and sets the Dock badge to the number of items needing action.
+`AttentionTracker` (pure, persisted per organization) decides what is news: the first update only takes a baseline, an item is announced once when it first needs action, and again only if it leaves and returns. More than three at once become one summary. Follow-up reminders are at most daily, and quiet hours suppress delivery. `AttentionNotifier` posts local notifications and sets the Dock badge to the number of items needing action. Each notification carries an `AttentionTarget` (an item, the needs-action list, or the follow-up Briefing, plus its organization). The notifier is the notification center delegate from `applicationWillFinishLaunching`, so clicks that launch Triage are buffered; `TriageAppModel.open(_:)` switches organization and holds the target until the presentation that contains it is published.
 
 ## Done, snooze, and handled detection
 
@@ -103,6 +103,8 @@ Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers a
 
 `TriageCopilotXPC` launches the signed Rust `TriageCopilotHelper` with a verified, pinned Copilot runtime. The helper supports only `health`, `authenticate`, `models`, `triage`, `draft`, `cancel`, and `shutdown`. Triage and drafts share one session runner in the helper. In the app, `CopilotHelperSession` owns one authenticated connection; the triage decider and the draft writer each have their own, so a draft never waits behind a triage batch. It runs Copilot with all tools denied and no file, MCP, or extra network access. One authenticated session per account and organization is reused across batches and recreated if it expires. The Copilot sign-in is separate from the GitHub connection and stored in an account-private profile.
 
+**Caller validation.** The XPC service accepts only a caller whose running code matches the signed Triage bundle on disk. If Triage was replaced while running, the service rejects it (`callerRejected`), the service and client log the stable error code under category `CopilotXPC`, and the app shows a relaunch-required problem with a Quit button instead of retrying.
+
 **Versions.** The helper uses the Rust `github-copilot-sdk` (pinned exactly, `runtime` feature only) and a pinned Copilot CLI release whose archive and executable SHA-256 digests are checked by both the app and the XPC service, along with GitHub's Developer ID signature. Updating the CLI means updating the version and all four digests in `CopilotRuntimeAcquisition.swift` and `CopilotHelperProcess.swift`, verified against the release's `SHA256SUMS.txt`. When an app update changes the pin, a previously installed runtime is upgraded automatically and superseded versions are deleted.
 
 **Model options.** Each organization stores a model, reasoning effort, and context tier for prioritizing, and optionally a separate set for Draft Reply (otherwise drafts use the prioritizing choice). Settings offers only the efforts and tiers the selected model reports through the SDK, and the helper applies them to each session.
@@ -115,7 +117,7 @@ Each GitHub account has its own SQLCipher database under `~/Library/Application 
 
 ## Observability
 
-All logging uses `os.Logger` with subsystem `com.triage.mac` and categories `App`, `Engine`, `Discovery`, `Copilot`, `Store`, `API`, and `GitHub`. Item content is never logged.
+All logging uses `os.Logger` with subsystem `com.triage.mac` and categories `App`, `Engine`, `Discovery`, `Copilot`, `Store`, `API`, `GitHub`, and `CopilotXPC`. Item content is never logged.
 
 ```sh
 log stream --predicate 'subsystem == "com.triage.mac" AND category != "API"'
