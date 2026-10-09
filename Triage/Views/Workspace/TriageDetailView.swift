@@ -695,41 +695,56 @@ private struct PersonChip: View {
 
 private struct DescriptionSection: View {
     let text: String
-    @State private var isExpanded = false
-    @State private var contentHeight: CGFloat = 0
-    private let collapsedHeight: CGFloat = 240
 
     var body: some View {
         if !text.isEmpty {
             DetailSection("Description") {
-                VStack(alignment: .leading, spacing: 8) {
-                    MarkdownText(source: text)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
-                        .frame(maxHeight: isCollapsible && !isExpanded ? collapsedHeight : nil, alignment: .top)
-                        .clipped()
-                        .mask {
-                            if isCollapsible && !isExpanded {
-                                LinearGradient(stops: [.init(color: .black, location: 0.75), .init(color: .clear, location: 1)],
-                                               startPoint: .top, endPoint: .bottom)
-                            } else {
-                                Rectangle()
-                            }
-                        }
-                    if isCollapsible {
-                        Button(isExpanded ? "Show Less" : "Show More") {
-                            withAnimation(.snappy) { isExpanded.toggle() }
-                        }
-                        .buttonStyle(.link)
+                CollapsibleMarkdown(text: text, collapsedHeight: 240)
+                    .padding(14)
+                    .background(.quinary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+}
+
+/// Markdown that folds long text behind Show More, so long descriptions and
+/// comments stay readable without being cut off.
+private struct CollapsibleMarkdown: View {
+    let text: String
+    let collapsedHeight: CGFloat
+    /// The text's style; Show More keeps the link style.
+    var textStyle: AnyShapeStyle = AnyShapeStyle(.primary)
+    @State private var isExpanded = false
+    @State private var contentHeight: CGFloat = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            MarkdownText(source: text)
+                .foregroundStyle(textStyle)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+                .frame(maxHeight: isCollapsed ? collapsedHeight : nil, alignment: .top)
+                .clipped()
+                .mask {
+                    if isCollapsed {
+                        LinearGradient(stops: [.init(color: .black, location: 0.75), .init(color: .clear, location: 1)],
+                                       startPoint: .top, endPoint: .bottom)
+                    } else {
+                        Rectangle()
                     }
                 }
-                .padding(14)
-                .background(.quinary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            if isCollapsible {
+                Button(isExpanded ? "Show Less" : "Show More") {
+                    withAnimation(.snappy) { isExpanded.toggle() }
+                }
+                .buttonStyle(.link)
             }
         }
     }
 
+    /// Only fold when it saves meaningful space.
     private var isCollapsible: Bool { contentHeight > collapsedHeight + 40 }
+    private var isCollapsed: Bool { isCollapsible && !isExpanded }
 }
 
 private struct ActivitySection: View {
@@ -755,9 +770,8 @@ private struct ActivitySection: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                                MarkdownText(source: fact.excerpt)
+                                CollapsibleMarkdown(text: fact.excerpt, collapsedHeight: 120, textStyle: AnyShapeStyle(.secondary))
                                     .font(.callout)
-                                    .foregroundStyle(.secondary)
                             }
                             .padding(.bottom, 16)
                         }

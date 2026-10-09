@@ -306,7 +306,7 @@ private actor Collector {
         let body = PersonalWorkItem.cleanedMarkdown(node.body, maximumBytes: PersonalWorkItem.maximumBodyLength)
         let activity = node.comments.nodes.compactMap { $0 }.sorted { $0.createdAt < $1.createdAt }.map {
             ActivityFact(author: $0.author?.login ?? "ghost", createdAt: $0.createdAt,
-                         excerpt: PersonalWorkItem.cleanedMarkdown($0.body, maximumBytes: PersonalWorkItem.maximumExcerptLength))
+                         excerpt: PersonalWorkItem.cleanedMarkdown($0.body, maximumBytes: PersonalWorkItem.maximumBodyLength))
         }
         let headCommit = node.commits?.nodes.compactMap(\.self).last?.commit
         let pullRequest = kind == .pullRequest ? PullRequestFacts(

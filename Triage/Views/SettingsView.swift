@@ -93,7 +93,7 @@ struct SettingsView: View {
 
     private static func idealHeight(_ category: SettingsCategory) -> CGFloat {
         switch category {
-        case .general: 820
+        case .general: 900
         case .inbox: 800
         case .notifications: 560
         case .accounts: 640
@@ -121,6 +121,19 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("Startup")
+            }
+
+            Section {
+                Picker("Show scroll bars", selection: Binding(
+                    get: { scrollBars },
+                    set: { scrollBars = $0; $0.apply() }
+                )) {
+                    ForEach(ScrollBarVisibility.allCases) { Text($0.title).tag($0) }
+                }
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("Use System Setting follows System Settings ▸ Appearance, which shows scroll bars all the time when a mouse is connected. Choose When Scrolling to keep them hidden until you scroll.")
             }
 
             Section {
@@ -176,6 +189,7 @@ struct SettingsView: View {
     }
 
     @AppStorage(TriagePreferenceKeys.launchDestination) private var launchDestination = LaunchDestination.inbox
+    @State private var scrollBars = ScrollBarVisibility.current()
 
     // MARK: Inbox
 

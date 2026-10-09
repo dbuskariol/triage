@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import ServiceManagement
 
 enum TriagePreferenceKeys {
@@ -90,6 +90,51 @@ extension AppPreferences {
         case 60: "Every hour"
         default: "Every \(minutes) minutes"
         }
+    }
+}
+
+/// When scroll bars appear, overriding System Settings ▸ Appearance for
+/// Triage only. Stored under AppKit's own `AppleShowScrollBars` key in
+/// Triage's defaults, which takes precedence over the global value, so every
+/// scroll view in the app follows it natively.
+enum ScrollBarVisibility: String, CaseIterable, Identifiable, Sendable {
+    case system, whenScrolling, always
+
+    static let key = "AppleShowScrollBars"
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .system: "Use System Setting"
+        case .whenScrolling: "When Scrolling"
+        case .always: "Always"
+        }
+    }
+
+    /// AppKit's value; `nil` removes the override.
+    private var appKitValue: String? {
+        switch self {
+        case .system: nil
+        case .whenScrolling: "WhenScrolling"
+        case .always: "Always"
+        }
+    }
+
+    static func current(_ defaults: UserDefaults = .standard) -> Self {
+        // Read Triage's own domain only, not the global fallback.
+        switch defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] as? String {
+        case "WhenScrolling": .whenScrolling
+        case "Always": .always
+        default: .system
+        }
+    }
+
+    /// Saves the choice and tells every scroll view to restyle now.
+    @MainActor
+    func apply(_ defaults: UserDefaults = .standard) {
+        defaults.set(appKitValue, forKey: Self.key)
+        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
     }
 }
 

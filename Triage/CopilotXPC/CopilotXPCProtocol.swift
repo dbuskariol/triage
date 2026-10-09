@@ -589,6 +589,8 @@ struct CopilotTriageActivity: Codable, Equatable, Sendable {
   let createdAt: Date
   let excerpt: String
   enum CodingKeys: String, CodingKey { case author; case createdAt = "created_at"; case excerpt }
+  /// Copilot sees the start of each comment, keeping prompts and batches small.
+  static let maximumExcerptBytes = 600
 }
 
 struct CopilotTriageItem: Codable, Equatable, Sendable {
@@ -615,7 +617,7 @@ struct CopilotTriageItem: Codable, Equatable, Sendable {
   enum CodingKeys: String, CodingKey { case id, kind, repository, number, title, state, author, relationships, labels, assignees, body; case updatedAt = "updated_at"; case pullRequest = "pull_request"; case recentActivity = "recent_activity"; case ruleHints = "rule_hints"; case previousNextAction = "previous_next_action"; case viewerActivity = "viewer_activity" }
   func validate() throws {
     guard !id.isEmpty, !kind.isEmpty, !repository.isEmpty, number > 0, !title.isEmpty, !state.isEmpty, body.utf8.count <= 4_000,
-      Set(relationships).count == relationships.count, relationships.allSatisfy({ !$0.isEmpty }), labels.allSatisfy({ !$0.isEmpty }), assignees.allSatisfy({ !$0.isEmpty }), recentActivity.allSatisfy({ !$0.author.isEmpty && $0.excerpt.utf8.count <= 600 }), (ruleHints ?? []).count <= 10, (ruleHints ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }), (previousNextAction?.utf8.count ?? 0) <= 200, (viewerActivity ?? []).count <= 10, (viewerActivity ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }) else { throw CopilotXPCError.invalidResponse }
+      Set(relationships).count == relationships.count, relationships.allSatisfy({ !$0.isEmpty }), labels.allSatisfy({ !$0.isEmpty }), assignees.allSatisfy({ !$0.isEmpty }), recentActivity.allSatisfy({ !$0.author.isEmpty && $0.excerpt.utf8.count <= CopilotTriageActivity.maximumExcerptBytes }), (ruleHints ?? []).count <= 10, (ruleHints ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }), (previousNextAction?.utf8.count ?? 0) <= 200, (viewerActivity ?? []).count <= 10, (viewerActivity ?? []).allSatisfy({ !$0.isEmpty && $0.utf8.count <= 200 }) else { throw CopilotXPCError.invalidResponse }
   }
 }
 
