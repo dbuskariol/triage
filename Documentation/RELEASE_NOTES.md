@@ -3,7 +3,7 @@
 - **The list column keeps its width.** Opening an item no longer resizes the list, and the width you set is remembered across sections and launches.
 - **Handled work that comes back is shown correctly.** When someone responds to work Triage marked handled, it returns to your Inbox without the old "Handled by You" label, and Triage can mark it handled again when you reply.
 - **Full comments in Recent activity.** Long comments are no longer cut off; they fold behind Show More, like the description.
-- **Scroll bar setting.** Settings ▸ General ▸ Show scroll bars: use the system setting, show them only when scrolling, or always.
+- **Scroll bar setting.** Settings ▸ General ▸ Show scroll bars: use the system setting, show them only when scrolling, or always. Applies the next time Triage opens.
 - **Copilot reconnects on its own** after an app update or a restart of its helper, instead of pausing analysis.
 
 ## Triage 0.1.0
