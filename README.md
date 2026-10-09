@@ -149,7 +149,7 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 
 | Tab | Options |
 |---|---|
-| **General** | Open at login · Show in menu bar · Show on launch (Briefing, Inbox, or where you left off) · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Privacy and local data · Keyboard reference |
+| **General** | Open at login · Show in menu bar · Show on launch (Briefing, Inbox, or where you left off) · Show scroll bars · Refresh every 2/5/10/15/30 min, hourly, or manually · Refresh when Triage becomes active · Privacy and local data · Keyboard reference |
 | **Inbox** | Default sort and order · *Later Today* length · *Tomorrow* time · When to suggest a follow-up · Mark work done when you handle it · Mark items as read immediately, after 2 seconds, or only manually |
 | **Notifications** | Notify when work newly needs your action · Daily follow-up reminder · Quiet hours · Dock badge |
 | **Accounts** | Connected GitHub accounts and their status · Which organization's work to show |

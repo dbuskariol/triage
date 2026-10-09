@@ -225,7 +225,7 @@ actor CopilotTriageDecider: TriageDeciding {
                 CopilotTriageActivity(
                     author: activity.author,
                     createdAt: activity.createdAt,
-                    excerpt: activity.excerpt
+                    excerpt: PersonalWorkItem.truncated(activity.excerpt, maximumBytes: CopilotTriageActivity.maximumExcerptBytes)
                 )
             },
             ruleHints: hints.isEmpty ? nil : hints,

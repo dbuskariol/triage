@@ -43,6 +43,24 @@ final class CopilotTriageDeciderTests: XCTestCase {
         XCTAssertEqual(counts.triage, 1)
     }
 
+    func testLongCommentsAreKeptWholeButClippedForCopilot() async throws {
+        let helper = FakeTriageHelper()
+        let comment = String(repeating: "word ", count: 400)
+        var item = deciderItem("A")
+        item = PersonalWorkItem(
+            id: item.id, kind: item.kind, repository: item.repository, number: item.number, title: item.title,
+            url: item.url, state: item.state, author: item.author, createdAt: item.createdAt, updatedAt: item.updatedAt,
+            relationships: item.relationships, labels: [], assignees: [], body: "", pullRequest: nil,
+            recentActivity: [ActivityFact(author: "bob", createdAt: .now, excerpt: comment)]
+        )
+        _ = try await makeDecider(helper).decide([item], scope: deciderScope, rules: .empty)
+        let request = await helper.lastTriage
+        let sent = try XCTUnwrap(request?.items.first?.recentActivity.first?.excerpt)
+        XCTAssertEqual(sent.utf8.count, CopilotTriageActivity.maximumExcerptBytes)
+        XCTAssertTrue(comment.hasPrefix(sent))
+        XCTAssertEqual(item.recentActivity.first?.excerpt, comment)
+    }
+
     func testPartialResponseKeepsDecidedItems() async throws {
         let helper = FakeTriageHelper(dropLastDecision: true)
         let decisions = try await makeDecider(helper).decide([deciderItem("A"), deciderItem("B")], scope: deciderScope, rules: .empty)
@@ -129,6 +147,7 @@ private actor FakeTriageHelper: TriageCopilotHelping {
     private var authenticateCount = 0
     private(set) var triageRequestIDs: [UUID] = []
     private(set) var lastDraft: CopilotDraftRequest?
+    private(set) var lastTriage: CopilotTriageRequest?
 
     private let failAuthenticateWith: CopilotXPCError?
 
@@ -159,6 +178,7 @@ private actor FakeTriageHelper: TriageCopilotHelping {
 
     func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse {
         triageRequestIDs.append(request.header.requestID)
+        lastTriage = request
         if failNextTriage {
             failNextTriage = false
             throw CopilotXPCError.runtimeUnavailable

@@ -104,7 +104,8 @@ struct PullRequestFacts: Codable, Equatable, Sendable {
 struct ActivityFact: Codable, Equatable, Sendable {
     let author: String
     let createdAt: Date
-    /// Plain-text excerpt, at most `PersonalWorkItem.maximumExcerptLength` UTF-8 bytes.
+    /// The comment's cleaned Markdown, at most `PersonalWorkItem.maximumBodyLength`
+    /// UTF-8 bytes. Copilot receives a shorter excerpt (see `CopilotTriageActivity`).
     let excerpt: String
 }
 
@@ -113,7 +114,6 @@ struct ActivityFact: Codable, Equatable, Sendable {
 /// separate passes.
 struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
     static let maximumBodyLength = 4_000
-    static let maximumExcerptLength = 600
     static let maximumActivityCount = 5
 
     /// Keeps Markdown structure (line breaks, lists, headings) but drops HTML
