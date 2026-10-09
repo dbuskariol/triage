@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import ServiceManagement
 
 enum TriagePreferenceKeys {
@@ -93,10 +93,10 @@ extension AppPreferences {
     }
 }
 
-/// When scroll bars appear, overriding System Settings ▸ Appearance for
-/// Triage only. Stored under AppKit's own `AppleShowScrollBars` key in
-/// Triage's defaults, which takes precedence over the global value, so every
-/// scroll view in the app follows it natively.
+/// When scroll bars appear in Triage, overriding System Settings ▸
+/// Appearance ▸ Show scroll bars for Triage only. Stored under AppKit's
+/// `AppleShowScrollBars` default in Triage's own domain, which AppKit reads at
+/// launch, so a change applies the next time Triage opens.
 enum ScrollBarVisibility: String, CaseIterable, Identifiable, Sendable {
     case system, whenScrolling, always
 
@@ -121,20 +121,14 @@ enum ScrollBarVisibility: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    static func current(_ defaults: UserDefaults = .standard) -> Self {
-        // Read Triage's own domain only, not the global fallback.
-        switch defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] as? String {
-        case "WhenScrolling": .whenScrolling
-        case "Always": .always
-        default: .system
-        }
+    /// The saved choice, from Triage's own domain (not the global setting).
+    static func saved(_ defaults: UserDefaults = .standard) -> Self {
+        let domain = defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "") ?? [:]
+        return allCases.first { $0.appKitValue == domain[key] as? String } ?? .system
     }
 
-    /// Saves the choice and tells every scroll view to restyle now.
-    @MainActor
-    func apply(_ defaults: UserDefaults = .standard) {
+    func save(_ defaults: UserDefaults = .standard) {
         defaults.set(appKitValue, forKey: Self.key)
-        NotificationCenter.default.post(name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
     }
 }
 

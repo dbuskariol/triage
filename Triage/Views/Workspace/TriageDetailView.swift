@@ -756,12 +756,7 @@ private struct ActivitySection: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(activity.reversed().enumerated()), id: \.offset) { index, fact in
                         HStack(alignment: .top, spacing: 12) {
-                            VStack(spacing: 0) {
-                                InitialAvatar(text: fact.author, size: 26)
-                                if index < activity.count - 1 {
-                                    Rectangle().fill(.quaternary).frame(width: 2).frame(maxHeight: .infinity)
-                                }
-                            }
+                            InitialAvatar(text: fact.author, size: 26)
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
                                     Text(fact.author).font(.callout.weight(.semibold))
@@ -774,6 +769,16 @@ private struct ActivitySection: View {
                                     .font(.callout)
                             }
                             .padding(.bottom, 16)
+                        }
+                        // The connector is drawn behind the row at the row's full
+                        // height, so it follows the comment as it expands.
+                        .background(alignment: .topLeading) {
+                            if index < activity.count - 1 {
+                                Rectangle().fill(.quaternary)
+                                    .frame(width: 2)
+                                    .padding(.top, 26)
+                                    .padding(.leading, 12)
+                            }
                         }
                     }
                 }
