@@ -61,6 +61,20 @@ final class CopilotTriageDeciderTests: XCTestCase {
         XCTAssertEqual(item.recentActivity.first?.excerpt, comment)
     }
 
+    func testRejectedCallerAsksForARelaunchWithoutRetrying() async throws {
+        let helper = FakeTriageHelper(failAuthenticateWith: .callerRejected)
+        do {
+            _ = try await makeDecider(helper).decide([deciderItem("A")], scope: deciderScope, rules: .empty)
+            XCTFail("Expected an error")
+        } catch let error as TriageDecisionError {
+            XCTAssertEqual(error, .appReplacedWhileRunning)
+            XCTAssertTrue(error.requiresRelaunch)
+            XCTAssertEqual(error.problem, .relaunchRequired(error.userMessage))
+        }
+        let counts = await helper.counts
+        XCTAssertEqual(counts.authenticate, 1)
+    }
+
     func testPartialResponseKeepsDecidedItems() async throws {
         let helper = FakeTriageHelper(dropLastDecision: true)
         let decisions = try await makeDecider(helper).decide([deciderItem("A"), deciderItem("B")], scope: deciderScope, rules: .empty)

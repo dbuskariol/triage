@@ -156,6 +156,14 @@ struct TriageListView: View {
             } actions: {
                 Button("Open Copilot Settings") { actions.openCopilotSettings() }
             }
+        case .relaunchRequired(let message):
+            ContentUnavailableView {
+                Label("Reopen Triage", systemImage: "arrow.clockwise")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("Quit Triage") { NSApp.terminate(nil) }
+            }
         case .gitHubUnavailable(let message):
             ContentUnavailableView {
                 Label("GitHub is unavailable", systemImage: "wifi.exclamationmark")

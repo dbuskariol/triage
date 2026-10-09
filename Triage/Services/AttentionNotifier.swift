@@ -29,7 +29,6 @@ enum NotificationPermission {
 @MainActor
 final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private static let logger = Logger(subsystem: "com.triage.mac", category: "App")
-    private nonisolated static let itemKey = "itemID"
     /// More than this many at once become one summary notification.
     private static let individualLimit = 3
 
@@ -37,8 +36,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
     private var trackers: [OrganizationID: AttentionTracker] = [:]
     private var hasRequestedAuthorization = false
-    /// Shows an item when its notification is clicked.
-    var onOpen: (GitHubNodeID) -> Void = { _ in }
+    /// Opens what a clicked notification points to.
+    var onOpen: (AttentionTarget) -> Void = { _ in }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -53,6 +52,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
 
         var tracker = trackers[organizationID] ?? load(organizationID)
         let fresh = tracker.update(with: presentation)
+        func target(_ kind: AttentionTarget.Kind) -> AttentionTarget { AttentionTarget(kind, organizationID: organizationID) }
         let followUps = WorkInsights.overdueFollowUps(
             in: presentation, days: Self.followUpDays(defaults), now: .now
         )
@@ -66,8 +66,8 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
             save(tracker, organizationID)
         }
         guard !silent else { return }
-        if bool(TriagePreferenceKeys.notifyNeedsAction), !fresh.isEmpty { post(needsAction: fresh) }
-        if remindFollowUps { post(followUps: followUps) }
+        if bool(TriagePreferenceKeys.notifyNeedsAction), !fresh.isEmpty { post(needsAction: fresh, target: target) }
+        if remindFollowUps { post(followUps: followUps, target: target) }
     }
 
     func updateDockBadge(count: Int) {
@@ -79,13 +79,13 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: Posting
 
-    private func post(needsAction entries: [TriageEntry]) {
+    private func post(needsAction entries: [TriageEntry], target: (AttentionTarget.Kind) -> AttentionTarget) {
         if entries.count > Self.individualLimit {
             send(
                 id: "needs-action-summary",
                 title: "\(entries.count) items need your action",
                 body: entries.prefix(3).map(\.item.title).joined(separator: " · "),
-                itemID: nil
+                target: target(.needsAction)
             )
         } else {
             for entry in entries {
@@ -93,28 +93,28 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
                     id: "needs-action-\(entry.id.rawValue)",
                     title: entry.decision?.nextAction ?? entry.item.title,
                     body: "\(entry.item.reference) · \(entry.item.title)",
-                    itemID: entry.id
+                    target: target(.item(entry.id))
                 )
             }
         }
     }
 
-    private func post(followUps: [TriageEntry]) {
+    private func post(followUps: [TriageEntry], target: (AttentionTarget.Kind) -> AttentionTarget) {
         send(
             id: "follow-ups",
             title: followUps.count == 1 ? "1 item may need a nudge" : "\(followUps.count) items may need a nudge",
             body: followUps.prefix(3).map(\.item.title).joined(separator: " · "),
-            itemID: followUps.count == 1 ? followUps.first?.id : nil
+            target: target(followUps.count == 1 ? followUps.first.map { .item($0.id) } ?? .followUps : .followUps)
         )
     }
 
-    private func send(id: String, title: String, body: String, itemID: GitHubNodeID?) {
+    private func send(id: String, title: String, body: String, target: AttentionTarget) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         content.threadIdentifier = "triage"
-        if let itemID { content.userInfo = [Self.itemKey: itemID.rawValue] }
+        content.userInfo = target.userInfo
         let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
         Task {
             await requestAuthorizationIfNeeded()
@@ -142,10 +142,10 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
     ) async {
-        let raw = response.notification.request.content.userInfo[Self.itemKey] as? String
+        let target = AttentionTarget(userInfo: response.notification.request.content.userInfo)
         await MainActor.run {
             NSApp.activate()
-            if let id = raw.flatMap(GitHubNodeID.init(rawValue:)) { onOpen(id) }
+            if let target { onOpen(target) }
         }
     }
 

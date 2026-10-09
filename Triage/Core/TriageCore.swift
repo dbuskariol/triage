@@ -429,10 +429,20 @@ struct TriageStatus: Equatable, Sendable {
     enum Problem: Equatable, Sendable {
         /// Copilot cannot be used; the message says what to fix.
         case copilotUnavailable(String)
+        /// Triage must be reopened before Copilot can be used again.
+        case relaunchRequired(String)
         /// GitHub refresh failed; showing saved work.
         case gitHubUnavailable(String)
         /// Some analyses failed; they retry automatically.
         case analysisFailed(String)
+
+        /// Copilot can't run at all until this is resolved.
+        var blocksAnalysis: Bool {
+            switch self {
+            case .copilotUnavailable, .relaunchRequired: true
+            case .gitHubUnavailable, .analysisFailed: false
+            }
+        }
     }
 
     var phase: Phase = .idle

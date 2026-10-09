@@ -5,6 +5,8 @@ enum TriageDecisionError: Error, LocalizedError, TriageAvailabilityError, Sendab
     case consentRequired
     case signInRequired
     case runtimeUnavailable
+    /// Triage was replaced on disk while it was running.
+    case appReplacedWhileRunning
     case invalidResponse
     case timedOut
 
@@ -16,6 +18,8 @@ enum TriageDecisionError: Error, LocalizedError, TriageAvailabilityError, Sendab
             "Sign in to Copilot to triage your work."
         case .runtimeUnavailable:
             "Copilot runtime is unavailable. Reconnect Copilot and try again."
+        case .appReplacedWhileRunning:
+            "Triage was updated while it was open. Quit and reopen Triage to keep using Copilot."
         case .invalidResponse:
             "Copilot returned an invalid triage response. No decisions were saved."
         case .timedOut:
@@ -25,12 +29,14 @@ enum TriageDecisionError: Error, LocalizedError, TriageAvailabilityError, Sendab
 
     var pausesAnalysis: Bool {
         switch self {
-        case .consentRequired, .signInRequired, .runtimeUnavailable:
+        case .consentRequired, .signInRequired, .runtimeUnavailable, .appReplacedWhileRunning:
             true
         case .invalidResponse, .timedOut:
             false
         }
     }
+
+    var requiresRelaunch: Bool { self == .appReplacedWhileRunning }
 
     var userMessage: String { errorDescription ?? "Copilot is unavailable." }
 }

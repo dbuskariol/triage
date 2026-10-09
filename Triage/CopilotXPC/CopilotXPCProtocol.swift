@@ -11,6 +11,9 @@ enum CopilotXPCError: Error, Equatable, Sendable {
   case responseMismatch
   case helperFailure(CopilotFailure)
   case helperUnavailable
+  /// The Copilot service refused this process: the running Triage no longer
+  /// matches the signed app on disk (it was replaced while open).
+  case callerRejected
   case helperLocationInvalid
   case helperNotExecutable
   case codeSignatureNotValidated

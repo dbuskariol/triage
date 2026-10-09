@@ -77,6 +77,7 @@ actor CopilotHelperSession {
         switch error {
         case .operationTimedOut: .timedOut
         case .runtimeUnavailable, .helperUnavailable, .processExited: .runtimeUnavailable
+        case .callerRejected: .appReplacedWhileRunning
         default: .invalidResponse
         }
     }

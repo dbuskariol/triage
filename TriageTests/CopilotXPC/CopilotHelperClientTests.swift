@@ -434,7 +434,7 @@ final class CopilotHelperClientTests: XCTestCase {
     )
     XCTAssertEqual(
       CopilotXPCServiceClient.mapServiceError(NSError(domain: domain, code: 1)),
-      .helperUnavailable
+      .callerRejected
     )
     XCTAssertEqual(
       CopilotXPCServiceClient.mapServiceError(NSError(domain: "untrusted.domain", code: 14)),

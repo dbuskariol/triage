@@ -31,6 +31,8 @@ struct TriageStatusView: View {
         switch problem {
         case .copilotUnavailable:
             Button("Open Copilot Settings") { actions.openCopilotSettings() }
+        case .relaunchRequired:
+            Button("Quit Triage") { NSApp.terminate(nil) }
         case .gitHubUnavailable:
             Button("Retry") { actions.refreshNow() }
         case .analysisFailed:
@@ -40,7 +42,7 @@ struct TriageStatusView: View {
 
     private func problemText(_ problem: TriageStatus.Problem) -> String {
         switch problem {
-        case .copilotUnavailable(let text), .gitHubUnavailable(let text):
+        case .copilotUnavailable(let text), .relaunchRequired(let text), .gitHubUnavailable(let text):
             text
         case .analysisFailed(let text):
             text
