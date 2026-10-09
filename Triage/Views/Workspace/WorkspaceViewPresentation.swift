@@ -54,6 +54,12 @@ enum WorkspaceViewPresentation {
         var isSevere: Bool { self == .checksFailing || self == .conflicts }
     }
 
+    /// The window subtitle for a list: search results, else the refresh status.
+    static func listSubtitle(search: WorkspaceSearch, resultCount: Int, status: TriageStatus, now: Date) -> String {
+        guard search.isActive else { return statusLine(status, now: now) }
+        return "\(resultCount) result\(resultCount == 1 ? "" : "s")\(search.scope == .all ? " in all work" : "")"
+    }
+
     static func statusLine(_ status: TriageStatus, now: Date = .now) -> String {
         switch status.phase {
         case .searching(let found):

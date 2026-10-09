@@ -75,6 +75,10 @@ struct WorkspacePresentation: Equatable, Sendable {
         let all = raw.map { entry in
             var entry = rules.apply(to: entry, viewer: viewer)
             entry.isUnread = entry.hasUnreadActivity(viewer: viewer)
+            // An expired status (done work someone else answered, an elapsed
+            // snooze) no longer applies: show the item as active, without its
+            // old "Handled by You" evidence.
+            if entry.isVisible(at: now, viewer: viewer) { entry.local = .active }
             // Decided under different preferences: queued for re-analysis.
             if entry.analysis == .current, let decision = entry.decision, (decision.rulesDigest ?? "") != digest {
                 entry.analysis = .pending

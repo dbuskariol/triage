@@ -1,4 +1,11 @@
-# Triage 0.1.0
+# Triage 0.1.1
+
+- **The list column keeps its width.** Opening an item no longer resizes the list, and the width you set is remembered across sections and launches.
+- **Handled work that comes back is shown correctly.** When someone responds to work Triage marked handled, it returns to your Inbox without the old "Handled by You" label, and Triage can mark it handled again when you reply.
+- **Copilot reconnects on its own** after an app update or a restart of its helper, instead of pausing analysis.
+
+## Triage 0.1.0
+
 
 Triage rebuilt around an AI-first core: your GitHub work, prioritized by Copilot.
 

@@ -107,17 +107,33 @@ final class GRDBTriageStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let work = item(id: "item", relationship: .assigned, updatedAt: Date())
         try await fixture.store.replaceItems([work], scope: fixture.scope, at: Date())
-        let marked = try await fixture.store.markHandled(
-            itemID: work.id, fingerprint: work.fingerprint, evidence: "You replied.", at: Date(), scope: fixture.scope
-        )
+        let marked = try await fixture.store.markHandled(work, viewer: "me", evidence: "You replied.", at: Date(), scope: fixture.scope)
         XCTAssertTrue(marked)
-        let again = try await fixture.store.markHandled(
-            itemID: work.id, fingerprint: work.fingerprint, evidence: "Other.", at: Date(), scope: fixture.scope
-        )
+        let again = try await fixture.store.markHandled(work, viewer: "me", evidence: "Other.", at: Date(), scope: fixture.scope)
         XCTAssertFalse(again)
         var iterator = try await fixture.store.entries(scope: fixture.scope).makeAsyncIterator()
         let entries = try await iterator.next()
         XCTAssertEqual(entries?.first?.handledEvidence, "You replied.")
+    }
+
+    func testMarkHandledReplacesOnlyExpiredStatuses() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let work = item(id: "item", relationship: .assigned, updatedAt: Date(timeIntervalSince1970: 1_000))
+        try await fixture.store.replaceItems([work], scope: fixture.scope, at: Date())
+
+        // A snooze the user set and that still applies is never overridden.
+        try await fixture.store.setLocalStatus(.snoozed(until: .distantFuture), itemID: work.id, scope: fixture.scope)
+        let blocked = try await fixture.store.markHandled(work, viewer: "me", evidence: "Replied", at: Date(), scope: fixture.scope)
+        XCTAssertFalse(blocked)
+
+        // Done work that came back (or an elapsed snooze) is replaced.
+        try await fixture.store.setLocalStatus(.snoozed(until: Date(timeIntervalSince1970: 1)), itemID: work.id, scope: fixture.scope)
+        let replaced = try await fixture.store.markHandled(work, viewer: "me", evidence: "Replied", at: Date(), scope: fixture.scope)
+        XCTAssertTrue(replaced)
+        var iterator = try await fixture.store.entries(scope: fixture.scope).makeAsyncIterator()
+        let entries = try await iterator.next()
+        XCTAssertEqual(entries?.first?.handledEvidence, "Replied")
     }
 
     private func makeFixture() async throws -> (directory: URL, store: GRDBTriageStore, scope: WorkspaceScope) {

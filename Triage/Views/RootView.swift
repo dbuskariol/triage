@@ -121,9 +121,10 @@ private struct WorkspaceView: View {
 /// A list section or saved search beside the selected item's details.
 private struct WorkspaceListAndDetail: View {
     @EnvironmentObject private var appModel: TriageAppModel
+    @State private var now = Date.now
 
     var body: some View {
-        HSplitView {
+        ListDetailSplitView {
             TriageListView(
                 presentation: appModel.presentation,
                 section: appModel.selectedSection,
@@ -134,25 +135,35 @@ private struct WorkspaceListAndDetail: View {
                 searchFocusRequest: appModel.searchFocusRequest,
                 doneFilter: $appModel.doneFilter
             )
-            .frame(minWidth: 320, idealWidth: 400, maxWidth: 560)
-            Group {
-                if appModel.selection.count > 1 {
-                    MultipleSelectionView(
-                        entries: appModel.selectedEntries,
-                        setAsideIDs: appModel.presentation.setAsideIDs,
-                        actions: appModel,
-                        select: { appModel.selectedEntryID = $0.id }
-                    )
-                } else {
-                    TriageDetailView(
-                        entry: appModel.selectedEntry,
-                        inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
-                        allEntries: appModel.presentation.allEntries,
-                        actions: appModel
-                    )
-                }
+        } detail: {
+            if appModel.selection.count > 1 {
+                MultipleSelectionView(
+                    entries: appModel.selectedEntries,
+                    setAsideIDs: appModel.presentation.setAsideIDs,
+                    actions: appModel,
+                    select: { appModel.selectedEntryID = $0.id }
+                )
+            } else {
+                TriageDetailView(
+                    entry: appModel.selectedEntry,
+                    inboxIsEmpty: appModel.presentation.count(in: .inbox) == 0,
+                    allEntries: appModel.presentation.allEntries,
+                    actions: appModel
+                )
             }
-            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // The window title lives outside the split's hosted panes.
+        .navigationTitle(appModel.selectedSavedSearch?.name ?? appModel.selectedSection.title)
+        .navigationSubtitle(WorkspaceViewPresentation.listSubtitle(
+            search: appModel.effectiveSearch, resultCount: appModel.visibleEntries.count,
+            status: appModel.presentation.status, now: now
+        ))
+        .task(id: appModel.presentation.status) {
+            // Keep "Updated N minutes ago" current while idle.
+            while !Task.isCancelled {
+                now = .now
+                try? await Task.sleep(for: .seconds(30))
+            }
         }
     }
 }

@@ -14,18 +14,9 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
     @FocusState private var isListFocused: Bool
-    @State private var statusNow = Date.now
     @Binding var doneFilter: DoneFilter
     @State private var isNamingSavedSearch = false
     @State private var savedSearchName = ""
-
-    private var statusSubtitle: String {
-        if effectiveSearch.isActive {
-            let count = entries.count
-            return "\(count) result\(count == 1 ? "" : "s")\(effectiveSearch.scope == .all ? " in all work" : "")"
-        }
-        return WorkspaceViewPresentation.statusLine(presentation.status, now: statusNow)
-    }
 
     var body: some View {
         Group {
@@ -89,7 +80,6 @@ struct TriageListView: View {
                 }
             }
         }
-        .navigationTitle(savedSearch?.name ?? section.title)
         .alert("Save Search", isPresented: $isNamingSavedSearch) {
             TextField("Name", text: $savedSearchName)
             Button("Save") { actions.saveSearch(named: savedSearchName) }
@@ -97,14 +87,6 @@ struct TriageListView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The search appears in the sidebar and stays up to date.")
-        }
-        .navigationSubtitle(statusSubtitle)
-        .task(id: presentation.status) {
-            // Keep "Updated N minutes ago" current while idle.
-            while !Task.isCancelled {
-                statusNow = .now
-                try? await Task.sleep(for: .seconds(30))
-            }
         }
     }
 

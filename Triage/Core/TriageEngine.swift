@@ -357,7 +357,7 @@ actor TriageEngine {
         for decision in decisions where decision.handled == .yes && contexts[decision.itemID] != nil {
             guard let item = batch.first(where: { $0.id == decision.itemID }) else { continue }
             let evidence = decision.handledEvidence ?? "You completed the suggested next step."
-            if try await store.markHandled(itemID: item.id, fingerprint: item.fingerprint, evidence: evidence, at: now(), scope: scope) {
+            if try await store.markHandled(item, viewer: scope.viewerLogin, evidence: evidence, at: now(), scope: scope) {
                 count += 1
             }
         }
