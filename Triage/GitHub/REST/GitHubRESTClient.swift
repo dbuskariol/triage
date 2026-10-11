@@ -48,6 +48,8 @@ struct GitHubResponse<Value: Sendable>: Sendable {
     let etag: String?
     let lastModified: String?
     let ssoHeader: GitHubSSOHeader?
+    /// When the credential that made the request expires, if it does.
+    let credentialExpiresAt: Date?
     let source: GitHubResponseSource
 
     init(
@@ -57,8 +59,10 @@ struct GitHubResponse<Value: Sendable>: Sendable {
         etag: String?,
         lastModified: String?,
         ssoHeader: GitHubSSOHeader?,
+        credentialExpiresAt: Date? = nil,
         source: GitHubResponseSource = .network
     ) {
+        self.credentialExpiresAt = credentialExpiresAt
         self.value = value
         self.payload = payload
         self.linkHeader = linkHeader
@@ -159,7 +163,10 @@ actor GitHubRESTClient {
                     linkHeader: response.header(named: "Link"),
                     etag: response.header(named: "ETag"),
                     lastModified: response.header(named: "Last-Modified"),
-                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO"))
+                    ssoHeader: GitHubSSOHeader(value: response.header(named: "X-GitHub-SSO")),
+                    credentialExpiresAt: GitHubCredentialObservation.expirationDate(
+                        from: response.header(named: GitHubCredentialObservation.expirationHeader)
+                    )
                 )
             )
         } catch {

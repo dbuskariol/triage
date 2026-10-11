@@ -86,16 +86,51 @@ final class CredentialLifecycleTests: XCTestCase {
         )
     }
 
-    func testNonOAuthCredentialsRemainActiveRegardlessOfExpirationMetadata() {
-        XCTAssertEqual(
+    func testPersonalAccessTokensWarnAWeekAheadAndExpireAtTheirDeadline() {
+        func status(_ offset: TimeInterval?) -> CredentialStatus {
             CredentialLifecycle.status(
                 authenticationKind: .classicPersonalAccessToken,
-                accessTokenExpiresAt: now.addingTimeInterval(-1),
-                refreshTokenExpiresAt: now.addingTimeInterval(-1),
+                accessTokenExpiresAt: offset.map { now.addingTimeInterval($0) },
+                refreshTokenExpiresAt: nil,
                 at: now
-            ),
-            .active
+            )
+        }
+        XCTAssertEqual(status(nil), .active)
+        XCTAssertEqual(status(8 * 24 * 3_600), .active)
+        XCTAssertEqual(status(6 * 24 * 3_600), .expiring)
+        XCTAssertEqual(status(0), .expired)
+        XCTAssertEqual(status(-1), .expired)
+    }
+
+    func testAcceptedResponseRecordsAPersonalAccessTokenExpiration() throws {
+        let account = makeAccount(accessTokenExpiresAt: nil, kind: .fineGrainedPersonalAccessToken)
+        let expiresAt = now.addingTimeInterval(3 * 24 * 3_600)
+        let updated = try XCTUnwrap(
+            CredentialLifecycle.account(account, observing: .accepted(expiresAt: expiresAt), at: now)
         )
+        XCTAssertEqual(updated.accessTokenExpiresAt, expiresAt)
+        XCTAssertEqual(updated.credentialStatus, .expiring)
+        XCTAssertNil(CredentialLifecycle.account(updated, observing: .accepted(expiresAt: expiresAt), at: now))
+    }
+
+    func testRejectionIsExpiredPastTheDeadlineAndRevokedBeforeIt() throws {
+        let expired = makeAccount(accessTokenExpiresAt: now.addingTimeInterval(-60), kind: .classicPersonalAccessToken)
+        XCTAssertEqual(CredentialLifecycle.account(expired, observing: .rejected, at: now)?.credentialStatus, .expired)
+        let revoked = makeAccount(accessTokenExpiresAt: nil, kind: .classicPersonalAccessToken)
+        XCTAssertEqual(CredentialLifecycle.account(revoked, observing: .rejected, at: now)?.credentialStatus, .revoked)
+    }
+
+    func testAcceptanceClearsAnEarlierRejection() throws {
+        let account = makeAccount(accessTokenExpiresAt: nil, kind: .classicPersonalAccessToken)
+            .replacingCredentialStatus(.revoked)
+        let updated = try XCTUnwrap(CredentialLifecycle.account(account, observing: .accepted(expiresAt: nil), at: now))
+        XCTAssertEqual(updated.credentialStatus, .active)
+    }
+
+    func testOAuthKeepsTheExpirationFromItsTokenExchange() {
+        let expiresAt = now.addingTimeInterval(60 * 60)
+        let account = makeAccount(accessTokenExpiresAt: expiresAt)
+        XCTAssertNil(CredentialLifecycle.account(account, observing: .accepted(expiresAt: now), at: now))
     }
 
     func testPermanentAndTransientBrokerFailuresHaveDistinctCredentialEffects() {
@@ -129,14 +164,15 @@ final class CredentialLifecycleTests: XCTestCase {
 
     private func makeAccount(
         accessTokenExpiresAt: Date?,
-        refreshTokenExpiresAt: Date? = nil
+        refreshTokenExpiresAt: Date? = nil,
+        kind: AuthenticationKind = .oauth
     ) -> GitHubAccount {
         GitHubAccount(
             id: AccountID(rawValue: "account-1")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",
-            authenticationKind: .oauth,
+            authenticationKind: kind,
             credentialID: CredentialID(rawValue: "credential-1")!,
             credentialStatus: .active,
             accessTokenExpiresAt: accessTokenExpiresAt,

@@ -30,6 +30,8 @@ struct OrganizationAISettingsState: Equatable {
 struct WorkspaceRuntime: Sendable {
     let store: any TriageStore
     let engine: TriageEngine
+    /// The account, whenever GitHub reports a change to its credential.
+    var credentialUpdates: AsyncStream<GitHubAccount> = AsyncStream { $0.finish() }
 }
 
 /// Application state: accounts, the selected workspace, and Copilot setup.
@@ -69,6 +71,8 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var hasRestoredAccounts = false
     @Published private(set) var restorationError: String?
     @Published private(set) var accountsBeingRemoved: Set<AccountID> = []
+    /// The account whose personal access token Settings is asking to replace.
+    @Published var tokenReplacementAccount: GitHubAccount?
 
     // MARK: Workspace
 
@@ -247,6 +251,7 @@ final class TriageAppModel: ObservableObject {
     private func refreshIfStale() {
         guard UserDefaults.standard.object(forKey: TriagePreferenceKeys.refreshWhenActive) as? Bool ?? true,
               case .idle = status.phase,
+              status.problem?.isCredentialRejected != true,
               let last = status.lastRefreshAt, Date.now.timeIntervalSince(last) > 60
         else { return }
         refreshNow()
@@ -341,6 +346,12 @@ final class TriageAppModel: ObservableObject {
                 }
             } catch {
                 Self.logger.error("entries stream failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        })
+        observationTasks.append(Task { [weak self] in
+            for await account in runtime.credentialUpdates {
+                guard let self, let index = self.accounts.firstIndex(where: { $0.id == account.id }) else { continue }
+                self.accounts[index] = account
             }
         })
         observationTasks.append(Task { [weak self] in
@@ -663,7 +674,9 @@ final class TriageAppModel: ObservableObject {
         case let error as AccountConnectionError:
             error.recoveryDescription ?? "Triage couldn't validate this GitHub account. Check its access and try again."
         case let error as AccountCredentialReplacementError:
-            error.localizedDescription
+            error.recoveryDescription
+        case let error as GitHubFailure where error.kind == .unauthorized:
+            "GitHub didn't accept this token. Check that it was copied completely and hasn't expired or been revoked."
         case GitHubOAuthError.authorizationTimedOut:
             "GitHub sign-in timed out. Try again."
         case is RuntimeOAuthConfigurationError:
@@ -872,6 +885,18 @@ extension TriageAppModel: WorkspaceActions {
 
     func openCopilotSettings() {
         openSettings?(.ai)
+    }
+
+    func replaceGitHubToken() {
+        if let account = selectedAccount, account.authenticationKind != .oauth {
+            tokenReplacementAccount = account
+        }
+        openSettings?(.accounts)
+    }
+
+    /// What to tell the user about the selected account's GitHub token, if anything.
+    var credentialNotice: GitHubCredentialNotice? {
+        GitHubCredentialNotice.make(account: selectedAccount, problem: presentation.status.problem, now: .now)
     }
 
     func show(_ entry: TriageEntry) {

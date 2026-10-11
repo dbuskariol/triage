@@ -129,6 +129,7 @@ private struct WorkspaceListAndDetail: View {
                 presentation: appModel.presentation,
                 section: appModel.selectedSection,
                 savedSearch: appModel.selectedSavedSearch,
+                credentialNotice: appModel.credentialNotice,
                 selection: $appModel.selection,
                 actions: appModel,
                 search: $appModel.search,

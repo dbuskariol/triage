@@ -18,6 +18,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
             account,
             authenticatedUser: user,
             credentialID: CredentialID(rawValue: "credential-2")!,
+            authenticationKind: .oauth,
             accessTokenExpiresAt: date.addingTimeInterval(3_600),
             refreshTokenExpiresAt: date.addingTimeInterval(7_200),
             at: date
@@ -44,6 +45,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
                     avatarURL: nil
                 ),
                 credentialID: CredentialID(rawValue: "credential-2")!,
+                authenticationKind: .oauth,
                 accessTokenExpiresAt: nil,
                 refreshTokenExpiresAt: nil,
                 at: date
@@ -65,6 +67,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
                     avatarURL: nil
                 ),
                 credentialID: CredentialID(rawValue: "credential-2")!,
+                authenticationKind: .oauth,
                 accessTokenExpiresAt: nil,
                 refreshTokenExpiresAt: nil,
                 at: date
@@ -113,7 +116,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
             secretStore: secrets,
             vaultRegistry: registry,
             clock: { now },
-            loadAuthenticatedUser: { _ in user }
+            loadAuthenticatedUser: { _ in AuthenticatedGitHubCredential(user: user, expiresAt: nil) }
         )
 
         let result = try await service.replace(
@@ -172,13 +175,13 @@ final class AccountCredentialReplacementTests: XCTestCase {
             ),
             clock: { now },
             loadAuthenticatedUser: { _ in
-                GitHubUserDTO(
+                AuthenticatedGitHubCredential(user: GitHubUserDTO(
                     id: account.githubUserID + 1,
                     nodeID: account.nodeID.rawValue,
                     login: "different-user",
                     name: nil,
                     avatarURL: nil
-                )
+                ), expiresAt: nil)
             }
         )
 
@@ -205,56 +208,64 @@ final class AccountCredentialReplacementTests: XCTestCase {
         XCTAssertEqual(removeCount, 0)
     }
 
-    func testFineGrainedReplacementFailsClosedWithoutAnOwnerOrCredentialMutation() async throws {
+    func testPersonalAccessTokenReplacementSwitchesKindAndRecordsExpiration() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let now = date
         let account = GitHubAccount(
             id: AccountID(rawValue: "00000000-0000-4000-8000-000000000207")!,
             githubUserID: 1,
             nodeID: GitHubNodeID(rawValue: "U_kgDOExample")!,
             login: "octocat",
-            authenticationKind: .fineGrainedPersonalAccessToken,
-            credentialID: CredentialID(rawValue: "fine-grained-credential")!,
-            credentialStatus: .active,
+            authenticationKind: .classicPersonalAccessToken,
+            credentialID: CredentialID(rawValue: "classic-credential")!,
+            credentialStatus: .revoked,
             createdAt: date
         )
-        let secrets = ReplacementSecretStore(values: [:])
+        let vaultKey = try VaultKey.generate()
+        let registry = try VaultRegistry(rootDirectory: directory)
+        let repository = AccountRepository(vault: try await registry.open(accountID: account.id, vaultKey: vaultKey))
+        try await repository.save(account, credentialRevision: CredentialRevision(rawValue: "revision-original")!)
+        let secrets = ReplacementSecretStore(values: [
+            .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
+            .init(kind: .personalAccessToken, accountID: account.id, credentialID: account.credentialID):
+                Data("ghp_original".utf8),
+        ])
+        let expiresAt = now.addingTimeInterval(30 * 24 * 3_600)
         let service = AccountCredentialReplacementService(
             secretStore: secrets,
-            vaultRegistry: try VaultRegistry(rootDirectory: directory),
+            vaultRegistry: registry,
+            clock: { now },
             loadAuthenticatedUser: { _ in
-                return GitHubUserDTO(
+                AuthenticatedGitHubCredential(user: GitHubUserDTO(
                     id: account.githubUserID,
                     nodeID: account.nodeID.rawValue,
                     login: account.login,
                     name: nil,
                     avatarURL: nil
-                )
+                ), expiresAt: expiresAt)
             }
         )
 
-        do {
-            _ = try await service.replace(
-                personalAccessToken: try PersonalAccessToken(
-                    rawValue: "github_pat_abcdefghijklmnopqrstuvwxyz"
-                ),
-                for: account
-            )
-            XCTFail("Fine-grained replacement must require an owner-qualified connection.")
-        } catch let error as AccountCredentialReplacementError {
-            XCTAssertEqual(error, .fineGrainedResourceOwnerOrganizationRequired)
-        }
-
-        let writeCount = await secrets.writeCount()
-        let removeCount = await secrets.removeCount()
-        XCTAssertEqual(writeCount, 0)
-        XCTAssertEqual(removeCount, 0)
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: directory.appendingPathComponent("Vaults", isDirectory: true).path
-            )
+        let result = try await service.replace(
+            personalAccessToken: try PersonalAccessToken(rawValue: "github_pat_abcdefghijklmnopqrstuvwxyz"),
+            for: account
         )
+
+        XCTAssertEqual(result.account.authenticationKind, .fineGrainedPersonalAccessToken)
+        XCTAssertEqual(result.account.accessTokenExpiresAt, expiresAt)
+        XCTAssertEqual(result.account.credentialStatus, .active)
+        let storedAccounts = try await repository.accounts()
+        XCTAssertEqual(storedAccounts, [result.account])
+        let replacement = await secrets.value(
+            kind: .personalAccessToken, accountID: account.id, credentialID: result.account.credentialID
+        )
+        XCTAssertEqual(replacement, Data("github_pat_abcdefghijklmnopqrstuvwxyz".utf8))
+        let retired = await secrets.value(
+            kind: .personalAccessToken, accountID: account.id, credentialID: account.credentialID
+        )
+        XCTAssertNil(retired)
     }
 
     func testCancellationAfterStagingAccessCredentialRemovesEveryReplacementSecret() async throws {
@@ -291,13 +302,13 @@ final class AccountCredentialReplacementTests: XCTestCase {
             secretStore: secrets,
             vaultRegistry: registry,
             loadAuthenticatedUser: { _ in
-                GitHubUserDTO(
+                AuthenticatedGitHubCredential(user: GitHubUserDTO(
                     id: account.githubUserID,
                     nodeID: account.nodeID.rawValue,
                     login: account.login,
                     name: account.displayName,
                     avatarURL: account.avatarURL
-                )
+                ), expiresAt: nil)
             }
         )
 

@@ -223,6 +223,7 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
 
     func replacingCredential(
         credentialID: CredentialID,
+        authenticationKind: AuthenticationKind? = nil,
         login: String,
         displayName: String?,
         avatarURL: URL?,
@@ -238,7 +239,7 @@ struct GitHubAccount: Codable, Equatable, Sendable, Identifiable {
             login: login,
             displayName: displayName,
             avatarURL: avatarURL,
-            authenticationKind: authenticationKind,
+            authenticationKind: authenticationKind ?? self.authenticationKind,
             credentialID: credentialID,
             credentialStatus: status,
             accessTokenExpiresAt: accessTokenExpiresAt,

@@ -4,8 +4,26 @@ enum AccountCredentialReplacementError: Error, Equatable, Sendable {
     case invalidGitHubIdentity
     case immutableIdentityMismatch
     case authenticationKindMismatch
-    case fineGrainedResourceOwnerOrganizationRequired
     case stagedCredentialCleanupFailed
+
+    var recoveryDescription: String {
+        switch self {
+        case .invalidGitHubIdentity:
+            "GitHub returned an unexpected account for this token. Try again."
+        case .immutableIdentityMismatch:
+            "This token belongs to a different GitHub account. Create the token while signed in as this account."
+        case .authenticationKindMismatch:
+            "This account signs in with GitHub. Use a personal access token only for accounts connected with one."
+        case .stagedCredentialCleanupFailed:
+            "Triage couldn't save the new token, and couldn't remove it from the Keychain. Try again."
+        }
+    }
+}
+
+/// The account a credential belongs to, and when GitHub says that credential expires.
+struct AuthenticatedGitHubCredential: Sendable {
+    let user: GitHubUserDTO
+    let expiresAt: Date?
 }
 
 private enum CredentialSecretRemovalError: Error, Sendable {
@@ -26,6 +44,7 @@ enum CredentialReplacement {
         _ account: GitHubAccount,
         authenticatedUser: GitHubUserDTO,
         credentialID: CredentialID,
+        authenticationKind: AuthenticationKind,
         accessTokenExpiresAt: Date?,
         refreshTokenExpiresAt: Date?,
         at date: Date
@@ -38,13 +57,14 @@ enum CredentialReplacement {
         }
         return account.replacingCredential(
             credentialID: credentialID,
+            authenticationKind: authenticationKind,
             login: authenticatedUser.login,
             displayName: authenticatedUser.name,
             avatarURL: authenticatedUser.avatarURL,
             accessTokenExpiresAt: accessTokenExpiresAt,
             refreshTokenExpiresAt: refreshTokenExpiresAt,
             status: CredentialLifecycle.status(
-                authenticationKind: account.authenticationKind,
+                authenticationKind: authenticationKind,
                 accessTokenExpiresAt: accessTokenExpiresAt,
                 refreshTokenExpiresAt: refreshTokenExpiresAt,
                 at: date
@@ -58,18 +78,19 @@ actor AccountCredentialReplacementService {
     private let secretStore: any SecretStore
     private let vaultRegistry: VaultRegistry
     private let clock: @Sendable () -> Date
-    private let loadAuthenticatedUser: @Sendable (SecretValue) async throws -> GitHubUserDTO
+    private let loadAuthenticatedUser: @Sendable (SecretValue) async throws -> AuthenticatedGitHubCredential
 
     init(
         secretStore: any SecretStore,
         vaultRegistry: VaultRegistry,
         clock: @escaping @Sendable () -> Date = Date.init,
-        loadAuthenticatedUser: @escaping @Sendable (SecretValue) async throws -> GitHubUserDTO = { accessToken in
+        loadAuthenticatedUser: @escaping @Sendable (SecretValue) async throws -> AuthenticatedGitHubCredential = { accessToken in
             let client = GitHubRESTClient(
                 transport: try GitHubRESTTransport(),
                 credential: accessToken
             )
-            return try await GitHubIdentityClient(client: client).authenticatedUser().value
+            let response = try await GitHubIdentityClient(client: client).authenticatedUser()
+            return AuthenticatedGitHubCredential(user: response.value, expiresAt: response.credentialExpiresAt)
         }
     ) {
         self.secretStore = secretStore
@@ -78,23 +99,20 @@ actor AccountCredentialReplacementService {
         self.loadAuthenticatedUser = loadAuthenticatedUser
     }
 
+    /// Replaces a personal access token with a new one for the same GitHub
+    /// account. Classic and fine-grained tokens can replace each other; the
+    /// account's organizations and local data are kept.
     func replace(
         personalAccessToken: PersonalAccessToken,
         for account: GitHubAccount
     ) async throws -> AccountCredentialReplacementResult {
-        guard account.authenticationKind == personalAccessToken.kind.authenticationKind else {
+        guard account.authenticationKind != .oauth else {
             throw AccountCredentialReplacementError.authenticationKindMismatch
-        }
-        // Replacement does not collect a fine-grained token's resource owner.
-        // Continuing would replay `/user/orgs`, which is not authoritative for
-        // that token class. Keep the existing profile intact and require the
-        // owner-qualified connection flow instead.
-        guard personalAccessToken.kind != .fineGrained else {
-            throw AccountCredentialReplacementError.fineGrainedResourceOwnerOrganizationRequired
         }
         return try await replace(
             accessToken: personalAccessToken.value,
             refreshToken: nil,
+            authenticationKind: personalAccessToken.kind.authenticationKind,
             accessTokenLifetime: nil,
             refreshTokenLifetime: nil,
             for: account
@@ -111,6 +129,7 @@ actor AccountCredentialReplacementService {
         return try await replace(
             accessToken: oauthTokenResponse.accessToken.value,
             refreshToken: oauthTokenResponse.refreshToken?.value,
+            authenticationKind: .oauth,
             accessTokenLifetime: oauthTokenResponse.expiresIn,
             refreshTokenLifetime: oauthTokenResponse.refreshTokenExpiresIn,
             for: account
@@ -120,21 +139,23 @@ actor AccountCredentialReplacementService {
     private func replace(
         accessToken: SecretValue,
         refreshToken: SecretValue?,
+        authenticationKind: AuthenticationKind,
         accessTokenLifetime: TimeInterval?,
         refreshTokenLifetime: TimeInterval?,
         for account: GitHubAccount
     ) async throws -> AccountCredentialReplacementResult {
-        let authenticatedUser = try await loadAuthenticatedUser(accessToken)
+        let authenticated = try await loadAuthenticatedUser(accessToken)
         try Task.checkCancellation()
 
         let date = clock()
-        let accessTokenExpiresAt = accessTokenLifetime.map { date.addingTimeInterval($0) }
+        let accessTokenExpiresAt = accessTokenLifetime.map { date.addingTimeInterval($0) } ?? authenticated.expiresAt
         let refreshTokenExpiresAt = refreshTokenLifetime.map { date.addingTimeInterval($0) }
         let replacementCredentialID = CredentialID.make()
         let updatedAccount = try CredentialReplacement.updatedAccount(
             account,
-            authenticatedUser: authenticatedUser,
+            authenticatedUser: authenticated.user,
             credentialID: replacementCredentialID,
+            authenticationKind: authenticationKind,
             accessTokenExpiresAt: accessTokenExpiresAt,
             refreshTokenExpiresAt: refreshTokenExpiresAt,
             at: date

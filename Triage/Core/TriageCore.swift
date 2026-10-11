@@ -433,6 +433,9 @@ struct TriageStatus: Equatable, Sendable {
         case relaunchRequired(String)
         /// GitHub refresh failed; showing saved work.
         case gitHubUnavailable(String)
+        /// GitHub rejected the account's token (expired, revoked, or regenerated).
+        /// Automatic refreshes pause until the token is replaced or the user refreshes.
+        case gitHubCredentialRejected
         /// Some analyses failed; they retry automatically.
         case analysisFailed(String)
 
@@ -440,9 +443,18 @@ struct TriageStatus: Equatable, Sendable {
         var blocksAnalysis: Bool {
             switch self {
             case .copilotUnavailable, .relaunchRequired: true
-            case .gitHubUnavailable, .analysisFailed: false
+            case .gitHubUnavailable, .gitHubCredentialRejected, .analysisFailed: false
             }
         }
+
+        var isGitHubProblem: Bool {
+            switch self {
+            case .gitHubUnavailable, .gitHubCredentialRejected: true
+            case .copilotUnavailable, .relaunchRequired, .analysisFailed: false
+            }
+        }
+
+        var isCredentialRejected: Bool { self == .gitHubCredentialRejected }
     }
 
     var phase: Phase = .idle

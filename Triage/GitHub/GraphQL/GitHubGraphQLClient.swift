@@ -113,14 +113,20 @@ actor GitHubGraphQLClient {
     private let rateLimitController: GitHubRateLimitController?
     private let requestPriority: GitHubRequestPriority
     private let personalWorkOnly: Bool
+    private let observeCredential: (@Sendable (GitHubCredentialObservation) async -> Void)?
+    private var lastCredentialObservation: GitHubCredentialObservation?
 
+    /// `observeCredential` hears what GitHub reports about the credential:
+    /// once, and again whenever that changes.
     init(
         session: any HTTPSession = URLSessionHTTPSession(),
         credential: SecretValue,
         rateLimitController: GitHubRateLimitController? = nil,
         requestPriority: GitHubRequestPriority = .inboxCandidateHydration,
-        personalWorkOnly: Bool = false
+        personalWorkOnly: Bool = false,
+        observeCredential: (@Sendable (GitHubCredentialObservation) async -> Void)? = nil
     ) {
+        self.observeCredential = observeCredential
         self.session = session
         self.credential = credential
         self.rateLimitController = rateLimitController
@@ -211,6 +217,14 @@ actor GitHubGraphQLClient {
             headers: Self.headers(from: response),
             body: body
         )
+        let observation = GitHubCredentialObservation(
+            statusCode: response.statusCode,
+            expirationHeader: metadata.header(named: GitHubCredentialObservation.expirationHeader)
+        )
+        if let observeCredential, observation != lastCredentialObservation {
+            lastCredentialObservation = observation
+            await observeCredential(observation)
+        }
         let responseMetadata = GitHubGraphQLResponseMetadata(
             requestID: metadata.header(named: "X-GitHub-Request-Id"),
             retryAfter: metadata.header(named: "Retry-After").flatMap(TimeInterval.init),

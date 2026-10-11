@@ -43,6 +43,9 @@ struct SettingsView: View {
         .sheet(isPresented: $isPresentingTokenSheet) {
             tokenSheet
         }
+        .sheet(item: $appModel.tokenReplacementAccount) { account in
+            ReplaceTokenSheet(account: account)
+        }
         .confirmationDialog(
             "Remove \(accountPendingRemoval?.login ?? "account")?",
             isPresented: Binding(
@@ -213,7 +216,7 @@ struct SettingsView: View {
                 Picker("Later Today", selection: $laterTodayHours) {
                     ForEach([1, 2, 3, 4, 6], id: \.self) { Text("In \($0) hour\($0 == 1 ? "" : "s")").tag($0) }
                 }
-                Picker("Tomorrow and Next Week", selection: $tomorrowHour) {
+                Picker("Morning snoozes return at", selection: $tomorrowHour) {
                     ForEach(6...13, id: \.self) { hour in
                         Text(Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: .now)?
                             .formatted(date: .omitted, time: .shortened) ?? "\(hour):00").tag(hour)
@@ -222,7 +225,7 @@ struct SettingsView: View {
             } header: {
                 Text("Snooze")
             } footer: {
-                Text("Snoozed work returns to its section at this time. Anything new on the item brings it back sooner.")
+                Text("Tomorrow, In 3 Days, Next Week (the coming Monday), and In 7 Days return at this time. Anything new on the item brings it back sooner.")
             }
 
             Section {
@@ -278,7 +281,7 @@ struct SettingsView: View {
                                         .foregroundStyle(.tint)
                                 }
                             }
-                            Text("@\(account.login) · \(account.authenticationKind.title)")
+                            Text(accountDetail(account))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -286,6 +289,10 @@ struct SettingsView: View {
                         Menu {
                             Button("Use This Account") { appModel.selectAccount(account.id) }
                                 .disabled(account.id == appModel.selectedAccountID)
+                            if account.authenticationKind != .oauth {
+                                Button("Replace Token…") { appModel.tokenReplacementAccount = account }
+                                    .disabled(appModel.isConnecting)
+                            }
                             Divider()
                             Button("Remove…", role: .destructive) { accountPendingRemoval = account }
                                 .disabled(appModel.isRemovingAccount(account.id))
@@ -342,13 +349,26 @@ struct SettingsView: View {
         }
     }
 
+    private func accountDetail(_ account: GitHubAccount) -> String {
+        var parts = ["@\(account.login)", account.authenticationKind.title]
+        if account.authenticationKind != .oauth {
+            if let expiresAt = account.accessTokenExpiresAt {
+                let date = expiresAt.formatted(date: .abbreviated, time: .omitted)
+                parts.append(expiresAt <= .now ? "Expired \(date)" : "Expires \(date)")
+            } else if account.credentialStatus == .active {
+                parts.append("No expiration")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private func credentialBadge(_ status: CredentialStatus) -> some View {
         let (text, color): (String, Color) = switch status {
         case .active: ("Connected", .green)
         case .expiring: ("Expiring soon", .orange)
         case .expired: ("Expired", .red)
-        case .revoked: ("Revoked", .red)
+        case .revoked: ("Not accepted", .red)
         case .missing: ("Sign in again", .red)
         case .capabilityLimited: ("Limited access", .orange)
         }

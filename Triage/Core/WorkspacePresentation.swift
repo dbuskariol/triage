@@ -214,6 +214,8 @@ protocol WorkspaceActions: AnyObject {
     func restore(_ entries: [TriageEntry])
     func openOnGitHub(_ entry: TriageEntry)
     func openCopilotSettings()
+    /// Opens Settings ▸ Accounts to replace (or reconnect) the selected account's GitHub token.
+    func replaceGitHubToken()
     /// Adds a hard rule for the selected organization (quick rules, feedback).
     func addRule(_ rule: TriageRule)
     /// Opens the rule editor prefilled from `entry`. `correcting` (from

@@ -161,7 +161,10 @@ actor TriageEngine {
     private func scheduleTimer() {
         timer?.cancel()
         timer = nil
-        let refreshDeadline = refreshInterval.map { cycleFinishedAt.advanced(by: $0) }
+        // A rejected token fails every time; wait for the user to refresh or replace it.
+        let refreshDeadline = status.problem?.isCredentialRejected == true
+            ? nil
+            : refreshInterval.map { cycleFinishedAt.advanced(by: $0) }
         status.nextRefreshAt = refreshDeadline.map {
             now().addingTimeInterval(ContinuousClock.now.duration(to: $0).timeInterval)
         }
@@ -188,7 +191,7 @@ actor TriageEngine {
     private func refresh(_ scope: WorkspaceScope) async {
         let started = ContinuousClock.now
         Self.logger.notice("refresh started")
-        if case .gitHubUnavailable = status.problem { status.problem = nil }
+        if status.problem?.isGitHubProblem == true { status.problem = nil }
         status.phase = .searching(found: 0)
         publish()
         do {
@@ -199,10 +202,13 @@ actor TriageEngine {
             try Task.checkCancellation()
             try await store.replaceItems(items, scope: scope, at: now())
             status.lastRefreshAt = now()
-            if case .gitHubUnavailable = status.problem { status.problem = nil }
+            if status.problem?.isGitHubProblem == true { status.problem = nil }
             Self.logger.notice("refresh outcome=success items=\(items.count, privacy: .public) duration=\(String(describing: started.duration(to: .now)), privacy: .public)")
         } catch is CancellationError {
             return
+        } catch GitHubGraphQLError.requestFailed(let failure) where failure.kind == .unauthorized {
+            status.problem = .gitHubCredentialRejected
+            Self.logger.error("refresh outcome=failed reason=credentialRejected")
         } catch {
             status.problem = .gitHubUnavailable(Self.message(for: error))
             Self.logger.error("refresh outcome=failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
@@ -437,7 +443,7 @@ actor TriageEngine {
             switch error {
             case .requestFailed(let failure):
                 switch failure.kind {
-                case .unauthorized: return "GitHub sign-in expired. Reconnect the account in Settings."
+                case .unauthorized: return "GitHub no longer accepts this account's token. Replace it in Settings ▸ Accounts."
                 case .forbidden: return "GitHub denied access to this organization. Check SSO authorization in Settings."
                 case .rateLimited, .secondaryRateLimited: return "GitHub rate limit reached. Triage will resume automatically."
                 case .serverFailure: return "GitHub is having problems. Showing saved work; Triage will try again."
