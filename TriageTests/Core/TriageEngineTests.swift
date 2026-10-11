@@ -38,6 +38,27 @@ final class TriageEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testRejectedTokenPausesAutomaticRefreshUntilTheUserRetries() async throws {
+        let store = MemoryStore()
+        let discovery = RejectedTokenDiscovery()
+        let engine = TriageEngine(
+            store: store, makeDiscovery: { _ in discovery }, decider: RecordingDecider(batchSize: 5),
+            refreshInterval: .milliseconds(20)
+        )
+        let statuses = await engine.statusUpdates()
+        await engine.start(scope)
+        for await status in statuses where status.problem == .gitHubCredentialRejected && status.phase == .idle {
+            XCTAssertNil(status.nextRefreshAt)
+            break
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        let automaticCalls = await discovery.calls
+        XCTAssertEqual(automaticCalls, 1)
+        await engine.refreshNow()
+        try await waitUntil { await discovery.calls == 2 }
+        await engine.stop()
+    }
+
     func testCopilotUnavailableKeepsItemsPendingInsteadOfFailingThem() async throws {
         let store = MemoryStore()
         let engine = engine(
@@ -247,6 +268,16 @@ private actor CountingDiscovery: PersonalWorkDiscovering {
     ) async throws -> [PersonalWorkItem] {
         calls += 1
         return items
+    }
+}
+
+private actor RejectedTokenDiscovery: PersonalWorkDiscovering {
+    private(set) var calls = 0
+    func discover(
+        scope: WorkspaceScope, progress: @escaping @Sendable (DiscoveryProgress) async -> Void
+    ) async throws -> [PersonalWorkItem] {
+        calls += 1
+        throw GitHubGraphQLError.requestFailed(GitHubFailure(kind: .unauthorized, statusCode: 401))
     }
 }
 

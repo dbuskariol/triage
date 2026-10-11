@@ -56,6 +56,25 @@ struct TriageProductionComposition: Sendable {
             makeWorkspace: { scope in
                 let vault = try await openVault(scope.accountID)
                 let store = GRDBTriageStore(vault: vault)
+                // Observations are saved in order by one task of their own, so a
+                // search cancelled after a 401 can't cancel recording that 401.
+                let (credentialReports, report) = AsyncStream.makeStream(
+                    of: (GitHubCredentialObservation, AccountID, CredentialID).self
+                )
+                let credentialRecorder = GitHubCredentialHealthRecorder(vault: vault)
+                let credentialUpdates = AsyncStream<GitHubAccount>(bufferingPolicy: .bufferingNewest(1)) { updates in
+                    let recording = Task {
+                        for await (observation, accountID, credentialID) in credentialReports {
+                            if let updated = await credentialRecorder.record(
+                                observation, accountID: accountID, credentialID: credentialID
+                            ) {
+                                updates.yield(updated)
+                            }
+                        }
+                        updates.finish()
+                    }
+                    updates.onTermination = { _ in recording.cancel() }
+                }
                 let engine = TriageEngine(
                     store: store,
                     makeDiscovery: { scope in
@@ -77,7 +96,10 @@ struct TriageProductionComposition: Sendable {
                             for: scope.accountID, vault: vault
                         )
                         let client = GitHubGraphQLClient(
-                            credential: token, rateLimitController: rateLimit, personalWorkOnly: true
+                            credential: token, rateLimitController: rateLimit, personalWorkOnly: true,
+                            observeCredential: { [accountID = account.id, credentialID = account.credentialID] observation in
+                                report.yield((observation, accountID, credentialID))
+                            }
                         )
                         return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(client: client))
                     },
@@ -87,7 +109,7 @@ struct TriageProductionComposition: Sendable {
                         UserDefaults.standard.object(forKey: TriagePreferenceKeys.autoDoneHandled) as? Bool ?? true
                     }
                 )
-                return WorkspaceRuntime(store: store, engine: engine)
+                return WorkspaceRuntime(store: store, engine: engine, credentialUpdates: credentialUpdates)
             }
         )
         dependencies.draftReply = { scope, item, goal, style in

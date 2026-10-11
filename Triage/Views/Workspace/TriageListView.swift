@@ -5,6 +5,7 @@ struct TriageListView: View {
     let section: WorkspacePresentation.Section
     /// When set, the list shows this saved search instead of `section`.
     var savedSearch: SavedSearch?
+    var credentialNotice: GitHubCredentialNotice?
     @Binding var selection: Set<GitHubNodeID>
     let actions: any WorkspaceActions
     @Binding var search: WorkspaceSearch
@@ -66,8 +67,8 @@ struct TriageListView: View {
                         isNamingSavedSearch = true
                     }
                 )
-                if presentation.status.problem != nil {
-                    TriageStatusView(status: presentation.status, actions: actions)
+                if presentation.status.problem != nil || credentialNotice != nil {
+                    TriageStatusView(status: presentation.status, credentialNotice: credentialNotice, actions: actions)
                 }
                 if section == .done, !search.isActive {
                     Picker("Show", selection: $doneFilter) {
@@ -171,6 +172,14 @@ struct TriageListView: View {
                 Text(message)
             } actions: {
                 Button("Retry") { actions.refreshNow() }
+            }
+        case .gitHubCredentialRejected:
+            ContentUnavailableView {
+                Label("Replace your GitHub token", systemImage: "key.slash")
+            } description: {
+                Text(credentialNotice?.message ?? "GitHub no longer accepts this account's token.")
+            } actions: {
+                Button(credentialNotice?.actionTitle ?? "Open Account Settings") { actions.replaceGitHubToken() }
             }
         case .analysisFailed:
             ContentUnavailableView(

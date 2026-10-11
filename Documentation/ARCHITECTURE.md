@@ -72,6 +72,8 @@ Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so
 
 ## Done, snooze, and handled detection
 
+**Snooze** choices are Later Today, Tomorrow, In 3 Days, Next Week (the next Monday, so a week away on a Monday), and In 7 Days; all but Later Today return at the user's morning hour.
+
 `LocalStatus.done` records when the item was marked done. Done work becomes visible again only when someone **other than the viewer** comments, reviews, or pushes after that time. The viewer's own follow-up never resurfaces it.
 
 When an Inbox item with a next step has viewer activity since its decision, the engine sends Copilot the previous `next_action` and a plain list of what the viewer did. Copilot returns `handled: yes | partial | no` with one sentence of evidence. On `yes`, the store marks the item done with that evidence (unless the user already set a status), the UI labels it **Handled by You**, and **Move Back to Inbox** undoes it. This is controlled by *Settings ▸ Inbox ▸ Mark work done when you handle it*.
@@ -110,6 +112,12 @@ Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers a
 **Model options.** Each organization stores a model, reasoning effort, and context tier for prioritizing, and optionally a separate set for Draft Reply (otherwise drafts use the prioritizing choice). Settings offers only the efforts and tiers the selected model reports through the SDK, and the helper applies them to each session.
 
 **Disk hygiene.** Every triage session is disconnected and deleted through the SDK after its batch. After each sign-in, sessions left by an interrupted run are listed and deleted through the SDK, the CLI runs at error-only log level, and only its five newest log files are kept.
+
+## GitHub credentials
+
+Every GitHub response says something about the credential that made it. `GitHubGraphQLClient` reports a `GitHubCredentialObservation`: *accepted*, with the expiration from GitHub's `GitHub-Authentication-Token-Expiration` header, or *rejected* on a 401. In production one task per workspace saves these in order through `GitHubCredentialHealthRecorder`, independently of the request that produced them, and streams the updated account to the app model. `CredentialLifecycle` holds the rules: a personal access token is *expiring* within seven days of its expiration and *expired* after it; a rejected token is *expired* if past its expiration and otherwise *revoked*. Connecting or replacing a token records its expiration from the `/user` response.
+
+When GitHub rejects the token, the engine reports `gitHubCredentialRejected` and stops scheduling automatic refreshes (Refresh Now still tries). `GitHubCredentialNotice` turns the account and that problem into the workspace banner: a warning a week before a token expires, and a blocking notice with **Replace Token…** once it stops working. Settings ▸ Accounts replaces a personal access token in place (classic and fine-grained can replace each other), keeping the account's organizations, rules, and history; the workspace restarts with the new token.
 
 ## Storage
 

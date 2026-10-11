@@ -162,7 +162,7 @@ enum MarkReadPolicy: String, CaseIterable, Identifiable, Sendable {
 
 /// Snooze times shared by every snooze control, using the user's preferences.
 enum SnoozeOption: CaseIterable, Identifiable {
-    case laterToday, tomorrow, nextWeek
+    case laterToday, tomorrow, inThreeDays, nextWeek, inSevenDays
 
     var id: Self { self }
 
@@ -170,25 +170,55 @@ enum SnoozeOption: CaseIterable, Identifiable {
         switch self {
         case .laterToday: "Later Today"
         case .tomorrow: "Tomorrow"
+        case .inThreeDays: "In 3 Days"
         case .nextWeek: "Next Week"
+        case .inSevenDays: "In 7 Days"
         }
     }
 
     func date(from now: Date = .now, defaults: UserDefaults = .standard, calendar: Calendar = .current) -> Date {
+        let hour = Self.morningHour(defaults)
         switch self {
         case .laterToday:
             let hours = defaults.object(forKey: TriagePreferenceKeys.laterTodayHours) as? Int ?? 3
             return now.addingTimeInterval(TimeInterval(max(1, hours) * 3_600))
-        case .tomorrow, .nextWeek:
-            let hour = defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9
-            let days = self == .tomorrow ? 1 : 7
-            let day = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: now)) ?? now
-            return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+        case .tomorrow: return Self.morning(daysAfter: 1, now, hour: hour, calendar: calendar)
+        case .inThreeDays: return Self.morning(daysAfter: 3, now, hour: hour, calendar: calendar)
+        case .nextWeek: return Self.nextMonday(after: now, hour: hour, calendar: calendar)
+        case .inSevenDays: return Self.morning(daysAfter: 7, now, hour: hour, calendar: calendar)
         }
     }
 
-    /// e.g. "Tomorrow, 9:00 AM" for menus.
-    func subtitle(from now: Date = .now) -> String {
-        date(from: now).formatted(.dateTime.weekday(.wide).hour().minute())
+    /// "Monday 9:00 AM" within the coming week; dates further out include the day and month.
+    func subtitle(from now: Date = .now, defaults: UserDefaults = .standard, calendar: Calendar = .current) -> String {
+        let date = date(from: now, defaults: defaults, calendar: calendar)
+        let days = calendar.dateComponents(
+            [.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)
+        ).day ?? 0
+        var style = days < 6
+            ? Date.FormatStyle().weekday(.wide).hour().minute()
+            : Date.FormatStyle().weekday(.abbreviated).day().month(.abbreviated).hour().minute()
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        return date.formatted(style)
+    }
+
+    /// The hour every morning snooze returns at (Settings ▸ General ▸ Snooze).
+    static func morningHour(_ defaults: UserDefaults) -> Int {
+        min(23, max(0, defaults.object(forKey: TriagePreferenceKeys.tomorrowHour) as? Int ?? 9))
+    }
+
+    private static func morning(daysAfter days: Int, _ now: Date, hour: Int, calendar: Calendar) -> Date {
+        let day = calendar.date(byAdding: .day, value: days, to: calendar.startOfDay(for: now)) ?? now
+        return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+    }
+
+    /// The start of the next work week: the first Monday after today, so on a
+    /// Monday it is the following Monday rather than later the same day.
+    private static func nextMonday(after now: Date, hour: Int, calendar: Calendar) -> Date {
+        // `weekday` is 1 = Sunday … 7 = Saturday in every locale; Monday is 2.
+        let weekday = calendar.component(.weekday, from: now)
+        let days = (2 - weekday + 7) % 7
+        return morning(daysAfter: days == 0 ? 7 : days, now, hour: hour, calendar: calendar)
     }
 }

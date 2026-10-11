@@ -138,7 +138,8 @@ actor AccountConnectionService {
     ) async throws -> AccountConnectionResult {
         let transport = try GitHubRESTTransport()
         let client = GitHubRESTClient(transport: transport, credential: accessToken)
-        let user = try await GitHubIdentityClient(client: client).authenticatedUser().value
+        let userResponse = try await GitHubIdentityClient(client: client).authenticatedUser()
+        let user = userResponse.value
         guard let nodeID = GitHubNodeID(rawValue: user.nodeID) else {
             throw AccountConnectionError.invalidGitHubIdentity
         }
@@ -146,6 +147,9 @@ actor AccountConnectionService {
         let accountID = AccountID.make()
         let credentialID = CredentialID.make()
         let now = Date()
+        // Personal access tokens report their expiration on every response.
+        let accessTokenExpiresAt = accessTokenLifetime.map { now.addingTimeInterval($0) }
+            ?? userResponse.credentialExpiresAt
         let account = GitHubAccount(
             id: accountID,
             githubUserID: user.id,
@@ -157,11 +161,11 @@ actor AccountConnectionService {
             credentialID: credentialID,
             credentialStatus: CredentialLifecycle.status(
                 authenticationKind: authenticationKind,
-                accessTokenExpiresAt: accessTokenLifetime.map { now.addingTimeInterval($0) },
+                accessTokenExpiresAt: accessTokenExpiresAt,
                 refreshTokenExpiresAt: refreshTokenLifetime.map { now.addingTimeInterval($0) },
                 at: now
             ),
-            accessTokenExpiresAt: accessTokenLifetime.map { now.addingTimeInterval($0) },
+            accessTokenExpiresAt: accessTokenExpiresAt,
             refreshTokenExpiresAt: refreshTokenLifetime.map { now.addingTimeInterval($0) },
             createdAt: now,
             lastValidatedAt: now
