@@ -9,8 +9,6 @@ struct SettingsView: View {
 
     @State private var isPresentingAccountAddition = false
     @State private var isPresentingTokenSheet = false
-    @State private var token = ""
-    @State private var resourceOwnerOrganization = ""
     @State private var accountPendingRemoval: GitHubAccount?
     @State private var removalError: String?
     @State private var isConfirmingReanalysis = false
@@ -41,7 +39,7 @@ struct SettingsView: View {
             Text("Connect another GitHub account for a local Triage workspace.")
         }
         .sheet(isPresented: $isPresentingTokenSheet) {
-            tokenSheet
+            PersonalAccessTokenSheet()
         }
         .sheet(item: $appModel.tokenReplacementAccount) { account in
             ReplaceTokenSheet(account: account)
@@ -557,39 +555,5 @@ struct SettingsView: View {
     private func errorLabel(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .foregroundStyle(.orange)
-    }
-
-    private var tokenSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Use a Personal Access Token")
-                .font(.title2.weight(.semibold))
-            SecureField("GitHub personal access token", text: $token)
-            TextField("Resource owner organization (fine-grained token)", text: $resourceOwnerOrganization)
-            if let error = appModel.connectionError {
-                errorLabel(error)
-            }
-            HStack {
-                Button("Cancel") { isPresentingTokenSheet = false }
-                Spacer()
-                Button("Connect") {
-                    let submittedToken = token
-                    let organization = resourceOwnerOrganization.isEmpty ? nil : resourceOwnerOrganization
-                    token = ""
-                    Task {
-                        await appModel.connectPersonalAccessToken(
-                            submittedToken,
-                            resourceOwnerOrganization: organization
-                        )
-                        if appModel.connectionError == nil {
-                            isPresentingTokenSheet = false
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(token.isEmpty || appModel.isConnecting)
-            }
-        }
-        .padding(24)
-        .frame(width: 440)
     }
 }

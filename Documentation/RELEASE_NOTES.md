@@ -1,4 +1,8 @@
-# Triage 0.1.1
+# Triage 0.1.2
+
+- **Token setup explains exactly what's needed.** The personal access token sheets list the read-only access Triage needs, and open GitHub's token page with it already selected, for fine-grained or classic tokens.
+
+## Triage 0.1.1
 
 - **The list column keeps its width.** Opening an item no longer resizes the list, and the width you set is remembered across sections and launches.
 - **Handled work that comes back is shown correctly.** When someone responds to work Triage marked handled, it returns to your Inbox without the old "Handled by You" label, and Triage can mark it handled again when you reply.

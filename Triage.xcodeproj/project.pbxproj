@@ -13,6 +13,7 @@
 		063CC539E9DFDD8DF2B08686 /* TriageStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13328BDFE5BCE96500CB580D /* TriageStatusView.swift */; };
 		07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */; };
 		09BB8EF8567D261FA774322E /* GitHubGraphQLClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE42BC79B25A8F9D28C18CE /* GitHubGraphQLClient.swift */; };
+		0EBCDDF72B18603699C2E539 /* GitHubCredentialNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B1F3C501373958435DB977 /* GitHubCredentialNoticeTests.swift */; };
 		0F397F8700D3DDCA1459FA6D /* CopilotModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F2CFFDE8AE4D6F2E72426D1 /* CopilotModelSettings.swift */; };
 		1365E2C79BEEAB092412617F /* AuthBrokerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70A992F1B225DED1E07FA18E /* AuthBrokerProtocol.swift */; };
 		14416BA87AEF31BB3BE74625 /* GRDBTriageStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5FB56E19BC052C7C9F17450 /* GRDBTriageStoreTests.swift */; };
@@ -47,6 +48,7 @@
 		463F21701DBBD3456B2362B8 /* TriageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDA3A2AB9CA28768B15E6CE8 /* TriageDetailView.swift */; };
 		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
 		4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AF305EE4595199A034B4462 /* OptimisticChanges.swift */; };
+		4C83D802A6CBFD76254F564C /* GitHubCredentialObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 194F5DB8714CC8F281F3FC7F /* GitHubCredentialObservationTests.swift */; };
 		4D07060943DD35CDF4F1F898 /* WorkspaceSortMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1D01831E8F9F2A8F3CE7A0 /* WorkspaceSortMenu.swift */; };
 		4DC752CE38B94B7C783756C8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5F7B0365D56F4DC3F04FB804 /* Sparkle */; };
 		4DF3F1CAE8F0E929CB4DCA3F /* TriageCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43224A6207C64C0892546655 /* TriageCommands.swift */; };
@@ -94,7 +96,6 @@
 		8559468EB89030738DB4A0F3 /* DashboardComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */; };
 		86C27F2AEAD8B377C934DFB7 /* CopilotXPCInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4693B242C89C319F29944A36 /* CopilotXPCInterface.swift */; };
 		88B1EEB64CA5AB2E1811D6DC /* WorkInsights.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14AD97D4FF1F004296DFFCF4 /* WorkInsights.swift */; };
-		88CEAE87677D3260D58B02F8 /* ReplaceTokenSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4251B3F89523C7992F8DF216 /* ReplaceTokenSheet.swift */; };
 		8917871AD7383F8DA0A5DA46 /* CopilotHelperSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56E9B5FC8260220C44C027A8 /* CopilotHelperSession.swift */; };
 		8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */; };
 		8FBB6F91155016FA03A9846C /* AccountRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80EB94E267D82037DB5FBBC /* AccountRepository.swift */; };
@@ -120,11 +121,13 @@
 		B573C772395816D584E13828 /* GitHubOAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */; };
 		B953E01CBEE60E7BBD7B7F9E /* TriagePerformanceLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67130087F89AF6E77194FF23 /* TriagePerformanceLaunchTests.swift */; };
 		B9FA1A23FA8059A53F75992B /* ListSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C3E82755AA6ADEC01446465 /* ListSelection.swift */; };
+		B9FD96EEDB6C37A3D5C46652 /* GitHubTokenRequirementsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 203F424B09E9E06EC8B13674 /* GitHubTokenRequirementsTests.swift */; };
 		BA2031D754FDBE13A9B7B141 /* GitHubGraphQLQueries.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8326C3C930B01A4914156D18 /* GitHubGraphQLQueries.swift */; };
 		BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C3A82005B8F97EE021DE4E7 /* KeychainSecretStore.swift */; };
 		BC1D02E540A3002137EE9891 /* RelativeTime.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA2042C053AA1E789FE067CF /* RelativeTime.swift */; };
 		BC98F650551115F8626ABA2B /* TriagePerformanceScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29E9DED9A4D718859CA9EB05 /* TriagePerformanceScrollTests.swift */; };
 		BECCEB186B22B627A00F12EE /* TriageApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51CCBC527DBD7C20ECD99955 /* TriageApp.swift */; };
+		BEF9875DEFDF6FAB91422DA3 /* PersonalAccessTokenSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = F769FAEF53449B22672FBC3C /* PersonalAccessTokenSheets.swift */; };
 		C456BE7D94C6C310182F71F1 /* CopilotXPCCallerValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */; };
 		C70DF6C9BAC43A7C2BF981F3 /* TriageEntryRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E59DA2CC1518F03EA1FCBC /* TriageEntryRows.swift */; };
 		CA97549D8440527006107522 /* EntryStatusColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67ED489BC9446914E7611C8 /* EntryStatusColumn.swift */; };
@@ -146,6 +149,7 @@
 		E587462A099A08B4A1394CFA /* GitHubDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993826A5AB570E9336F94531 /* GitHubDiagnostics.swift */; };
 		E6E211CEB38C07FA9FC64BBC /* AccountVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */; };
 		E83CD27CC70C0C6ADC078EC7 /* GitHubCredentialObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBAA94430599662CA45DBFB3 /* GitHubCredentialObservation.swift */; };
+		E9A8A7B60C6237AF9869A7DD /* GitHubTokenRequirements.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A7099292C958AD6650E689 /* GitHubTokenRequirements.swift */; };
 		EAAD6FE52F94FC1F076B8B62 /* CopilotRuntimeAcquisitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26D488FD99BFD1BA3771B6C4 /* CopilotRuntimeAcquisitionTests.swift */; };
 		EDC07FACA4AE6EB03C90979A /* AccountConnectionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D962615F59F45990114831EF /* AccountConnectionService.swift */; };
 		EEB384069794A87C52F10A61 /* GitHubRESTTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE740719DC2E5F12F288FFB9 /* GitHubRESTTransport.swift */; };
@@ -210,11 +214,13 @@
 		13E0D7BC216D6CA976B8B7BF /* AuthBrokerProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerProtocolTests.swift; sourceTree = "<group>"; };
 		14AD97D4FF1F004296DFFCF4 /* WorkInsights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkInsights.swift; sourceTree = "<group>"; };
 		152B2A70DEBF7542ECA00583 /* GitHubOAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuth.swift; sourceTree = "<group>"; };
+		194F5DB8714CC8F281F3FC7F /* GitHubCredentialObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCredentialObservationTests.swift; sourceTree = "<group>"; };
 		1B612974F6C076D28C56A297 /* AttentionNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionNotifier.swift; sourceTree = "<group>"; };
 		1CC47AE55CA5D1EEE6B4F120 /* CredentialLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialLifecycleTests.swift; sourceTree = "<group>"; };
 		1D8BBCAD56C03D23E2FEDD17 /* TriageCopilotXPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageCopilotXPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1EE818BCDE6443719AD70E34 /* DashboardComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardComponents.swift; sourceTree = "<group>"; };
 		1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = TriageCopilotXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		203F424B09E9E06EC8B13674 /* GitHubTokenRequirementsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTokenRequirementsTests.swift; sourceTree = "<group>"; };
 		23EE6CF4533FFD2F5C447830 /* CopilotDraftWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotDraftWriter.swift; sourceTree = "<group>"; };
 		26D488FD99BFD1BA3771B6C4 /* CopilotRuntimeAcquisitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotRuntimeAcquisitionTests.swift; sourceTree = "<group>"; };
 		26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationModel.swift; sourceTree = "<group>"; };
@@ -231,7 +237,6 @@
 		3C1D14CD752A80B469B56678 /* OnboardingStepTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingStepTests.swift; sourceTree = "<group>"; };
 		3C4DF31783537875285A0A91 /* AccountCredentialReplacementService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCredentialReplacementService.swift; sourceTree = "<group>"; };
 		3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateDataArtifacts.swift; sourceTree = "<group>"; };
-		4251B3F89523C7992F8DF216 /* ReplaceTokenSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplaceTokenSheet.swift; sourceTree = "<group>"; };
 		42D8AD520B03BBC304347049 /* WorkspaceSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearch.swift; sourceTree = "<group>"; };
 		43224A6207C64C0892546655 /* TriageCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageCommands.swift; sourceTree = "<group>"; };
 		4496D533D578A4695215DA26 /* WorkspaceViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViewsTests.swift; sourceTree = "<group>"; };
@@ -256,6 +261,7 @@
 		65853326EA395EEEF7A98A9A /* TriageProductionAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageProductionAdapters.swift; sourceTree = "<group>"; };
 		67130087F89AF6E77194FF23 /* TriagePerformanceLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriagePerformanceLaunchTests.swift; sourceTree = "<group>"; };
 		67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClientTests.swift; sourceTree = "<group>"; };
+		68B1F3C501373958435DB977 /* GitHubCredentialNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCredentialNoticeTests.swift; sourceTree = "<group>"; };
 		6B08CBED136FC66902A80125 /* OnboardingFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingFlowView.swift; sourceTree = "<group>"; };
 		6C847E2A0F9CB9226F78C821 /* TriageRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageRules.swift; sourceTree = "<group>"; };
 		6D279F3AFBDDF3C471DD6052 /* WorkspaceDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDestination.swift; sourceTree = "<group>"; };
@@ -346,6 +352,8 @@
 		F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotHelperProcess.swift; sourceTree = "<group>"; };
 		F4E8C13358B108D728AFEB94 /* ListDetailSplitViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListDetailSplitViewTests.swift; sourceTree = "<group>"; };
 		F51E6E99FA1D5F9BA1F44336 /* ScrollBarVisibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollBarVisibilityTests.swift; sourceTree = "<group>"; };
+		F6A7099292C958AD6650E689 /* GitHubTokenRequirements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubTokenRequirements.swift; sourceTree = "<group>"; };
+		F769FAEF53449B22672FBC3C /* PersonalAccessTokenSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalAccessTokenSheets.swift; sourceTree = "<group>"; };
 		FBAA94430599662CA45DBFB3 /* GitHubCredentialObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCredentialObservation.swift; sourceTree = "<group>"; };
 		FCDBE483415D40F0CFC8CC2A /* FocusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusView.swift; sourceTree = "<group>"; };
 		FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OAuthCredentialRefreshService.swift; sourceTree = "<group>"; };
@@ -399,6 +407,7 @@
 				093F78313766BF56E21E1A0F /* CredentialLifecycle.swift */,
 				152B2A70DEBF7542ECA00583 /* GitHubOAuth.swift */,
 				4A34E439D5B2F44D6BBEFAFF /* GitHubSSOHeader.swift */,
+				F6A7099292C958AD6650E689 /* GitHubTokenRequirements.swift */,
 				FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */,
 				77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */,
 				BACBE230946C1056771FE56F /* PersonalAccessToken.swift */,
@@ -503,6 +512,7 @@
 				1CC47AE55CA5D1EEE6B4F120 /* CredentialLifecycleTests.swift */,
 				A98DEAE173E13682A5A7331C /* GitHubOAuthTests.swift */,
 				8DF235BDAD99F90AC293BE9E /* GitHubSSOHeaderTests.swift */,
+				203F424B09E9E06EC8B13674 /* GitHubTokenRequirementsTests.swift */,
 				83392CACBB3AEE37ADD6DF40 /* OAuthCredentialRefreshServiceTests.swift */,
 				28B1B9B44356DF52DF727463 /* OrganizationAccessEvaluatorTests.swift */,
 				48973FB43480258729EA7617 /* PersonalAccessTokenTests.swift */,
@@ -590,6 +600,7 @@
 		9B840724F73C721915E3802E /* GitHub */ = {
 			isa = PBXGroup;
 			children = (
+				194F5DB8714CC8F281F3FC7F /* GitHubCredentialObservationTests.swift */,
 				1185018DFA42006B4AD699F5 /* GitHubGraphQLClientTests.swift */,
 				5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */,
 				E844E395E5858DFCE770AF44 /* GitHubRESTClientTests.swift */,
@@ -699,6 +710,7 @@
 			isa = PBXGroup;
 			children = (
 				532B68509614ECFCF006E1EB /* CopilotTriageDeciderTests.swift */,
+				68B1F3C501373958435DB977 /* GitHubCredentialNoticeTests.swift */,
 				9B9E9B3711E7D1FB03B4A2F0 /* GitHubPersonalWorkDiscoveryTests.swift */,
 				D5FB56E19BC052C7C9F17450 /* GRDBTriageStoreTests.swift */,
 				BD65EE2EB9640B299C3BA48A /* ListSelectionTests.swift */,
@@ -754,7 +766,7 @@
 			children = (
 				9F2CFFDE8AE4D6F2E72426D1 /* CopilotModelSettings.swift */,
 				75D6D37988DAE4D21BE6B872 /* NotificationSettingsPage.swift */,
-				4251B3F89523C7992F8DF216 /* ReplaceTokenSheet.swift */,
+				F769FAEF53449B22672FBC3C /* PersonalAccessTokenSheets.swift */,
 				845CF6B5B88ACA9A8956F7CB /* ScrollBarSettingSection.swift */,
 				CF755537AF07EB548FB6EC36 /* SettingsPages.swift */,
 			);
@@ -1006,6 +1018,8 @@
 				54F005BBBB3ABAF7E20BF900 /* CopilotTriageDeciderTests.swift in Sources */,
 				54DFA6EA6877C636EB142DB3 /* CredentialLifecycleTests.swift in Sources */,
 				14416BA87AEF31BB3BE74625 /* GRDBTriageStoreTests.swift in Sources */,
+				0EBCDDF72B18603699C2E539 /* GitHubCredentialNoticeTests.swift in Sources */,
+				4C83D802A6CBFD76254F564C /* GitHubCredentialObservationTests.swift in Sources */,
 				4E2BF6D574E266F59DCCA22B /* GitHubGraphQLClientTests.swift in Sources */,
 				B573C772395816D584E13828 /* GitHubOAuthTests.swift in Sources */,
 				B05D57BDEE8F56B3BAEA4A3A /* GitHubPersonalWorkDiscoveryTests.swift in Sources */,
@@ -1013,6 +1027,7 @@
 				7E2741B48EAF6AE543478647 /* GitHubRESTTransportTests.swift in Sources */,
 				DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */,
 				7E270B424596D87E20392CA3 /* GitHubSSOHeaderTests.swift in Sources */,
+				B9FD96EEDB6C37A3D5C46652 /* GitHubTokenRequirementsTests.swift in Sources */,
 				79927CD4DF78EE0D36C25374 /* ListDetailSplitViewTests.swift in Sources */,
 				961DBD886D1A3913691A10CD /* ListSelectionTests.swift in Sources */,
 				58A6405C6A15A5FBE98B3CF4 /* OAuthCredentialRefreshServiceTests.swift in Sources */,
@@ -1118,6 +1133,7 @@
 				5365A873C4D57DE2CD51390B /* GitHubRateLimit.swift in Sources */,
 				73D7797231637093519A10CB /* GitHubRequestTrace.swift in Sources */,
 				59361E7D730F026936B600C3 /* GitHubSSOHeader.swift in Sources */,
+				E9A8A7B60C6237AF9869A7DD /* GitHubTokenRequirements.swift in Sources */,
 				1BDA615244FC119314DB2354 /* Identifiers.swift in Sources */,
 				BA70AEAACC23EA02254610CE /* KeychainSecretStore.swift in Sources */,
 				A0E44686D5476CFD018AFCD5 /* ListDetailSplitView.swift in Sources */,
@@ -1132,10 +1148,10 @@
 				4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */,
 				8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */,
 				82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */,
+				BEF9875DEFDF6FAB91422DA3 /* PersonalAccessTokenSheets.swift in Sources */,
 				DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */,
 				3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */,
 				BC1D02E540A3002137EE9891 /* RelativeTime.swift in Sources */,
-				88CEAE87677D3260D58B02F8 /* ReplaceTokenSheet.swift in Sources */,
 				ABD3FA38E3B258FA7A8DB2AA /* ReviewView.swift in Sources */,
 				593D34E52E35E0A27F81AC9E /* RootView.swift in Sources */,
 				F92619283A09F1258E355548 /* RuleViews.swift in Sources */,
@@ -1260,11 +1276,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Triage/Triage.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/Triage-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac;
 				PRODUCT_NAME = Triage;
 				SDKROOT = macosx;
@@ -1381,11 +1397,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Triage/TriageDebug.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/Triage-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac;
 				PRODUCT_NAME = Triage;
 				SDKROOT = macosx;
@@ -1434,11 +1450,11 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TriageCopilotXPC/TriageCopilotXPC.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/TriageCopilotXPC-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac.TriageCopilotXPC;
 				PRODUCT_NAME = TriageCopilotXPC;
 				SDKROOT = macosx;
@@ -1487,11 +1503,11 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TriageCopilotXPC/TriageCopilotXPC.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Configuration/TriageCopilotXPC-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.triage.mac.TriageCopilotXPC;
 				PRODUCT_NAME = TriageCopilotXPC;
 				SDKROOT = macosx;

@@ -203,7 +203,7 @@ private struct SetupRow<Action: View>: View {
     }
 }
 
-private struct ErrorText: View {
+struct ErrorText: View {
     let message: String
     var body: some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -298,48 +298,6 @@ private struct ConnectGitHubPage: View {
         ) {
             Button("Try Again") { Task { await appModel.restoreAccounts() } }
                 .disabled(appModel.isRestoringAccounts)
-        }
-    }
-}
-
-private struct PersonalAccessTokenSheet: View {
-    @EnvironmentObject private var appModel: TriageAppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var token = ""
-    @State private var resourceOwnerOrganization = ""
-
-    var body: some View {
-        Form {
-            Section {
-                SecureField("Token", text: $token)
-                TextField("Resource owner", text: $resourceOwnerOrganization, prompt: Text("Organization, for fine-grained tokens"))
-            } header: {
-                Text("Use a Personal Access Token")
-            } footer: {
-                Text("Needs read access to issues, pull requests, and organization membership. The token is stored in the Keychain.")
-            }
-            if let error = appModel.connectionError {
-                ErrorText(message: error)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { token = ""; dismiss() }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Connect") {
-                    let submitted = token
-                    let organization = resourceOwnerOrganization.isEmpty ? nil : resourceOwnerOrganization
-                    token = ""
-                    Task {
-                        await appModel.connectPersonalAccessToken(submitted, resourceOwnerOrganization: organization)
-                        if appModel.connectionError == nil { dismiss() }
-                    }
-                }
-                .disabled(token.isEmpty || appModel.isConnecting)
-            }
         }
     }
 }
