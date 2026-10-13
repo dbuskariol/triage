@@ -17,6 +17,23 @@ struct TriageRulesTests {
         #expect(!TriageRuleCondition(field: .author, value: "  ").matches(item))
     }
 
+    @Test func textContainsMatchesPlainTextAcrossTitleBodyAndComments() {
+        let item = rulesItem(
+            body: "Please **review** the [docs](https://example.com/guide).\n\n```bash\necho hello\n```\n\nSee `node_id` too.",
+            activity: [ActivityFact(author: "octocat", createdAt: .now, excerpt: "> quoted **follow-up** here")]
+        )
+        let contains = TriageRuleCondition(field: .textContains, value: "review the docs")
+        #expect(contains.matches(item))
+        #expect(TriageRuleCondition(field: .textContains, value: "**review** the [docs](https://example.com)").matches(item))
+        #expect(TriageRuleCondition(field: .textContains, value: "echo hello").matches(item))
+        #expect(TriageRuleCondition(field: .textContains, value: "node_id").matches(item))
+        #expect(TriageRuleCondition(field: .textContains, value: "quoted follow-up").matches(item))
+        #expect(TriageRuleCondition(field: .textContains, value: "bump dependency").matches(item))
+        #expect(!TriageRuleCondition(field: .textContains, value: "unrelated phrase").matches(item))
+        #expect(!TriageRuleCondition(field: .textContains, value: "**").isValid)
+        #expect(contains.summary == "text contains “review the docs”")
+    }
+
     @Test func hardRulesOverrideCopilotAndAreAttributed() {
         let item = rulesItem()
         let entry = TriageEntry(item: item, decision: decision(item, .none, priority: 30), analysis: .current, local: .active)
@@ -63,6 +80,19 @@ struct TriageRulesTests {
         }
     }
 
+    @Test func markDoneStampsOnceAndDoesNotClassifyAfterward() {
+        let item = rulesItem()
+        var rule = TriageRule.quick(.markDone, .author, "dependabot[bot]")
+        let rules = TriageRules(instructions: "", rules: [rule])
+        let stamp = RuleDoneStamp(ruleID: rule.id, itemID: item.id)
+        #expect(rules.pendingDoneStamps(for: [item], already: []).contains(stamp))
+        #expect(rules.pendingDoneStamps(for: [item], already: [stamp]).isEmpty)
+        #expect(rules.matches(for: item).isEmpty)
+        #expect(!rules.isMuted(item))
+        rule.isEnabled = false
+        #expect(TriageRules(instructions: "", rules: [rule]).pendingDoneStamps(for: [item], already: []).isEmpty)
+    }
+
     @Test func hintsDescribeEnforcedOutcomes() {
         let hints = TriageRules(instructions: "", rules: [.quick(.needsAction, .repository, "widgets")]).hints(for: rulesItem())
         #expect(hints.count == 1)
@@ -72,18 +102,19 @@ struct TriageRulesTests {
 
 private func rulesItem(
     repository: String = "octo/widgets", author: String = "dependabot[bot]",
-    labels: [String] = ["security"], draft: Bool = false
+    labels: [String] = ["security"], draft: Bool = false,
+    body: String = "", activity: [ActivityFact] = []
 ) -> PersonalWorkItem {
     PersonalWorkItem(
         id: GitHubNodeID(rawValue: "PR_rules")!, kind: .pullRequest, repository: repository, number: 7,
         title: "Bump dependency", url: URL(string: "https://github.com/\(repository)/pull/7")!, state: .open,
         author: author, createdAt: .now, updatedAt: .now, relationships: [.assigned], labels: labels,
-        assignees: [], body: "",
+        assignees: [], body: body,
         pullRequest: PullRequestFacts(
             isDraft: draft, reviewDecision: nil, requestedReviewers: [], latestReviews: [], checks: nil,
             mergeable: nil, unresolvedReviewThreads: 0, additions: 0, deletions: 0
         ),
-        recentActivity: []
+        recentActivity: activity
     )
 }
 

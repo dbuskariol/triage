@@ -62,8 +62,27 @@ struct TriageRules: Codable, Equatable, Sendable {
 
     /// Enabled rules matching `item`, in list order. `viewer` is the signed-in
     /// login, needed for "requested from me directly / from my team".
+    /// Mark-as-Done rules are omitted: they stamp local status once, and must
+    /// not keep classifying an item after someone else brings it back.
     func matches(for item: PersonalWorkItem, viewer: String = "") -> [TriageRule] {
-        enabledRules.filter { $0.matches(item, viewer: viewer) }
+        enabledRules.filter { $0.effect != .markDone && $0.matches(item, viewer: viewer) }
+    }
+
+    /// Mark-as-Done rules that match `items` and have not already been stamped.
+    /// A stamp is once per rule and item. A later reply does not create another.
+    func pendingDoneStamps(for items: [PersonalWorkItem], already: Set<RuleDoneStamp>, viewer: String = "") -> [RuleDoneStamp] {
+        let doneRules = enabledRules.filter { $0.effect == .markDone }
+        guard !doneRules.isEmpty else { return [] }
+        let stamped = Set(already.map { "\($0.ruleID.uuidString)|\($0.itemID.rawValue)" })
+        var result: [RuleDoneStamp] = []
+        for item in items {
+            for rule in doneRules where rule.matches(item, viewer: viewer) {
+                let key = "\(rule.id.uuidString)|\(item.id.rawValue)"
+                guard !stamped.contains(key) else { continue }
+                result.append(RuleDoneStamp(ruleID: rule.id, itemID: item.id))
+            }
+        }
+        return result
     }
 
     func isMuted(_ item: PersonalWorkItem, viewer: String = "") -> Bool {
@@ -120,6 +139,13 @@ enum TriageRulesError: Error, Equatable, LocalizedError {
     }
 }
 
+/// One Mark-as-Done rule applied to one item. Recorded so the rule does not
+/// stamp the item again after it comes back or the user restores it.
+struct RuleDoneStamp: Hashable, Sendable {
+    var ruleID: UUID
+    var itemID: GitHubNodeID
+}
+
 struct TriageRule: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
@@ -171,7 +197,7 @@ struct TriageRule: Codable, Equatable, Identifiable, Sendable {
 
 struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
     enum Field: String, Codable, CaseIterable, Identifiable, Sendable {
-        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, inactiveDays
+        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, textContains, inactiveDays
 
         var id: String { rawValue }
 
@@ -188,6 +214,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .pullRequestStatus: "Pull request status"
             case .kind: "Type"
             case .titleContains: "Title contains"
+            case .textContains: "Contains text"
             case .inactiveDays: "No updates for (days)"
             }
         }
@@ -200,6 +227,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .relationship, .kind, .pullRequestStatus: ""
             case .requestedTeam: "team slug or org/team"
             case .titleContains: "text"
+            case .textContains: "words, ignoring formatting"
             case .inactiveDays: "e.g. 14"
             }
         }
@@ -220,7 +248,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
                     ("conflicts", "Has conflicts"),
                 ]
             case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request")]
-            case .repository, .author, .label, .titleContains, .requestedTeam, .inactiveDays: nil
+            case .repository, .author, .label, .titleContains, .textContains, .requestedTeam, .inactiveDays: nil
             }
         }
     }
@@ -230,6 +258,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
 
     var isValid: Bool {
         guard !normalizedValue.isEmpty else { return false }
+        if field == .textContains { return !PersonalWorkItem.plainText(from: normalizedValue).isEmpty }
         return field != .inactiveDays || (Int(normalizedValue) ?? 0) > 0
     }
 
@@ -239,6 +268,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
         let shown = field.choices?.first { $0.value == normalizedValue }?.title ?? normalizedValue
         switch field {
         case .titleContains: return "title contains “\(shown)”"
+        case .textContains: return "text contains “\(PersonalWorkItem.plainText(from: normalizedValue))”"
         case .inactiveDays: return "no updates for \(shown)+ days"
         case .relationship, .pullRequestStatus: return shown.prefix(1).lowercased() + shown.dropFirst()
         default: return "\(field.title.lowercased()) is \(shown)"
@@ -290,12 +320,16 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             default: return false
             }
         case .titleContains: return item.title.localizedCaseInsensitiveContains(value)
+        case .textContains:
+            let query = PersonalWorkItem.plainText(from: value)
+            guard !query.isEmpty else { return false }
+            return item.searchablePlainText.localizedCaseInsensitiveContains(query)
         }
     }
 }
 
 enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
-    case alwaysInbox, needsAction, waiting, noAction, raisePriority, lowerPriority, mute
+    case alwaysInbox, needsAction, waiting, noAction, raisePriority, lowerPriority, mute, markDone
 
     var id: String { rawValue }
 
@@ -308,6 +342,7 @@ enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
         case .raisePriority: "Raise priority"
         case .lowerPriority: "Lower priority"
         case .mute: "Mute"
+        case .markDone: "Mark as Done"
         }
     }
 
@@ -320,6 +355,7 @@ enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
         case .raisePriority: "arrow.up.circle"
         case .lowerPriority: "arrow.down.circle"
         case .mute: "speaker.slash"
+        case .markDone: "checkmark"
         }
     }
 
@@ -330,7 +366,7 @@ enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
         case .needsAction: .act
         case .waiting: .wait
         case .noAction: .none
-        case .raisePriority, .lowerPriority, .mute: nil
+        case .raisePriority, .lowerPriority, .mute, .markDone: nil
         }
     }
 
@@ -351,6 +387,7 @@ enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
         case .raisePriority: "the user wants this ranked higher."
         case .lowerPriority: "the user wants this ranked lower."
         case .mute: "the user has muted this."
+        case .markDone: "the user has marked this done."
         }
     }
 }

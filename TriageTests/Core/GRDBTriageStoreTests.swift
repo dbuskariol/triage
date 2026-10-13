@@ -49,6 +49,46 @@ final class GRDBTriageStoreTests: XCTestCase {
         XCTAssertFalse(entry.first!.isVisible(at: Date()))
     }
 
+    func testDoneRuleStampsOnceAndDoesNotOverrideASnoozeOrALaterRestore() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let work = item(id: "item", relationship: .assigned, updatedAt: Date())
+        try await fixture.store.replaceItems([work], scope: fixture.scope, at: Date())
+        let stamp = RuleDoneStamp(ruleID: UUID(), itemID: work.id)
+        let firstAt = Date(timeIntervalSince1970: 1_000)
+
+        let stamped = try await fixture.store.applyDoneStamps([stamp], viewer: "me", at: firstAt, scope: fixture.scope)
+        XCTAssertEqual(stamped, [stamp])
+        let again = try await fixture.store.applyDoneStamps(
+            [stamp], viewer: "me", at: Date(timeIntervalSince1970: 2_000), scope: fixture.scope
+        )
+        XCTAssertEqual(again, [stamp])
+
+        let stream = try await fixture.store.entries(scope: fixture.scope)
+        var iterator = stream.makeAsyncIterator()
+        let entries = try await iterator.next()
+        XCTAssertEqual(entries?.first?.local, .done(fingerprint: work.fingerprint, at: firstAt))
+
+        try await fixture.store.setLocalStatus(.snoozed(until: Date(timeIntervalSince1970: 9_000)), itemID: work.id, scope: fixture.scope)
+        let other = RuleDoneStamp(ruleID: UUID(), itemID: work.id)
+        let deferred = try await fixture.store.applyDoneStamps([other], viewer: "me", at: Date(timeIntervalSince1970: 1_500), scope: fixture.scope)
+        XCTAssertTrue(deferred.isEmpty)
+        let afterSnooze = try await fixture.store.entries(scope: fixture.scope)
+        var snoozedIterator = afterSnooze.makeAsyncIterator()
+        let snoozed = try await snoozedIterator.next()
+        XCTAssertEqual(snoozed?.first?.local, .snoozed(until: Date(timeIntervalSince1970: 9_000)))
+
+        try await fixture.store.setLocalStatus(.active, itemID: work.id, scope: fixture.scope)
+        let restored = try await fixture.store.applyDoneStamps(
+            [stamp], viewer: "me", at: Date(timeIntervalSince1970: 3_000), scope: fixture.scope
+        )
+        XCTAssertEqual(restored, [stamp])
+        let afterRestore = try await fixture.store.entries(scope: fixture.scope)
+        var restoredIterator = afterRestore.makeAsyncIterator()
+        let active = try await restoredIterator.next()
+        XCTAssertEqual(active?.first?.local, .active)
+    }
+
     func testEntriesStreamPublishesDecisionsSavedAfterSubscription() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

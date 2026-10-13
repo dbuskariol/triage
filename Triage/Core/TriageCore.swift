@@ -129,6 +129,37 @@ struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
         return truncated(value.trimmingCharacters(in: .whitespacesAndNewlines), maximumBytes: maximumBytes)
     }
 
+    /// Visible text for rule matching. Drops Markdown and HTML formatting
+    /// (emphasis, links, fences, headings, quotes) so a phrase matches the
+    /// words a person would read, not the source syntax around them.
+    static func plainText(from markdown: String) -> String {
+        var value = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        value = value.replacingOccurrences(of: #"<!--[\s\S]*?-->"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"</?[A-Za-z][^>]*>"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\[([^\]]+)\]\[[^\]]*\]"#, with: " $1 ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^[ \t]*(```|~~~)[^\n]*"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^[ \t]{0,3}#{1,6}[ \t]+"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?m)^[ \t]*>[ \t]?"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: "\n", with: " ")
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        let rendered = (try? AttributedString(markdown: value, options: options)).map { String($0.characters) } ?? value
+        let collapsed = rendered
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Unpaired markers (`**`, `_`) are formatting, not words.
+        let markers = CharacterSet(charactersIn: "*_`~")
+        if collapsed.unicodeScalars.allSatisfy({ markers.contains($0) }) { return "" }
+        return collapsed
+    }
+
+    /// Title, description, and recent comments as one plain-text string.
+    var searchablePlainText: String {
+        Self.plainText(from: ([title, body] + recentActivity.map(\.excerpt)).joined(separator: "\n"))
+    }
+
     static func truncated(_ text: String, maximumBytes: Int) -> String {
         guard text.utf8.count > maximumBytes else { return text }
         var result = ""
@@ -516,6 +547,12 @@ protocol TriageStore: Sendable {
     func markHandled(
         _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool
+    /// Stamps Mark-as-Done rules once. Returns the stamps now recorded.
+    /// Skips an item whose current status still hides it, and does not record
+    /// that skip, so an elapsed snooze can be stamped later. Never restamps.
+    func applyDoneStamps(
+        _ stamps: [RuleDoneStamp], viewer: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Set<RuleDoneStamp>
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws
 }
 

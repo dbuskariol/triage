@@ -114,7 +114,7 @@ Triage uses **two layers** you control, on top of a fixed built-in policy:
 
 | Layer | What it does | When it applies |
 |---|---|---|
-| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. |
+| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority, or Mark as Done. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. Mark as Done stamps once; a later reply from someone else brings the item back. |
 | **Instructions** | Plain-English guidance, e.g. *“Production incidents matter more than refactors.”* Up to 2,000 characters. | On the next analysis. Copilot re-checks affected work in the background. |
 
 Rule conditions (all must match):
@@ -125,7 +125,8 @@ Rule conditions (all must match):
 | Requested team | `core` or `octo/core` |
 | Pull request status | Draft, ready for review, approved, changes requested, checks failing, has conflicts |
 | Repository, author, label | `octo/widgets`, `octo/*`, `dependabot[bot]`, `security` |
-| Type, title contains | Issue, pull request, draft pull request; any text |
+| Type, title contains | Issue, pull request, draft pull request; any text in the title |
+| Contains text | Plain text in the title, description, and recent comments. Ignores bold, italics, links, and code fences |
 | No updates for | At least *N* days, for stale work |
 
 For example, *“My relationship is review requested from my team only → Lower priority”* keeps team-wide review requests from crowding out the ones addressed to you.
