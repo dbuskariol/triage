@@ -3,21 +3,26 @@ import XCTest
 @testable import Triage
 
 final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
-    func testSearchStringsUsePersonalQualifiersAndSixtyDayWindow() throws {
+    func testSearchesNameTheirTypeAndUseASixtyDayWindow() throws {
         let scope = scope()
         let date = Date(timeIntervalSince1970: 1_736_899_200) // 2025-01-15 UTC
         XCTAssertEqual(
-            try GitHubPersonalWorkDiscovery.searchQuery(for: .reviewRequested, scope: scope, now: date),
-            "org:octo is:open archived:false review-requested:me"
+            try GitHubPersonalWorkDiscovery.searchQueries(for: .reviewRequested, scope: scope, now: date),
+            ["org:octo is:pr is:open archived:false review-requested:me"]
         )
         XCTAssertEqual(
-            try GitHubPersonalWorkDiscovery.searchQuery(for: .mentioned, scope: scope, now: date),
-            "org:octo is:open archived:false mentions:me updated:>=2024-11-16"
+            try GitHubPersonalWorkDiscovery.searchQueries(for: .mentioned, scope: scope, now: date),
+            [
+                "org:octo is:issue is:open archived:false mentions:me updated:>=2024-11-16",
+                "org:octo is:pr is:open archived:false mentions:me updated:>=2024-11-16",
+            ]
         )
-        XCTAssertEqual(
-            try GitHubPersonalWorkDiscovery.searchQuery(for: .commented, scope: scope, now: date),
-            "org:octo is:open archived:false commenter:me updated:>=2024-11-16"
-        )
+        // Fine-grained tokens find nothing unless every search names is:issue or is:pr.
+        for relationship in WorkRelationship.allCases {
+            for query in try GitHubPersonalWorkDiscovery.searchQueries(for: relationship, scope: scope, now: date) {
+                XCTAssertTrue(query.contains(" is:issue ") || query.contains(" is:pr "), query)
+            }
+        }
     }
 
     func testInvalidLoginIsRejected() async {
@@ -91,7 +96,7 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         let items = try await GitHubPersonalWorkDiscovery(executor: executor, retryDelay: { _ in }).discover(scope: scope()) { _ in }
         XCTAssertEqual(items.map(\.id.rawValue), ["I1"])
         let calls = await executor.calls
-        XCTAssertEqual(calls, 7)
+        XCTAssertEqual(calls, 11) // 9 searches, 2 retried
     }
 
     func testRepeatedTransientFailureReportsSearchUnavailable() async {
@@ -173,7 +178,16 @@ private actor FixtureExecutor: PersonalWorkSearchExecuting {
     func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
         let key = ["review-requested", "assignee", "author", "mentions", "commenter"].first { query.contains($0) }!
         calls.append(key)
-        return pages[key]!.removeFirst()
+        // Each relationship searches issues and pull requests separately; unscripted searches find nothing.
+        guard var remaining = pages[key], !remaining.isEmpty else {
+            return try JSONDecoder().decode(
+                PersonalWorkSearchPage.self,
+                from: Data(#"{ "search": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } }"#.utf8)
+            )
+        }
+        let page = remaining.removeFirst()
+        pages[key] = remaining
+        return page
     }
 
     func callCount(containing value: String) -> Int {
