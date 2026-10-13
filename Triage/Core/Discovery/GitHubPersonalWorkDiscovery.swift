@@ -138,8 +138,8 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         progress: @escaping @Sendable (DiscoveryProgress) async -> Void
     ) async throws -> [PersonalWorkItem] {
         try Self.validate(scope: scope)
-        let queries = try WorkRelationship.allCases.sorted { $0.urgencyRank < $1.urgencyRank }.map { relationship in
-            (relationship, try Self.searchQuery(for: relationship, scope: scope, now: now()))
+        let queries = try WorkRelationship.allCases.sorted { $0.urgencyRank < $1.urgencyRank }.flatMap { relationship in
+            try Self.searchQueries(for: relationship, scope: scope, now: now()).map { (relationship, $0) }
         }
         let collector = Collector(organizationLogin: scope.organizationLogin)
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -159,17 +159,21 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         return await collector.items()
     }
 
-    static func searchQuery(for relationship: WorkRelationship, scope: WorkspaceScope, now: Date) throws -> String {
+    /// One search per item type. Fine-grained tokens grant Issues and Pull
+    /// requests separately, so GitHub returns nothing for a search that
+    /// doesn't name a type (REST rejects it; GraphQL answers with no results).
+    static func searchQueries(for relationship: WorkRelationship, scope: WorkspaceScope, now: Date) throws -> [String] {
         try validate(scope: scope)
-        let prefix = "org:\(scope.organizationLogin) is:open archived:false"
         let viewer = scope.viewerLogin
-        switch relationship {
-        case .reviewRequested: return "\(prefix) review-requested:\(viewer)"
-        case .assigned: return "\(prefix) assignee:\(viewer)"
-        case .authored: return "\(prefix) author:\(viewer)"
-        case .mentioned: return "\(prefix) mentions:\(viewer) updated:>=\(dayString(now.addingTimeInterval(-60 * 86_400)))"
-        case .commented: return "\(prefix) commenter:\(viewer) updated:>=\(dayString(now.addingTimeInterval(-60 * 86_400)))"
+        let recent = "updated:>=\(dayString(now.addingTimeInterval(-60 * 86_400)))"
+        let (types, qualifier): ([String], String) = switch relationship {
+        case .reviewRequested: (["is:pr"], "review-requested:\(viewer)")
+        case .assigned: (["is:issue", "is:pr"], "assignee:\(viewer)")
+        case .authored: (["is:issue", "is:pr"], "author:\(viewer)")
+        case .mentioned: (["is:issue", "is:pr"], "mentions:\(viewer) \(recent)")
+        case .commented: (["is:issue", "is:pr"], "commenter:\(viewer) \(recent)")
         }
+        return types.map { "org:\(scope.organizationLogin) \($0) is:open archived:false \(qualifier)" }
     }
 
     private func search(
