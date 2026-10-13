@@ -214,40 +214,18 @@ actor AccountConnectionService {
                 organizationDiscoverySSOHeader = organizationInventory.partialResultsSSOHeader
             }
 
-            let organizations = try organizationDTOs.map { dto in
-                guard let organizationNodeID = GitHubNodeID(rawValue: dto.nodeID),
-                      let organizationID = OrganizationID(rawValue: dto.nodeID)
-                else {
-                    throw AccountConnectionError.invalidGitHubIdentity
-                }
-                return GitHubOrganization(
-                    id: organizationID,
-                    githubOrganizationID: dto.id,
-                    nodeID: organizationNodeID,
-                    login: dto.login,
-                    avatarURL: dto.avatarURL
-                )
-            }
+            let organizations = try organizationDTOs.map(OrganizationInventory.organization(from:))
             var organizationAccesses: [OrganizationID: OrganizationAccess] = [:]
             for organization in organizations {
                 let organizationSSOHeader = scopedSSOHeader(
                     for: organization,
                     aggregateHeader: organizationDiscoverySSOHeader
                 )
-                let access = OrganizationAccess(
+                let access = OrganizationInventory.access(
                     accountID: account.id,
                     organizationID: organization.id,
-                    state: OrganizationAccessEvaluator.state(
-                        statusCode: 200,
-                        ssoHeader: organizationSSOHeader
-                    ),
-                    capabilityRevision: CapabilityRevision(rawValue: UUID().uuidString.lowercased())!,
-                    capabilities: GitHubCapability.allCases
-                        .filter { $0.scope == .organization }
-                        .map {
-                        CapabilityAvailability(capability: $0, status: .unknown, checkedAt: now)
-                        },
-                    checkedAt: now
+                    state: OrganizationAccessEvaluator.state(statusCode: 200, ssoHeader: organizationSSOHeader),
+                    at: now
                 )
                 try await repository.save(
                     organization,

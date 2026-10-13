@@ -151,10 +151,12 @@ actor AccountRestorationService {
                 )
             }
             accounts.append(restoredAccount)
-            organizationsByAccount[accountID] = try await repository.organizations(for: accountID)
-            organizationAccessesByAccount[accountID] = try await repository.organizationAccesses(
-                for: accountID
-            )
+            let accesses = try await repository.organizationAccesses(for: accountID)
+            // Organizations the current credential can't see stay stored but aren't offered.
+            let offered = try await repository.organizations(for: accountID)
+                .filter { accesses[$0.id]?.state != .inaccessible }
+            organizationsByAccount[accountID] = offered
+            organizationAccessesByAccount[accountID] = accesses.filter { id, _ in offered.contains { $0.id == id } }
             if let accountCapabilities = try await repository.accountCapabilities(for: accountID) {
                 accountCapabilitiesByAccount[accountID] = accountCapabilities
             }

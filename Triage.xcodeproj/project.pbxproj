@@ -140,6 +140,7 @@
 		D369C97DA5A19C2B20A4E5D2 /* ScrollBarSettingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 845CF6B5B88ACA9A8956F7CB /* ScrollBarSettingSection.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D56F957C75EA9F0BDCCF19C7 /* SnoozeOptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E143D4DF5EDB467682BF141 /* SnoozeOptionTests.swift */; };
+		D6F59A3A9A4D84884B12274E /* OrganizationInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC764D6DECB53080072660BF /* OrganizationInventory.swift */; };
 		DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */; };
 		DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE5842BB23AADE47B6BA878 /* PrivateDataArtifacts.swift */; };
 		DDB94F790D5E72929F5DEEA8 /* GitHubRateLimitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0747F7EA46505F5A0E282B /* GitHubRateLimitTests.swift */; };
@@ -329,6 +330,7 @@
 		CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubRESTClient.swift; sourceTree = "<group>"; };
 		CAA6AA1C7B7A5BFE5C18FA07 /* CopilotRuntimeAcquisition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotRuntimeAcquisition.swift; sourceTree = "<group>"; };
 		CC05EC9E4FBA22DC3262B6B0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		CC764D6DECB53080072660BF /* OrganizationInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizationInventory.swift; sourceTree = "<group>"; };
 		CF755537AF07EB548FB6EC36 /* SettingsPages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsPages.swift; sourceTree = "<group>"; };
 		CFFF01166BFEB1E4E4570284 /* MultipleSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultipleSelectionView.swift; sourceTree = "<group>"; };
 		D0C5C9816331A78B3AA1D00A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
@@ -410,6 +412,7 @@
 				F6A7099292C958AD6650E689 /* GitHubTokenRequirements.swift */,
 				FCF36EB960ADECF622F1AA55 /* OAuthCredentialRefreshService.swift */,
 				77C56A1AC719D7AFB981CEEF /* OrganizationAccessEvaluator.swift */,
+				CC764D6DECB53080072660BF /* OrganizationInventory.swift */,
 				BACBE230946C1056771FE56F /* PersonalAccessToken.swift */,
 				B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */,
 			);
@@ -1147,6 +1150,7 @@
 				DE8B11DECA51A55BC9ADC661 /* OnboardingStep.swift in Sources */,
 				4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */,
 				8D1CCC8B43CF21D355983994 /* OrganizationAccessEvaluator.swift in Sources */,
+				D6F59A3A9A4D84884B12274E /* OrganizationInventory.swift in Sources */,
 				82CDC66CB6916A9334EC0B1C /* PersonalAccessToken.swift in Sources */,
 				BEF9875DEFDF6FAB91422DA3 /* PersonalAccessTokenSheets.swift in Sources */,
 				DCE1B27F493EE327F363A482 /* PrivateDataArtifacts.swift in Sources */,
