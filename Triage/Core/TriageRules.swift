@@ -171,7 +171,7 @@ struct TriageRule: Codable, Equatable, Identifiable, Sendable {
 
 struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
     enum Field: String, Codable, CaseIterable, Identifiable, Sendable {
-        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, inactiveDays
+        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, textContains, inactiveDays
 
         var id: String { rawValue }
 
@@ -188,6 +188,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .pullRequestStatus: "Pull request status"
             case .kind: "Type"
             case .titleContains: "Title contains"
+            case .textContains: "Contains text"
             case .inactiveDays: "No updates for (days)"
             }
         }
@@ -200,6 +201,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case .relationship, .kind, .pullRequestStatus: ""
             case .requestedTeam: "team slug or org/team"
             case .titleContains: "text"
+            case .textContains: "words, ignoring formatting"
             case .inactiveDays: "e.g. 14"
             }
         }
@@ -220,7 +222,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
                     ("conflicts", "Has conflicts"),
                 ]
             case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request")]
-            case .repository, .author, .label, .titleContains, .requestedTeam, .inactiveDays: nil
+            case .repository, .author, .label, .titleContains, .textContains, .requestedTeam, .inactiveDays: nil
             }
         }
     }
@@ -230,6 +232,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
 
     var isValid: Bool {
         guard !normalizedValue.isEmpty else { return false }
+        if field == .textContains { return !PersonalWorkItem.plainText(from: normalizedValue).isEmpty }
         return field != .inactiveDays || (Int(normalizedValue) ?? 0) > 0
     }
 
@@ -239,6 +242,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
         let shown = field.choices?.first { $0.value == normalizedValue }?.title ?? normalizedValue
         switch field {
         case .titleContains: return "title contains “\(shown)”"
+        case .textContains: return "text contains “\(PersonalWorkItem.plainText(from: normalizedValue))”"
         case .inactiveDays: return "no updates for \(shown)+ days"
         case .relationship, .pullRequestStatus: return shown.prefix(1).lowercased() + shown.dropFirst()
         default: return "\(field.title.lowercased()) is \(shown)"
@@ -290,6 +294,10 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             default: return false
             }
         case .titleContains: return item.title.localizedCaseInsensitiveContains(value)
+        case .textContains:
+            let query = PersonalWorkItem.plainText(from: value)
+            guard !query.isEmpty else { return false }
+            return item.searchablePlainText.localizedCaseInsensitiveContains(query)
         }
     }
 }

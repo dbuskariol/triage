@@ -125,7 +125,8 @@ Rule conditions (all must match):
 | Requested team | `core` or `octo/core` |
 | Pull request status | Draft, ready for review, approved, changes requested, checks failing, has conflicts |
 | Repository, author, label | `octo/widgets`, `octo/*`, `dependabot[bot]`, `security` |
-| Type, title contains | Issue, pull request, draft pull request; any text |
+| Type, title contains | Issue, pull request, draft pull request; any text in the title |
+| Contains text | Plain text in the title, description, and recent comments. Ignores bold, italics, links, and code fences |
 | No updates for | At least *N* days, for stale work |
 
 For example, *“My relationship is review requested from my team only → Lower priority”* keeps team-wide review requests from crowding out the ones addressed to you.
