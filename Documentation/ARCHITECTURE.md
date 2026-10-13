@@ -133,6 +133,16 @@ log stream --predicate 'subsystem == "com.triage.mac" AND category != "API"'
 
 Typical lines: `refresh outcome=success items=215 duration=41s`, `analysis started items=19 withYourActivity=2`, `batch outcome=decided items=15 duration=28s`, `handled-by-viewer items=2`.
 
+## UI-test fixture
+
+`TriageUITests` launch Triage with `-triage-ui-fixture` and `TRIAGE_UI_TEST_MODE=1`. Only Debug builds contain `TriageUITestFixture` (`#if DEBUG`), and both values are required, so Release and notarized builds can never enter it. A fixture launch composes the app from local fake data: in-memory accounts and organizations, a static `PersonalWorkDiscovering`, a deterministic `TriageDeciding`, and the no-op Copilot provider. The production store, engine, and consent repository run unchanged against encrypted vaults in a temporary directory with a session-derived key. It never reads the Keychain, the user's vaults, GitHub, or the Copilot runtime, skips notifications and Sparkle, and keeps preferences in a per-session suite (`UserDefaults.triage`).
+
+| Variable | Meaning |
+| --- | --- |
+| `TRIAGE_UI_TEST_SCENARIO` | `workspace` (default), `performance-workspace` (10,000 items), `onboarding`, `personal-access-token`, `personal-access-token-replacement`, `notification-route`, `account-recovery`, `refresh-failure` |
+| `TRIAGE_UI_TEST_SESSION` | Names the preferences suite and vault directory; letters, digits, `-`, and `_` |
+| `TRIAGE_UI_TEST_RESET` | `1` erases the session's preferences and vaults before launch; `0` keeps them to test relaunch |
+
 ## Distribution
 
 A universal (`arm64` + `x86_64`) macOS 26 app with Hardened Runtime, Developer ID signing, notarization, and Sparkle EdDSA-verified updates. See [Releasing](RELEASING.md).

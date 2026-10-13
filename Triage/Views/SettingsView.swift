@@ -301,6 +301,7 @@ struct SettingsView: View {
                         .menuIndicator(.hidden)
                         .fixedSize()
                         .accessibilityLabel("Actions for \(account.login)")
+                        .accessibilityIdentifier("account-actions-\(account.login)")
                     }
                     .padding(.vertical, 2)
                 }

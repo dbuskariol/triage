@@ -137,7 +137,7 @@ final class GRDBTriageStoreTests: XCTestCase {
     }
 
     private func makeFixture() async throws -> (directory: URL, store: GRDBTriageStore, scope: WorkspaceScope) {
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".triage-store-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let accountID = AccountID.make()

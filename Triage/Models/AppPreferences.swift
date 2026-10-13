@@ -27,6 +27,20 @@ enum TriagePreferenceKeys {
     static let readBaseline = "inbox.read-baseline-v2"
 }
 
+extension UserDefaults {
+    /// Triage's preferences store: always `.standard`, except in a Debug
+    /// UI-test fixture launch, which uses an isolated per-session suite so
+    /// tests never read or change the user's preferences.
+    static var triage: UserDefaults {
+        #if DEBUG
+        if let fixture = TriageUITestFixtureLaunch.current, let defaults = UserDefaults(suiteName: fixture.defaultsSuiteName) {
+            return defaults
+        }
+        #endif
+        return .standard
+    }
+}
+
 @MainActor
 final class AppPreferences: ObservableObject {
     @Published var showMenuBarExtra: Bool {
@@ -44,7 +58,7 @@ final class AppPreferences: ObservableObject {
 
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .triage) {
         self.defaults = defaults
         showMenuBarExtra = defaults.object(forKey: TriagePreferenceKeys.showMenuBarExtra) as? Bool ?? true
         refreshIntervalMinutes = Self.refreshIntervalMinutes(defaults)
@@ -75,7 +89,7 @@ extension AppPreferences {
     nonisolated static let refreshIntervalChoices = [2, 5, 10, 15, 30, 60, 0]
     nonisolated static let defaultRefreshIntervalMinutes = 5
 
-    nonisolated static func refreshIntervalMinutes(_ defaults: UserDefaults = .standard) -> Int {
+    nonisolated static func refreshIntervalMinutes(_ defaults: UserDefaults = .triage) -> Int {
         let stored = defaults.object(forKey: TriagePreferenceKeys.refreshIntervalMinutes) as? Int
         return stored.flatMap { refreshIntervalChoices.contains($0) ? $0 : nil } ?? defaultRefreshIntervalMinutes
     }
@@ -155,7 +169,7 @@ enum MarkReadPolicy: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    static func current(_ defaults: UserDefaults = .standard) -> Self {
+    static func current(_ defaults: UserDefaults = .triage) -> Self {
         defaults.string(forKey: TriagePreferenceKeys.markReadPolicy).flatMap(Self.init) ?? .afterDelay
     }
 }
@@ -176,7 +190,7 @@ enum SnoozeOption: CaseIterable, Identifiable {
         }
     }
 
-    func date(from now: Date = .now, defaults: UserDefaults = .standard, calendar: Calendar = .current) -> Date {
+    func date(from now: Date = .now, defaults: UserDefaults = .triage, calendar: Calendar = .current) -> Date {
         let hour = Self.morningHour(defaults)
         switch self {
         case .laterToday:
@@ -190,7 +204,7 @@ enum SnoozeOption: CaseIterable, Identifiable {
     }
 
     /// "Monday 9:00 AM" within the coming week; dates further out include the day and month.
-    func subtitle(from now: Date = .now, defaults: UserDefaults = .standard, calendar: Calendar = .current) -> String {
+    func subtitle(from now: Date = .now, defaults: UserDefaults = .triage, calendar: Calendar = .current) -> String {
         let date = date(from: now, defaults: defaults, calendar: calendar)
         let days = calendar.dateComponents(
             [.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)

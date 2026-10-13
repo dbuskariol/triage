@@ -25,6 +25,47 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         }
     }
 
+    func testSingleSignOnThatHidesTheOrganizationFailsInsteadOfLookingEmpty() throws {
+        let url = URL(string: "https://github.com/orgs/acme/sso?authorization_request=1")!
+        XCTAssertThrowsError(try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            .authorizationRequired(url), organizationLogin: "acme", organizationDatabaseID: 7
+        )) { error in
+            XCTAssertEqual(error as? PersonalWorkDiscoveryError, .singleSignOnRequired(organization: "acme", authorizationURL: url))
+        }
+        XCTAssertThrowsError(try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            .partialResults([7, 9]), organizationLogin: "acme", organizationDatabaseID: 7
+        )) { error in
+            XCTAssertEqual(error as? PersonalWorkDiscoveryError, .singleSignOnRequired(organization: "acme", authorizationURL: nil))
+        }
+        // Another organization's single sign-on doesn't affect this organization's search.
+        XCTAssertNoThrow(try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            .partialResults([9]), organizationLogin: "acme", organizationDatabaseID: 7
+        ))
+        XCTAssertNoThrow(try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            nil, organizationLogin: "acme", organizationDatabaseID: 7
+        ))
+    }
+
+    func testRefusedFieldsNameTheMissingTokenPermissions() throws {
+        func refused(_ path: String...) -> GitHubGraphQLPartialError {
+            GitHubGraphQLPartialError(
+                message: "Resource not accessible by personal access token",
+                path: path.map { GitHubGraphQLErrorPathComponent.field($0) },
+                type: "FORBIDDEN", extensions: nil
+            )
+        }
+        XCTAssertEqual(
+            GitHubPersonalWorkSearchExecutor.missingPermissions(in: [
+                refused("search", "nodes", "commits", "nodes"),
+                refused("search", "nodes", "reviewRequests", "nodes", "requestedReviewer"),
+            ]),
+            ["Contents", "Members"]
+        )
+        XCTAssertNil(GitHubPersonalWorkSearchExecutor.missingPermissions(in: []))
+        XCTAssertEqual(GitHubPersonalWorkSearchExecutor.missingPermissions(in: [refused("search", "nodes", "unknown")]), [])
+        XCTAssertFalse(GitHubPersonalWorkDiscovery.isTransient(PersonalWorkDiscoveryError.missingTokenPermissions(["Contents"])))
+    }
+
     func testInvalidLoginIsRejected() async {
         let invalidScope = WorkspaceScope(
             accountID: AccountID(rawValue: "account")!,

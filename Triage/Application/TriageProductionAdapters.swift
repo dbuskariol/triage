@@ -101,7 +101,14 @@ struct TriageProductionComposition: Sendable {
                                 report.yield((observation, accountID, credentialID))
                             }
                         )
-                        return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(client: client))
+                        let organizationDatabaseID = try await AccountRepository(vault: vault)
+                            .organizations(for: scope.accountID)
+                            .first { $0.id == scope.organizationID }?.githubOrganizationID
+                        return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(
+                            client: client,
+                            organizationLogin: scope.organizationLogin,
+                            organizationDatabaseID: organizationDatabaseID
+                        ))
                     },
                     decider: CopilotTriageDecider(resolveVault: openVault),
                     refreshInterval: AppPreferences.refreshInterval(minutes: AppPreferences.refreshIntervalMinutes()),

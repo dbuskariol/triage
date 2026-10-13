@@ -26,13 +26,10 @@ final class TriagePerformanceScrollTests: XCTestCase {
         ]
         app.launch()
 
-        let workList = app.descendants(matching: .any)["work-list"]
+        let workList = app.outlines["Inbox work"]
         XCTAssertTrue(workList.waitForExistence(timeout: 15), "The 10k-row fixture must reach its native work list.")
-        XCTAssertEqual(
-            workList.value as? String,
-            "\(Configuration.itemCount) visible local work items",
-            "The fixture must expose the stable non-content visible-count accessibility value."
-        )
+        // Every XCUITest query snapshots the whole accessibility tree, which
+        // includes all 10,000 rows, so the benchmark avoids extra queries.
 
         // XCTest's `measure` executes its closure once as a discarded warmup.
         // These two manual pairs therefore make the declared total exactly

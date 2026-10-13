@@ -21,7 +21,7 @@ struct TriageWorkspaceCommands: Commands {
 
         CommandGroup(before: .help) {
             Button("Setup Assistant…") {
-                UserDefaults.standard.set(false, forKey: TriagePreferenceKeys.onboardingCompleted)
+                UserDefaults.triage.set(false, forKey: TriagePreferenceKeys.onboardingCompleted)
                 appModel.openMainWindow?()
             }
         }

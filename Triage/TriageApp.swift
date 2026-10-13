@@ -13,7 +13,7 @@ private final class TriageApplicationDelegate: NSObject, NSApplicationDelegate {
     private var pendingTarget: AttentionTarget?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        guard !TriageApp.isRunningTests else { return }
+        guard !TriageApp.isRunningTests, !TriageApp.isUITestFixture else { return }
         let attention = AttentionNotifier()
         attention.onOpen = { [weak self] target in
             guard let self else { return }
@@ -62,12 +62,32 @@ struct TriageApp: App {
     @NSApplicationDelegateAdaptor(TriageApplicationDelegate.self) private var appDelegate
     @StateObject private var navigation: AppNavigationModel
     @StateObject private var appModel: TriageAppModel
-    @StateObject private var preferences = AppPreferences()
-    @StateObject private var softwareUpdates = SoftwareUpdateController()
+    @StateObject private var preferences: AppPreferences
+    @StateObject private var softwareUpdates: SoftwareUpdateController
+    #if DEBUG
+    private let uiTestFixture: TriageUITestFixture?
+    #endif
 
     init() {
         let navigation = AppNavigationModel()
         _navigation = StateObject(wrappedValue: navigation)
+        _preferences = StateObject(wrappedValue: AppPreferences())
+        #if DEBUG
+        if let launch = TriageUITestFixtureLaunch.current {
+            do {
+                let fixture = try TriageUITestFixture(launch: launch)
+                uiTestFixture = fixture
+                let dependencies = try fixture.dependencies()
+                _appModel = StateObject(wrappedValue: TriageAppModel(dependencies: dependencies))
+                _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController(startingUpdater: false))
+            } catch {
+                fatalError("Triage could not create its UI-test fixture workspace.")
+            }
+            return
+        }
+        uiTestFixture = nil
+        #endif
+        _softwareUpdates = StateObject(wrappedValue: SoftwareUpdateController())
         do {
             let fileManager = FileManager.default
             let composition = TriageProductionComposition(
@@ -98,10 +118,14 @@ struct TriageApp: App {
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
                 .frame(minWidth: 940, minHeight: 620)
+                .defaultAppStorage(.triage)
                 .task {
                     guard !Self.isRunningTests else { return }
                     appDelegate.install(appModel: appModel)
                     await appModel.restoreAccounts()
+                    #if DEBUG
+                    uiTestFixture?.didRestoreAccounts(appModel)
+                    #endif
                 }
         }
         .defaultSize(width: 1180, height: 760)
@@ -117,6 +141,7 @@ struct TriageApp: App {
             MenuBarView()
                 .environmentObject(appModel)
                 .environmentObject(navigation)
+                .defaultAppStorage(.triage)
         } label: {
             Label("Triage", systemImage: "square.stack.3d.up")
         }
@@ -128,6 +153,7 @@ struct TriageApp: App {
                 .environmentObject(navigation)
                 .environmentObject(preferences)
                 .environmentObject(softwareUpdates)
+                .defaultAppStorage(.triage)
         }
     }
 
@@ -146,6 +172,16 @@ struct TriageApp: App {
     /// The XCTest host launches the app; it must not touch Keychain or GitHub.
     static var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    /// A Debug UI-test fixture launch: local fixture data only, and no
+    /// notifications or Dock badge from the user's notification center.
+    static var isUITestFixture: Bool {
+        #if DEBUG
+        TriageUITestFixtureLaunch.current != nil
+        #else
+        false
+        #endif
     }
 }
 

@@ -46,6 +46,7 @@
 		43BA27988C234117DFD36E49 /* WorkspaceViewPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DDE4421B73201F0C1F3D297 /* WorkspaceViewPresentation.swift */; };
 		44BD374DB36F8C7B6DE34615 /* FocusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCDBE483415D40F0CFC8CC2A /* FocusView.swift */; };
 		463F21701DBBD3456B2362B8 /* TriageDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDA3A2AB9CA28768B15E6CE8 /* TriageDetailView.swift */; };
+		4A52108F53759088BB790C6E /* TriageUITestFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BF52634F385C9E1A1D73538 /* TriageUITestFixture.swift */; };
 		4C3FD8F7FEB784A38ABF8C1F /* RuntimeOAuthConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EF50B47520258D20451993 /* RuntimeOAuthConfiguration.swift */; };
 		4C76D6B3BFA282B85D7ED605 /* OptimisticChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AF305EE4595199A034B4462 /* OptimisticChanges.swift */; };
 		4C83D802A6CBFD76254F564C /* GitHubCredentialObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 194F5DB8714CC8F281F3FC7F /* GitHubCredentialObservationTests.swift */; };
@@ -264,6 +265,7 @@
 		67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBrokerClientTests.swift; sourceTree = "<group>"; };
 		68B1F3C501373958435DB977 /* GitHubCredentialNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubCredentialNoticeTests.swift; sourceTree = "<group>"; };
 		6B08CBED136FC66902A80125 /* OnboardingFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingFlowView.swift; sourceTree = "<group>"; };
+		6BF52634F385C9E1A1D73538 /* TriageUITestFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageUITestFixture.swift; sourceTree = "<group>"; };
 		6C847E2A0F9CB9226F78C821 /* TriageRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageRules.swift; sourceTree = "<group>"; };
 		6D279F3AFBDDF3C471DD6052 /* WorkspaceDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDestination.swift; sourceTree = "<group>"; };
 		6DDE4421B73201F0C1F3D297 /* WorkspaceViewPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViewPresentation.swift; sourceTree = "<group>"; };
@@ -617,6 +619,7 @@
 			children = (
 				37350686ECC6519100F26E3E /* TriageApplicationDependencies.swift */,
 				65853326EA395EEEF7A98A9A /* TriageProductionAdapters.swift */,
+				6BF52634F385C9E1A1D73538 /* TriageUITestFixture.swift */,
 			);
 			path = Application;
 			sourceTree = "<group>";
@@ -1179,6 +1182,7 @@
 				FB1D2A3E2245883A04E0F093 /* TriageProductionAdapters.swift in Sources */,
 				7A50AE364E911003ED4C4293 /* TriageRules.swift in Sources */,
 				063CC539E9DFDD8DF2B08686 /* TriageStatusView.swift in Sources */,
+				4A52108F53759088BB790C6E /* TriageUITestFixture.swift in Sources */,
 				88B1EEB64CA5AB2E1811D6DC /* WorkInsights.swift in Sources */,
 				63C37A152621F226A1BD3D6A /* WorkspaceDestination.swift in Sources */,
 				AA278C715C68543C604DB809 /* WorkspacePresentation.swift in Sources */,
