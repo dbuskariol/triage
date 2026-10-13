@@ -169,7 +169,7 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 
 Download and open Triage (macOS 26 or later). The Setup Assistant walks you through everything in about two minutes:
 
-1. **GitHub.** Connect with your browser, or a personal access token.
+1. **GitHub.** Connect with your browser, or a personal access token (see [GitHub access](#github-access)).
 2. **Organization.** Choose whose work to show.
 3. **Copilot.** Allow Copilot for the organization, install the verified runtime, and sign in.
 4. **Notifications.** Allow notifications and the Dock badge, and choose what you hear about.
@@ -178,6 +178,17 @@ Download and open Triage (macOS 26 or later). The Setup Assistant walks you thro
 Only GitHub and an organization are required; everything else can be set up later in Settings. Run the assistant again anytime from **Help ▸ Setup Assistant**. When you finish, Triage opens your Briefing.
 
 Requires a GitHub account with GitHub Copilot access for AI prioritization.
+
+### GitHub access
+
+Triage only reads from GitHub; it never posts, comments, or changes anything. Copilot signs in separately, so the token below is used only to find your work. The token sheet links to GitHub's token page with this access already selected.
+
+| Token | What to select |
+|---|---|
+| **Fine-grained** (recommended) | Resource owner: your organization (it must allow fine-grained tokens, and may need to approve yours). Repository access: all repositories, or the ones you work in. Repository permissions, read-only: Metadata, Issues, Pull requests, Commit statuses, Contents. Organization permissions, read-only: Members. |
+| **Classic** | Scopes `repo` and `read:org`. Classic tokens have no read-only scope for private repositories. If your organization uses SAML single sign-on, authorize the token for it. |
+
+Triage shows each token's expiration in **Settings ▸ Accounts**, warns you a week before it expires, and lets you replace it without removing the account.
 
 ## Building from source
 
