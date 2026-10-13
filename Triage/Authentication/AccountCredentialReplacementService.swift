@@ -4,6 +4,7 @@ enum AccountCredentialReplacementError: Error, Equatable, Sendable {
     case invalidGitHubIdentity
     case immutableIdentityMismatch
     case authenticationKindMismatch
+    case noAccessibleOrganizations
     case stagedCredentialCleanupFailed
 
     var recoveryDescription: String {
@@ -14,16 +15,22 @@ enum AccountCredentialReplacementError: Error, Equatable, Sendable {
             "This token belongs to a different GitHub account. Create the token while signed in as this account."
         case .authenticationKindMismatch:
             "This account signs in with GitHub. Use a personal access token only for accounts connected with one."
+        case .noAccessibleOrganizations:
+            "This token can't access any organization. Create it with your organization as the resource owner, and check whether the organization needs to approve it."
         case .stagedCredentialCleanupFailed:
             "Triage couldn't save the new token, and couldn't remove it from the Keychain. Try again."
         }
     }
 }
 
-/// The account a credential belongs to, and when GitHub says that credential expires.
+/// The account a credential belongs to, when GitHub says it expires, and the
+/// organizations it can access.
 struct AuthenticatedGitHubCredential: Sendable {
     let user: GitHubUserDTO
     let expiresAt: Date?
+    let organizations: [GitHubOrganizationDTO]
+    /// Partial-results SSO evidence from the organization list, if any.
+    var organizationSSOHeader: GitHubSSOHeader? = nil
 }
 
 private enum CredentialSecretRemovalError: Error, Sendable {
@@ -89,8 +96,15 @@ actor AccountCredentialReplacementService {
                 transport: try GitHubRESTTransport(),
                 credential: accessToken
             )
-            let response = try await GitHubIdentityClient(client: client).authenticatedUser()
-            return AuthenticatedGitHubCredential(user: response.value, expiresAt: response.credentialExpiresAt)
+            let identity = GitHubIdentityClient(client: client)
+            let response = try await identity.authenticatedUser()
+            let inventory = try await identity.allOrganizations()
+            return AuthenticatedGitHubCredential(
+                user: response.value,
+                expiresAt: response.credentialExpiresAt,
+                organizations: inventory.organizations,
+                organizationSSOHeader: inventory.partialResultsSSOHeader
+            )
         }
     ) {
         self.secretStore = secretStore
@@ -146,6 +160,12 @@ actor AccountCredentialReplacementService {
     ) async throws -> AccountCredentialReplacementResult {
         let authenticated = try await loadAuthenticatedUser(accessToken)
         try Task.checkCancellation()
+        // A fine-grained token sees only its resource owner; seeing none means
+        // it was created for a personal account or is awaiting approval.
+        if authenticationKind == .fineGrainedPersonalAccessToken, authenticated.organizations.isEmpty {
+            throw AccountCredentialReplacementError.noAccessibleOrganizations
+        }
+        let organizations = try authenticated.organizations.map(OrganizationInventory.organization(from:))
 
         let date = clock()
         let accessTokenExpiresAt = accessTokenLifetime.map { date.addingTimeInterval($0) } ?? authenticated.expiresAt
@@ -192,7 +212,12 @@ actor AccountCredentialReplacementService {
                 )
                 try Task.checkCancellation()
             }
-            try await AccountRepository(vault: vault).save(
+            let repository = AccountRepository(vault: vault)
+            try await recordOrganizations(
+                organizations, ssoHeader: authenticated.organizationSSOHeader,
+                for: account.id, repository: repository, at: date
+            )
+            try await repository.save(
                 updatedAccount,
                 credentialRevision: credentialRevision
             )
@@ -212,6 +237,34 @@ actor AccountCredentialReplacementService {
             updatedAccount: updatedAccount,
             credentialRevision: credentialRevision
         )
+    }
+
+    /// Organizations the new credential can see become available; ones it
+    /// can't are kept, with their local data, but marked inaccessible so they
+    /// leave the organization list until a credential can see them again.
+    private func recordOrganizations(
+        _ organizations: [GitHubOrganization],
+        ssoHeader: GitHubSSOHeader?,
+        for accountID: AccountID,
+        repository: AccountRepository,
+        at date: Date
+    ) async throws {
+        let visible = Set(organizations.map(\.id))
+        for organization in organizations {
+            try await repository.save(organization, access: OrganizationInventory.access(
+                accountID: accountID,
+                organizationID: organization.id,
+                state: OrganizationAccessEvaluator.state(
+                    statusCode: 200, ssoHeader: ssoHeader?.scoped(to: organization.githubOrganizationID)
+                ),
+                at: date
+            ))
+        }
+        for organization in try await repository.organizations(for: accountID) where !visible.contains(organization.id) {
+            try await repository.save(organization, access: OrganizationInventory.access(
+                accountID: accountID, organizationID: organization.id, state: .inaccessible, at: date
+            ))
+        }
     }
 
     private func finishReplacement(

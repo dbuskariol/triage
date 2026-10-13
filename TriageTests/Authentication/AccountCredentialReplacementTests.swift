@@ -116,7 +116,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
             secretStore: secrets,
             vaultRegistry: registry,
             clock: { now },
-            loadAuthenticatedUser: { _ in AuthenticatedGitHubCredential(user: user, expiresAt: nil) }
+            loadAuthenticatedUser: { _ in AuthenticatedGitHubCredential(user: user, expiresAt: nil, organizations: []) }
         )
 
         let result = try await service.replace(
@@ -181,7 +181,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
                     login: "different-user",
                     name: nil,
                     avatarURL: nil
-                ), expiresAt: nil)
+                ), expiresAt: nil, organizations: [])
             }
         )
 
@@ -227,6 +227,14 @@ final class AccountCredentialReplacementTests: XCTestCase {
         let registry = try VaultRegistry(rootDirectory: directory)
         let repository = AccountRepository(vault: try await registry.open(accountID: account.id, vaultKey: vaultKey))
         try await repository.save(account, credentialRevision: CredentialRevision(rawValue: "revision-original")!)
+        // The classic token saw two organizations; the fine-grained one sees only its resource owner.
+        let acme = try OrganizationInventory.organization(from: Self.organizationDTO)
+        let other = try OrganizationInventory.organization(from: Self.otherOrganizationDTO)
+        for organization in [acme, other] {
+            try await repository.save(organization, access: OrganizationInventory.access(
+                accountID: account.id, organizationID: organization.id, state: .available, at: date
+            ))
+        }
         let secrets = ReplacementSecretStore(values: [
             .init(kind: .vaultKey, accountID: account.id, credentialID: nil): vaultKey.data,
             .init(kind: .personalAccessToken, accountID: account.id, credentialID: account.credentialID):
@@ -244,7 +252,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
                     login: account.login,
                     name: nil,
                     avatarURL: nil
-                ), expiresAt: expiresAt)
+                ), expiresAt: expiresAt, organizations: [Self.organizationDTO])
             }
         )
 
@@ -254,6 +262,9 @@ final class AccountCredentialReplacementTests: XCTestCase {
         )
 
         XCTAssertEqual(result.account.authenticationKind, .fineGrainedPersonalAccessToken)
+        let accesses = try await repository.organizationAccesses(for: account.id)
+        XCTAssertEqual(accesses[acme.id]?.state, .available)
+        XCTAssertEqual(accesses[other.id]?.state, .inaccessible)
         XCTAssertEqual(result.account.accessTokenExpiresAt, expiresAt)
         XCTAssertEqual(result.account.credentialStatus, .active)
         let storedAccounts = try await repository.accounts()
@@ -266,6 +277,39 @@ final class AccountCredentialReplacementTests: XCTestCase {
             kind: .personalAccessToken, accountID: account.id, credentialID: account.credentialID
         )
         XCTAssertNil(retired)
+    }
+
+    func testFineGrainedTokenThatSeesNoOrganizationIsRefusedBeforeAnyChange() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let account = makeAccount().replacingCredential(
+            credentialID: CredentialID(rawValue: "classic-credential")!,
+            authenticationKind: .classicPersonalAccessToken,
+            login: "octocat", displayName: nil, avatarURL: nil,
+            accessTokenExpiresAt: nil, refreshTokenExpiresAt: nil, status: .active, validatedAt: date
+        )
+        let secrets = ReplacementSecretStore(values: [:])
+        let service = AccountCredentialReplacementService(
+            secretStore: secrets,
+            vaultRegistry: try VaultRegistry(rootDirectory: directory),
+            loadAuthenticatedUser: { _ in
+                AuthenticatedGitHubCredential(user: GitHubUserDTO(
+                    id: account.githubUserID, nodeID: account.nodeID.rawValue, login: account.login, name: nil, avatarURL: nil
+                ), expiresAt: nil, organizations: [])
+            }
+        )
+        do {
+            _ = try await service.replace(
+                personalAccessToken: try PersonalAccessToken(rawValue: "github_pat_abcdefghijklmnopqrstuvwxyz"),
+                for: account
+            )
+            XCTFail("A fine-grained token that sees no organization must be refused.")
+        } catch let error as AccountCredentialReplacementError {
+            XCTAssertEqual(error, .noAccessibleOrganizations)
+        }
+        let writeCount = await secrets.writeCount()
+        XCTAssertEqual(writeCount, 0)
     }
 
     func testCancellationAfterStagingAccessCredentialRemovesEveryReplacementSecret() async throws {
@@ -308,7 +352,7 @@ final class AccountCredentialReplacementTests: XCTestCase {
                     login: account.login,
                     name: account.displayName,
                     avatarURL: account.avatarURL
-                ), expiresAt: nil)
+                ), expiresAt: nil, organizations: [])
             }
         )
 
@@ -351,6 +395,13 @@ final class AccountCredentialReplacementTests: XCTestCase {
         XCTAssertFalse(hasStagedAccessToken)
         XCTAssertFalse(hasStagedRefreshToken)
     }
+
+    private static let organizationDTO = GitHubOrganizationDTO(
+        id: 10, nodeID: "O_kgDOAcme", login: "acme", avatarURL: nil
+    )
+    private static let otherOrganizationDTO = GitHubOrganizationDTO(
+        id: 11, nodeID: "O_kgDOOther", login: "other", avatarURL: nil
+    )
 
     private func makeAccount() -> GitHubAccount {
         GitHubAccount(
