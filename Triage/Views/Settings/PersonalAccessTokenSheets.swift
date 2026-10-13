@@ -1,45 +1,66 @@
 import SwiftUI
 
-/// What a personal access token needs, with links that open GitHub's token
-/// page with exactly that access selected. `kind` limits it to one token type.
-struct TokenRequirementsSection: View {
+/// The ways to get a token on GitHub, one per row, each opening GitHub's
+/// token page with the read-only access Triage needs already selected.
+struct TokenSourcesSection: View {
+    var title: String
     var organization: String?
-    var kind: AuthenticationKind?
+    /// When replacing, offers regenerating the account's current token first.
+    var regenerating: AuthenticationKind?
+    @Environment(\.openURL) private var openURL
 
-    private func list(_ permissions: [GitHubTokenRequirements.Permission]) -> String {
-        ListFormatter.localizedString(byJoining: permissions.map(\.title))
+    private func list(_ items: [String]) -> String { ListFormatter.localizedString(byJoining: items) }
+
+    private var fineGrainedDetail: String {
+        let owner = organization.flatMap { $0.isEmpty ? nil : $0 } ?? "your organization"
+        let repository = list(GitHubTokenRequirements.repositoryPermissions.map(\.title))
+        let organizationPermissions = list(GitHubTokenRequirements.organizationPermissions.map(\.title))
+        return "For \(owner). Read-only: \(repository); organization \(organizationPermissions)."
     }
 
     var body: some View {
         Section {
-            if kind != .classicPersonalAccessToken {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Fine-grained token (recommended)").fontWeight(.medium)
-                    Text("Resource owner: \(organization.flatMap { $0.isEmpty ? nil : $0 } ?? "your organization"). Repository access: all repositories, or the ones you work in.")
-                    Text("Repository permissions, read-only: \(list(GitHubTokenRequirements.repositoryPermissions)).")
-                    Text("Organization permissions, read-only: \(list(GitHubTokenRequirements.organizationPermissions)).")
-                    Link("Create a Fine-grained Token on GitHub",
-                         destination: GitHubTokenRequirements.fineGrainedTokenURL(organization: organization))
-                        .padding(.top, 2)
-                }
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
+            if let regenerating {
+                row("Regenerate your current token",
+                    detail: "Easiest. GitHub issues a new value with the same access.",
+                    action: "Regenerate…", url: GitHubTokenRequirements.tokenSettingsURL(for: regenerating))
             }
-            if kind != .fineGrainedPersonalAccessToken {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Classic token").fontWeight(.medium)
-                    Text("Scopes: \(ListFormatter.localizedString(byJoining: GitHubTokenRequirements.classicScopes)). If your organization uses SAML single sign-on, authorize the token for it after creating it.")
-                    Link("Create a Classic Token on GitHub", destination: GitHubTokenRequirements.classicTokenURL)
-                        .padding(.top, 2)
-                }
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            row("Create a fine-grained token",
+                detail: fineGrainedDetail,
+                badge: "Recommended",
+                action: "Create…", url: GitHubTokenRequirements.fineGrainedTokenURL(organization: organization))
+            row("Create a classic token",
+                detail: "Scopes: \(list(GitHubTokenRequirements.classicScopes)). Authorize it for SAML single sign-on if your organization uses it.",
+                action: "Create…", url: GitHubTokenRequirements.classicTokenURL)
         } header: {
-            Text("What the token needs")
+            Text(title)
         } footer: {
-            Text("Triage only reads from GitHub and never posts for you. The token is stored in your Keychain.")
+            Text("Triage only reads from GitHub and never posts for you.")
         }
+    }
+
+    private func row(_ title: String, detail: String, badge: String? = nil, action: String, url: URL) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(title)
+                    if let badge {
+                        Text(badge)
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(.tint.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.tint)
+                    }
+                }
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action) { openURL(url) }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -54,13 +75,21 @@ struct PersonalAccessTokenSheet: View {
     var body: some View {
         Form {
             Section {
-                TextField("Organization", text: $resourceOwnerOrganization, prompt: Text("Required for fine-grained tokens"))
+                TextField("Organization", text: $resourceOwnerOrganization, prompt: Text("e.g. acme"))
+            } header: {
+                Text("Connect with a Personal Access Token")
+            } footer: {
+                Text("The organization whose work you want to see. Required for fine-grained tokens.")
+            }
+            TokenSourcesSection(title: "Get a token on GitHub", organization: resourceOwnerOrganization)
+            Section {
                 SecureField("Token", text: $token)
                     .onSubmit(submit)
             } header: {
-                Text("Use a Personal Access Token")
+                Text("Paste the token")
+            } footer: {
+                Text("Stored in your Keychain.")
             }
-            TokenRequirementsSection(organization: resourceOwnerOrganization)
             if hasSubmitted, !appModel.isConnecting, let error = appModel.connectionError {
                 ErrorText(message: error)
             }
@@ -107,17 +136,19 @@ struct ReplaceTokenSheet: View {
 
     var body: some View {
         Form {
+            TokenSourcesSection(
+                title: "Get a new token for @\(account.login)",
+                organization: organization,
+                regenerating: account.authenticationKind
+            )
             Section {
-                SecureField("New token", text: $token)
+                SecureField("Token", text: $token)
                     .onSubmit(submit)
-                Link("Regenerate an Existing Token on GitHub",
-                     destination: GitHubTokenRequirements.tokenSettingsURL(for: account.authenticationKind))
             } header: {
-                Text("Replace Token for @\(account.login)")
+                Text("Paste the new token")
             } footer: {
-                Text("Regenerating keeps the token's access. Your organizations, rules, and Triage history are kept.")
+                Text("Your organizations, rules, and Triage history are kept. The token is stored in your Keychain.")
             }
-            TokenRequirementsSection(organization: organization)
             if hasSubmitted, !appModel.isConnecting, let error = appModel.connectionError {
                 ErrorText(message: error)
             }
