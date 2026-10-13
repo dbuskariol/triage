@@ -59,6 +59,12 @@ enum GitHubTokenRequirements {
         return components.url!
     }
 
+    /// Where a token is authorized for an organization's SAML single sign-on
+    /// (Configure SSO), when GitHub didn't supply a direct authorization link.
+    static func singleSignOnAuthorizationURL(_ url: URL?) -> URL {
+        url ?? URL(string: "https://github.com/settings/tokens")!
+    }
+
     /// Where existing tokens of `kind` are listed, to regenerate one.
     static func tokenSettingsURL(for kind: AuthenticationKind) -> URL {
         kind == .fineGrainedPersonalAccessToken

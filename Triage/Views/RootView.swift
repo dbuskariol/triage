@@ -183,6 +183,7 @@ private struct WorkspacePickers: View {
                     Text(account.displayName ?? account.login).tag(Optional(account.id))
                 }
             }
+            .accessibilityIdentifier("workspace-account-picker")
         }
         if appModel.organizations.count > 1 {
             Picker("Organization", selection: Binding(
@@ -193,6 +194,7 @@ private struct WorkspacePickers: View {
                     Text(organization.displayName ?? organization.login).tag(Optional(organization.id))
                 }
             }
+            .accessibilityIdentifier("workspace-organization-picker")
         }
     }
 }

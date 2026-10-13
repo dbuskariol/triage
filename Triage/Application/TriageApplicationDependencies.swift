@@ -75,7 +75,7 @@ struct AccountDeletionRecoveryStatePurger: AccountDeletionRecoveryStatePurging {
     @MainActor
     static func purgeSelectedAccountAndOrganization(
         for accountID: AccountID,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .triage
     ) {
         guard defaults.string(forKey: PreferenceKey.selectedAccountID) == accountID.rawValue else {
             return
@@ -98,6 +98,8 @@ struct TriageApplicationDependencies: Sendable {
     var draftReply: @Sendable (WorkspaceScope, PersonalWorkItem, String?, String?) async throws -> String = { _, _, _, _ in
         throw TriageDecisionError.runtimeUnavailable
     }
+    /// The GitHub sign-in configuration, read from the signed app bundle.
+    var oauthConfiguration: @Sendable () throws -> RuntimeOAuthConfiguration = { try RuntimeOAuthConfiguration() }
 }
 
 enum AccountSessionSnapshotError: Error, Equatable, Sendable {

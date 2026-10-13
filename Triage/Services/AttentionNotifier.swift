@@ -39,7 +39,7 @@ final class AttentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// Opens what a clicked notification points to.
     var onOpen: (AttentionTarget) -> Void = { _ in }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .triage) {
         self.defaults = defaults
         super.init()
         center.delegate = self

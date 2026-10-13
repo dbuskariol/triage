@@ -59,6 +59,27 @@ final class TriageEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testSingleSignOnKeepsSavedWorkAndExplainsTheProblem() async throws {
+        let store = MemoryStore()
+        try await store.replaceItems([engineItem("saved", relationship: .assigned)], scope: scope, at: .now)
+        let engine = TriageEngine(
+            store: store, makeDiscovery: { _ in SingleSignOnDiscovery() }, decider: RecordingDecider(batchSize: 5),
+            refreshInterval: .seconds(3_600)
+        )
+        let statuses = await engine.statusUpdates()
+        await engine.start(scope)
+        for await status in statuses {
+            if case .gitHubSingleSignOnRequired(let organization, _) = status.problem, status.phase == .idle {
+                XCTAssertEqual(organization, "acme")
+                XCTAssertNotNil(status.nextRefreshAt, "Authorizing can happen at any time, so refreshes continue.")
+                break
+            }
+        }
+        let saved = await store.savedItemIDs()
+        XCTAssertEqual(saved, ["saved"])
+        await engine.stop()
+    }
+
     func testCopilotUnavailableKeepsItemsPendingInsteadOfFailingThem() async throws {
         let store = MemoryStore()
         let engine = engine(
@@ -278,6 +299,14 @@ private actor RejectedTokenDiscovery: PersonalWorkDiscovering {
     ) async throws -> [PersonalWorkItem] {
         calls += 1
         throw GitHubGraphQLError.requestFailed(GitHubFailure(kind: .unauthorized, statusCode: 401))
+    }
+}
+
+private struct SingleSignOnDiscovery: PersonalWorkDiscovering {
+    func discover(
+        scope: WorkspaceScope, progress: @escaping @Sendable (DiscoveryProgress) async -> Void
+    ) async throws -> [PersonalWorkItem] {
+        throw PersonalWorkDiscoveryError.singleSignOnRequired(organization: "acme", authorizationURL: nil)
     }
 }
 

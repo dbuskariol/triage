@@ -4,11 +4,23 @@ import OSLog
 enum PersonalWorkDiscoveryError: Error, Equatable, Sendable, LocalizedError {
     case invalidLogin
     case searchUnavailable
+    /// The organization uses SAML single sign-on and the token isn't
+    /// authorized for it, so GitHub left the organization's work out of search.
+    case singleSignOnRequired(organization: String, authorizationURL: URL?)
+    /// GitHub refused parts of the search because the token lacks these
+    /// permissions (titles from `GitHubTokenRequirements`; empty if unknown).
+    case missingTokenPermissions([String])
 
     var errorDescription: String? {
         switch self {
         case .invalidLogin: "This account or organization name isn't valid for GitHub search."
         case .searchUnavailable: "GitHub search timed out repeatedly. Showing saved work; Triage will try again automatically."
+        case .singleSignOnRequired(let organization, _):
+            "\(organization) uses SAML single sign-on, and your GitHub token isn't authorized for it. Authorize the token on GitHub, then try again."
+        case .missingTokenPermissions(let permissions) where permissions.isEmpty:
+            "Your GitHub token is missing a permission Triage needs. Compare it with Settings ▸ Accounts ▸ Replace Token…, then try again."
+        case .missingTokenPermissions(let permissions):
+            "Your GitHub token is missing read access to \(ListFormatter.localizedString(byJoining: permissions)). Add it to the token on GitHub (the token keeps its value), then try again."
         }
     }
 }
@@ -95,9 +107,14 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
 
 struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
     private let client: GitHubGraphQLClient
+    private let organizationLogin: String
+    /// GitHub's numeric organization ID, matched against single sign-on evidence.
+    private let organizationDatabaseID: UInt64?
 
-    init(client: GitHubGraphQLClient) {
+    init(client: GitHubGraphQLClient, organizationLogin: String, organizationDatabaseID: UInt64?) {
         self.client = client
+        self.organizationLogin = organizationLogin
+        self.organizationDatabaseID = organizationDatabaseID
     }
 
     func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
@@ -105,11 +122,58 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
             let query: String
             let cursor: String?
         }
-        return try await client.executeComplete(
+        let response = try await client.execute(
             GitHubGraphQLQueries.personalWorkSearch(),
             variables: Variables(query: query, cursor: cursor),
             as: PersonalWorkSearchPage.self
         )
+        try Self.checkSingleSignOn(
+            response.metadata.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
+        )
+        if let missing = Self.missingPermissions(in: response.errors) {
+            throw PersonalWorkDiscoveryError.missingTokenPermissions(missing)
+        }
+        guard response.errors.isEmpty else { throw GitHubGraphQLError.partialResponse }
+        guard let data = response.data else { throw GitHubGraphQLError.missingData }
+        return data
+    }
+
+    /// GitHub refuses individual fields a fine-grained token can't read
+    /// (`FORBIDDEN`) while answering the rest. Names the permissions that
+    /// cover the refused fields; `nil` when nothing was refused.
+    static func missingPermissions(in errors: [GitHubGraphQLPartialError]) -> [String]? {
+        let refused = errors.filter { ($0.type ?? $0.extensions?.type) == "FORBIDDEN" }
+        guard !refused.isEmpty else { return nil }
+        // The innermost field is the one refused; outer fields are just where it sits.
+        let fields = Set(refused.compactMap { error in
+            (error.path ?? []).compactMap { component -> String? in
+                if case .field(let name) = component { name } else { nil }
+            }.last { $0 != "nodes" }
+        })
+        let byField: [(field: String, parameter: String)] = [
+            ("commits", "contents"), ("requestedReviewer", "members"), ("statusCheckRollup", "statuses"),
+            ("reviewRequests", "pull_requests"), ("latestReviews", "pull_requests"), ("reviewThreads", "pull_requests"),
+        ]
+        let parameters = Set(byField.filter { fields.contains($0.field) }.map(\.parameter))
+        let permissions = GitHubTokenRequirements.repositoryPermissions + GitHubTokenRequirements.organizationPermissions
+        return permissions.filter { parameters.contains($0.parameter) }.map(\.title)
+    }
+
+    /// GitHub still answers a search when single sign-on hides an
+    /// organization, so an empty result would look like having no work.
+    static func checkSingleSignOn(
+        _ header: GitHubSSOHeader?, organizationLogin: String, organizationDatabaseID: UInt64?
+    ) throws {
+        switch header {
+        case .authorizationRequired(let url):
+            throw PersonalWorkDiscoveryError.singleSignOnRequired(organization: organizationLogin, authorizationURL: url)
+        case .partialResults(let organizations):
+            // Searches are limited to one organization; without its ID, any omission is that organization's.
+            guard organizationDatabaseID.map(organizations.contains) ?? true else { return }
+            throw PersonalWorkDiscoveryError.singleSignOnRequired(organization: organizationLogin, authorizationURL: nil)
+        case .malformed, nil:
+            return
+        }
     }
 }
 

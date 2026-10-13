@@ -11,6 +11,7 @@ struct TriageListView: View {
     @Binding var search: WorkspaceSearch
     var searchFocusRequest = 0
     @Environment(\.triageViewerLogin) private var viewer
+    @Environment(\.openURL) private var openURL
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
@@ -171,6 +172,15 @@ struct TriageListView: View {
             } description: {
                 Text(message)
             } actions: {
+                Button("Retry") { actions.refreshNow() }
+            }
+        case .gitHubSingleSignOnRequired(let organization, let url):
+            ContentUnavailableView {
+                Label("Authorize your token for \(organization)", systemImage: "lock.shield")
+            } description: {
+                Text(TriageStatusView.singleSignOnMessage(organization))
+            } actions: {
+                Button("Authorize on GitHub") { openURL(GitHubTokenRequirements.singleSignOnAuthorizationURL(url)) }
                 Button("Retry") { actions.refreshNow() }
             }
         case .gitHubCredentialRejected:

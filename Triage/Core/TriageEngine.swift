@@ -206,6 +206,9 @@ actor TriageEngine {
             Self.logger.notice("refresh outcome=success items=\(items.count, privacy: .public) duration=\(String(describing: started.duration(to: .now)), privacy: .public)")
         } catch is CancellationError {
             return
+        } catch PersonalWorkDiscoveryError.singleSignOnRequired(let organization, let url) {
+            status.problem = .gitHubSingleSignOnRequired(organization: organization, authorizationURL: url)
+            Self.logger.error("refresh outcome=failed reason=singleSignOnRequired")
         } catch GitHubGraphQLError.requestFailed(let failure) where failure.kind == .unauthorized {
             status.problem = .gitHubCredentialRejected
             Self.logger.error("refresh outcome=failed reason=credentialRejected")

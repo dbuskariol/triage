@@ -133,12 +133,12 @@ struct SavedSearchStore: Sendable {
 
     private var key: String { "savedSearches.\(organizationID.rawValue)" }
 
-    func load(defaults: UserDefaults = .standard) -> [SavedSearch] {
+    func load(defaults: UserDefaults = .triage) -> [SavedSearch] {
         guard let data = defaults.data(forKey: key) else { return [] }
         return (try? JSONDecoder().decode([SavedSearch].self, from: data)) ?? []
     }
 
-    func save(_ searches: [SavedSearch], defaults: UserDefaults = .standard) {
+    func save(_ searches: [SavedSearch], defaults: UserDefaults = .triage) {
         defaults.set(try? JSONEncoder().encode(searches), forKey: key)
     }
 }

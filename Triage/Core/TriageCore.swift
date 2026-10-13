@@ -436,6 +436,8 @@ struct TriageStatus: Equatable, Sendable {
         /// GitHub rejected the account's token (expired, revoked, or regenerated).
         /// Automatic refreshes pause until the token is replaced or the user refreshes.
         case gitHubCredentialRejected
+        /// The organization's SAML single sign-on hides its work from the token.
+        case gitHubSingleSignOnRequired(organization: String, authorizationURL: URL?)
         /// Some analyses failed; they retry automatically.
         case analysisFailed(String)
 
@@ -443,13 +445,13 @@ struct TriageStatus: Equatable, Sendable {
         var blocksAnalysis: Bool {
             switch self {
             case .copilotUnavailable, .relaunchRequired: true
-            case .gitHubUnavailable, .gitHubCredentialRejected, .analysisFailed: false
+            case .gitHubUnavailable, .gitHubCredentialRejected, .gitHubSingleSignOnRequired, .analysisFailed: false
             }
         }
 
         var isGitHubProblem: Bool {
             switch self {
-            case .gitHubUnavailable, .gitHubCredentialRejected: true
+            case .gitHubUnavailable, .gitHubCredentialRejected, .gitHubSingleSignOnRequired: true
             case .copilotUnavailable, .relaunchRequired, .analysisFailed: false
             }
         }

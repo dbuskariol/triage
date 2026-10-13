@@ -151,7 +151,7 @@ final class TriageAppModel: ObservableObject {
     private var copilotAuthenticationTask: Task<Void, Never>?
     private var isShuttingDown = false
 
-    init(dependencies: TriageApplicationDependencies, defaults: UserDefaults = .standard) {
+    init(dependencies: TriageApplicationDependencies, defaults: UserDefaults = .triage) {
         self.dependencies = dependencies
         self.defaults = defaults
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID).flatMap(AccountID.init(rawValue:))
@@ -249,7 +249,7 @@ final class TriageAppModel: ObservableObject {
     /// Activation and wake only refresh when saved work is more than a minute
     /// old and nothing is running; explicit Refresh always runs.
     private func refreshIfStale() {
-        guard UserDefaults.standard.object(forKey: TriagePreferenceKeys.refreshWhenActive) as? Bool ?? true,
+        guard defaults.object(forKey: TriagePreferenceKeys.refreshWhenActive) as? Bool ?? true,
               case .idle = status.phase,
               status.problem?.isCredentialRejected != true,
               let last = status.lastRefreshAt, Date.now.timeIntervalSince(last) > 60
@@ -402,7 +402,7 @@ final class TriageAppModel: ObservableObject {
 
     func connectGitHub(presentationAnchor: NSWindow) async {
         await connect {
-            let configuration = try RuntimeOAuthConfiguration()
+            let configuration = try self.dependencies.oauthConfiguration()
             let request = try await self.oauthAuthorizer.authorize(
                 configuration: configuration.oauth, presentationAnchor: presentationAnchor
             )
@@ -754,7 +754,6 @@ extension TriageAppModel {
         case .section, .savedSearch:
             break
         }
-        let defaults = UserDefaults.standard
         return presentation.visibleEntries(
             section: selectedSection, search: effectiveSearch, doneFilter: doneFilter,
             sortedBy: defaults.string(forKey: TriagePreferenceKeys.sortField).flatMap(WorkspaceSortField.init) ?? .recommended,
@@ -912,7 +911,7 @@ extension TriageAppModel: WorkspaceActions {
         selectedEntryID = entry.id
     }
 
-    var followUpDays: Int { AttentionNotifier.followUpDays(.standard) }
+    var followUpDays: Int { AttentionNotifier.followUpDays(defaults) }
 
     func beginDraft(for entry: TriageEntry) {
         draftEntry = entry

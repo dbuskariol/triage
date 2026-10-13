@@ -47,7 +47,7 @@ final class AppNavigationModel: ObservableObject {
 
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .triage) {
         self.defaults = defaults
         settingsCategory = defaults.string(forKey: Self.settingsCategoryKey)
             .flatMap(SettingsCategory.init(rawValue:)) ?? .general

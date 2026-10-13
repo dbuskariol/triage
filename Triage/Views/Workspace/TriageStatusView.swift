@@ -4,6 +4,7 @@ struct TriageStatusView: View {
     let status: TriageStatus
     var credentialNotice: GitHubCredentialNotice?
     let actions: any WorkspaceActions
+    @Environment(\.openURL) private var openURL
 
     /// The credential notice explains a rejected token better than the problem does.
     private var problem: TriageStatus.Problem? {
@@ -57,6 +58,9 @@ struct TriageStatusView: View {
             Button("Retry") { actions.refreshNow() }
         case .gitHubCredentialRejected:
             Button("Open Account Settings") { actions.replaceGitHubToken() }
+        case .gitHubSingleSignOnRequired(_, let url):
+            Button("Authorize on GitHub") { openURL(GitHubTokenRequirements.singleSignOnAuthorizationURL(url)) }
+            Button("Retry") { actions.refreshNow() }
         case .analysisFailed:
             EmptyView()
         }
@@ -70,6 +74,12 @@ struct TriageStatusView: View {
             text
         case .gitHubCredentialRejected:
             "GitHub no longer accepts this account's token. Replace it in Settings ▸ Accounts."
+        case .gitHubSingleSignOnRequired(let organization, _):
+            Self.singleSignOnMessage(organization)
         }
+    }
+
+    static func singleSignOnMessage(_ organization: String) -> String {
+        "\(organization) uses SAML single sign-on, and your GitHub token isn't authorized for it, so GitHub hid its work. Authorize the token, then retry."
     }
 }

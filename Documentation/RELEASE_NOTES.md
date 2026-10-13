@@ -1,5 +1,6 @@
 # Triage 0.1.2
 
+- **Clear messages instead of an empty inbox.** If an organization's SAML single sign-on hides its work from your token, or your token is missing a permission Triage needs, Triage keeps your saved work and says exactly what to fix, with a link to authorize the token.
 - **Fine-grained tokens find your work.** Triage now searches issues and pull requests separately, which fine-grained tokens require; before, they found nothing.
 - **Replacing a token updates your organizations.** Organizations the new token can't access leave the list (their local data is kept), and a fine-grained token that can't access any organization is refused with an explanation.
 - **Token setup explains exactly what's needed.** The personal access token sheets list the read-only access Triage needs, and open GitHub's token page with it already selected, for fine-grained or classic tokens.

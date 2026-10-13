@@ -4,7 +4,7 @@ import XCTest
 
 final class AIConsentRepositoryTests: XCTestCase {
     func testReplyModelIsStoredSeparatelyAndDefaultsToTheTriageChoice() async throws {
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".triage-store-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
