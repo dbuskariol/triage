@@ -547,6 +547,12 @@ protocol TriageStore: Sendable {
     func markHandled(
         _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool
+    /// Stamps Mark-as-Done rules once. Returns the stamps now recorded.
+    /// Skips an item whose current status still hides it, and does not record
+    /// that skip, so an elapsed snooze can be stamped later. Never restamps.
+    func applyDoneStamps(
+        _ stamps: [RuleDoneStamp], viewer: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Set<RuleDoneStamp>
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws
 }
 

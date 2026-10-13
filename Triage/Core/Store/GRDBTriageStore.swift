@@ -387,6 +387,84 @@ actor GRDBTriageStore: TriageStore {
         }
     }
 
+    func applyDoneStamps(
+        _ stamps: [RuleDoneStamp], viewer: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Set<RuleDoneStamp> {
+        try await validate(scope)
+        guard !stamps.isEmpty else { return [] }
+        let encoder = self.encoder
+        let decoder = self.decoder
+        let stampedAt = Self.milliseconds(date)
+        return try await vault.writeTransaction { database in
+            var recorded: Set<RuleDoneStamp> = []
+            let existing = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT rule_id, node_id FROM triage_rule_done_stamps
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            )
+            let already = Set(existing.compactMap { row -> String? in
+                guard let ruleID: String = row["rule_id"], let nodeID: String = row["node_id"] else { return nil }
+                return "\(ruleID)|\(nodeID)"
+            })
+            for stamp in stamps {
+                let key = "\(stamp.ruleID.uuidString)|\(stamp.itemID.rawValue)"
+                if already.contains(key) {
+                    recorded.insert(stamp)
+                    continue
+                }
+                guard let itemData = try Data.fetchOne(
+                    database,
+                    sql: """
+                        SELECT item_json FROM triage_items
+                        WHERE account_id = ? AND organization_id = ? AND node_id = ?
+                        """,
+                    arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, stamp.itemID.rawValue]
+                ), let item = try? decoder.decode(PersonalWorkItem.self, from: itemData) else { continue }
+                if let statusData = try Data.fetchOne(
+                    database,
+                    sql: """
+                        SELECT status_json FROM triage_local_status
+                        WHERE account_id = ? AND organization_id = ? AND node_id = ?
+                        """,
+                    arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, stamp.itemID.rawValue]
+                ), let status = try? decoder.decode(LocalStatus.self, from: statusData),
+                   status.hides(item, at: date, viewer: viewer) {
+                    continue
+                }
+                let done = try encoder.encode(LocalStatus.done(fingerprint: item.fingerprint, at: date))
+                try database.execute(
+                    sql: """
+                        INSERT INTO triage_local_status (
+                            account_id, organization_id, node_id, status_json, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(account_id, organization_id, node_id) DO UPDATE SET
+                            status_json = excluded.status_json, updated_at_ms = excluded.updated_at_ms
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue, stamp.itemID.rawValue,
+                        done, stampedAt
+                    ]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO triage_rule_done_stamps (
+                            account_id, organization_id, node_id, rule_id, stamped_at_ms
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue, stamp.itemID.rawValue,
+                        stamp.ruleID.uuidString, stampedAt
+                    ]
+                )
+                recorded.insert(stamp)
+            }
+            return recorded
+        }
+    }
+
     func rules(scope: WorkspaceScope) async throws -> TriageRules {
         try await validate(scope)
         let decoder = self.decoder

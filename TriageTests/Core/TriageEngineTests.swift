@@ -382,6 +382,7 @@ actor MemoryStore: TriageStore {
     private var readAt: [GitHubNodeID: Date] = [:]
     private var refreshedAt: Date?
     private var savedRules = TriageRules.empty
+    private var doneStamps: Set<String> = []
 
     func rules(scope: WorkspaceScope) async throws -> TriageRules { savedRules }
     func decisions(for ids: [GitHubNodeID], scope: WorkspaceScope) async throws -> [GitHubNodeID: TriageDecision] {
@@ -397,6 +398,24 @@ actor MemoryStore: TriageStore {
     func localStatus(_ id: String) -> LocalStatus? { local[GitHubNodeID(rawValue: id)!] }
     func seedDecision(_ decision: TriageDecision) { decisions[decision.itemID] = decision }
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws { savedRules = rules }
+    func applyDoneStamps(
+        _ stamps: [RuleDoneStamp], viewer: String, at date: Date, scope: WorkspaceScope
+    ) async throws -> Set<RuleDoneStamp> {
+        var recorded: Set<RuleDoneStamp> = []
+        for stamp in stamps {
+            let key = "\(stamp.ruleID.uuidString)|\(stamp.itemID.rawValue)"
+            if doneStamps.contains(key) {
+                recorded.insert(stamp)
+                continue
+            }
+            guard let item = items[stamp.itemID] else { continue }
+            if let status = local[stamp.itemID], status.hides(item, at: date, viewer: viewer) { continue }
+            local[stamp.itemID] = .done(fingerprint: item.fingerprint, at: date)
+            doneStamps.insert(key)
+            recorded.insert(stamp)
+        }
+        return recorded
+    }
 
     func decidedCount() -> Int { decisions.count }
     func failureCount() -> Int { failures.count }

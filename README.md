@@ -114,7 +114,7 @@ Triage uses **two layers** you control, on top of a fixed built-in policy:
 
 | Layer | What it does | When it applies |
 |---|---|---|
-| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. |
+| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority, or Mark as Done. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. Mark as Done stamps once; a later reply from someone else brings the item back. |
 | **Instructions** | Plain-English guidance, e.g. *“Production incidents matter more than refactors.”* Up to 2,000 characters. | On the next analysis. Copilot re-checks affected work in the background. |
 
 Rule conditions (all must match):
