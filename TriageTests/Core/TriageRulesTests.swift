@@ -80,6 +80,19 @@ struct TriageRulesTests {
         }
     }
 
+    @Test func markDoneStampsOnceAndDoesNotClassifyAfterward() {
+        let item = rulesItem()
+        var rule = TriageRule.quick(.markDone, .author, "dependabot[bot]")
+        let rules = TriageRules(instructions: "", rules: [rule])
+        let stamp = RuleDoneStamp(ruleID: rule.id, itemID: item.id)
+        #expect(rules.pendingDoneStamps(for: [item], already: []).contains(stamp))
+        #expect(rules.pendingDoneStamps(for: [item], already: [stamp]).isEmpty)
+        #expect(rules.matches(for: item).isEmpty)
+        #expect(!rules.isMuted(item))
+        rule.isEnabled = false
+        #expect(TriageRules(instructions: "", rules: [rule]).pendingDoneStamps(for: [item], already: []).isEmpty)
+    }
+
     @Test func hintsDescribeEnforcedOutcomes() {
         let hints = TriageRules(instructions: "", rules: [.quick(.needsAction, .repository, "widgets")]).hints(for: rulesItem())
         #expect(hints.count == 1)

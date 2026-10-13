@@ -60,7 +60,7 @@ Stale items keep their previous decision and section while Copilot re-checks the
 
 ## Rules
 
-Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. The first matching rule with a disposition effect wins (*Always Inbox* never downgrades *Needs Action*); priority adjustments accumulate (±25 each, clamped 0–100). *Mute* moves items to the Muted section and the engine never sends them to Copilot. Matching rules are also sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome.
+Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. The first matching rule with a disposition effect wins (*Always Inbox* never downgrades *Needs Action*); priority adjustments accumulate (±25 each, clamped 0–100). *Mute* moves items to the Muted section and the engine never sends them to Copilot. *Mark as Done* writes local Done status once per rule and item; it does not keep hiding an item after someone else acts, and restoring it does not stamp it again. Matching disposition rules are also sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome.
 
 ## Workspace navigation
 

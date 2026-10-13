@@ -15,7 +15,7 @@ enum TriageDatabaseMigrationError: Error, Equatable, Sendable {
 /// leaves the vault exactly as it was.
 enum TriageDatabaseMigrator {
     /// Bump when `tables` or `indexes` change.
-    static let schemaVersion = "v2-007-schema"
+    static let schemaVersion = "v2-008-schema"
     static let migrationCount = 1
 
     private struct Table {
@@ -179,6 +179,14 @@ enum TriageDatabaseMigrator {
             rules_json BLOB NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (account_id, organization_id)
+            """),
+        Table(name: "triage_rule_done_stamps", body: """
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            organization_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            stamped_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (account_id, organization_id, node_id, rule_id)
             """)
     ]
 

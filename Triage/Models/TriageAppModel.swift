@@ -143,6 +143,9 @@ final class TriageAppModel: ObservableObject {
     private var workspaceTask: Task<Void, Never>?
     private var observationTasks: [Task<Void, Never>] = []
     private var entries: [TriageEntry] = []
+    /// Mark-as-Done stamps already recorded, so a refresh does not write them again.
+    private var doneStampsRecorded: Set<RuleDoneStamp> = []
+    private var doneStampsInFlight: Set<RuleDoneStamp> = []
     private var status = TriageStatus.initial
     private var modelsByScope: [WorkspaceScope: [CopilotModel]] = [:]
     private var copilotRestoreAttempted: Set<WorkspaceScope> = []
@@ -328,6 +331,8 @@ final class TriageAppModel: ObservableObject {
         rules = .empty
         optimistic = OptimisticChanges()
         entries = []
+        doneStampsRecorded = []
+        doneStampsInFlight = []
         status = .initial
         selectedEntryID = nil
         publishPresentation()
@@ -363,7 +368,37 @@ final class TriageAppModel: ObservableObject {
         })
     }
 
+    /// Writes Mark-as-Done once for matches that are not already set aside.
+    private func considerDoneRules() {
+        guard let runtime else { return }
+        let viewer = runtime.scope.viewerLogin
+        let now = Date()
+        let pending = rules.pendingDoneStamps(for: entries.map(\.item), already: doneStampsRecorded, viewer: viewer)
+        let eligible = pending.filter { stamp in
+            guard !doneStampsInFlight.contains(stamp),
+                  let entry = entries.first(where: { $0.id == stamp.itemID }) else { return false }
+            return !entry.local.hides(entry.item, at: now, viewer: viewer)
+        }
+        guard !eligible.isEmpty else { return }
+        doneStampsInFlight.formUnion(eligible)
+        let scope = runtime.scope
+        let store = runtime.value.store
+        Task { [weak self] in
+            do {
+                let recorded = try await store.applyDoneStamps(eligible, viewer: viewer, at: now, scope: scope)
+                guard let self, self.runtime?.scope == scope else { return }
+                self.doneStampsInFlight.subtract(eligible)
+                self.doneStampsRecorded.formUnion(recorded)
+            } catch {
+                guard let self else { return }
+                self.doneStampsInFlight.subtract(eligible)
+                Self.logger.error("done rule stamp failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        }
+    }
+
     private func publishPresentation() {
+        considerDoneRules()
         let shown = optimistic.apply(to: entries)
         let next = WorkspacePresentation(
             entries: shown, status: status, now: .now, rules: rules, viewer: runtime?.scope.viewerLogin ?? ""

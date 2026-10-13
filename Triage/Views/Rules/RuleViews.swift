@@ -115,6 +115,11 @@ struct RuleEditorSheet: View {
                             Label(option.title, systemImage: option.systemImage).tag(option)
                         }
                     }
+                    if rule.effect == .markDone {
+                        Text("Marks a match Done once. A later reply from someone else brings it back. Restore does not mark it Done again.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     TextField("Name", text: $rule.name, prompt: Text(rule.isValid ? rule.defaultName : "Optional"))
                     if !isNew { Toggle("Enabled", isOn: $rule.isEnabled) }
                 }
