@@ -12,7 +12,7 @@ struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
     /// Bump when the triage prompt changes materially, so existing decisions
     /// are re-analyzed in the background with the improved prompt.
-    static let promptVersion = "prompt-4"
+    static let promptVersion = "prompt-5"
     static let maximumRules = 100
     static let empty = TriageRules(instructions: "", rules: [])
 
@@ -219,7 +219,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
                     ("changesRequested", "Changes requested"), ("checksFailing", "Checks failing"),
                     ("conflicts", "Has conflicts"),
                 ]
-            case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request")]
+            case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request"), ("discussion", "Discussion")]
             case .repository, .author, .label, .titleContains, .requestedTeam, .inactiveDays: nil
             }
         }
@@ -287,6 +287,7 @@ struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
             case "issue": return item.kind == .issue
             case "pullRequest": return item.kind == .pullRequest
             case "draftPullRequest": return item.pullRequest?.isDraft == true
+            case "discussion": return item.kind == .discussion
             default: return false
             }
         case .titleContains: return item.title.localizedCaseInsensitiveContains(value)

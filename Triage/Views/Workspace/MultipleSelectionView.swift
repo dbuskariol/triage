@@ -88,11 +88,16 @@ struct MultipleSelectionView: View {
         let unread = entries.filter(\.isUnread).count
         let repositories = Set(entries.map(\.item.repository)).count
         let pullRequests = entries.filter { $0.item.kind == .pullRequest }.count
+        let discussions = entries.filter { $0.item.kind == .discussion }.count
+        let issues = entries.count - pullRequests - discussions
         return HStack(spacing: 12) {
             stat("\(needsAction)", "Need action", tint: .orange)
             stat("\(unread)", "Unread", tint: .accentColor)
             stat("\(pullRequests)", pullRequests == 1 ? "Pull request" : "Pull requests")
-            stat("\(entries.count - pullRequests)", entries.count - pullRequests == 1 ? "Issue" : "Issues")
+            stat("\(issues)", issues == 1 ? "Issue" : "Issues")
+            if discussions > 0 {
+                stat("\(discussions)", discussions == 1 ? "Discussion" : "Discussions")
+            }
             stat("\(repositories)", repositories == 1 ? "Repository" : "Repositories")
         }
     }

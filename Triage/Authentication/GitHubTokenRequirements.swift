@@ -17,6 +17,7 @@ enum GitHubTokenRequirements {
         Permission(parameter: "metadata", title: "Metadata"),
         Permission(parameter: "issues", title: "Issues"),
         Permission(parameter: "pull_requests", title: "Pull requests"),
+        Permission(parameter: "discussions", title: "Discussions"),
         Permission(parameter: "statuses", title: "Commit statuses"),
         Permission(parameter: "contents", title: "Contents"),
     ]
@@ -26,7 +27,7 @@ enum GitHubTokenRequirements {
     ]
 
     static let tokenName = "Triage"
-    static let tokenDescription = "Read-only access for Triage to find the issues and pull requests that involve you. https://github.com/dbuskariol/triage"
+    static let tokenDescription = "Read-only access for Triage to find the issues, pull requests, and discussions that involve you. https://github.com/dbuskariol/triage"
     /// Triage warns a week before a token expires; organization policies may shorten this.
     static let fineGrainedExpirationDays = 90
 

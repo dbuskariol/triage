@@ -94,8 +94,8 @@ enum GitHubGraphQLQueries {
     static func personalWorkSearch() throws -> GitHubGraphQLQuery {
         try GitHubGraphQLQuery(
         document: """
-        query TriagePersonalWorkSearch($query: String!, $cursor: String) {
-          search(query: $query, type: ISSUE, first: 25, after: $cursor) {
+        query TriagePersonalWorkSearch($query: String!, $cursor: String, $searchType: SearchType!) {
+          search(query: $query, type: $searchType, first: 25, after: $cursor) {
             issueCount
             pageInfo { hasNextPage endCursor }
             nodes {
@@ -129,6 +129,15 @@ enum GitHubGraphQLQueries {
                 latestReviews(first: 10) { nodes { author { login } state submittedAt } }
                 commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state } authors(first: 3) { nodes { user { login } } } } } }
                 reviewThreads(first: 50) { nodes { isResolved } }
+              }
+              ... on Discussion {
+                id number title url createdAt updatedAt body
+                closed
+                author { login }
+                repository { nameWithOwner isArchived }
+                category { name }
+                labels(first: 20) { nodes { name } }
+                comments(last: 5) { nodes { author { login } createdAt body } }
               }
             }
           }

@@ -222,7 +222,7 @@ private struct WelcomePage: View {
                 title: "Welcome to Triage",
                 subtitle: "Your GitHub work, prioritized by Copilot. Setup takes about two minutes."
             )
-            feature("sparkles", "Know what needs you", "Copilot reads the issues and pull requests that involve you and says what to do next, and why now.")
+            feature("sparkles", "Know what needs you", "Copilot reads the issues, pull requests, and discussions that involve you and says what to do next, and why now.")
             feature("sun.horizon", "Start with a Briefing", "See what's blocked on you, quick wins, and follow-ups at a glance, then work through them in Focus.")
             feature("keyboard", "Move fast", "Mail-style keys, instant Done and Snooze, and replies Copilot drafts in your voice.")
             feature("lock.shield", "Private by design", "Your data stays encrypted on this Mac. Triage never changes anything on GitHub and has no telemetry.")
