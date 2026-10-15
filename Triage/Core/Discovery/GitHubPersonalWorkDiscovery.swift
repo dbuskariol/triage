@@ -385,22 +385,35 @@ protocol DiscussionInboxFetching: Sendable {
 struct GitHubDiscussionInbox: DiscussionInboxFetching {
     static let maximumPages = 8
     static let maximumHydrations = 40
+    /// Same window as comment search. A read notification does not drop the
+    /// discussion while it, or the notification, is still inside this window.
+    static let retention: TimeInterval = 60 * 86_400
 
     private let rest: GitHubRESTClient
     private let graphql: GitHubGraphQLClient
     private let organizationLogin: String
     private let organizationDatabaseID: UInt64?
+    private let memory: (any WatchedDiscussionMemory)?
+    private let now: @Sendable () -> Date
 
     init(
         rest: GitHubRESTClient,
         graphql: GitHubGraphQLClient,
         organizationLogin: String,
-        organizationDatabaseID: UInt64?
+        organizationDatabaseID: UInt64?,
+        memory: (any WatchedDiscussionMemory)? = nil,
+        now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.rest = rest
         self.graphql = graphql
         self.organizationLogin = organizationLogin
         self.organizationDatabaseID = organizationDatabaseID
+        self.memory = memory
+        self.now = now
+    }
+
+    static func shouldKeep(lastSeenAt: Date, updatedAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(lastSeenAt) <= retention || now.timeIntervalSince(updatedAt) <= retention
     }
 
     func unreadDiscussions() async throws -> [InboxDiscussion] {
@@ -439,12 +452,57 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
         }
 
         var hits: [InboxDiscussion] = []
+        var seen = Set<String>()
+        var remember: [WatchedDiscussionRef] = []
+        let seenAt = now()
         for candidate in candidates {
-            if let node = try await hydrate(owner: candidate.owner, name: candidate.name, number: candidate.number) {
+            let key = Self.key(candidate.owner, candidate.name, candidate.number)
+            seen.insert(key)
+            switch try await hydrate(owner: candidate.owner, name: candidate.name, number: candidate.number) {
+            case .discussion(let node) where !node.repository.isArchived:
                 hits.append(InboxDiscussion(node: node, relationship: candidate.relationship))
+                if candidate.relationship == .watching {
+                    remember.append(WatchedDiscussionRef(
+                        owner: candidate.owner.lowercased(), name: candidate.name.lowercased(),
+                        number: candidate.number, lastSeenAt: seenAt
+                    ))
+                }
+            case .discussion, .missing, .unavailable:
+                break
             }
         }
+
+        var forget: [WatchedDiscussionRef] = []
+        var rememberedHydrations = 0
+        let remembered = (try await memory?.refs() ?? []).sorted { $0.lastSeenAt > $1.lastSeenAt }
+        for ref in remembered where !seen.contains(Self.key(ref.owner, ref.name, ref.number)) {
+            if rememberedHydrations == Self.maximumHydrations { break }
+            rememberedHydrations += 1
+            switch try await hydrate(owner: ref.owner, name: ref.name, number: ref.number) {
+            case .discussion(let node) where node.repository.isArchived:
+                forget.append(ref)
+            case .discussion(let node) where !Self.shouldKeep(lastSeenAt: ref.lastSeenAt, updatedAt: node.updatedAt, now: seenAt):
+                forget.append(ref)
+            case .discussion(let node)
+                where node.repository.nameWithOwner.lowercased().hasPrefix("\(organizationLogin.lowercased())/"):
+                hits.append(InboxDiscussion(node: node, relationship: .watching))
+            case .discussion:
+                forget.append(ref)
+            case .missing:
+                forget.append(ref)
+            case .unavailable:
+                break
+            }
+        }
+        if let memory {
+            try await memory.remember(remember)
+            try await memory.forget(forget)
+        }
         return hits
+    }
+
+    private static func key(_ owner: String, _ name: String, _ number: Int) -> String {
+        "\(owner.lowercased())/\(name.lowercased())#\(number)"
     }
 
     /// `true` when a classic `notifications` scope is missing. Single sign-on
@@ -493,7 +551,13 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
         return (owner, name, number)
     }
 
-    private func hydrate(owner: String, name: String, number: Int) async throws -> PersonalWorkSearchPage.Node? {
+    private enum Hydration: Sendable {
+        case discussion(PersonalWorkSearchPage.Node)
+        case missing
+        case unavailable
+    }
+
+    private func hydrate(owner: String, name: String, number: Int) async throws -> Hydration {
         struct Variables: Encodable, Sendable {
             let owner: String
             let name: String
@@ -513,8 +577,9 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
                 as: Lookup.self
             )
         } catch let error as GitHubGraphQLError {
-            if case .requestFailed(let failure) = error, failure.kind == .forbidden || failure.kind == .notFound {
-                return nil
+            if case .requestFailed(let failure) = error {
+                if failure.kind == .notFound { return .missing }
+                if failure.kind == .forbidden { return .unavailable }
             }
             throw error
         }
@@ -522,10 +587,11 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
             response.metadata.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
         )
         if GitHubPersonalWorkSearchExecutor.missingPermissions(in: response.errors) != nil {
-            return nil
+            return .unavailable
         }
-        guard response.errors.isEmpty else { return nil }
-        return response.data?.repository?.discussion
+        guard response.errors.isEmpty else { return .unavailable }
+        guard let discussion = response.data?.repository?.discussion else { return .missing }
+        return .discussion(discussion)
     }
 }
 

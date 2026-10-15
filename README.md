@@ -31,7 +31,7 @@ flowchart LR
     E --> F[Inbox · Waiting · No Action · Done]
 ```
 
-1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments, and discussions you opened or commented on). It also reads unread discussion notifications, which is the only way to see a discussion you only watch. No organization-wide crawling.
+1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments, and discussions you opened or commented on). It also reads unread discussion notifications, which is the only way to see a discussion you only watch. Once it has seen one, it remembers the URL locally, so reading the GitHub notification doesn't drop it. It keeps that discussion while the notification or the discussion itself is still inside 60 days, then drops it. No organization-wide crawling.
 2. **Store.** Results are saved in an encrypted SQLCipher database. The list appears immediately from saved data.
 3. **Decide.** Only new or changed items go to Copilot, most urgent first. Copilot returns a disposition, priority, summary, next step, and reason for each.
 4. **Apply your rules.** Hard rules are applied on top of Copilot's decision, instantly and deterministically.
