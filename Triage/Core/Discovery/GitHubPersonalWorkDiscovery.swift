@@ -48,16 +48,20 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
         let number: Int
         let title: String
         let url: URL
-        let state: String
+        /// Issues and pull requests. Discussions use `closed` instead.
+        let state: String?
         let createdAt: Date
         let updatedAt: Date
         /// GitHub-flavored Markdown source.
         let body: String
         let author: Actor?
         let repository: Repository
-        let labels: Names
-        let assignees: Actors
+        let labels: Names?
+        let assignees: Actors?
         let comments: Comments
+        /// Discussions only.
+        let closed: Bool?
+        let category: Category?
         let isDraft: Bool?
         let merged: Bool?
         let reviewDecision: String?
@@ -70,10 +74,11 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
         let reviewThreads: Threads?
 
         enum CodingKeys: String, CodingKey {
-            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, isDraft, merged, reviewDecision, mergeable, additions, deletions, reviewRequests, latestReviews, commits, reviewThreads
+            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, closed, category, isDraft, merged, reviewDecision, mergeable, additions, deletions, reviewRequests, latestReviews, commits, reviewThreads
         }
     }
 
+    struct Category: Decodable, Sendable { let name: String }
     struct Actor: Decodable, Sendable { let login: String? }
     struct Repository: Decodable, Sendable { let nameWithOwner: String; let isArchived: Bool }
     struct Names: Decodable, Sendable { let nodes: [Name?] }
@@ -121,10 +126,16 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
         struct Variables: Encodable, Sendable {
             let query: String
             let cursor: String?
+            /// `ISSUE` also returns pull requests. Discussions need their own type.
+            let searchType: String
         }
         let response = try await client.execute(
             GitHubGraphQLQueries.personalWorkSearch(),
-            variables: Variables(query: query, cursor: cursor),
+            variables: Variables(
+                query: query,
+                cursor: cursor,
+                searchType: query.contains(" is:discussion ") ? "DISCUSSION" : "ISSUE"
+            ),
             as: PersonalWorkSearchPage.self
         )
         try Self.checkSingleSignOn(
@@ -153,6 +164,7 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
         let byField: [(field: String, parameter: String)] = [
             ("commits", "contents"), ("requestedReviewer", "members"), ("statusCheckRollup", "statuses"),
             ("reviewRequests", "pull_requests"), ("latestReviews", "pull_requests"), ("reviewThreads", "pull_requests"),
+            ("category", "discussions"), ("closed", "discussions"),
         ]
         let parameters = Set(byField.filter { fields.contains($0.field) }.map(\.parameter))
         let permissions = GitHubTokenRequirements.repositoryPermissions + GitHubTokenRequirements.organizationPermissions
@@ -223,9 +235,10 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         return await collector.items()
     }
 
-    /// One search per item type. Fine-grained tokens grant Issues and Pull
-    /// requests separately, so GitHub returns nothing for a search that
-    /// doesn't name a type (REST rejects it; GraphQL answers with no results).
+    /// One search per item type. Fine-grained tokens grant Issues, Pull
+    /// requests, and Discussions separately, so GitHub returns nothing for a
+    /// search that doesn't name a type (REST rejects it; GraphQL answers with
+    /// no results). Discussion search also rejects `archived:false`.
     static func searchQueries(for relationship: WorkRelationship, scope: WorkspaceScope, now: Date) throws -> [String] {
         try validate(scope: scope)
         let viewer = scope.viewerLogin
@@ -237,7 +250,21 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         case .mentioned: (["is:issue", "is:pr"], "mentions:\(viewer) \(recent)")
         case .commented: (["is:issue", "is:pr"], "commenter:\(viewer) \(recent)")
         }
-        return types.map { "org:\(scope.organizationLogin) \($0) is:open archived:false \(qualifier)" }
+        var queries = types.map { "org:\(scope.organizationLogin) \($0) is:open archived:false \(qualifier)" }
+        // GitHub discussion search does not honour `mentions:`. `commenter:`
+        // and `author:` do. Closed discussions still receive comments, so the
+        // comment window is not limited to `is:open`.
+        let org = "org:\(scope.organizationLogin)"
+        switch relationship {
+        case .authored:
+            queries.append("\(org) is:discussion is:open author:\(viewer)")
+            queries.append("\(org) is:discussion is:closed author:\(viewer) \(recent)")
+        case .commented:
+            queries.append("\(org) is:discussion commenter:\(viewer) \(recent)")
+        case .reviewRequested, .assigned, .mentioned:
+            break
+        }
+        return queries
     }
 
     private func search(
@@ -249,7 +276,14 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         var cursor: String?
         for pageNumber in 1...Self.maximumPages {
             try Task.checkCancellation()
-            let page = try await fetchPage(query: query, cursor: cursor, relationship: relationship, pageNumber: pageNumber)
+            let page: PersonalWorkSearchPage
+            do {
+                page = try await fetchPage(query: query, cursor: cursor, relationship: relationship, pageNumber: pageNumber)
+            } catch PersonalWorkDiscoveryError.missingTokenPermissions where query.contains(" is:discussion ") {
+                // A token without Discussions read must not blank the inbox.
+                Self.logger.error("discussion search skipped reason=missingPermission")
+                return
+            }
             let found = await collector.add(page.search.nodes, relationship: relationship)
             await progress(.init(relationship: relationship, found: found))
             Self.logger.notice("search relationship=\(relationship.rawValue, privacy: .public) page=\(pageNumber, privacy: .public) results=\(page.search.nodes.count, privacy: .public) totalFound=\(found, privacy: .public)")
@@ -369,6 +403,7 @@ private actor Collector {
         switch node.typename {
         case "Issue": kind = .issue
         case "PullRequest": kind = .pullRequest
+        case "Discussion": kind = .discussion
         default: return nil
         }
         let body = PersonalWorkItem.cleanedMarkdown(node.body, maximumBytes: PersonalWorkItem.maximumBodyLength)
@@ -398,14 +433,29 @@ private actor Collector {
         return PersonalWorkItem(
             id: node.id, kind: kind, repository: node.repository.nameWithOwner, number: node.number,
             title: node.title, url: node.url,
-            state: kind == .pullRequest && node.merged == true ? .merged : node.state == "OPEN" ? .open : .closed,
+            state: workState(kind: kind, node: node),
             author: node.author?.login, createdAt: node.createdAt, updatedAt: node.updatedAt,
-            relationships: [relationship], labels: node.labels.nodes.compactMap { $0?.name },
-            assignees: node.assignees.nodes.compactMap { $0?.login }, body: body,
+            relationships: [relationship], labels: labels(node),
+            assignees: node.assignees?.nodes.compactMap { $0?.login } ?? [], body: body,
             pullRequest: pullRequest, recentActivity: activity
         )
     }
 
+
+    private func workState(kind: WorkKind, node: PersonalWorkSearchPage.Node) -> WorkState {
+        if kind == .discussion { return node.closed == true ? .closed : .open }
+        if kind == .pullRequest && node.merged == true { return .merged }
+        return node.state == "OPEN" ? .open : .closed
+    }
+
+    /// Discussion category is kept as a label so existing label rules can match it.
+    private func labels(_ node: PersonalWorkSearchPage.Node) -> [String] {
+        var names = node.labels?.nodes.compactMap { $0?.name } ?? []
+        if let category = node.category?.name, !names.contains(category) {
+            names.insert(category, at: 0)
+        }
+        return names
+    }
 
     private func reviewDecision(_ value: String?) -> ReviewDecision? {
         switch value {

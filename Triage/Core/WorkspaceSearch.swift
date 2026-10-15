@@ -29,7 +29,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
     /// Accepted `is:`, `status:`, and `priority:` values, with descriptions for suggestions.
     static let knownValues: [Kind: [(String, String)]] = [
         .is: [
-            ("pr", "Pull requests"), ("issue", "Issues"), ("draft", "Draft pull requests"),
+            ("pr", "Pull requests"), ("issue", "Issues"), ("discussion", "Discussions"), ("draft", "Draft pull requests"),
             ("review", "Review requested"), ("direct", "Review requested from you directly"),
             ("team", "Review requested from your team only"), ("assigned", "Assigned to you"),
             ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("action", "Needs your action"),
@@ -56,6 +56,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             switch value.lowercased() {
             case "pr": return item.kind == .pullRequest
             case "issue": return item.kind == .issue
+            case "discussion": return item.kind == .discussion
             case "draft": return facts?.isDraft == true
             case "review": return item.relationships.contains(.reviewRequested)
             case "direct": return item.reviewRequestKind(viewer: viewer) == .direct

@@ -1,6 +1,6 @@
 # Triage
 
-**Your GitHub work, prioritized by Copilot.** Triage is a native macOS app that finds every issue and pull request that involves you in an organization, asks GitHub Copilot what needs your attention and why, and gives you a calm, keyboard-driven Inbox of exactly that.
+**Your GitHub work, prioritized by Copilot.** Triage is a native macOS app that finds the issues, pull requests, and discussions that involve you in an organization, asks GitHub Copilot what needs your attention and why, and gives you a calm, keyboard-driven Inbox of exactly that.
 
 It is private by design: your data stays on your Mac in an encrypted database, Triage never changes anything on GitHub, and there is no telemetry.
 
@@ -23,7 +23,7 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 
 ```mermaid
 flowchart LR
-    A[GitHub search<br/>review requests, assigned,<br/>authored, mentions, comments] --> B[(Encrypted local store)]
+    A[GitHub search<br/>review requests, assigned,<br/>authored, mentions, comments,<br/>discussions you joined] --> B[(Encrypted local store)]
     B --> C{Changed since<br/>last decision?}
     C -- yes --> D[Copilot triage<br/>batches of 10]
     D --> B
@@ -31,7 +31,7 @@ flowchart LR
     E --> F[Inbox · Waiting · No Action · Done]
 ```
 
-1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments). No organization-wide crawling.
+1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments, and discussions you opened or commented on). No organization-wide crawling. Watched discussions you haven't joined stay on GitHub.
 2. **Store.** Results are saved in an encrypted SQLCipher database. The list appears immediately from saved data.
 3. **Decide.** Only new or changed items go to Copilot, most urgent first. Copilot returns a disposition, priority, summary, next step, and reason for each.
 4. **Apply your rules.** Hard rules are applied on top of Copilot's decision, instantly and deterministically.

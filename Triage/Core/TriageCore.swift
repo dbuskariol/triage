@@ -19,6 +19,7 @@ struct WorkspaceScope: Hashable, Codable, Sendable {
 enum WorkKind: String, Codable, Sendable {
     case issue
     case pullRequest
+    case discussion
 }
 
 enum WorkState: String, Codable, Sendable {

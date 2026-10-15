@@ -17,10 +17,32 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
                 "org:octo is:pr is:open archived:false mentions:me updated:>=2024-11-16",
             ]
         )
-        // Fine-grained tokens find nothing unless every search names is:issue or is:pr.
+        XCTAssertEqual(
+            try GitHubPersonalWorkDiscovery.searchQueries(for: .commented, scope: scope, now: date),
+            [
+                "org:octo is:issue is:open archived:false commenter:me updated:>=2024-11-16",
+                "org:octo is:pr is:open archived:false commenter:me updated:>=2024-11-16",
+                "org:octo is:discussion commenter:me updated:>=2024-11-16",
+            ]
+        )
+        XCTAssertEqual(
+            try GitHubPersonalWorkDiscovery.searchQueries(for: .authored, scope: scope, now: date).filter { $0.contains("is:discussion") },
+            [
+                "org:octo is:discussion is:open author:me",
+                "org:octo is:discussion is:closed author:me updated:>=2024-11-16",
+            ]
+        )
+        // Fine-grained tokens find nothing unless every search names a type.
+        // Discussion search rejects archived:false, so those queries omit it.
         for relationship in WorkRelationship.allCases {
             for query in try GitHubPersonalWorkDiscovery.searchQueries(for: relationship, scope: scope, now: date) {
-                XCTAssertTrue(query.contains(" is:issue ") || query.contains(" is:pr "), query)
+                XCTAssertTrue(
+                    query.contains(" is:issue ") || query.contains(" is:pr ") || query.contains(" is:discussion "),
+                    query
+                )
+                if query.contains(" is:discussion ") {
+                    XCTAssertFalse(query.contains("archived:"), query)
+                }
             }
         }
     }
@@ -110,6 +132,30 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         XCTAssertEqual(pr.recentActivity.map(\ActivityFact.author), ["ghost", "alice"])
     }
 
+    func testDiscussionNodesKeepCategoryAndClosedState() async throws {
+        let executor = FixtureExecutor(pages: [
+            "commenter": [Self.page(Self.discussionNode(), hasNext: false)]
+        ])
+        let items = try await GitHubPersonalWorkDiscovery(
+            executor: executor, now: { Date(timeIntervalSince1970: 1_736_899_200) }
+        ).discover(scope: scope()) { _ in }
+        let discussion = try XCTUnwrap(items.first { $0.id.rawValue == "D1" })
+        XCTAssertEqual(discussion.kind, .discussion)
+        XCTAssertEqual(discussion.state, .closed)
+        XCTAssertEqual(discussion.labels, ["General"])
+        XCTAssertEqual(discussion.relationships, [.commented])
+        XCTAssertTrue(discussion.assignees.isEmpty)
+        XCTAssertNil(discussion.pullRequest)
+    }
+
+    func testMissingDiscussionPermissionDoesNotBlankOtherWork() async throws {
+        let executor = DiscussionPermissionExecutor(issue: Self.page(Self.node(), hasNext: false))
+        let items = try await GitHubPersonalWorkDiscovery(executor: executor).discover(scope: scope()) { _ in }
+        XCTAssertEqual(items.map(\.id.rawValue), ["I1"])
+        let skipped = await executor.discussionCalls
+        XCTAssertGreaterThan(skipped, 0)
+    }
+
     func testPaginationStopsAtPageCap() async throws {
         let executor = FixtureExecutor(pages: Dictionary(uniqueKeysWithValues: ["review-requested", "assignee", "author", "mentions", "commenter"].map {
             ($0, Array(repeating: Self.page(Self.node(id: "\($0)-id"), hasNext: true, cursor: "more"), count: GitHubPersonalWorkDiscovery.maximumPages))
@@ -137,7 +183,7 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         let items = try await GitHubPersonalWorkDiscovery(executor: executor, retryDelay: { _ in }).discover(scope: scope()) { _ in }
         XCTAssertEqual(items.map(\.id.rawValue), ["I1"])
         let calls = await executor.calls
-        XCTAssertEqual(calls, 11) // 9 searches, 2 retried
+        XCTAssertEqual(calls, 14) // 12 searches, 2 retried
     }
 
     func testRepeatedTransientFailureReportsSearchUnavailable() async {
@@ -197,6 +243,12 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         """
     }
 
+    private static func discussionNode() -> String {
+        """
+        { "__typename": "Discussion", "id": "D1", "number": 2150, "title": "Offsite", "url": "https://github.com/octo/repo/discussions/2150", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-02T00:00:00Z", "body": "hello", "closed": true, "author": { "login": "me" }, "repository": { "nameWithOwner": "octo/repo", "isArchived": false }, "category": { "name": "General" }, "labels": { "nodes": [] }, "comments": { "nodes": [{ "author": { "login": "me" }, "createdAt": "2025-01-02T00:00:00Z", "body": "reply" }] } }
+        """
+    }
+
     private static func page(_ node: String, hasNext: Bool, cursor: String? = nil) -> PersonalWorkSearchPage {
         let cursorJSON = cursor.map { #""\#($0)""# } ?? "null"
         let json = #"{ "search": { "pageInfo": { "hasNextPage": \#(hasNext), "endCursor": \#(cursorJSON) }, "nodes": [\#(node)] } }"#
@@ -205,6 +257,23 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         } catch {
             fatalError("\(error): \(json)")
         }
+    }
+}
+
+private actor DiscussionPermissionExecutor: PersonalWorkSearchExecuting {
+    private let issue: PersonalWorkSearchPage
+    private(set) var discussionCalls = 0
+
+    init(issue: PersonalWorkSearchPage) {
+        self.issue = issue
+    }
+
+    func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
+        if query.contains(" is:discussion ") {
+            discussionCalls += 1
+            throw PersonalWorkDiscoveryError.missingTokenPermissions(["Discussions"])
+        }
+        return issue
     }
 }
 

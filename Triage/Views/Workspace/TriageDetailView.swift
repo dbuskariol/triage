@@ -143,7 +143,11 @@ private struct DetailHeader: View {
     }
 
     private var metadata: String {
-        let kind = item.kind == .pullRequest ? "Pull request" : "Issue"
+        let kind = switch item.kind {
+        case .pullRequest: "Pull request"
+        case .discussion: "Discussion"
+        case .issue: "Issue"
+        }
         let author = item.author.map { " by \($0)" } ?? ""
         let opened = item.createdAt.formatted(date: .abbreviated, time: .omitted)
         let updated = RelativeTime.phrase(item.updatedAt)
@@ -175,6 +179,9 @@ private struct StateBadge: View {
     }
 
     private var symbol: String {
+        if item.kind == .discussion {
+            return item.state == .open ? "bubble.left.and.bubble.right" : "bubble.left.and.bubble.right.fill"
+        }
         if item.kind == .issue {
             return item.state == .open ? "circle.circle" : "checkmark.circle"
         }
@@ -189,7 +196,7 @@ private struct StateBadge: View {
         if isDraft { return .gray }
         switch item.state {
         case .open: return .green
-        case .closed: return item.kind == .issue ? .purple : .red
+        case .closed: return item.kind == .pullRequest ? .red : .purple
         case .merged: return .purple
         }
     }
