@@ -32,7 +32,7 @@ flowchart TB
 | Component | Responsibility |
 |---|---|
 | `TriageCore.swift` | Domain types (`PersonalWorkItem`, `TriageDecision`, `TriageEntry`, `LocalStatus`, `TriageStatus`) and the `PersonalWorkDiscovering`, `TriageStore`, and `TriageDeciding` protocols. |
-| `GitHubPersonalWorkDiscovery` | One GraphQL search per relationship (review requested, assigned, authored, mentioned, commented), 25 per page, two concurrent queries, transient-failure retries. Mentions and comments look back 60 days. Unread discussion notifications (`GET /notifications`, classic `notifications` scope) add discussions you only watch. A 403 on that call skips it. |
+| `GitHubPersonalWorkDiscovery` | One GraphQL search per relationship (review requested, assigned, authored, mentioned, commented), 25 per page, two concurrent queries, transient-failure retries. Mentions and comments look back 60 days. Unread discussion notifications (`GET /notifications`, classic `notifications` scope) add discussions you only watch. Seen ones are kept in `watched_discussions` and re-fetched after the notification is read, until both the notification and the discussion are older than 60 days. A 403 on that call skips new inbox hits, not the remembered ones. |
 | `GRDBTriageStore` | Items, decisions, analysis failures, local status (done/snoozed), refresh times, and rules, per account and organization. Publishes live entries through GRDB `ValueObservation`. |
 | `TriageEngine` | The loop: refresh → save → analyze changed items → wait. Publishes `TriageStatus` (phase, problem, last/next refresh, handled count). |
 | `CopilotTriageDecider` | Builds bounded Copilot requests, reuses one authenticated helper session, and maps responses to decisions. |

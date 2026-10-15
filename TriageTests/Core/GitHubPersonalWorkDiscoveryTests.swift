@@ -170,6 +170,62 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         XCTAssertEqual(added.relationships, [.watching])
     }
 
+    func testReadNotificationStillKeepsARecentWatchedDiscussion() {
+        let now = Date(timeIntervalSince1970: 1_736_899_200)
+        XCTAssertTrue(GitHubDiscussionInbox.shouldKeep(
+            lastSeenAt: now.addingTimeInterval(-86_400), updatedAt: now.addingTimeInterval(-50 * 86_400), now: now
+        ))
+        XCTAssertFalse(GitHubDiscussionInbox.shouldKeep(
+            lastSeenAt: now.addingTimeInterval(-61 * 86_400), updatedAt: now.addingTimeInterval(-61 * 86_400), now: now
+        ))
+        XCTAssertTrue(GitHubDiscussionInbox.shouldKeep(
+            lastSeenAt: now.addingTimeInterval(-90 * 86_400), updatedAt: now.addingTimeInterval(-2 * 86_400), now: now
+        ))
+    }
+
+    func testRememberedDiscussionSurvivesAnEmptyInbox() async throws {
+        let now = Date(timeIntervalSince1970: 1_736_899_200)
+        let memory = MemoryInbox()
+        try await memory.remember([WatchedDiscussionRef(
+            owner: "octo", name: "repo", number: 9, lastSeenAt: now.addingTimeInterval(-86_400)
+        )])
+        let session = DiscussionRouteSession(notificationsStatus: 200, updatedAt: "2025-01-02T00:00:00Z")
+        let inbox = try GitHubDiscussionInbox(
+            rest: GitHubRESTClient(transport: try GitHubRESTTransport(session: session), credential: SecretValue("token")),
+            graphql: GitHubGraphQLClient(session: session, credential: SecretValue("token")),
+            organizationLogin: "octo",
+            organizationDatabaseID: nil,
+            memory: memory,
+            now: { now }
+        )
+        let hits = try await inbox.unreadDiscussions()
+        XCTAssertEqual(hits.map(\.node.id.rawValue), ["D9"])
+        XCTAssertEqual(hits.map(\.relationship), [.watching])
+        let kept = try await memory.refs()
+        XCTAssertEqual(kept.map(\.number), [9])
+    }
+
+    func testQuietRememberedDiscussionIsForgotten() async throws {
+        let now = Date(timeIntervalSince1970: 1_736_899_200)
+        let memory = MemoryInbox()
+        try await memory.remember([WatchedDiscussionRef(
+            owner: "octo", name: "repo", number: 9, lastSeenAt: now.addingTimeInterval(-90 * 86_400)
+        )])
+        let session = DiscussionRouteSession(notificationsStatus: 200, updatedAt: "2024-10-01T00:00:00Z")
+        let inbox = try GitHubDiscussionInbox(
+            rest: GitHubRESTClient(transport: try GitHubRESTTransport(session: session), credential: SecretValue("token")),
+            graphql: GitHubGraphQLClient(session: session, credential: SecretValue("token")),
+            organizationLogin: "octo",
+            organizationDatabaseID: nil,
+            memory: memory,
+            now: { now }
+        )
+        let hits = try await inbox.unreadDiscussions()
+        XCTAssertTrue(hits.isEmpty)
+        let kept = try await memory.refs()
+        XCTAssertTrue(kept.isEmpty)
+    }
+
     func testNotificationReasonsAndDiscussionURLs() throws {
         XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "subscribed"), .watching)
         XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "manual"), .watching)
@@ -325,6 +381,43 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         } catch {
             fatalError("\(error): \(json)")
         }
+    }
+}
+
+private actor MemoryInbox: WatchedDiscussionMemory {
+    private var values: [WatchedDiscussionRef] = []
+    func refs() async throws -> [WatchedDiscussionRef] { values }
+    func remember(_ refs: [WatchedDiscussionRef]) async throws {
+        for ref in refs {
+            values.removeAll { $0.owner == ref.owner && $0.name == ref.name && $0.number == ref.number }
+            values.append(ref)
+        }
+    }
+    func forget(_ refs: [WatchedDiscussionRef]) async throws {
+        values.removeAll { current in
+            refs.contains { $0.owner == current.owner && $0.name == current.name && $0.number == current.number }
+        }
+    }
+}
+
+private struct DiscussionRouteSession: HTTPSession {
+    let notificationsStatus: Int
+    let updatedAt: String
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = try XCTUnwrap(request.url)
+        let body: Data
+        let status: Int
+        if url.path == "/notifications" {
+            body = Data("[]".utf8)
+            status = notificationsStatus
+        } else {
+            body = Data("""
+            {"data":{"repository":{"discussion":{"__typename":"Discussion","id":"D9","number":9,"title":"Watched","url":"https://github.com/octo/repo/discussions/9","createdAt":"2025-01-01T00:00:00Z","updatedAt":"\(updatedAt)","body":"hello","closed":false,"author":{"login":"ada"},"repository":{"nameWithOwner":"octo/repo","isArchived":false},"category":{"name":"General"},"labels":{"nodes":[]},"comments":{"nodes":[]}}},"rateLimit":{"cost":1,"remaining":4000,"resetAt":"2025-01-16T00:00:00Z"}}}
+            """.utf8)
+            status = 200
+        }
+        return (body, HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 }
 

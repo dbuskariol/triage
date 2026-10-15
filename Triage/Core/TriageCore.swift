@@ -68,6 +68,22 @@ enum WorkRelationship: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// A discussion Triage has already seen in the notification inbox.
+/// Search cannot find a discussion the viewer only watches, and GitHub drops
+/// it from the inbox once the notification is read.
+struct WatchedDiscussionRef: Hashable, Sendable {
+    let owner: String
+    let name: String
+    let number: Int
+    let lastSeenAt: Date
+}
+
+protocol WatchedDiscussionMemory: Sendable {
+    func refs() async throws -> [WatchedDiscussionRef]
+    func remember(_ refs: [WatchedDiscussionRef]) async throws
+    func forget(_ refs: [WatchedDiscussionRef]) async throws
+}
+
 enum CheckStatus: String, Codable, Sendable {
     case success
     case failure

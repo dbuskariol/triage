@@ -120,7 +120,8 @@ struct TriageProductionComposition: Sendable {
                                 rest: rest,
                                 graphql: client,
                                 organizationLogin: scope.organizationLogin,
-                                organizationDatabaseID: organizationDatabaseID
+                                organizationDatabaseID: organizationDatabaseID,
+                                memory: ScopedWatchedDiscussionMemory(store: store, scope: scope)
                             )
                         )
                     },

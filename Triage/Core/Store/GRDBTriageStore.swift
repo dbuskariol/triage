@@ -6,6 +6,23 @@ enum GRDBTriageStoreError: Error, Equatable, Sendable {
     case invalidScope
 }
 
+struct ScopedWatchedDiscussionMemory: WatchedDiscussionMemory {
+    let store: GRDBTriageStore
+    let scope: WorkspaceScope
+
+    func refs() async throws -> [WatchedDiscussionRef] {
+        try await store.watchedDiscussions(scope: scope)
+    }
+
+    func remember(_ refs: [WatchedDiscussionRef]) async throws {
+        try await store.rememberWatchedDiscussions(refs, scope: scope)
+    }
+
+    func forget(_ refs: [WatchedDiscussionRef]) async throws {
+        try await store.forgetWatchedDiscussions(refs, scope: scope)
+    }
+}
+
 actor GRDBTriageStore: TriageStore {
     private static let logger = Logger(subsystem: "com.triage.mac", category: "Store")
     private static let retentionMilliseconds: Int64 = 30 * 24 * 60 * 60 * 1_000
@@ -421,6 +438,69 @@ actor GRDBTriageStore: TriageStore {
             )
         }
         Self.logger.notice("rules saved rules=\(rules.rules.count, privacy: .public) hasInstructions=\(rules.trimmedInstructions != nil, privacy: .public)")
+    }
+
+    func watchedDiscussions(scope: WorkspaceScope) async throws -> [WatchedDiscussionRef] {
+        try await validate(scope)
+        return try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT owner, name, number, last_seen_at_ms
+                    FROM watched_discussions
+                    WHERE account_id = ? AND organization_id = ?
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            ).map { row in
+                WatchedDiscussionRef(
+                    owner: row["owner"],
+                    name: row["name"],
+                    number: row["number"],
+                    lastSeenAt: Date(timeIntervalSince1970: TimeInterval(row["last_seen_at_ms"] as Int64) / 1_000)
+                )
+            }
+        }
+    }
+
+    func rememberWatchedDiscussions(_ refs: [WatchedDiscussionRef], scope: WorkspaceScope) async throws {
+        guard !refs.isEmpty else { return }
+        try await validate(scope)
+        try await vault.writeTransaction { database in
+            for ref in refs {
+                try database.execute(
+                    sql: """
+                        INSERT INTO watched_discussions (
+                            account_id, organization_id, owner, name, number, last_seen_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(account_id, organization_id, owner, name, number) DO UPDATE SET
+                            last_seen_at_ms = excluded.last_seen_at_ms
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue,
+                        ref.owner, ref.name, ref.number, Self.milliseconds(ref.lastSeenAt),
+                    ]
+                )
+            }
+        }
+    }
+
+    func forgetWatchedDiscussions(_ refs: [WatchedDiscussionRef], scope: WorkspaceScope) async throws {
+        guard !refs.isEmpty else { return }
+        try await validate(scope)
+        try await vault.writeTransaction { database in
+            for ref in refs {
+                try database.execute(
+                    sql: """
+                        DELETE FROM watched_discussions
+                        WHERE account_id = ? AND organization_id = ? AND owner = ? AND name = ? AND number = ?
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue,
+                        ref.owner, ref.name, ref.number,
+                    ]
+                )
+            }
+        }
     }
 
     private func validate(_ scope: WorkspaceScope) async throws {
