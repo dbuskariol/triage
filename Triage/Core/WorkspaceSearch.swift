@@ -64,6 +64,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             case "assigned": return item.relationships.contains(.assigned)
             case "mine": return item.relationships.contains(.authored)
             case "mentioned": return item.relationships.contains(.mentioned)
+            case "watching": return item.relationships.contains(.watching)
             case "action": return entry.decision?.disposition == .act
             case "unread": return entry.isUnread
             case "read": return !entry.isUnread

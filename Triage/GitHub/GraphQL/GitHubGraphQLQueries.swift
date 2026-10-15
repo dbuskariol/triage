@@ -1,13 +1,13 @@
 import Foundation
 
 enum GitHubGraphQLQueries {
-    private static let productionOperationNames = ["TriageViewer", "TriagePersonalWorkSearch"]
+    private static let productionOperationNames = ["TriageViewer", "TriagePersonalWorkSearch", "TriageDiscussionLookup"]
 
     /// Every operation permitted to cross the GraphQL transport boundary.
     /// Keep this inventory exhaustive: callers cannot send dynamically-built
     /// documents, even when they are read-only.
     static func registeredQueries() throws -> [GitHubGraphQLQuery] {
-        let queries = try [viewer(), personalWorkSearch()]
+        let queries = try [viewer(), personalWorkSearch(), discussionLookup()]
         try validateProductionRegistry(queries)
         return queries
     }
@@ -145,6 +145,31 @@ enum GitHubGraphQLQueries {
         }
         """,
         operationName: "TriagePersonalWorkSearch"
+        )
+    }
+
+    /// One discussion by number. Notification threads have no GraphQL node id,
+    /// so the inbox hydrates each unread discussion before it can be stored.
+    static func discussionLookup() throws -> GitHubGraphQLQuery {
+        try GitHubGraphQLQuery(
+        document: """
+        query TriageDiscussionLookup($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            discussion(number: $number) {
+              __typename
+              id number title url createdAt updatedAt body
+              closed
+              author { login }
+              repository { nameWithOwner isArchived }
+              category { name }
+              labels(first: 20) { nodes { name } }
+              comments(last: 5) { nodes { author { login } createdAt body } }
+            }
+          }
+          rateLimit { cost remaining resetAt }
+        }
+        """,
+        operationName: "TriageDiscussionLookup"
         )
     }
 }

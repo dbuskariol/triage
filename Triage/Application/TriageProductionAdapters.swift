@@ -104,11 +104,25 @@ struct TriageProductionComposition: Sendable {
                         let organizationDatabaseID = try await AccountRepository(vault: vault)
                             .organizations(for: scope.accountID)
                             .first { $0.id == scope.organizationID }?.githubOrganizationID
-                        return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(
-                            client: client,
-                            organizationLogin: scope.organizationLogin,
-                            organizationDatabaseID: organizationDatabaseID
-                        ))
+                        let rest = GitHubRESTClient(
+                            transport: try GitHubRESTTransport(),
+                            credential: token,
+                            rateLimitController: rateLimit,
+                            personalWorkOnly: true
+                        )
+                        return GitHubPersonalWorkDiscovery(
+                            executor: GitHubPersonalWorkSearchExecutor(
+                                client: client,
+                                organizationLogin: scope.organizationLogin,
+                                organizationDatabaseID: organizationDatabaseID
+                            ),
+                            inbox: GitHubDiscussionInbox(
+                                rest: rest,
+                                graphql: client,
+                                organizationLogin: scope.organizationLogin,
+                                organizationDatabaseID: organizationDatabaseID
+                            )
+                        )
                     },
                     decider: CopilotTriageDecider(resolveVault: openVault),
                     refreshInterval: AppPreferences.refreshInterval(minutes: AppPreferences.refreshIntervalMinutes()),

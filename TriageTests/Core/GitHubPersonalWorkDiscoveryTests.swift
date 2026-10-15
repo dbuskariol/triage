@@ -32,6 +32,7 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
                 "org:octo is:discussion is:closed author:me updated:>=2024-11-16",
             ]
         )
+        XCTAssertEqual(try GitHubPersonalWorkDiscovery.searchQueries(for: .watching, scope: scope, now: date), [])
         // Fine-grained tokens find nothing unless every search names a type.
         // Discussion search rejects archived:false, so those queries omit it.
         for relationship in WorkRelationship.allCases {
@@ -148,6 +149,73 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         XCTAssertNil(discussion.pullRequest)
     }
 
+    func testUnreadDiscussionInboxMergesWithSearch() async throws {
+        let watched = try XCTUnwrap(Self.page(Self.discussionNode(id: "D2", number: 9, title: "Watched"), hasNext: false).search.nodes.compactMap { $0 }.first)
+        let joined = try XCTUnwrap(Self.page(Self.discussionNode(), hasNext: false).search.nodes.compactMap { $0 }.first)
+        let executor = FixtureExecutor(pages: [
+            "commenter": [Self.page(Self.discussionNode(), hasNext: false)]
+        ])
+        let items = try await GitHubPersonalWorkDiscovery(
+            executor: executor,
+            inbox: FixtureInbox(hits: [
+                InboxDiscussion(node: watched, relationship: .watching),
+                InboxDiscussion(node: joined, relationship: .watching),
+            ]),
+            now: { Date(timeIntervalSince1970: 1_736_899_200) }
+        ).discover(scope: scope()) { _ in }
+        let existing = try XCTUnwrap(items.first { $0.id.rawValue == "D1" })
+        XCTAssertEqual(existing.relationships, [.commented, .watching])
+        let added = try XCTUnwrap(items.first { $0.id.rawValue == "D2" })
+        XCTAssertEqual(added.kind, .discussion)
+        XCTAssertEqual(added.relationships, [.watching])
+    }
+
+    func testNotificationReasonsAndDiscussionURLs() throws {
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "subscribed"), .watching)
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "manual"), .watching)
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "state_change"), .watching)
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "team_mention"), .mentioned)
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "author"), .authored)
+        XCTAssertEqual(GitHubDiscussionInbox.relationship(forNotificationReason: "comment"), .commented)
+        XCTAssertNil(GitHubDiscussionInbox.relationship(forNotificationReason: "ci_activity"))
+        let api = URL(string: "https://api.github.com/repos/Octo/Repo/discussions/12")!
+        XCTAssertEqual(GitHubDiscussionInbox.discussion(in: api)?.owner, "Octo")
+        XCTAssertEqual(GitHubDiscussionInbox.discussion(in: api)?.number, 12)
+        XCTAssertEqual(
+            GitHubDiscussionInbox.discussion(in: URL(string: "https://github.com/octo/repo/discussions/3"))?.name,
+            "repo"
+        )
+        XCTAssertNil(GitHubDiscussionInbox.discussion(in: URL(string: "https://api.github.com/repos/octo/repo/issues/3")))
+        XCTAssertNil(GitHubDiscussionInbox.discussion(in: nil))
+    }
+
+    func testMissingNotificationScopeSkipsTheInbox() throws {
+        XCTAssertTrue(try GitHubDiscussionInbox.missingScope(
+            GitHubFailure(kind: .forbidden, statusCode: 403),
+            organizationLogin: "octo", organizationDatabaseID: 7
+        ))
+        XCTAssertFalse(try GitHubDiscussionInbox.missingScope(
+            GitHubFailure(kind: .unauthorized, statusCode: 401),
+            organizationLogin: "octo", organizationDatabaseID: 7
+        ))
+        XCTAssertThrowsError(try GitHubDiscussionInbox.missingScope(
+            GitHubFailure(
+                kind: .forbidden, statusCode: 403,
+                ssoHeader: .partialResults([7])
+            ),
+            organizationLogin: "octo", organizationDatabaseID: 7
+        ))
+    }
+
+    func testForbiddenInboxDoesNotBlankSearch() async throws {
+        let executor = FixtureExecutor(pages: ["author": [Self.page(Self.node(), hasNext: false)]])
+        let items = try await GitHubPersonalWorkDiscovery(
+            executor: executor,
+            inbox: ThrowingInbox(error: GitHubFailure(kind: .forbidden, statusCode: 403))
+        ).discover(scope: scope()) { _ in }
+        XCTAssertEqual(items.map(\.id.rawValue), ["I1"])
+    }
+
     func testMissingDiscussionPermissionDoesNotBlankOtherWork() async throws {
         let executor = DiscussionPermissionExecutor(issue: Self.page(Self.node(), hasNext: false))
         let items = try await GitHubPersonalWorkDiscovery(executor: executor).discover(scope: scope()) { _ in }
@@ -243,9 +311,9 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         """
     }
 
-    private static func discussionNode() -> String {
+    private static func discussionNode(id: String = "D1", number: Int = 2150, title: String = "Offsite") -> String {
         """
-        { "__typename": "Discussion", "id": "D1", "number": 2150, "title": "Offsite", "url": "https://github.com/octo/repo/discussions/2150", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-02T00:00:00Z", "body": "hello", "closed": true, "author": { "login": "me" }, "repository": { "nameWithOwner": "octo/repo", "isArchived": false }, "category": { "name": "General" }, "labels": { "nodes": [] }, "comments": { "nodes": [{ "author": { "login": "me" }, "createdAt": "2025-01-02T00:00:00Z", "body": "reply" }] } }
+        { "__typename": "Discussion", "id": "\(id)", "number": \(number), "title": "\(title)", "url": "https://github.com/octo/repo/discussions/\(number)", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-02T00:00:00Z", "body": "hello", "closed": true, "author": { "login": "me" }, "repository": { "nameWithOwner": "octo/repo", "isArchived": false }, "category": { "name": "General" }, "labels": { "nodes": [] }, "comments": { "nodes": [{ "author": { "login": "me" }, "createdAt": "2025-01-02T00:00:00Z", "body": "reply" }] } }
         """
     }
 
@@ -257,6 +325,21 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         } catch {
             fatalError("\(error): \(json)")
         }
+    }
+}
+
+private struct FixtureInbox: DiscussionInboxFetching {
+    let hits: [InboxDiscussion]
+    func unreadDiscussions() async throws -> [InboxDiscussion] { hits }
+}
+
+private struct ThrowingInbox: DiscussionInboxFetching {
+    let error: GitHubFailure
+    func unreadDiscussions() async throws -> [InboxDiscussion] {
+        if try GitHubDiscussionInbox.missingScope(error, organizationLogin: "octo", organizationDatabaseID: 7) {
+            return []
+        }
+        throw error
     }
 }
 

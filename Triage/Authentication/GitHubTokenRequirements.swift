@@ -10,8 +10,9 @@ enum GitHubTokenRequirements {
     }
 
     /// Classic scopes: `repo` is the only classic scope that can read private
-    /// repositories; `read:org` lists organizations and team review requests.
-    static let classicScopes = ["repo", "read:org"]
+    /// repositories; `notifications` reads the inbox (fine-grained tokens can't);
+    /// `read:org` lists organizations and team review requests.
+    static let classicScopes = ["repo", "notifications", "read:org"]
 
     static let repositoryPermissions = [
         Permission(parameter: "metadata", title: "Metadata"),

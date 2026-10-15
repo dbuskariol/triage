@@ -1,6 +1,6 @@
 # Triage 0.1.2
 
-- **Discussions you opened or commented on.** They show up with your issues and pull requests, including a closed discussion that was updated in the last 60 days. A fine-grained token needs Discussions read. Watched discussions you haven't joined still aren't included.
+- **Discussions, including ones you only watch.** Search finds discussions you opened or commented on, including a closed discussion updated in the last 60 days. Unread discussion notifications add the ones you only watch. That inbox call needs a classic token with `repo`, `notifications`, and `read:org`. A fine-grained token still finds discussions you joined, and skips the inbox instead of blanking the refresh.
 - **Clear messages instead of an empty inbox.** If an organization's SAML single sign-on hides its work from your token, or your token is missing a permission Triage needs, Triage keeps your saved work and says exactly what to fix, with a link to authorize the token.
 - **Fine-grained tokens find your work.** Triage now searches issues and pull requests separately, which fine-grained tokens require; before, they found nothing.
 - **Replacing a token updates your organizations.** Organizations the new token can't access leave the list (their local data is kept), and a fine-grained token that can't access any organization is refused with an explanation.

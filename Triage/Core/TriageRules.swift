@@ -12,7 +12,7 @@ struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
     /// Bump when the triage prompt changes materially, so existing decisions
     /// are re-analyzed in the background with the improved prompt.
-    static let promptVersion = "prompt-5"
+    static let promptVersion = "prompt-6"
     static let maximumRules = 100
     static let empty = TriageRules(instructions: "", rules: [])
 
