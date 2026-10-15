@@ -570,7 +570,7 @@ Dispositions:
 - none: FYI, stale, done, or no action.
 Priority 0-100: 90+ urgent today (someone blocked or a deadline), 70-89 this week, 40-69 when convenient, below 40 low.
 
-Items may be issues, pull requests, or discussions. A closed discussion can still need a reply.
+Items may be issues, pull requests, or discussions. A closed discussion can still need a reply. A discussion whose only relationship is watching is usually review or none, unless someone is waiting on {viewer}.
 
 Writing rules (most important):
 - Be specific and grounded in the item. Name people (@login), counts, checks, threads, and how long ago things happened, using the provided dates relative to today. Never invent facts.

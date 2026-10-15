@@ -23,7 +23,7 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 
 ```mermaid
 flowchart LR
-    A[GitHub search<br/>review requests, assigned,<br/>authored, mentions, comments,<br/>discussions you joined] --> B[(Encrypted local store)]
+    A[GitHub search and unread<br/>discussion notifications] --> B[(Encrypted local store)]
     B --> C{Changed since<br/>last decision?}
     C -- yes --> D[Copilot triage<br/>batches of 10]
     D --> B
@@ -31,7 +31,7 @@ flowchart LR
     E --> F[Inbox · Waiting · No Action · Done]
 ```
 
-1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments, and discussions you opened or commented on). No organization-wide crawling. Watched discussions you haven't joined stay on GitHub.
+1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments, and discussions you opened or commented on). It also reads unread discussion notifications, which is the only way to see a discussion you only watch. No organization-wide crawling.
 2. **Store.** Results are saved in an encrypted SQLCipher database. The list appears immediately from saved data.
 3. **Decide.** Only new or changed items go to Copilot, most urgent first. Copilot returns a disposition, priority, summary, next step, and reason for each.
 4. **Apply your rules.** Hard rules are applied on top of Copilot's decision, instantly and deterministically.
@@ -79,7 +79,7 @@ Focus (⇧⌘F, or the target button above the list) shows one item at a time fr
 
 The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, people, labels, and Copilot's notes, or use GitHub-style filters:
 
-`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` `is:unread` `is:read` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
+`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:discussion` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:watching` `is:action` `is:unread` `is:read` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
 
 **Save** keeps the current search in the sidebar as a saved search that stays up to date across all your work. Type in the search field to narrow it further; right-click it to rename or delete.
 
@@ -121,7 +121,7 @@ Rule conditions (all must match):
 
 | Condition | Examples |
 |---|---|
-| My relationship | Review requested from me **directly** or from **my team only**, assigned, opened by me, mentions me, I commented |
+| My relationship | Review requested from me **directly** or from **my team only**, assigned, opened by me, mentions me, I commented, watching |
 | Requested team | `core` or `octo/core` |
 | Pull request status | Draft, ready for review, approved, changes requested, checks failing, has conflicts |
 | Repository, author, label | `octo/widgets`, `octo/*`, `dependabot[bot]`, `security` |
@@ -185,8 +185,8 @@ Triage only reads from GitHub; it never posts, comments, or changes anything. Co
 
 | Token | What to select |
 |---|---|
-| **Fine-grained** (recommended) | Resource owner: your organization (it must allow fine-grained tokens, and may need to approve yours). Repository access: all repositories, or the ones you work in. Repository permissions, read-only: Metadata, Issues, Pull requests, Commit statuses, Contents. Organization permissions, read-only: Members. |
-| **Classic** | Scopes `repo` and `read:org`. Classic tokens have no read-only scope for private repositories. If your organization uses SAML single sign-on, authorize the token for it. |
+| **Fine-grained** | Resource owner: your organization (it must allow fine-grained tokens, and may need to approve yours). Repository access: all repositories, or the ones you work in. Repository permissions, read-only: Metadata, Issues, Pull requests, Discussions, Commit statuses, Contents. Organization permissions, read-only: Members. A fine-grained token can't read the notification inbox, so discussions you only watch stay on GitHub. |
+| **Classic** (needed for watched discussions) | Scopes `repo`, `notifications`, and `read:org`. Classic tokens have no read-only scope for private repositories. If your organization uses SAML single sign-on, authorize the token for it. |
 
 Triage shows each token's expiration in **Settings ▸ Accounts**, warns you a week before it expires, and lets you replace it without removing the account.
 

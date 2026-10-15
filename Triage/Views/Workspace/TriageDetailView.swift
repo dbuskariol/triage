@@ -647,6 +647,7 @@ private struct PeopleSection: View {
         case .authored: "pencil"
         case .mentioned: "at"
         case .commented: "text.bubble"
+        case .watching: "bell"
         }
     }
 }

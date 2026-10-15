@@ -33,6 +33,6 @@ struct GitHubTokenRequirementsTests {
     @Test func classicLinkSelectsRepoAndReadOrg() {
         let url = GitHubTokenRequirements.classicTokenURL
         #expect(url.path() == "/settings/tokens/new")
-        #expect(query(url)["scopes"] == "repo,read:org")
+        #expect(query(url)["scopes"] == "repo,notifications,read:org")
     }
 }
