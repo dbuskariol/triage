@@ -32,7 +32,8 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             ("pr", "Pull requests"), ("issue", "Issues"), ("discussion", "Discussions"), ("draft", "Draft pull requests"),
             ("review", "Review requested"), ("direct", "Review requested from you directly"),
             ("team", "Review requested from your team only"), ("assigned", "Assigned to you"),
-            ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("action", "Needs your action"),
+            ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("watching", "Discussions you watch"),
+            ("action", "Needs your action"),
             ("unread", "Unread"), ("read", "Read"),
         ],
         .status: [
