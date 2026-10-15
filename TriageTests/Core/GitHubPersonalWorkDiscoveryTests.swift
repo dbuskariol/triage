@@ -205,6 +205,27 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         XCTAssertEqual(kept.map(\.number), [9])
     }
 
+    func testForbiddenInboxStillKeepsRememberedDiscussions() async throws {
+        let now = Date(timeIntervalSince1970: 1_736_899_200)
+        let memory = MemoryInbox()
+        try await memory.remember([WatchedDiscussionRef(
+            owner: "octo", name: "repo", number: 9, lastSeenAt: now.addingTimeInterval(-86_400)
+        )])
+        let session = DiscussionRouteSession(notificationsStatus: 403, updatedAt: "2025-01-02T00:00:00Z")
+        let inbox = try GitHubDiscussionInbox(
+            rest: GitHubRESTClient(transport: try GitHubRESTTransport(session: session), credential: SecretValue("token")),
+            graphql: GitHubGraphQLClient(session: session, credential: SecretValue("token")),
+            organizationLogin: "octo",
+            organizationDatabaseID: nil,
+            memory: memory,
+            now: { now }
+        )
+        let hits = try await inbox.unreadDiscussions()
+        XCTAssertEqual(hits.map(\.node.id.rawValue), ["D9"])
+        let kept = try await memory.refs()
+        XCTAssertEqual(kept.map(\.number), [9])
+    }
+
     func testQuietRememberedDiscussionIsForgotten() async throws {
         let now = Date(timeIntervalSince1970: 1_736_899_200)
         let memory = MemoryInbox()

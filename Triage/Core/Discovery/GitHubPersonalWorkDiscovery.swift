@@ -417,39 +417,7 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
     }
 
     func unreadDiscussions() async throws -> [InboxDiscussion] {
-        var request = try GitHubRESTRequest(
-            path: "/notifications",
-            query: [
-                URLQueryItem(name: "all", value: "false"),
-                URLQueryItem(name: "participating", value: "false"),
-                URLQueryItem(name: "per_page", value: "50"),
-            ]
-        )
-        var candidates: [(owner: String, name: String, number: Int, relationship: WorkRelationship)] = []
-        for _ in 1...Self.maximumPages {
-            let page: GitHubPage<NotificationThread>
-            do {
-                page = try await rest.getPage(NotificationThread.self, request: request)
-            } catch {
-                if try Self.missingScope(error, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID) {
-                    return []
-                }
-                throw error
-            }
-            try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
-                page.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
-            )
-            for thread in page.values where thread.subject.type == "Discussion" {
-                guard let parsed = Self.discussion(in: thread.subject.url),
-                      parsed.owner.caseInsensitiveCompare(organizationLogin) == .orderedSame,
-                      let relationship = Self.relationship(forNotificationReason: thread.reason)
-                else { continue }
-                candidates.append((parsed.owner, parsed.name, parsed.number, relationship))
-                if candidates.count == Self.maximumHydrations { break }
-            }
-            guard candidates.count < Self.maximumHydrations, let next = page.nextPageURL else { break }
-            request = try GitHubRESTRequest(nextPageURL: next)
-        }
+        let candidates = try await notificationCandidates()
 
         var hits: [InboxDiscussion] = []
         var seen = Set<String>()
@@ -503,6 +471,45 @@ struct GitHubDiscussionInbox: DiscussionInboxFetching {
 
     private static func key(_ owner: String, _ name: String, _ number: Int) -> String {
         "\(owner.lowercased())/\(name.lowercased())#\(number)"
+    }
+
+    /// Unread discussion threads. Empty when the token can't call the inbox.
+    /// A missing scope must not skip discussions already remembered.
+    private func notificationCandidates() async throws -> [(owner: String, name: String, number: Int, relationship: WorkRelationship)] {
+        var request = try GitHubRESTRequest(
+            path: "/notifications",
+            query: [
+                URLQueryItem(name: "all", value: "false"),
+                URLQueryItem(name: "participating", value: "false"),
+                URLQueryItem(name: "per_page", value: "50"),
+            ]
+        )
+        var candidates: [(owner: String, name: String, number: Int, relationship: WorkRelationship)] = []
+        for _ in 1...Self.maximumPages {
+            let page: GitHubPage<NotificationThread>
+            do {
+                page = try await rest.getPage(NotificationThread.self, request: request)
+            } catch {
+                if try Self.missingScope(error, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID) {
+                    return []
+                }
+                throw error
+            }
+            try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+                page.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
+            )
+            for thread in page.values where thread.subject.type == "Discussion" {
+                guard let parsed = Self.discussion(in: thread.subject.url),
+                      parsed.owner.caseInsensitiveCompare(organizationLogin) == .orderedSame,
+                      let relationship = Self.relationship(forNotificationReason: thread.reason)
+                else { continue }
+                candidates.append((parsed.owner, parsed.name, parsed.number, relationship))
+                if candidates.count == Self.maximumHydrations { break }
+            }
+            guard candidates.count < Self.maximumHydrations, let next = page.nextPageURL else { break }
+            request = try GitHubRESTRequest(nextPageURL: next)
+        }
+        return candidates
     }
 
     /// `true` when a classic `notifications` scope is missing. Single sign-on
