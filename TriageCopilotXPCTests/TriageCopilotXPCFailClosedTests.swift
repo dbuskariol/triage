@@ -322,6 +322,39 @@ final class TriageCopilotXPCFailClosedTests: XCTestCase {
     XCTAssertEqual(capturedEnvironment["COPILOT_SKIP_CLI_DOWNLOAD"], "1")
   }
 
+  func testUnsignedDebugCallerIsAllowedOnlyWithoutATeam() {
+    let app = CopilotXPCCallerValidator.applicationIdentifier
+    let helper = "com.triage.mac.TriageCopilotHelper"
+    XCTAssertTrue(CopilotSignatureAuthorization.allows(
+      identifier: app, teamIdentifier: "BJCVJ5G7MJ", isAdHoc: false,
+      expectedIdentifier: app, expectedTeamIdentifier: "BJCVJ5G7MJ", acceptAdHocDebugCaller: false
+    ))
+    XCTAssertTrue(CopilotSignatureAuthorization.allows(
+      identifier: app, teamIdentifier: nil, isAdHoc: true,
+      expectedIdentifier: app, expectedTeamIdentifier: nil, acceptAdHocDebugCaller: true
+    ))
+    XCTAssertTrue(CopilotSignatureAuthorization.allows(
+      identifier: helper, teamIdentifier: nil, isAdHoc: true,
+      expectedIdentifier: helper, expectedTeamIdentifier: "", acceptAdHocDebugCaller: true
+    ))
+    XCTAssertFalse(CopilotSignatureAuthorization.allows(
+      identifier: app, teamIdentifier: nil, isAdHoc: true,
+      expectedIdentifier: app, expectedTeamIdentifier: nil, acceptAdHocDebugCaller: false
+    ))
+    XCTAssertFalse(CopilotSignatureAuthorization.allows(
+      identifier: app, teamIdentifier: nil, isAdHoc: true,
+      expectedIdentifier: app, expectedTeamIdentifier: "BJCVJ5G7MJ", acceptAdHocDebugCaller: true
+    ))
+    XCTAssertFalse(CopilotSignatureAuthorization.allows(
+      identifier: "com.example.other", teamIdentifier: nil, isAdHoc: true,
+      expectedIdentifier: app, expectedTeamIdentifier: nil, acceptAdHocDebugCaller: true
+    ))
+    XCTAssertFalse(CopilotSignatureAuthorization.allows(
+      identifier: app, teamIdentifier: "OTHERTEAM1", isAdHoc: false,
+      expectedIdentifier: app, expectedTeamIdentifier: "BJCVJ5G7MJ", acceptAdHocDebugCaller: true
+    ))
+  }
+
   func testMalformedTeamIdentifiersAreRejectedBeforeCodeValidation() {
     for teamIdentifier in [nil, "", "not-a-team", "ABCDE1234!"] {
       XCTAssertThrowsError(
