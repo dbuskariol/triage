@@ -28,6 +28,7 @@
 		1FE6E7920216631C2D7E98CE /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 6946314899C158B0508FF5F7 /* GRDB */; };
 		21326935BB82C2DD57A0CEE4 /* CopilotDraftWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23EE6CF4533FFD2F5C447830 /* CopilotDraftWriter.swift */; };
 		23223F01D8B92B7392253D78 /* TriageCopilotXPC.xpc in CopyFiles */ = {isa = PBXBuildFile; fileRef = 1F7A2FD9C1B8E79B18243806 /* TriageCopilotXPC.xpc */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		23652C3653D5076BB83464BD /* CopilotSignatureAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDCC5B81040F0C0C8FA57B26 /* CopilotSignatureAuthorization.swift */; };
 		257D4C1F9D4D7DA0F2629292 /* TriageCopilotXPCListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */; };
 		296A723D11E2B61AF6895EA0 /* AccountCredentialReplacementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70C78FBE1F94059E1A646A17 /* AccountCredentialReplacementTests.swift */; };
 		2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */; };
@@ -40,6 +41,7 @@
 		39645229C79AF0AA7C0331BF /* AppNavigationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26EFD8DB564055A12BB171EA /* AppNavigationModel.swift */; };
 		3ABE0BAEB34FB0FC696F7351 /* CredentialLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 093F78313766BF56E21E1A0F /* CredentialLifecycle.swift */; };
 		3B3C071426CD280CFC578AAE /* GitHubRESTClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8B0563A7880B62115935FB /* GitHubRESTClient.swift */; };
+		3BD1DE020EBE4A149299C53F /* CopilotSignatureAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDCC5B81040F0C0C8FA57B26 /* CopilotSignatureAuthorization.swift */; };
 		3C78FA216FA70BB26E87F03E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8D6771CB3C835C681DA66152 /* Assets.xcassets */; };
 		40401FB69538105A05F50C8A /* TriageCopilotXPCListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6F9D3F7E91D844D9CA5D2F /* TriageCopilotXPCListener.swift */; };
 		435A91DA37F58881611CC413 /* GRDBTriageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C4F39495F10FEDFE5319407 /* GRDBTriageStore.swift */; };
@@ -326,6 +328,7 @@
 		BB1D01831E8F9F2A8F3CE7A0 /* WorkspaceSortMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSortMenu.swift; sourceTree = "<group>"; };
 		BD65EE2EB9640B299C3BA48A /* ListSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListSelectionTests.swift; sourceTree = "<group>"; };
 		BDA5D08ACA7560833D95FAAD /* TriageUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BDCC5B81040F0C0C8FA57B26 /* CopilotSignatureAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotSignatureAuthorization.swift; sourceTree = "<group>"; };
 		C6AF26C67EA04CCB86479224 /* AttentionTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionTracker.swift; sourceTree = "<group>"; };
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA2042C053AA1E789FE067CF /* RelativeTime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelativeTime.swift; sourceTree = "<group>"; };
@@ -810,6 +813,7 @@
 			isa = PBXGroup;
 			children = (
 				F40943BD935FE1E44093417C /* CopilotHelperProcess.swift */,
+				BDCC5B81040F0C0C8FA57B26 /* CopilotSignatureAuthorization.swift */,
 				55E9ED9B576EB6D93E2AB5D5 /* CopilotXPCCallerValidator.swift */,
 				E98F5372A9B97D56766FD587 /* CopilotXPCFrame.swift */,
 				89EB0458B411E6A895FE992B /* main.swift */,
@@ -1066,6 +1070,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A90B0A807674321B5BE29EE8 /* CopilotHelperProcess.swift in Sources */,
+				23652C3653D5076BB83464BD /* CopilotSignatureAuthorization.swift in Sources */,
 				F2F097BB5F828A89CA1851AA /* CopilotXPCCallerValidator.swift in Sources */,
 				81583E154FDA724FE3ADFD42 /* CopilotXPCFrame.swift in Sources */,
 				57E068C5936DFF50A830B501 /* CopilotXPCInterface.swift in Sources */,
@@ -1080,6 +1085,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				DACDAD22405CB0D021BC479B /* CopilotHelperProcess.swift in Sources */,
+				3BD1DE020EBE4A149299C53F /* CopilotSignatureAuthorization.swift in Sources */,
 				C456BE7D94C6C310182F71F1 /* CopilotXPCCallerValidator.swift in Sources */,
 				A864239EB7212CD8B4839E1D /* CopilotXPCFrame.swift in Sources */,
 				86C27F2AEAD8B377C934DFB7 /* CopilotXPCInterface.swift in Sources */,

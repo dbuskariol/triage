@@ -148,6 +148,7 @@ targets:
     sources:
       - TriageCopilotXPCTests
       - TriageCopilotXPC/CopilotHelperProcess.swift
+      - TriageCopilotXPC/CopilotSignatureAuthorization.swift
       - TriageCopilotXPC/CopilotXPCCallerValidator.swift
       - TriageCopilotXPC/CopilotXPCFrame.swift
       - TriageCopilotXPC/TriageCopilotXPCService.swift

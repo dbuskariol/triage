@@ -1115,9 +1115,13 @@ private enum CopilotRuntimeCodeSignatureValidator {
 
 enum CopilotCodeSignatureValidator {
   static func validate(executableURL: URL, identifier: String) throws {
-    let teamIdentifier = try validatedTeamIdentifier(
-      Bundle.main.object(forInfoDictionaryKey: "TriageExpectedTeamIdentifier") as? String
-    )
+    let expectedTeam = Bundle.main.object(forInfoDictionaryKey: "TriageExpectedTeamIdentifier") as? String
+    #if DEBUG
+    if allowsUnsignedDebugHelper(executableURL, identifier: identifier, expectedTeamIdentifier: expectedTeam) {
+      return
+    }
+    #endif
+    let teamIdentifier = try validatedTeamIdentifier(expectedTeam)
     let requirementString =
       "anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(teamIdentifier)\""
     var requirement: SecRequirement?
@@ -1134,6 +1138,51 @@ enum CopilotCodeSignatureValidator {
       throw CopilotXPCServiceError.codeSignatureNotValidated
     }
   }
+
+  #if DEBUG
+  /// The embedded helper of an unsigned Debug build is ad-hoc too. Accept only
+  /// that helper, and only when this service was built without an Apple team.
+  private static func allowsUnsignedDebugHelper(
+    _ executableURL: URL,
+    identifier: String,
+    expectedTeamIdentifier: String?
+  ) -> Bool {
+    guard let facts = signatureFacts(executableURL) else { return false }
+    return CopilotSignatureAuthorization.allows(
+      identifier: facts.identifier,
+      teamIdentifier: facts.teamIdentifier,
+      isAdHoc: facts.isAdHoc,
+      expectedIdentifier: identifier,
+      expectedTeamIdentifier: expectedTeamIdentifier,
+      acceptAdHocDebugCaller: true
+    )
+  }
+
+  private static func signatureFacts(_ executableURL: URL) -> (
+    identifier: String?, teamIdentifier: String?, isAdHoc: Bool
+  )? {
+    var code: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess, let code else {
+      return nil
+    }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(
+      code,
+      SecCSFlags(rawValue: kSecCSSigningInformation),
+      &information
+    ) == errSecSuccess,
+      let info = information as? [CFString: Any]
+    else {
+      return nil
+    }
+    let flags = info[kSecCodeInfoFlags] as? UInt32 ?? 0
+    return (
+      info[kSecCodeInfoIdentifier] as? String,
+      info[kSecCodeInfoTeamIdentifier] as? String,
+      flags & 0x2 != 0
+    )
+  }
+  #endif
 
   static func validatedTeamIdentifier(_ value: String?) throws -> String {
     guard let value,
