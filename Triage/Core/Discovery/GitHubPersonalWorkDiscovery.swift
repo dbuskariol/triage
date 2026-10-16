@@ -190,6 +190,9 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
 }
 
 struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
+    /// How far `commenter:` and `mentions:` look back. GitHub accepts a longer
+    /// date. Search still stops at 1,000 results.
+    static let recentWindow: TimeInterval = 365 * 86_400
     static let maximumPages = 40
     static let maximumAttemptsPerPage = 3
     private static let logger = Logger(subsystem: "com.triage.mac", category: "Discovery")
@@ -255,7 +258,7 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
     static func searchQueries(for relationship: WorkRelationship, scope: WorkspaceScope, now: Date) throws -> [String] {
         try validate(scope: scope)
         let viewer = scope.viewerLogin
-        let recent = "updated:>=\(dayString(now.addingTimeInterval(-60 * 86_400)))"
+        let recent = "updated:>=\(dayString(now.addingTimeInterval(-Self.recentWindow)))"
         let (types, qualifier): ([String], String) = switch relationship {
         case .reviewRequested: (["is:pr"], "review-requested:\(viewer)")
         case .assigned: (["is:issue", "is:pr"], "assignee:\(viewer)")
@@ -385,9 +388,9 @@ protocol DiscussionInboxFetching: Sendable {
 struct GitHubDiscussionInbox: DiscussionInboxFetching {
     static let maximumPages = 8
     static let maximumHydrations = 40
-    /// Same window as comment search. A read notification does not drop the
-    /// discussion while it, or the notification, is still inside this window.
-    static let retention: TimeInterval = 60 * 86_400
+    /// A read notification does not drop the discussion while it, or the
+    /// notification, is still inside the comment-search window.
+    static let retention = GitHubPersonalWorkDiscovery.recentWindow
 
     private let rest: GitHubRESTClient
     private let graphql: GitHubGraphQLClient
