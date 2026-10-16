@@ -48,16 +48,20 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
         let number: Int
         let title: String
         let url: URL
-        let state: String
+        /// Issues and pull requests. Discussions use `closed` instead.
+        let state: String?
         let createdAt: Date
         let updatedAt: Date
         /// GitHub-flavored Markdown source.
         let body: String
         let author: Actor?
         let repository: Repository
-        let labels: Names
-        let assignees: Actors
+        let labels: Names?
+        let assignees: Actors?
         let comments: Comments
+        /// Discussions only.
+        let closed: Bool?
+        let category: Category?
         let isDraft: Bool?
         let merged: Bool?
         let reviewDecision: String?
@@ -70,10 +74,11 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
         let reviewThreads: Threads?
 
         enum CodingKeys: String, CodingKey {
-            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, isDraft, merged, reviewDecision, mergeable, additions, deletions, reviewRequests, latestReviews, commits, reviewThreads
+            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, closed, category, isDraft, merged, reviewDecision, mergeable, additions, deletions, reviewRequests, latestReviews, commits, reviewThreads
         }
     }
 
+    struct Category: Decodable, Sendable { let name: String }
     struct Actor: Decodable, Sendable { let login: String? }
     struct Repository: Decodable, Sendable { let nameWithOwner: String; let isArchived: Bool }
     struct Names: Decodable, Sendable { let nodes: [Name?] }
@@ -121,10 +126,16 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
         struct Variables: Encodable, Sendable {
             let query: String
             let cursor: String?
+            /// `ISSUE` also returns pull requests. Discussions need their own type.
+            let searchType: String
         }
         let response = try await client.execute(
             GitHubGraphQLQueries.personalWorkSearch(),
-            variables: Variables(query: query, cursor: cursor),
+            variables: Variables(
+                query: query,
+                cursor: cursor,
+                searchType: query.contains(" is:discussion ") ? "DISCUSSION" : "ISSUE"
+            ),
             as: PersonalWorkSearchPage.self
         )
         try Self.checkSingleSignOn(
@@ -153,6 +164,7 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
         let byField: [(field: String, parameter: String)] = [
             ("commits", "contents"), ("requestedReviewer", "members"), ("statusCheckRollup", "statuses"),
             ("reviewRequests", "pull_requests"), ("latestReviews", "pull_requests"), ("reviewThreads", "pull_requests"),
+            ("category", "discussions"), ("closed", "discussions"),
         ]
         let parameters = Set(byField.filter { fields.contains($0.field) }.map(\.parameter))
         let permissions = GitHubTokenRequirements.repositoryPermissions + GitHubTokenRequirements.organizationPermissions
@@ -178,21 +190,27 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
 }
 
 struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
+    /// How far `commenter:` and `mentions:` look back. GitHub accepts a longer
+    /// date. Search still stops at 1,000 results.
+    static let recentWindow: TimeInterval = 365 * 86_400
     static let maximumPages = 40
     static let maximumAttemptsPerPage = 3
     private static let logger = Logger(subsystem: "com.triage.mac", category: "Discovery")
     private let executor: any PersonalWorkSearchExecuting
+    private let inbox: (any DiscussionInboxFetching)?
     private let now: @Sendable () -> Date
     private let retryDelay: @Sendable (Int) async throws -> Void
 
     init(
         executor: any PersonalWorkSearchExecuting,
+        inbox: (any DiscussionInboxFetching)? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         retryDelay: @escaping @Sendable (Int) async throws -> Void = { attempt in
             try await Task.sleep(for: .seconds(2 * attempt))
         }
     ) {
         self.executor = executor
+        self.inbox = inbox
         self.now = now
         self.retryDelay = retryDelay
     }
@@ -220,24 +238,50 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
                 index += 1
             }
         }
+        if let inbox {
+            let hits = try await inbox.unreadDiscussions()
+            if !hits.isEmpty {
+                var found = 0
+                for hit in hits {
+                    found = await collector.add([hit.node], relationship: hit.relationship)
+                }
+                await progress(.init(relationship: .watching, found: found))
+            }
+        }
         return await collector.items()
     }
 
-    /// One search per item type. Fine-grained tokens grant Issues and Pull
-    /// requests separately, so GitHub returns nothing for a search that
-    /// doesn't name a type (REST rejects it; GraphQL answers with no results).
+    /// One search per item type. Fine-grained tokens grant Issues, Pull
+    /// requests, and Discussions separately, so GitHub returns nothing for a
+    /// search that doesn't name a type (REST rejects it; GraphQL answers with
+    /// no results). Discussion search also rejects `archived:false`.
     static func searchQueries(for relationship: WorkRelationship, scope: WorkspaceScope, now: Date) throws -> [String] {
         try validate(scope: scope)
         let viewer = scope.viewerLogin
-        let recent = "updated:>=\(dayString(now.addingTimeInterval(-60 * 86_400)))"
+        let recent = "updated:>=\(dayString(now.addingTimeInterval(-Self.recentWindow)))"
         let (types, qualifier): ([String], String) = switch relationship {
         case .reviewRequested: (["is:pr"], "review-requested:\(viewer)")
         case .assigned: (["is:issue", "is:pr"], "assignee:\(viewer)")
         case .authored: (["is:issue", "is:pr"], "author:\(viewer)")
         case .mentioned: (["is:issue", "is:pr"], "mentions:\(viewer) \(recent)")
         case .commented: (["is:issue", "is:pr"], "commenter:\(viewer) \(recent)")
+        case .watching: ([], "")
         }
-        return types.map { "org:\(scope.organizationLogin) \($0) is:open archived:false \(qualifier)" }
+        var queries = types.map { "org:\(scope.organizationLogin) \($0) is:open archived:false \(qualifier)" }
+        // GitHub discussion search does not honour `mentions:`. `commenter:`
+        // and `author:` do. Closed discussions still receive comments, so the
+        // comment window is not limited to `is:open`.
+        let org = "org:\(scope.organizationLogin)"
+        switch relationship {
+        case .authored:
+            queries.append("\(org) is:discussion is:open author:\(viewer)")
+            queries.append("\(org) is:discussion is:closed author:\(viewer) \(recent)")
+        case .commented:
+            queries.append("\(org) is:discussion commenter:\(viewer) \(recent)")
+        case .reviewRequested, .assigned, .mentioned, .watching:
+            break
+        }
+        return queries
     }
 
     private func search(
@@ -249,7 +293,14 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         var cursor: String?
         for pageNumber in 1...Self.maximumPages {
             try Task.checkCancellation()
-            let page = try await fetchPage(query: query, cursor: cursor, relationship: relationship, pageNumber: pageNumber)
+            let page: PersonalWorkSearchPage
+            do {
+                page = try await fetchPage(query: query, cursor: cursor, relationship: relationship, pageNumber: pageNumber)
+            } catch PersonalWorkDiscoveryError.missingTokenPermissions where query.contains(" is:discussion ") {
+                // A token without Discussions read must not blank the inbox.
+                Self.logger.error("discussion search skipped reason=missingPermission")
+                return
+            }
             let found = await collector.add(page.search.nodes, relationship: relationship)
             await progress(.init(relationship: relationship, found: found))
             Self.logger.notice("search relationship=\(relationship.rawValue, privacy: .public) page=\(pageNumber, privacy: .public) results=\(page.search.nodes.count, privacy: .public) totalFound=\(found, privacy: .public)")
@@ -319,6 +370,251 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
     }
 }
 
+struct InboxDiscussion: Sendable {
+    let node: PersonalWorkSearchPage.Node
+    let relationship: WorkRelationship
+}
+
+protocol DiscussionInboxFetching: Sendable {
+    /// Unread discussions in the current organization. Empty when the token
+    /// can't call `GET /notifications` (fine-grained, or classic without the
+    /// scope). Throws when single sign-on hides the organization.
+    func unreadDiscussions() async throws -> [InboxDiscussion]
+}
+
+/// Unread discussion threads from `GET /notifications`. Search cannot see a
+/// discussion the viewer only watches. This call needs a classic token with
+/// the `notifications` scope, and it never marks a thread read.
+struct GitHubDiscussionInbox: DiscussionInboxFetching {
+    static let maximumPages = 8
+    static let maximumHydrations = 40
+    /// A read notification does not drop the discussion while it, or the
+    /// notification, is still inside the comment-search window.
+    static let retention = GitHubPersonalWorkDiscovery.recentWindow
+
+    private let rest: GitHubRESTClient
+    private let graphql: GitHubGraphQLClient
+    private let organizationLogin: String
+    private let organizationDatabaseID: UInt64?
+    private let memory: (any WatchedDiscussionMemory)?
+    private let now: @Sendable () -> Date
+
+    init(
+        rest: GitHubRESTClient,
+        graphql: GitHubGraphQLClient,
+        organizationLogin: String,
+        organizationDatabaseID: UInt64?,
+        memory: (any WatchedDiscussionMemory)? = nil,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.rest = rest
+        self.graphql = graphql
+        self.organizationLogin = organizationLogin
+        self.organizationDatabaseID = organizationDatabaseID
+        self.memory = memory
+        self.now = now
+    }
+
+    static func shouldKeep(lastSeenAt: Date, updatedAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(lastSeenAt) <= retention || now.timeIntervalSince(updatedAt) <= retention
+    }
+
+    func unreadDiscussions() async throws -> [InboxDiscussion] {
+        let candidates = try await notificationCandidates()
+
+        var hits: [InboxDiscussion] = []
+        var seen = Set<String>()
+        var remember: [WatchedDiscussionRef] = []
+        let seenAt = now()
+        for candidate in candidates {
+            let key = Self.key(candidate.owner, candidate.name, candidate.number)
+            seen.insert(key)
+            switch try await hydrate(owner: candidate.owner, name: candidate.name, number: candidate.number) {
+            case .discussion(let node) where !node.repository.isArchived:
+                hits.append(InboxDiscussion(node: node, relationship: candidate.relationship))
+                if candidate.relationship == .watching {
+                    remember.append(WatchedDiscussionRef(
+                        owner: candidate.owner.lowercased(), name: candidate.name.lowercased(),
+                        number: candidate.number, lastSeenAt: seenAt
+                    ))
+                }
+            case .discussion, .missing, .unavailable:
+                break
+            }
+        }
+
+        var forget: [WatchedDiscussionRef] = []
+        var rememberedHydrations = 0
+        let remembered = (try await memory?.refs() ?? []).sorted { $0.lastSeenAt > $1.lastSeenAt }
+        for ref in remembered where !seen.contains(Self.key(ref.owner, ref.name, ref.number)) {
+            if rememberedHydrations == Self.maximumHydrations { break }
+            rememberedHydrations += 1
+            switch try await hydrate(owner: ref.owner, name: ref.name, number: ref.number) {
+            case .discussion(let node) where node.repository.isArchived:
+                forget.append(ref)
+            case .discussion(let node) where !Self.shouldKeep(lastSeenAt: ref.lastSeenAt, updatedAt: node.updatedAt, now: seenAt):
+                forget.append(ref)
+            case .discussion(let node)
+                where node.repository.nameWithOwner.lowercased().hasPrefix("\(organizationLogin.lowercased())/"):
+                hits.append(InboxDiscussion(node: node, relationship: .watching))
+            case .discussion:
+                forget.append(ref)
+            case .missing:
+                forget.append(ref)
+            case .unavailable:
+                break
+            }
+        }
+        if let memory {
+            try await memory.remember(remember)
+            try await memory.forget(forget)
+        }
+        return hits
+    }
+
+    private static func key(_ owner: String, _ name: String, _ number: Int) -> String {
+        "\(owner.lowercased())/\(name.lowercased())#\(number)"
+    }
+
+    /// Unread discussion threads. Empty when the token can't call the inbox.
+    /// A missing scope must not skip discussions already remembered.
+    private func notificationCandidates() async throws -> [(owner: String, name: String, number: Int, relationship: WorkRelationship)] {
+        var request = try GitHubRESTRequest(
+            path: "/notifications",
+            query: [
+                URLQueryItem(name: "all", value: "false"),
+                URLQueryItem(name: "participating", value: "false"),
+                URLQueryItem(name: "per_page", value: "50"),
+            ]
+        )
+        var candidates: [(owner: String, name: String, number: Int, relationship: WorkRelationship)] = []
+        for _ in 1...Self.maximumPages {
+            let page: GitHubPage<NotificationThread>
+            do {
+                page = try await rest.getPage(NotificationThread.self, request: request)
+            } catch {
+                if try Self.missingScope(error, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID) {
+                    return []
+                }
+                throw error
+            }
+            try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+                page.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
+            )
+            for thread in page.values where thread.subject.type == "Discussion" {
+                guard let parsed = Self.discussion(in: thread.subject.url),
+                      parsed.owner.caseInsensitiveCompare(organizationLogin) == .orderedSame,
+                      let relationship = Self.relationship(forNotificationReason: thread.reason)
+                else { continue }
+                candidates.append((parsed.owner, parsed.name, parsed.number, relationship))
+                if candidates.count == Self.maximumHydrations { break }
+            }
+            guard candidates.count < Self.maximumHydrations, let next = page.nextPageURL else { break }
+            request = try GitHubRESTRequest(nextPageURL: next)
+        }
+        return candidates
+    }
+
+    /// `true` when a classic `notifications` scope is missing. Single sign-on
+    /// refusals still throw, so a hidden organization doesn't look empty.
+    static func missingScope(
+        _ error: Error, organizationLogin: String, organizationDatabaseID: UInt64?
+    ) throws -> Bool {
+        guard let failure = error as? GitHubFailure, failure.kind == .forbidden else { return false }
+        try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            failure.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
+        )
+        return true
+    }
+
+    static func relationship(forNotificationReason reason: String) -> WorkRelationship? {
+        switch reason {
+        case "subscribed", "manual", "state_change": .watching
+        case "mention", "team_mention": .mentioned
+        case "author": .authored
+        case "comment": .commented
+        default: nil
+        }
+    }
+
+    /// `subject.url` is `https://api.github.com/repos/{owner}/{repo}/discussions/{number}`.
+    static func discussion(in url: URL?) -> (owner: String, name: String, number: Int)? {
+        guard let url else { return nil }
+        let parts = url.path.split(separator: "/").map(String.init)
+        let owner: String
+        let name: String
+        let numberText: String
+        if parts.count == 5, parts[0] == "repos", parts[3] == "discussions" {
+            owner = parts[1]
+            name = parts[2]
+            numberText = parts[4]
+        } else if parts.count == 4, parts[2] == "discussions" {
+            owner = parts[0]
+            name = parts[1]
+            numberText = parts[3]
+        } else {
+            return nil
+        }
+        guard let number = Int(numberText), number > 0,
+              !owner.isEmpty, !name.isEmpty, !owner.contains("."), !name.contains("..")
+        else { return nil }
+        return (owner, name, number)
+    }
+
+    private enum Hydration: Sendable {
+        case discussion(PersonalWorkSearchPage.Node)
+        case missing
+        case unavailable
+    }
+
+    private func hydrate(owner: String, name: String, number: Int) async throws -> Hydration {
+        struct Variables: Encodable, Sendable {
+            let owner: String
+            let name: String
+            let number: Int
+        }
+        struct Lookup: Decodable, Sendable {
+            struct Repository: Decodable, Sendable {
+                let discussion: PersonalWorkSearchPage.Node?
+            }
+            let repository: Repository?
+        }
+        let response: GitHubGraphQLResponse<Lookup>
+        do {
+            response = try await graphql.execute(
+                GitHubGraphQLQueries.discussionLookup(),
+                variables: Variables(owner: owner, name: name, number: number),
+                as: Lookup.self
+            )
+        } catch let error as GitHubGraphQLError {
+            if case .requestFailed(let failure) = error {
+                if failure.kind == .notFound { return .missing }
+                if failure.kind == .forbidden { return .unavailable }
+            }
+            throw error
+        }
+        try GitHubPersonalWorkSearchExecutor.checkSingleSignOn(
+            response.metadata.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
+        )
+        if GitHubPersonalWorkSearchExecutor.missingPermissions(in: response.errors) != nil {
+            return .unavailable
+        }
+        guard response.errors.isEmpty else { return .unavailable }
+        guard let discussion = response.data?.repository?.discussion else { return .missing }
+        return .discussion(discussion)
+    }
+}
+
+private struct NotificationThread: Decodable, Sendable {
+    let reason: String
+    let subject: Subject
+
+    struct Subject: Decodable, Sendable {
+        let type: String
+        let url: URL?
+    }
+}
+
 private actor Collector {
     private let organizationLogin: String
     private var values: [GitHubNodeID: PersonalWorkItem] = [:]
@@ -369,6 +665,7 @@ private actor Collector {
         switch node.typename {
         case "Issue": kind = .issue
         case "PullRequest": kind = .pullRequest
+        case "Discussion": kind = .discussion
         default: return nil
         }
         let body = PersonalWorkItem.cleanedMarkdown(node.body, maximumBytes: PersonalWorkItem.maximumBodyLength)
@@ -398,14 +695,29 @@ private actor Collector {
         return PersonalWorkItem(
             id: node.id, kind: kind, repository: node.repository.nameWithOwner, number: node.number,
             title: node.title, url: node.url,
-            state: kind == .pullRequest && node.merged == true ? .merged : node.state == "OPEN" ? .open : .closed,
+            state: workState(kind: kind, node: node),
             author: node.author?.login, createdAt: node.createdAt, updatedAt: node.updatedAt,
-            relationships: [relationship], labels: node.labels.nodes.compactMap { $0?.name },
-            assignees: node.assignees.nodes.compactMap { $0?.login }, body: body,
+            relationships: [relationship], labels: labels(node),
+            assignees: node.assignees?.nodes.compactMap { $0?.login } ?? [], body: body,
             pullRequest: pullRequest, recentActivity: activity
         )
     }
 
+
+    private func workState(kind: WorkKind, node: PersonalWorkSearchPage.Node) -> WorkState {
+        if kind == .discussion { return node.closed == true ? .closed : .open }
+        if kind == .pullRequest && node.merged == true { return .merged }
+        return node.state == "OPEN" ? .open : .closed
+    }
+
+    /// Discussion category is kept as a label so existing label rules can match it.
+    private func labels(_ node: PersonalWorkSearchPage.Node) -> [String] {
+        var names = node.labels?.nodes.compactMap { $0?.name } ?? []
+        if let category = node.category?.name, !names.contains(category) {
+            names.insert(category, at: 0)
+        }
+        return names
+    }
 
     private func reviewDecision(_ value: String?) -> ReviewDecision? {
         switch value {

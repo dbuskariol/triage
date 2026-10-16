@@ -10,7 +10,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         let queries = try GitHubGraphQLQueries.registeredQueries()
         XCTAssertEqual(
             queries.map(\.operationName),
-            ["TriageViewer", "TriagePersonalWorkSearch"]
+            ["TriageViewer", "TriagePersonalWorkSearch", "TriageDiscussionLookup"]
         )
         XCTAssertNoThrow(try GitHubGraphQLQueries.validateProductionRegistry(queries))
         XCTAssertTrue(queries.allSatisfy { query in
@@ -44,7 +44,8 @@ final class GitHubGraphQLClientTests: XCTestCase {
         }
 
         let search = try XCTUnwrap(documents["TriagePersonalWorkSearch"])
-        XCTAssertTrue(search.contains("search(query: $query, type: ISSUE, first: 25, after: $cursor)"))
+        XCTAssertTrue(search.contains("search(query: $query, type: $searchType, first: 25, after: $cursor)"))
+        XCTAssertTrue(search.contains("... on Discussion {"))
         XCTAssertTrue(search.contains("pageInfo { hasNextPage endCursor }") || search.contains("pageInfo {"))
     }
 

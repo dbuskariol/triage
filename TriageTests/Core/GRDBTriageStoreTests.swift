@@ -3,6 +3,22 @@ import XCTest
 @testable import Triage
 
 final class GRDBTriageStoreTests: XCTestCase {
+    func testWatchedDiscussionsAreRememberedUntilForgotten() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let seen = Date(timeIntervalSince1970: 1_700_000_000)
+        let ref = WatchedDiscussionRef(owner: "octo", name: "repo", number: 9, lastSeenAt: seen)
+        try await fixture.store.rememberWatchedDiscussions([ref], scope: fixture.scope)
+        let later = WatchedDiscussionRef(owner: "octo", name: "repo", number: 9, lastSeenAt: seen.addingTimeInterval(10))
+        try await fixture.store.rememberWatchedDiscussions([later], scope: fixture.scope)
+        let stored = try await fixture.store.watchedDiscussions(scope: fixture.scope)
+        XCTAssertEqual(stored.map(\.number), [9])
+        XCTAssertEqual(stored.first?.lastSeenAt, later.lastSeenAt)
+        try await fixture.store.forgetWatchedDiscussions([ref], scope: fixture.scope)
+        let remaining = try await fixture.store.watchedDiscussions(scope: fixture.scope)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     func testReplaceDeactivatesAndOrdersItemsNeedingAnalysis() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

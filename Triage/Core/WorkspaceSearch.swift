@@ -29,10 +29,11 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
     /// Accepted `is:`, `status:`, and `priority:` values, with descriptions for suggestions.
     static let knownValues: [Kind: [(String, String)]] = [
         .is: [
-            ("pr", "Pull requests"), ("issue", "Issues"), ("draft", "Draft pull requests"),
+            ("pr", "Pull requests"), ("issue", "Issues"), ("discussion", "Discussions"), ("draft", "Draft pull requests"),
             ("review", "Review requested"), ("direct", "Review requested from you directly"),
             ("team", "Review requested from your team only"), ("assigned", "Assigned to you"),
-            ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("action", "Needs your action"),
+            ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("watching", "Discussions you watch"),
+            ("action", "Needs your action"),
             ("unread", "Unread"), ("read", "Read"),
         ],
         .status: [
@@ -56,6 +57,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             switch value.lowercased() {
             case "pr": return item.kind == .pullRequest
             case "issue": return item.kind == .issue
+            case "discussion": return item.kind == .discussion
             case "draft": return facts?.isDraft == true
             case "review": return item.relationships.contains(.reviewRequested)
             case "direct": return item.reviewRequestKind(viewer: viewer) == .direct
@@ -63,6 +65,7 @@ struct SearchToken: Identifiable, Hashable, Codable, Sendable {
             case "assigned": return item.relationships.contains(.assigned)
             case "mine": return item.relationships.contains(.authored)
             case "mentioned": return item.relationships.contains(.mentioned)
+            case "watching": return item.relationships.contains(.watching)
             case "action": return entry.decision?.disposition == .act
             case "unread": return entry.isUnread
             case "read": return !entry.isUnread

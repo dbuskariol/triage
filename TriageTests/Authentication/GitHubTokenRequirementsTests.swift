@@ -16,7 +16,7 @@ struct GitHubTokenRequirementsTests {
         #expect(query["target_name"] == "acme")
         #expect(query["name"] == "Triage")
         #expect(query["expires_in"] == "90")
-        for permission in ["metadata", "issues", "pull_requests", "statuses", "contents", "members"] {
+        for permission in ["metadata", "issues", "pull_requests", "discussions", "statuses", "contents", "members"] {
             #expect(query[permission] == "read", "\(permission)")
         }
         let accessLevels = Set(query.filter { !["name", "description", "target_name", "expires_in"].contains($0.key) }.values)
@@ -33,6 +33,6 @@ struct GitHubTokenRequirementsTests {
     @Test func classicLinkSelectsRepoAndReadOrg() {
         let url = GitHubTokenRequirements.classicTokenURL
         #expect(url.path() == "/settings/tokens/new")
-        #expect(query(url)["scopes"] == "repo,read:org")
+        #expect(query(url)["scopes"] == "repo,notifications,read:org")
     }
 }

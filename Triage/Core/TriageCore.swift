@@ -19,6 +19,7 @@ struct WorkspaceScope: Hashable, Codable, Sendable {
 enum WorkKind: String, Codable, Sendable {
     case issue
     case pullRequest
+    case discussion
 }
 
 enum WorkState: String, Codable, Sendable {
@@ -27,8 +28,8 @@ enum WorkState: String, Codable, Sendable {
     case merged
 }
 
-/// Why an item is personally relevant. Each case corresponds to exactly one
-/// GitHub search qualifier, so GitHub itself is the authority for the claim.
+/// Why an item is personally relevant. Search qualifiers cover the first five.
+/// `watching` comes from unread discussion notifications, which search can't see.
 enum WorkRelationship: String, Codable, Sendable, CaseIterable {
     /// `review-requested:<login>` (direct or via one of the user's teams).
     case reviewRequested
@@ -40,6 +41,8 @@ enum WorkRelationship: String, Codable, Sendable, CaseIterable {
     case mentioned
     /// `commenter:<login>`
     case commented
+    /// Unread discussion notification the viewer is subscribed to.
+    case watching
 
     /// Lower is more urgent. Orders discovery and AI batches.
     var urgencyRank: Int {
@@ -49,6 +52,7 @@ enum WorkRelationship: String, Codable, Sendable, CaseIterable {
         case .authored: 2
         case .mentioned: 3
         case .commented: 4
+        case .watching: 5
         }
     }
 
@@ -59,8 +63,25 @@ enum WorkRelationship: String, Codable, Sendable, CaseIterable {
         case .authored: "Opened by you"
         case .mentioned: "Mentions you"
         case .commented: "You commented"
+        case .watching: "Watching"
         }
     }
+}
+
+/// A discussion Triage has already seen in the notification inbox.
+/// Search cannot find a discussion the viewer only watches, and GitHub drops
+/// it from the inbox once the notification is read.
+struct WatchedDiscussionRef: Hashable, Sendable {
+    let owner: String
+    let name: String
+    let number: Int
+    let lastSeenAt: Date
+}
+
+protocol WatchedDiscussionMemory: Sendable {
+    func refs() async throws -> [WatchedDiscussionRef]
+    func remember(_ refs: [WatchedDiscussionRef]) async throws
+    func forget(_ refs: [WatchedDiscussionRef]) async throws
 }
 
 enum CheckStatus: String, Codable, Sendable {
