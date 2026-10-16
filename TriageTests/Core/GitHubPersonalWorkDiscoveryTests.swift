@@ -3,7 +3,7 @@ import XCTest
 @testable import Triage
 
 final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
-    func testSearchesNameTheirTypeAndUseASixtyDayWindow() throws {
+    func testSearchesNameTheirTypeAndUseAYearWindow() throws {
         let scope = scope()
         let date = Date(timeIntervalSince1970: 1_736_899_200) // 2025-01-15 UTC
         XCTAssertEqual(
@@ -13,23 +13,23 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         XCTAssertEqual(
             try GitHubPersonalWorkDiscovery.searchQueries(for: .mentioned, scope: scope, now: date),
             [
-                "org:octo is:issue is:open archived:false mentions:me updated:>=2024-11-16",
-                "org:octo is:pr is:open archived:false mentions:me updated:>=2024-11-16",
+                "org:octo is:issue is:open archived:false mentions:me updated:>=2024-01-16",
+                "org:octo is:pr is:open archived:false mentions:me updated:>=2024-01-16",
             ]
         )
         XCTAssertEqual(
             try GitHubPersonalWorkDiscovery.searchQueries(for: .commented, scope: scope, now: date),
             [
-                "org:octo is:issue is:open archived:false commenter:me updated:>=2024-11-16",
-                "org:octo is:pr is:open archived:false commenter:me updated:>=2024-11-16",
-                "org:octo is:discussion commenter:me updated:>=2024-11-16",
+                "org:octo is:issue is:open archived:false commenter:me updated:>=2024-01-16",
+                "org:octo is:pr is:open archived:false commenter:me updated:>=2024-01-16",
+                "org:octo is:discussion commenter:me updated:>=2024-01-16",
             ]
         )
         XCTAssertEqual(
             try GitHubPersonalWorkDiscovery.searchQueries(for: .authored, scope: scope, now: date).filter { $0.contains("is:discussion") },
             [
                 "org:octo is:discussion is:open author:me",
-                "org:octo is:discussion is:closed author:me updated:>=2024-11-16",
+                "org:octo is:discussion is:closed author:me updated:>=2024-01-16",
             ]
         )
         XCTAssertEqual(try GitHubPersonalWorkDiscovery.searchQueries(for: .watching, scope: scope, now: date), [])
@@ -176,7 +176,7 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
             lastSeenAt: now.addingTimeInterval(-86_400), updatedAt: now.addingTimeInterval(-50 * 86_400), now: now
         ))
         XCTAssertFalse(GitHubDiscussionInbox.shouldKeep(
-            lastSeenAt: now.addingTimeInterval(-61 * 86_400), updatedAt: now.addingTimeInterval(-61 * 86_400), now: now
+            lastSeenAt: now.addingTimeInterval(-366 * 86_400), updatedAt: now.addingTimeInterval(-366 * 86_400), now: now
         ))
         XCTAssertTrue(GitHubDiscussionInbox.shouldKeep(
             lastSeenAt: now.addingTimeInterval(-90 * 86_400), updatedAt: now.addingTimeInterval(-2 * 86_400), now: now
@@ -230,9 +230,9 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_736_899_200)
         let memory = MemoryInbox()
         try await memory.remember([WatchedDiscussionRef(
-            owner: "octo", name: "repo", number: 9, lastSeenAt: now.addingTimeInterval(-90 * 86_400)
+            owner: "octo", name: "repo", number: 9, lastSeenAt: now.addingTimeInterval(-366 * 86_400)
         )])
-        let session = DiscussionRouteSession(notificationsStatus: 200, updatedAt: "2024-10-01T00:00:00Z")
+        let session = DiscussionRouteSession(notificationsStatus: 200, updatedAt: "2023-12-01T00:00:00Z")
         let inbox = try GitHubDiscussionInbox(
             rest: GitHubRESTClient(transport: try GitHubRESTTransport(session: session), credential: SecretValue("token")),
             graphql: GitHubGraphQLClient(session: session, credential: SecretValue("token")),
