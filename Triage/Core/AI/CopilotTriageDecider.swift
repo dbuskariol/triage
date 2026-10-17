@@ -174,6 +174,7 @@ actor CopilotTriageDecider: TriageDeciding {
                     summary: decision.summary,
                     reason: decision.reason,
                     nextAction: decision.nextAction,
+                    situation: decision.situation,
                     fingerprint: item.fingerprint,
                     modelID: response.modelID,
                     decidedAt: now(),

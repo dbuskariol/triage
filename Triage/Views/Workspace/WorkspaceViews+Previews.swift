@@ -60,6 +60,7 @@ private enum WorkspacePreviewFixture {
             summary: "The author needs your review before this can move forward.",
             reason: "Changes were requested and the checks are failing.",
             nextAction: "Review the latest changes and respond to the author.",
+            situation: "Pull request tightening what stays in the inbox. @octocat requested your review today after asking you to look at the new flow again. Checks are failing.",
             fingerprint: "preview",
             modelID: "preview",
             decidedAt: .now

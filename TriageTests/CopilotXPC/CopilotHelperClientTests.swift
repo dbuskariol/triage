@@ -731,6 +731,18 @@ extension CopilotHelperClientTests {
     XCTAssertThrowsError(try CopilotWireSchema.validate(tooLong, expectedStatus: .triage))
   }
 
+  func testStrictWireSchemaAcceptsSituation() throws {
+    let organization = try XCTUnwrap(OrganizationID(rawValue: "triage-org"))
+    let header = CopilotResponseHeader(requestID: UUID(), accountID: copilotTestAccountID, organizationID: organization, status: .triage)
+    var decision = CopilotTriageItemDecision(id: "node-1", disposition: .review, priority: 40, confidence: 0.8, summary: "Read it.", reason: "You were mentioned.", nextAction: "Reply to @alice.")
+    decision.situation = "Bug about cache eviction. @alice mentioned you yesterday asking if the workaround still holds."
+    let data = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
+    XCTAssertNoThrow(try CopilotWireSchema.validate(data, expectedStatus: .triage))
+    decision.situation = String(repeating: "a", count: 281)
+    let tooLong = try JSONEncoder().encode(CopilotTriageResponse(header: header, modelID: "auto", decisions: [decision]))
+    XCTAssertThrowsError(try CopilotWireSchema.validate(tooLong, expectedStatus: .triage))
+  }
+
   func testDraftResponsesAreStrictlyAllowlisted() throws {
     func frame(_ extra: String) -> Data {
       Data(#"{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"a","organization_id":"o","status":"draft","model_id":"auto","draft":"Thanks!"\#(extra)}"#.utf8)

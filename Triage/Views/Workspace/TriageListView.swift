@@ -315,14 +315,28 @@ struct TriageEntryRow: View {
         .lineLimit(1)
     }
 
-    /// Copilot's single most useful line: the next step, else the reason.
+    /// What the item is, then the next step. Older decisions have no situation yet.
     @ViewBuilder
     private var copilotLine: some View {
         if let decision = entry.decision {
-            Text(decision.nextAction ?? decision.reason)
-                .font(.subheadline)
-                .foregroundStyle(secondary)
-                .lineLimit(2)
+            if let situation = decision.situation, !situation.isEmpty {
+                Text(situation)
+                    .font(.subheadline)
+                    .foregroundStyle(secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let nextAction = decision.nextAction {
+                Text(nextAction)
+                    .font(decision.situation?.isEmpty == false ? .subheadline.weight(.medium) : .subheadline)
+                    .foregroundStyle(secondary)
+                    .lineLimit(2)
+            } else if decision.situation?.isEmpty != false {
+                Text(decision.reason)
+                    .font(.subheadline)
+                    .foregroundStyle(secondary)
+                    .lineLimit(2)
+            }
             if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
                 Label(entry.analysis == .pending ? "Re-checking…" : analysis, systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption)
@@ -397,10 +411,11 @@ struct TriageEntryRow: View {
 
     private var accessibilityLabel: String {
         let priority = entry.decision.map { WorkspaceViewPresentation.priorityLabel($0.priority) } ?? "Pending"
+        let situation = entry.decision?.situation ?? ""
         let reason = entry.decision?.reason ?? WorkspaceViewPresentation.analysisLabel(entry.analysis) ?? ""
         let nextAction = entry.decision?.nextAction.map { "Next action: \($0)" } ?? ""
         let state = [entry.isUnread ? "Unread" : nil, entry.decision?.disposition == .act ? "Needs your action" : nil]
-        return (state.compactMap { $0 } + [entry.item.title, "Priority \(priority)", reason, nextAction])
+        return (state.compactMap { $0 } + [entry.item.title, situation, "Priority \(priority)", reason, nextAction])
             .filter { !$0.isEmpty }
             .joined(separator: ". ")
     }
