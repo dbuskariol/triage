@@ -11,7 +11,7 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 ## Highlights
 
 - **An Inbox you can trust.** Only work that needs your action or is worth a look. Everything else is sorted into *Waiting on Others* and *No Action Needed*.
-- **Specific calls to action.** Every item says what to do and why now: *“@bob has waited 3 days for your review; CI is green.”*
+- **Specific calls to action.** Every item says what it is and what's happened, then what to do: *“@bob requested your review 3 days ago. CI is green.”* The list shows that why under the title, with the next step. The View menu's List Shows can keep just one of them.
 - **Knows when you've handled it.** Comment, review, or push, and Copilot checks whether you completed its suggested step. Done work comes back only when someone *else* responds.
 - **Your rules win.** Mute noisy repos or bots, keep critical work in the Inbox, and tell Copilot what matters to you in plain English.
 - **Start the day with a Briefing.** What needs you, what's waited longest, quick wins, follow-ups to nudge, and what you finished today. End the week with a Weekly Review.
@@ -33,7 +33,7 @@ flowchart LR
 
 1. **Find.** On every refresh, Triage runs a handful of GitHub searches scoped to you (review requests, assignments, your PRs, recent mentions and comments). No organization-wide crawling.
 2. **Store.** Results are saved in an encrypted SQLCipher database. The list appears immediately from saved data.
-3. **Decide.** Only new or changed items go to Copilot, most urgent first. Copilot returns a disposition, priority, summary, next step, and reason for each.
+3. **Decide.** Only new or changed items go to Copilot, most urgent first. Copilot returns a disposition, priority, a short situation, summary, next step, and reason for each.
 4. **Apply your rules.** Hard rules are applied on top of Copilot's decision, instantly and deterministically.
 5. **Repeat** on your chosen interval, or when you press ⌘R.
 
@@ -63,7 +63,7 @@ A **blue dot** means unread: you haven't viewed the item since someone else last
 
 **Select several items** with ⌘-click, ⇧-click, or ⌘A to mark them done, snooze, restore, mark read or unread, open them on GitHub, or work through them in Focus, from the right-click menu, the Item menu, the keyboard, or the summary that replaces the detail panel.
 
-Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
+Each row reads top to bottom in order of importance: **repository, number, and why it's yours**, then the **title**, then **what the item is and what's happened**, then **Copilot's next step**, then any **blockers** (conflicts, failing checks, changes requested).
 
 Select an item to see the full recommendation (including Copilot's effort estimate: *Quick*, *Under an hour*, or *Deep work*), pull request status, people, related work it references or is referenced by, the formatted description, and recent activity. **Group By** in the sort menu groups any list by effort, repository, or why it's yours.
 

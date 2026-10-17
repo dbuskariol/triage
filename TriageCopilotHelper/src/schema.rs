@@ -93,6 +93,10 @@ pub struct TriageItemDecision {
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+    /// What the item is and what has happened so far, including why it is in
+    /// the viewer's notifications. Orientation, not a call to action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub situation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +206,12 @@ pub fn parse_triage_output(content: &str) -> Option<Vec<TriageItemDecision>> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| clamp_text(value, 200));
+        decision.situation = decision
+            .situation
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("null"))
+            .map(|value| clamp_text(value, 280));
         decision.handled = decision
             .handled
             .as_deref()
@@ -319,6 +329,10 @@ pub fn retain_valid_triage_outputs(
                     .next_action
                     .as_ref()
                     .is_some_and(|v| v.is_empty() || v.len() > 200)
+                && !output
+                    .situation
+                    .as_ref()
+                    .is_some_and(|v| v.is_empty() || v.len() > 280)
                 && ids.insert(output.id.clone())
         })
         .collect();
@@ -343,7 +357,16 @@ mod triage_contract_tests {
         assert_eq!(decision.confidence, 1.0);
         assert!(decision.summary.len() <= 280 && decision.summary.ends_with('…'));
         assert_eq!(decision.next_action, None);
+        assert_eq!(decision.situation, None);
         assert!(super::parse_triage_output("no json here").is_none());
+
+        let situated = format!(
+            r#"{{"id":"A","disposition":"act","priority":80,"confidence":0.9,"summary":"Do it.","reason":"r","situation":"  {long}  "}}"#
+        );
+        let kept = super::parse_triage_output(&situated).expect("situated");
+        assert!(kept[0].situation.as_ref().is_some_and(|value| value.len() <= 280 && value.ends_with('…')));
+        let blank = r#"{"id":"A","disposition":"act","priority":80,"confidence":0.9,"summary":"Do it.","reason":"r","situation":"null"}"#;
+        assert_eq!(super::parse_triage_output(blank).unwrap()[0].situation, None);
 
         let one = r#"{"id":"A","disposition":"act","priority":80,"confidence":0.9,"summary":"Do {it}.","reason":"r"}"#;
         let wrapped = format!(r#"{{"decisions":[{one}]}}"#);
@@ -391,6 +414,7 @@ mod triage_contract_tests {
             summary: "Read this item.".into(),
             reason: "It is relevant to you.".into(),
             next_action: None,
+            situation: None,
             instruction_note: None,
             handled: None,
             handled_evidence: None,

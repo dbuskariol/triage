@@ -632,12 +632,14 @@ struct CopilotTriageItemDecision: Codable, Equatable, Sendable {
   let summary: String
   let reason: String
   let nextAction: String?
+  /// What the item is and what's happened so far, including why it's in the user's notifications.
+  var situation: String? = nil
   var instructionNote: String? = nil
   var handled: HandledState? = nil
   var handledEvidence: String? = nil
   var effort: TriageEffort? = nil
-  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason, handled, effort; case nextAction = "next_action"; case instructionNote = "instruction_note"; case handledEvidence = "handled_evidence" }
-  func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, instructionNote?.utf8.count ?? 0 <= 200, handledEvidence?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
+  enum CodingKeys: String, CodingKey { case id, disposition, priority, confidence, summary, reason, situation, handled, effort; case nextAction = "next_action"; case instructionNote = "instruction_note"; case handledEvidence = "handled_evidence" }
+  func validate() throws { guard !id.isEmpty, (0...100).contains(priority), confidence.isFinite && (0...1).contains(confidence), !summary.isEmpty && summary.utf8.count <= 280, !reason.isEmpty && reason.utf8.count <= 400, nextAction?.utf8.count ?? 0 <= 200, situation?.utf8.count ?? 0 <= 280, instructionNote?.utf8.count ?? 0 <= 200, handledEvidence?.utf8.count ?? 0 <= 200 else { throw CopilotXPCError.invalidResponse } }
 }
 
 struct CopilotTriageRequest: Codable, Equatable, Sendable {

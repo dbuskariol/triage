@@ -25,6 +25,63 @@ enum TriagePreferenceKeys {
     static let lastDestination = "interface.last-destination"
     static let markReadPolicy = "inbox.mark-read"
     static let readBaseline = "inbox.read-baseline-v2"
+    static let listLine = "inbox.list-line"
+}
+
+/// What an Inbox row shows under the title. The why is Copilot's reason,
+/// the same line the menu bar and the detail view already show.
+enum InboxListLine: String, CaseIterable, Identifiable, Sendable {
+    case both
+    case why
+    case nextStep
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .both: "Why and Next Step"
+        case .why: "Why"
+        case .nextStep: "Next Step"
+        }
+    }
+
+    struct RowLine: Equatable, Sendable {
+        let text: String
+        /// The next step, when another line is also shown.
+        let emphasized: Bool
+    }
+
+    /// Lines under the title, in reading order. Empty Copilot fields are skipped.
+    func rowLines(situation: String?, reason: String, nextAction: String?) -> [RowLine] {
+        let situation = Self.cleaned(situation)
+        let reason = Self.cleaned(reason)
+        let nextAction = Self.cleaned(nextAction)
+        let why = reason.map { RowLine(text: $0, emphasized: false) }
+        let step = nextAction.map { RowLine(text: $0, emphasized: why != nil || situation != nil) }
+        switch self {
+        case .both:
+            return [situation.map { RowLine(text: $0, emphasized: false) }, why, step].compactMap(\.self)
+        case .why:
+            if let why { return [why] }
+            if let step { return [RowLine(text: step.text, emphasized: false)] }
+            return []
+        case .nextStep:
+            if let situation {
+                var lines = [RowLine(text: situation, emphasized: false)]
+                if let step { lines.append(RowLine(text: step.text, emphasized: false)) }
+                return lines
+            }
+            if let step { return [RowLine(text: step.text, emphasized: false)] }
+            return why.map { [$0] } ?? []
+        }
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
 }
 
 extension UserDefaults {
