@@ -574,6 +574,7 @@ Writing rules (most important):
 - Be specific and grounded in the item. Name people (@login), counts, checks, threads, and how long ago things happened, using the provided dates relative to today. Never invent facts.
 - summary: the call to action and the exact reason it needs {viewer} now, in one sentence of at most 25 words. Lead with what matters.
 - next_action: one concrete imperative {viewer} can do right now, at most 12 words, naming the person, thread, or check when relevant. null only for wait or none.
+- situation: what the item is and what has happened so far, in one or two sentences of at most 35 words. Say why it is in {viewer}'s notifications (a review request, mention, assignment, their own pull request, or a comment). Name people and what changed, using the provided dates relative to today. This orients {viewer} before they act. It is not a call to action, and it must not repeat the title or next_action.
 - reason: the evidence behind the decision, one sentence of at most 30 words: who is waiting, what changed, what blocks merge.
 - Do not restate the title, labels, or obvious states ("this PR has conflicts") without saying why it matters to {viewer}. No filler like "worth a look", "consider", or "it may be helpful".
 
@@ -584,13 +585,15 @@ Bad next_action: "Resolve the conflicts and revalidate the PR."
 Good next_action: "Rebase on main and re-run the failing unit tests."
 Bad summary: "You were requested to review this PR."
 Good summary: "@bob has waited 3 days for your review of the pagination fix; CI is green and it's otherwise approved."
+Bad situation: "You were mentioned on this issue."
+Good situation: "Bug about cache eviction on self-hosted runners. @alice mentioned you yesterday asking if the workaround from 2 days ago still holds."
 
 Handled check: an item may include previous_next_action (the step you suggested last time) and viewer_activity (what {viewer} has done since). For those items only, set "handled": "yes" if that activity completed the step and nothing further is needed from {viewer} now, "partial" if some of it remains, or "no"; and "handled_evidence": one sentence citing what {viewer} did (e.g. "You approved the PR and replied to @bob's thread."). If handled is yes, the disposition is usually wait or none. Omit both fields (null) for items without viewer_activity.
 
 Effort: estimate the user's next step only, as "quick" (under 5 minutes: a reply, an approval, a small fix), "short" (under an hour: a focused review or change), or "deep" (needs a block of time: a large review, design work, a hard bug). Use null when there is no next step.
 
 An item may carry rule_hints: outcomes the user's own rules will enforce; keep your summary and reason consistent with them.
-Output exactly one decision per input: {"id":"input id","disposition":"act|review|wait|none","priority":0,"confidence":0.0,"summary":"...","reason":"...","next_action":"... or null","instruction_note":"one short sentence on how the user's preferences changed this decision, or null","handled":"yes|partial|no or null","handled_evidence":"... or null","effort":"quick|short|deep or null"}."#;
+Output exactly one decision per input: {"id":"input id","disposition":"act|review|wait|none","priority":0,"confidence":0.0,"summary":"...","reason":"...","next_action":"... or null","situation":"...","instruction_note":"one short sentence on how the user's preferences changed this decision, or null","handled":"yes|partial|no or null","handled_evidence":"... or null","effort":"quick|short|deep or null"}."#;
 
 const DRAFT_SYSTEM_PROMPT: &str = r#"You draft a reply that GitHub user {viewer} will post on the issue or pull request below. {viewer} reviews and edits it before posting; you never post anything.
 
@@ -1800,5 +1803,6 @@ mod tests {
         }
         assert!(TRIAGE_SYSTEM_PROMPT.contains("untrusted data"));
         assert!(TRIAGE_SYSTEM_PROMPT.contains("Never invent facts"));
+        assert!(TRIAGE_SYSTEM_PROMPT.contains("situation:"));
     }
 }

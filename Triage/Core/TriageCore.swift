@@ -288,6 +288,8 @@ struct TriageDecision: Codable, Equatable, Sendable {
     let reason: String
     /// Imperative, concrete next step for the user, when one exists.
     let nextAction: String?
+    /// One or two sentences: what this item is, what's happened, and why it's in the user's notifications.
+    var situation: String? = nil
     /// `PersonalWorkItem.fingerprint` of the facts this decision was made from.
     let fingerprint: String
     let modelID: String

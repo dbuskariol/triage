@@ -136,7 +136,7 @@ struct WorkspaceSearch: Equatable, Codable, Sendable {
             item.title, item.repository, "#\(item.number)", item.author ?? "", item.body,
             item.labels.joined(separator: " "), item.assignees.joined(separator: " "),
             (item.pullRequest?.requestedReviewers ?? []).joined(separator: " "),
-            entry.decision?.summary ?? "", entry.decision?.nextAction ?? "", entry.decision?.reason ?? "",
+            entry.decision?.summary ?? "", entry.decision?.nextAction ?? "", entry.decision?.situation ?? "", entry.decision?.reason ?? "",
         ]
         return terms.allSatisfy { term in fields.contains { $0.localizedCaseInsensitiveContains(term) } }
     }

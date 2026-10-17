@@ -301,6 +301,12 @@ private struct RecommendationCard: View {
                 .background(.green.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             if let decision = entry.decision {
+                if let situation = decision.situation, !situation.isEmpty {
+                    Text(situation)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 Text(decision.summary)
                     .font(.title3)
                     .fixedSize(horizontal: false, vertical: true)
