@@ -2,6 +2,47 @@ import Foundation
 import Testing
 @testable import Triage
 
+struct InboxListLineTests {
+    @Test func bothShowsTheWhyAboveTheNextStep() {
+        let lines = InboxListLine.both.rowLines(
+            situation: "Cache eviction bug on self-hosted runners.",
+            reason: "You are the Business DRI, and @AnthonyS asked yesterday.",
+            nextAction: "Reply to @AnthonyS with the tag and routing answers."
+        )
+        #expect(lines.map(\.text) == [
+            "Cache eviction bug on self-hosted runners.",
+            "You are the Business DRI, and @AnthonyS asked yesterday.",
+            "Reply to @AnthonyS with the tag and routing answers.",
+        ])
+        #expect(lines.map(\.emphasized) == [false, false, true])
+    }
+
+    @Test func whyReplacesTheNextStep() {
+        let lines = InboxListLine.why.rowLines(
+            situation: "Ignored while Why is selected.",
+            reason: "You are the Business DRI.",
+            nextAction: "Reply to @AnthonyS."
+        )
+        #expect(lines.map(\.text) == ["You are the Business DRI."])
+    }
+
+    @Test func nextStepKeepsTheActionAndFallsBackToTheWhy() {
+        let withAction = InboxListLine.nextStep.rowLines(
+            situation: nil,
+            reason: "You are the Business DRI.",
+            nextAction: "Reply to @AnthonyS."
+        )
+        #expect(withAction.map(\.text) == ["Reply to @AnthonyS."])
+
+        let withoutAction = InboxListLine.nextStep.rowLines(
+            situation: "  ",
+            reason: "You are the Business DRI.",
+            nextAction: nil
+        )
+        #expect(withoutAction.map(\.text) == ["You are the Business DRI."])
+    }
+}
+
 struct WorkspaceViewsTests {
     @Test func decisionLabelsUseProductThresholds() {
         #expect(WorkspaceViewPresentation.priorityLabel(70) == "High")

@@ -92,7 +92,7 @@ Done and Snoozed are separate sections: Done is newest first with a *Handled by 
 
 Copilot receives four layers, highest precedence first:
 
-1. **Fixed system policy** (in the Rust helper): role, untrusted-data handling, dispositions and priority bands, writing rules with good and bad examples, a `situation` sentence (what the item is, what's happened, and why it's in the user's notifications), handled-check rules, and the JSON schema. It is not user-editable; this keeps output parseable, protects against instructions embedded in GitHub content, and lets improvements ship with updates. `TriageRules.promptVersion` is bumped when it changes materially. The Inbox shows `situation` on its own line above the next step.
+1. **Fixed system policy** (in the Rust helper): role, untrusted-data handling, dispositions and priority bands, writing rules with good and bad examples, a `situation` sentence (what the item is, what's happened, and why it's in the user's notifications), handled-check rules, and the JSON schema. It is not user-editable; this keeps output parseable, protects against instructions embedded in GitHub content, and lets improvements ship with updates. `TriageRules.promptVersion` is bumped when it changes materially. The Inbox shows the why (`reason`) under the title, with the next step. The View menu's List Shows switches that to why only, or next step only. A `situation` sentence, when Copilot has one, stays above those lines.
 2. **User preferences**: the organization's instructions, appended in a delimited `<user_preferences>` block that cannot change the format or policy.
 3. **Per-item hints**: `rule_hints`, and for handled checks `previous_next_action` and `viewer_activity`.
 4. **Untrusted data**: today's date, then the items as JSON.

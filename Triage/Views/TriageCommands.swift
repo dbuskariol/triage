@@ -17,6 +17,8 @@ struct TriageWorkspaceCommands: Commands {
             Menu("Sort By") {
                 WorkspaceSortMenuContent()
             }
+
+            InboxListLineMenu()
         }
 
         CommandGroup(before: .help) {
@@ -100,6 +102,26 @@ struct TriageWorkspaceCommands: Commands {
             Button("Open on GitHub") { appModel.openOnGitHub(selected) }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(selected.isEmpty)
+        }
+    }
+}
+
+/// View menu choice for the line under each Inbox title.
+struct InboxListLineMenu: View {
+    @AppStorage(TriagePreferenceKeys.listLine) private var stored = InboxListLine.both.rawValue
+
+    var body: some View {
+        Menu("List Shows") {
+            Picker("List Shows", selection: Binding(
+                get: { InboxListLine(rawValue: stored) ?? .both },
+                set: { stored = $0.rawValue }
+            )) {
+                ForEach(InboxListLine.allCases) { line in
+                    Text(line.title).tag(line)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
         }
     }
 }

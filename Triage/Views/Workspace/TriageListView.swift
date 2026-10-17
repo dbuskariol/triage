@@ -315,27 +315,22 @@ struct TriageEntryRow: View {
         .lineLimit(1)
     }
 
-    /// What the item is, then the next step. Older decisions have no situation yet.
+    @AppStorage(TriagePreferenceKeys.listLine) private var listLineRaw = InboxListLine.both.rawValue
+
+    private var listLine: InboxListLine {
+        InboxListLine(rawValue: listLineRaw) ?? .both
+    }
+
+    /// The why, the next step, or both. View menu, List Shows, changes it.
     @ViewBuilder
     private var copilotLine: some View {
         if let decision = entry.decision {
-            if let situation = decision.situation, !situation.isEmpty {
-                Text(situation)
-                    .font(.subheadline)
+            ForEach(Array(rowLines(decision).enumerated()), id: \.offset) { _, line in
+                Text(line.text)
+                    .font(line.emphasized ? .subheadline.weight(.medium) : .subheadline)
                     .foregroundStyle(secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if let nextAction = decision.nextAction {
-                Text(nextAction)
-                    .font(decision.situation?.isEmpty == false ? .subheadline.weight(.medium) : .subheadline)
-                    .foregroundStyle(secondary)
-                    .lineLimit(2)
-            } else if decision.situation?.isEmpty != false {
-                Text(decision.reason)
-                    .font(.subheadline)
-                    .foregroundStyle(secondary)
-                    .lineLimit(2)
             }
             if let analysis = WorkspaceViewPresentation.analysisLabel(entry.analysis) {
                 Label(entry.analysis == .pending ? "Re-checking…" : analysis, systemImage: "arrow.triangle.2.circlepath")
@@ -409,13 +404,20 @@ struct TriageEntryRow: View {
         }
     }
 
+    private func rowLines(_ decision: TriageDecision) -> [InboxListLine.RowLine] {
+        listLine.rowLines(
+            situation: decision.situation,
+            reason: decision.reason,
+            nextAction: decision.nextAction
+        )
+    }
+
     private var accessibilityLabel: String {
         let priority = entry.decision.map { WorkspaceViewPresentation.priorityLabel($0.priority) } ?? "Pending"
-        let situation = entry.decision?.situation ?? ""
-        let reason = entry.decision?.reason ?? WorkspaceViewPresentation.analysisLabel(entry.analysis) ?? ""
-        let nextAction = entry.decision?.nextAction.map { "Next action: \($0)" } ?? ""
+        let lines = entry.decision.map { rowLines($0).map(\.text) }
+            ?? [WorkspaceViewPresentation.analysisLabel(entry.analysis)].compactMap { $0 }
         let state = [entry.isUnread ? "Unread" : nil, entry.decision?.disposition == .act ? "Needs your action" : nil]
-        return (state.compactMap { $0 } + [entry.item.title, situation, "Priority \(priority)", reason, nextAction])
+        return (state.compactMap { $0 } + [entry.item.title] + lines + ["Priority \(priority)"])
             .filter { !$0.isEmpty }
             .joined(separator: ". ")
     }
