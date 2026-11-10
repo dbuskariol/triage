@@ -471,6 +471,64 @@ actor GRDBTriageStore: TriageStore {
         }
     }
 
+    func recordFeedback(_ events: [TriageFeedback], scope: WorkspaceScope) async throws {
+        try await validate(scope)
+        guard !events.isEmpty else { return }
+        let encoder = self.encoder
+        let rows = try events.map { event in
+            (event, try encoder.encode(event), event.kind == .ignoredInInbox ? event.itemID.map { "ignored:\($0.rawValue)" } : nil)
+        }
+        try await vault.writeTransaction { database in
+            for (event, json, dedupe) in rows {
+                try database.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO triage_feedback (account_id, organization_id, kind, node_id, at_ms, event_json, dedupe)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue, event.kind.rawValue,
+                        event.itemID?.rawValue, Self.milliseconds(event.at), json, dedupe,
+                    ]
+                )
+            }
+        }
+    }
+
+    func feedback(since date: Date, scope: WorkspaceScope) async throws -> [TriageFeedback] {
+        try await validate(scope)
+        let decoder = self.decoder
+        return try await vault.read { database in
+            try Data.fetchAll(
+                database,
+                sql: """
+                    SELECT event_json FROM triage_feedback
+                    WHERE account_id = ? AND organization_id = ? AND at_ms >= ? ORDER BY at_ms, id
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, Self.milliseconds(date)]
+            ).compactMap { try? decoder.decode(TriageFeedback.self, from: $0) }
+        }
+    }
+
+    func clearFeedback(scope: WorkspaceScope) async throws {
+        try await validate(scope)
+        try await vault.writeTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM triage_feedback WHERE account_id = ? AND organization_id = ?",
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            )
+        }
+    }
+
+    func pruneFeedback(before date: Date, scope: WorkspaceScope) async throws {
+        try await validate(scope)
+        try await vault.writeTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM triage_feedback WHERE account_id = ? AND organization_id = ? AND at_ms < ?",
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, Self.milliseconds(date)]
+            )
+        }
+    }
+
     private func validate(_ scope: WorkspaceScope) async throws {
         guard scope.accountID == vault.accountID else { throw GRDBTriageStoreError.invalidScope }
     }

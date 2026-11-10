@@ -174,9 +174,9 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 
 ## Privacy and security
 
-- **Local-first.** Work, decisions, rules, and instructions live in a SQLCipher database whose key is in your Keychain. Work not seen for 30 days is pruned.
+- **Local-first.** Work, decisions, rules, topics, instructions, saved searches, and the history Triage learns from live in a SQLCipher database whose key is in your Keychain. Work not seen for 30 days and learning history older than 90 days are pruned; clear the history any time in **Settings ▸ Rules ▸ Learning**.
 - **Read-only.** Triage only reads from GitHub. It never comments, approves, merges, or edits.
-- **Copilot is opt-in per organization.** When on, Copilot receives titles, descriptions, recent comments, pull request status, and your instructions for work involving you, through an isolated helper process with no tools, files, or network beyond the Copilot runtime.
+- **Copilot is opt-in per organization.** When on, Copilot receives titles, descriptions, recent comments, pull request status and checks, your instructions, and your topics for work involving you — and, only when you ask for rule suggestions, a summary of how you've handled recommendations with a few example items — through an isolated helper process with no tools, files, or network beyond the Copilot runtime.
 - **No telemetry.** No analytics, tracking, advertising, or crash uploads.
 - **Signed updates.** Developer ID signed, notarized, and Sparkle EdDSA-verified.
 

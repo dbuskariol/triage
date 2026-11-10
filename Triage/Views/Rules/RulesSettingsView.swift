@@ -8,6 +8,7 @@ struct RulesSettingsView: View {
     @State private var instructions = ""
     @State private var editingRule: RuleDraft?
     @State private var editingTopic: TriageTopic?
+    @State private var isConfirmingClear = false
     @Environment(\.triageViewerLogin) private var viewer
 
     private static let examples = [
@@ -23,6 +24,7 @@ struct RulesSettingsView: View {
                 rulesSection
                 topicsSection
                 instructionsSection
+                learningSection
             } else {
                 Section {
                     Text("Select an organization in the main window to manage its rules.")
@@ -285,6 +287,31 @@ struct RulesSettingsView: View {
             Text("Topics")
         } footer: {
             Text("Copilot tags work with your topics as it analyzes it. Use them in rules and search with topic:\"Name\" — for example, hide everything waiting on a compliance approval. Adding or changing a topic re-analyzes your work in the background.")
+        }
+    }
+
+    // MARK: Learning
+
+    private var learningSection: some View {
+        Section {
+            LabeledContent("Remembered") {
+                Text(appModel.feedbackCount == 0 ? "Nothing yet" : "\(appModel.feedbackCount) action\(appModel.feedbackCount == 1 ? "" : "s") from the last 90 days")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("Clear History…", role: .destructive) { isConfirmingClear = true }
+                    .disabled(appModel.feedbackCount == 0)
+            }
+            .confirmationDialog("Clear what Triage has learned from you?", isPresented: $isConfirmingClear) {
+                Button("Clear History", role: .destructive) { appModel.clearFeedback() }
+            } message: {
+                Text("Rule suggestions start over. Your rules, topics, and instructions are not affected.")
+            }
+        } header: {
+            Text("Learning")
+        } footer: {
+            Text("To suggest rules, Triage remembers how you handle its recommendations — for example, marking work done without opening it, muting it, or saying Not right? It stays encrypted on this Mac for 90 days. Only when you ask for suggestions are summaries and a few item details sent to Copilot.")
         }
     }
 

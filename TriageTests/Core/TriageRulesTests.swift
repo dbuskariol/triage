@@ -391,3 +391,41 @@ struct PriorityBreakdownTests {
         #expect(entry.priorityBreakdown?.copilot == 20)
     }
 }
+
+struct FeedbackTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func entry(_ disposition: TriageDisposition, readAt: Date?, decidedDaysAgo: Double = 0) -> TriageEntry {
+        let item = rulesItem()
+        var value = TriageEntry(item: item, decision: TriageDecision(
+            itemID: item.id, disposition: disposition, priority: 80, confidence: 0.9, summary: "s", reason: "r",
+            nextAction: nil, fingerprint: item.fingerprint, modelID: "m", decidedAt: now.addingTimeInterval(-decidedDaysAgo * 86_400)
+        ), analysis: .current, local: .active)
+        value.readAt = readAt
+        return value
+    }
+
+    @Test func doneSaysSomethingOnlyWhenUnopenedOrImmediate() {
+        #expect(TriageFeedback.done(entry(.review, readAt: nil), viewer: "me", at: now)?.kind == .doneUnopened)
+        #expect(TriageFeedback.done(entry(.act, readAt: now.addingTimeInterval(-30)), viewer: "me", at: now)?.kind == .doneQuickly)
+        #expect(TriageFeedback.done(entry(.review, readAt: now.addingTimeInterval(-30)), viewer: "me", at: now) == nil)
+        #expect(TriageFeedback.done(entry(.act, readAt: now.addingTimeInterval(-600)), viewer: "me", at: now) == nil)
+    }
+
+    @Test func unopenedInboxWorkCountsAfterAWeek() {
+        let stale = entry(.review, readAt: nil, decidedDaysAgo: 8)
+        let fresh = entry(.review, readAt: nil, decidedDaysAgo: 2)
+        #expect(TriageFeedback.ignored(in: WorkspacePresentation(entries: [.inbox: [stale]], status: .initial), viewer: "me", now: now).count == 1)
+        #expect(TriageFeedback.ignored(in: WorkspacePresentation(entries: [.inbox: [fresh]], status: .initial), viewer: "me", now: now).isEmpty)
+    }
+
+    @Test func snapshotsKeepWhatRulesCanUse() {
+        var value = entry(.act, readAt: nil)
+        value.decision?.signals = ["approval-gate"]
+        let snapshot = TriageFeedback.Snapshot(value, viewer: "me")
+        #expect(snapshot.repository == "octo/widgets")
+        #expect(snapshot.author == "dependabot[bot]")
+        #expect(snapshot.signals == ["approval-gate"])
+        #expect(snapshot.disposition == "act")
+    }
+}

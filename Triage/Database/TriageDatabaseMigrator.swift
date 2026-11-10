@@ -15,7 +15,7 @@ enum TriageDatabaseMigrationError: Error, Equatable, Sendable {
 /// leaves the vault exactly as it was.
 enum TriageDatabaseMigrator {
     /// Bump when `tables` or `indexes` change.
-    static let schemaVersion = "v2-008-schema"
+    static let schemaVersion = "v2-009-schema"
     static let migrationCount = 1
 
     private struct Table {
@@ -189,13 +189,25 @@ enum TriageDatabaseMigrator {
             position INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (account_id, organization_id, id)
+            """),
+        Table(name: "triage_feedback", body: """
+            id INTEGER PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            organization_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            node_id TEXT,
+            at_ms INTEGER NOT NULL,
+            event_json BLOB NOT NULL,
+            dedupe TEXT
             """)
     ]
 
     private static let indexes = [
         "CREATE INDEX account_organizations_selected ON account_organizations (account_id, selected_at_ms DESC)",
         "CREATE INDEX capabilities_lookup ON capabilities (account_id, organization_id, repository_id, capability)",
-        "CREATE INDEX triage_items_analysis_selection ON triage_items (account_id, organization_id, is_active, urgency_rank, updated_at_ms DESC)"
+        "CREATE INDEX triage_items_analysis_selection ON triage_items (account_id, organization_id, is_active, urgency_rank, updated_at_ms DESC)",
+        "CREATE INDEX triage_feedback_time ON triage_feedback (account_id, organization_id, at_ms)",
+        "CREATE UNIQUE INDEX triage_feedback_once ON triage_feedback (account_id, organization_id, dedupe) WHERE dedupe IS NOT NULL"
     ]
 
     static func migrate(

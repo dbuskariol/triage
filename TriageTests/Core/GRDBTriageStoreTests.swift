@@ -34,6 +34,30 @@ final class GRDBTriageStoreTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.name), ["Failing"])
     }
 
+    func testFeedbackRecordsOnceWhereAskedPrunesAndClears() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let work = item(id: "item", relationship: .assigned, updatedAt: Date())
+        let entry = TriageEntry(item: work, decision: nil, analysis: .pending, local: .active)
+        let old = Date(timeIntervalSinceNow: -100 * 86_400)
+        try await fixture.store.recordFeedback([
+            .item(.muted, entry, viewer: "me", at: old),
+            .item(.ignoredInInbox, entry, viewer: "me", at: Date()),
+            TriageFeedback(kind: .ruleCreated, at: Date(), detail: "exclude author:bot"),
+        ], scope: fixture.scope)
+        try await fixture.store.recordFeedback([.item(.ignoredInInbox, entry, viewer: "me", at: Date())], scope: fixture.scope)
+        let all = try await fixture.store.feedback(since: .distantPast, scope: fixture.scope)
+        XCTAssertEqual(all.map(\.kind), [.muted, .ignoredInInbox, .ruleCreated])
+        XCTAssertEqual(all.first?.snapshot?.repository, work.repository)
+
+        try await fixture.store.pruneFeedback(before: Date(timeIntervalSinceNow: -90 * 86_400), scope: fixture.scope)
+        let pruned = try await fixture.store.feedback(since: .distantPast, scope: fixture.scope)
+        XCTAssertEqual(pruned.map(\.kind), [.ignoredInInbox, .ruleCreated])
+        try await fixture.store.clearFeedback(scope: fixture.scope)
+        let cleared = try await fixture.store.feedback(since: .distantPast, scope: fixture.scope)
+        XCTAssertTrue(cleared.isEmpty)
+    }
+
     func testDecisionFailureAndLocalStateFollowCurrentFingerprint() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

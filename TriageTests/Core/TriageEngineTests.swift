@@ -400,6 +400,11 @@ actor MemoryStore: TriageStore {
     private var searches: [SavedSearch] = []
     func savedSearches(scope: WorkspaceScope) async throws -> [SavedSearch] { searches }
     func saveSavedSearches(_ searches: [SavedSearch], scope: WorkspaceScope) async throws { self.searches = searches }
+    private var events: [TriageFeedback] = []
+    func recordFeedback(_ events: [TriageFeedback], scope: WorkspaceScope) async throws { self.events += events }
+    func feedback(since date: Date, scope: WorkspaceScope) async throws -> [TriageFeedback] { events.filter { $0.at >= date } }
+    func clearFeedback(scope: WorkspaceScope) async throws { events = [] }
+    func pruneFeedback(before date: Date, scope: WorkspaceScope) async throws { events.removeAll { $0.at < date } }
 
     func decidedCount() -> Int { decisions.count }
     func failureCount() -> Int { failures.count }

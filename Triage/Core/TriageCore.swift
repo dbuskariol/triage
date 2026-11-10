@@ -585,7 +585,7 @@ protocol PersonalWorkDiscovering: Sendable {
 }
 
 /// Encrypted local storage for the workspace.
-protocol TriageStore: Sendable {
+protocol TriageStore: TriageFeedbackStore {
     /// Upserts `items` and deactivates every other item in `scope` (it no
     /// longer matches a personal search, e.g. closed or unassigned).
     func replaceItems(_ items: [PersonalWorkItem], scope: WorkspaceScope, at date: Date) async throws

@@ -83,7 +83,12 @@ final class TriageAppModel: ObservableObject {
     /// The rule editor started from an item, if open.
     @Published var ruleDraft: RuleDraft?
     /// The item whose recommendation the user said is not right, if that sheet is open.
-    @Published var correctionEntry: TriageEntry?
+    @Published var correctionEntry: TriageEntry? {
+        didSet { if let correctionEntry { recordFeedback([.item(.notRight, correctionEntry, viewer: viewerLogin, at: .now)]) } }
+    }
+    /// Feedback events kept for rule suggestions in the selected organization.
+    @Published private(set) var feedbackCount = 0
+    private var lastIgnoredScan = Date.distantPast
     /// Local status changes shown immediately, before the store confirms them.
     private var optimistic = OptimisticChanges()
     @Published var destination = WorkspaceDestination.section(.inbox) {
@@ -308,6 +313,7 @@ final class TriageAppModel: ObservableObject {
                 self.runtime = (scope, runtime)
                 self.rules = (try? await runtime.store.rules(scope: scope)) ?? .empty
                 await self.loadSavedSearches(runtime.store, scope: scope)
+                await self.loadFeedback(runtime.store, scope: scope)
                 self.observe(runtime, scope: scope)
                 // GitHub discovery must never wait on Copilot sign-in or model listing.
                 Self.logger.notice("workspace activated; starting engine")
@@ -333,6 +339,7 @@ final class TriageAppModel: ObservableObject {
         if let engine = runtime?.value.engine { await engine.stop() }
         runtime = nil
         rules = .empty
+        feedbackCount = 0
         optimistic = OptimisticChanges()
         entries = []
         status = .initial
@@ -377,6 +384,10 @@ final class TriageAppModel: ObservableObject {
         )
         guard next != presentation else { return }
         presentation = next
+        if Date.now.timeIntervalSince(lastIgnoredScan) > 3_600, !entries.isEmpty {
+            lastIgnoredScan = .now
+            recordFeedback(TriageFeedback.ignored(in: next, viewer: viewerLogin, now: .now))
+        }
         onPresentationChange?(next, runtime?.scope.organizationID)
         resolvePendingTarget()
         let existing = Set(entries.map(\.id))
@@ -870,6 +881,49 @@ extension TriageAppModel {
     }
 }
 
+// MARK: Feedback
+
+extension TriageAppModel {
+    var viewerLogin: String { runtime?.scope.viewerLogin ?? selectedAccount?.login ?? "" }
+
+    /// Saves feedback in the background; it only ever informs rule suggestions.
+    func recordFeedback(_ events: [TriageFeedback]) {
+        guard let runtime, !events.isEmpty else { return }
+        Task {
+            do {
+                try await runtime.value.store.recordFeedback(events, scope: runtime.scope)
+                await loadFeedback(runtime.value.store, scope: runtime.scope, prune: false)
+            } catch {
+                Self.logger.error("feedback save failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        }
+    }
+
+    func loadFeedback(_ store: any TriageStore, scope: WorkspaceScope, prune: Bool = true) async {
+        let cutoff = Date.now.addingTimeInterval(-TriageFeedback.retention)
+        do {
+            if prune { try await store.pruneFeedback(before: cutoff, scope: scope) }
+            let count = try await store.feedback(since: cutoff, scope: scope).count
+            guard selectedScope == scope else { return }
+            feedbackCount = count
+        } catch {
+            Self.logger.error("feedback load failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+        }
+    }
+
+    func clearFeedback() {
+        guard let runtime else { return }
+        feedbackCount = 0
+        Task {
+            do {
+                try await runtime.value.store.clearFeedback(scope: runtime.scope)
+            } catch {
+                Self.logger.error("feedback clear failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        }
+    }
+}
+
 // MARK: Rules
 
 extension TriageAppModel {
@@ -888,6 +942,11 @@ extension TriageAppModel {
         publishPresentation()
         let saved = rules
         let viewer = runtime.scope.viewerLogin
+        let before = Set(previous.rules.map(\.id)), after = Set(saved.rules.map(\.id))
+        recordFeedback(
+            saved.rules.filter { !before.contains($0.id) }.map { TriageFeedback(kind: .ruleCreated, at: .now, detail: "\($0.action.storageValue) \($0.query)") }
+                + previous.rules.filter { !after.contains($0.id) }.map { TriageFeedback(kind: .ruleDeleted, at: .now, detail: "\($0.action.storageValue) \($0.query)") }
+        )
         // Re-analyze only when what Copilot sees for some item changed.
         let affectsCopilot = entries.contains { previous.digest(for: $0.item, viewer: viewer) != saved.digest(for: $0.item, viewer: viewer) }
             || previous.trimmedInstructions != saved.trimmedInstructions || previous.reanalysisToken != saved.reanalysisToken
@@ -910,14 +969,17 @@ extension TriageAppModel: WorkspaceActions {
     }
 
     func markDone(_ entries: [TriageEntry]) {
+        recordFeedback(entries.compactMap { TriageFeedback.done($0, viewer: viewerLogin, at: .now) })
         setLocalStatus(for: entries) { .done(fingerprint: $0.item.fingerprint, at: .now) }
     }
 
     func mute(_ entries: [TriageEntry]) {
+        recordFeedback(entries.map { .item(.muted, $0, viewer: viewerLogin, at: .now) })
         setLocalStatus(for: entries) { LocalStatus.muting($0.item, at: .now) }
     }
 
     func snooze(_ entries: [TriageEntry], until date: Date) {
+        recordFeedback(entries.map { .item(.snoozed, $0, viewer: viewerLogin, at: .now) })
         setLocalStatus(for: entries) { _ in .snoozed(until: date) }
     }
 
