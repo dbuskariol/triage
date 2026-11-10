@@ -98,6 +98,11 @@ struct TriageApplicationDependencies: Sendable {
     var draftReply: @Sendable (WorkspaceScope, PersonalWorkItem, String?, String?) async throws -> String = { _, _, _, _ in
         throw TriageDecisionError.runtimeUnavailable
     }
+    /// Asks Copilot to turn local candidates into rules.
+    var suggestRules: @Sendable (WorkspaceScope, [RuleSuggestionCandidate], TriageRules) async throws
+        -> (suggestions: [CopilotRuleSuggestion], candidates: [String: RuleSuggestionCandidate]) = { _, _, _ in
+        throw TriageDecisionError.runtimeUnavailable
+    }
     /// The GitHub sign-in configuration, read from the signed app bundle.
     var oauthConfiguration: @Sendable () throws -> RuntimeOAuthConfiguration = { try RuntimeOAuthConfiguration() }
 }

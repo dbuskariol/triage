@@ -91,6 +91,17 @@ actor CopilotHelperClient: TriageCopilotHelping {
     return response
   }
 
+  func suggestRules(_ request: CopilotSuggestRulesRequest) async throws -> CopilotSuggestRulesResponse {
+    let timeout = request.deadline.timeIntervalSinceNow
+    guard timeout > 0 else { throw CopilotXPCError.operationTimedOut }
+    try request.validate()
+    let response: CopilotSuggestRulesResponse = try await exchange(request, expectedStatus: .suggestions, timeout: timeout)
+    guard request.modelID == nil || response.modelID == request.modelID,
+      response.suggestions.allSatisfy({ suggestion in request.candidates.contains { $0.id == suggestion.candidateID } })
+    else { throw CopilotXPCError.invalidResponse }
+    return response
+  }
+
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse {
     guard let activeOperation,
       activeOperation.requestID == request.targetRequestID,
@@ -385,6 +396,7 @@ extension CopilotHealthRequest: CopilotRequestContaining {}
 extension CopilotModelsRequest: CopilotRequestContaining {}
 extension CopilotTriageRequest: CopilotRequestContaining {}
 extension CopilotDraftRequest: CopilotRequestContaining {}
+extension CopilotSuggestRulesRequest: CopilotRequestContaining {}
 extension CopilotCancelRequest: CopilotRequestContaining {}
 extension CopilotShutdownRequest: CopilotRequestContaining {}
 
@@ -397,6 +409,7 @@ extension CopilotAuthenticationResponse: CopilotResponseContaining {}
 extension CopilotModelsResponse: CopilotResponseContaining {}
 extension CopilotTriageResponse: CopilotResponseContaining {}
 extension CopilotDraftResponse: CopilotResponseContaining {}
+extension CopilotSuggestRulesResponse: CopilotResponseContaining {}
 extension CopilotCancelResponse: CopilotResponseContaining {}
 extension CopilotShutdownResponse: CopilotResponseContaining {}
 
@@ -554,6 +567,8 @@ enum CopilotWireSchema {
       operationFields = ["model_id", "decisions"]
     case .draft:
       operationFields = ["model_id", "draft"]
+    case .suggestions:
+      operationFields = ["model_id", "suggestions"]
     case .cancelled:
       operationFields = ["cancelled_request_id"]
     case .shutdown:
@@ -566,6 +581,7 @@ enum CopilotWireSchema {
       throw CopilotXPCError.invalidResponse
     }
     if actualStatus == .triage, expectedStatus == .triage { try validateTriage(object) }
+    if actualStatus == .suggestions, expectedStatus == .suggestions { try validateSuggestions(object) }
     if actualStatus == .draft, expectedStatus == .draft {
       guard let model = object["model_id"] as? String, !model.isEmpty,
         let draft = object["draft"] as? String, !draft.isEmpty,
@@ -575,6 +591,22 @@ enum CopilotWireSchema {
   }
 
 
+
+  private static func validateSuggestions(_ object: [String: Any]) throws {
+    guard let model = object["model_id"] as? String, !model.isEmpty,
+      let suggestions = object["suggestions"] as? [[String: Any]], suggestions.count <= CopilotSuggestRulesResponse.maximumSuggestions
+    else { throw CopilotXPCError.invalidResponse }
+    let fields: Set<String> = ["candidate_id", "query", "action", "name", "rationale"]
+    for suggestion in suggestions {
+      guard Set(suggestion.keys) == fields,
+        let id = suggestion["candidate_id"] as? String, !id.isEmpty,
+        let query = suggestion["query"] as? String, !query.isEmpty, query.utf8.count <= 300,
+        let action = suggestion["action"] as? String, TriageRuleAction(storageValue: action) != nil,
+        let name = suggestion["name"] as? String, !name.isEmpty, name.utf8.count <= 60,
+        let rationale = suggestion["rationale"] as? String, !rationale.isEmpty, rationale.utf8.count <= 280
+      else { throw CopilotXPCError.invalidResponse }
+    }
+  }
 
   private static func validateTriage(_ object: [String: Any]) throws {
     guard let model = object["model_id"] as? String, !model.isEmpty,

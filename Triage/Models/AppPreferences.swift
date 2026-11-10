@@ -2,6 +2,8 @@ import Foundation
 import ServiceManagement
 
 enum TriagePreferenceKeys {
+    static let lastSuggestionHint = "rules.last-suggestion-hint"
+    static let lastSuggestionHintKey = "rules.last-suggestion-hint-key"
     static let showMenuBarExtra = "interface.show-menu-bar-extra"
     static let sortField = "interface.sort-field"
     static let grouping = "interface.grouping"

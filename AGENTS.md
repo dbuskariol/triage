@@ -18,7 +18,7 @@ Preserve these baseline invariants:
 ## Repository map
 
 - `Triage/Core`: contracts, GitHub personal-work discovery, GRDB store, AI triage, engine, rules, and presentation.
-- `Triage/CopilotXPC`, `TriageCopilotXPC`, and `TriageCopilotHelper`: fail-closed authenticated Copilot boundary; `triage` is its only inference operation and holds the fixed system prompt.
+- `Triage/CopilotXPC`, `TriageCopilotXPC`, and `TriageCopilotHelper`: fail-closed authenticated Copilot boundary. Its inference operations are `triage`, `draft`, and `suggest_rules`, each with a fixed system prompt in the helper; adding another needs the same treatment in the Rust protocol, the XPC frame allowlist, and the Swift wire types.
 - `Triage/Views`: SwiftUI workspace, detail, rules, settings, onboarding, and menu bar.
 - `Triage/Models` and `Triage/Services`: app state, preferences, and platform services.
 - `TriageTests`: deterministic unit tests.

@@ -17,8 +17,9 @@ use crate::{
         EphemeralCredential, TrustedRuntimeBootstrap,
     },
     schema::{
-        TriageItem, TriageItemDecision, TriageTopic, ValidationError, retain_valid_triage_outputs,
-        validate_draft_inputs, validate_triage_inputs, validate_triage_instructions,
+        RuleSuggestion, SuggestionCandidate, TriageItem, TriageItemDecision, TriageTopic,
+        ValidationError, retain_valid_triage_outputs, validate_draft_inputs,
+        validate_suggestion_inputs, validate_triage_inputs, validate_triage_instructions,
         validate_triage_topics,
     },
 };
@@ -131,6 +132,19 @@ impl WireRequest {
                 )
                 .map_err(ProtocolError::InvalidRequest)?;
             }
+            RequestOperation::SuggestRules {
+                viewer_login,
+                candidates,
+                existing_rules,
+                topics,
+                reasoning_effort,
+                context_tier,
+                ..
+            } => {
+                validate_model_options(reasoning_effort.as_deref(), context_tier.as_deref())?;
+                validate_suggestion_inputs(viewer_login, candidates, existing_rules, topics)
+                    .map_err(ProtocolError::InvalidRequest)?;
+            }
             _ => {}
         }
         if let RequestOperation::Authenticate {
@@ -197,6 +211,21 @@ pub enum RequestOperation {
         goal: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         writing_style: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_tier: Option<String>,
+    },
+    SuggestRules {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
+        viewer_login: String,
+        deadline: DateTime<Utc>,
+        candidates: Vec<SuggestionCandidate>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        existing_rules: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        topics: Vec<TriageTopic>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,6 +308,31 @@ struct DraftWireRequest {
 enum DraftOperation {
     #[serde(rename = "draft")]
     Draft,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestRulesWireRequest {
+    #[serde(flatten)]
+    header: HeaderRequest,
+    operation: SuggestRulesOperation,
+    model_id: Option<String>,
+    viewer_login: String,
+    deadline: DateTime<Utc>,
+    candidates: Vec<SuggestionCandidate>,
+    #[serde(default)]
+    existing_rules: Vec<String>,
+    #[serde(default)]
+    topics: Vec<TriageTopic>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    context_tier: Option<String>,
+}
+#[derive(Deserialize)]
+enum SuggestRulesOperation {
+    #[serde(rename = "suggest_rules")]
+    SuggestRules,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +437,10 @@ pub enum ResponseResult {
     Draft {
         model_id: String,
         draft: String,
+    },
+    Suggestions {
+        model_id: String,
+        suggestions: Vec<RuleSuggestion>,
     },
     Authentication {
         authentication: AuthenticationResponse,
@@ -543,6 +601,31 @@ fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
                     deadline: request.deadline,
                     goal: request.goal,
                     writing_style: request.writing_style,
+                    reasoning_effort: request.reasoning_effort,
+                    context_tier: request.context_tier,
+                },
+            })
+        }
+        "suggest_rules" => {
+            if payload.len() > 64 * 1024 {
+                return Err(ProtocolError::InvalidRequest(ValidationError::new(
+                    "suggestion request exceeds 64 KiB",
+                )));
+            }
+            let request: SuggestRulesWireRequest = decode_typed(payload)?;
+            let SuggestRulesOperation::SuggestRules = request.operation;
+            Ok(WireRequest {
+                protocol_version: request.header.protocol_version,
+                request_id: request.header.request_id,
+                account_id: request.header.account_id,
+                organization_id: request.header.organization_id,
+                operation: RequestOperation::SuggestRules {
+                    model_id: request.model_id,
+                    viewer_login: request.viewer_login,
+                    deadline: request.deadline,
+                    candidates: request.candidates,
+                    existing_rules: request.existing_rules,
+                    topics: request.topics,
                     reasoning_effort: request.reasoning_effort,
                     context_tier: request.context_tier,
                 },
@@ -757,6 +840,26 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                                 response
                             });
                         }
+                        RequestOperation::SuggestRules { model_id, viewer_login, deadline, candidates, existing_rules, topics, reasoning_effort, context_tier } => {
+                            let suggest_request = crate::engine::SuggestRulesRequest { viewer_login: viewer_login.clone(), candidates: candidates.clone(), existing_rules: existing_rules.clone() };
+                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: None, topics: topics.clone() };
+                            let model_id = model_id.clone();
+                            let deadline = *deadline;
+                            cancellation.begin(request.request_id, cancellation_scope(&request));
+                            let task_engine = Arc::clone(&engine);
+                            let cancellation_engine = Arc::clone(&engine);
+                            let task_cancellation = cancellation.clone();
+                            analyses.spawn(async move {
+                                let work = task_engine.suggest_rules(request.request_id, suggest_request, options, task_cancellation.clone());
+                                let result = run_until_deadline(work, deadline, request.request_id, &task_cancellation, cancellation_engine.as_ref()).await;
+                                let response = match result {
+                                    Ok(suggestions) => WireResponse::for_request(&request, ResponseResult::Suggestions { model_id: model_id.unwrap_or_else(|| "auto".to_owned()), suggestions }),
+                                    Err(failure) => WireResponse::failure(&request, failure),
+                                };
+                                task_cancellation.finish(request.request_id);
+                                response
+                            });
+                        }
                         RequestOperation::Authenticate { credential, allow_browser } => {
                             let credential = credential.take();
                             let allow_browser = *allow_browser;
@@ -960,6 +1063,15 @@ mod tests {
         ) -> Result<String, Failure> {
             Err(Failure::new(FailureCode::Internal, "unused"))
         }
+        async fn suggest_rules(
+            &self,
+            _: Uuid,
+            _: crate::engine::SuggestRulesRequest,
+            _: crate::engine::TriageModelOptions,
+            _: CancellationState,
+        ) -> Result<Vec<RuleSuggestion>, Failure> {
+            Err(Failure::new(FailureCode::Internal, "unused"))
+        }
         async fn authenticate(
             &self,
             _: Option<EphemeralCredential>,
@@ -999,6 +1111,55 @@ mod tests {
         let mut framed = Vec::new();
         write_frame(&mut framed, payload.as_bytes()).unwrap();
         framed
+    }
+
+    trait PipeFrame {
+        fn pipe_frame(self) -> Vec<u8>;
+    }
+    impl PipeFrame for Vec<u8> {
+        fn pipe_frame(self) -> Vec<u8> {
+            let mut framed = Vec::new();
+            write_frame(&mut framed, &self).unwrap();
+            framed
+        }
+    }
+
+    #[test]
+    fn suggest_rules_requests_decode_strictly_and_respond_with_suggestions() {
+        let payload = |extra: &str| -> Vec<u8> {
+            format!(
+                r#"{{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"account-1","organization_id":"organization-1","operation":"suggest_rules","viewer_login":"octocat","deadline":"2030-01-01T00:00:00Z","candidates":[{{"id":"c1","query":"author:dependabot[bot]","total":12,"dismissive":11,"outcomes":[{{"kind":"doneUnopened","count":11}}],"examples":[{{"repository":"o/r","title":"Bump x","author":"dependabot[bot]","labels":[],"signals":["bot-noise"]}}]}}],"topics":[{{"name":"Compliance","description":"Approval gates."}}]{extra}}}"#
+            )
+            .into_bytes()
+            .pipe_frame()
+        };
+        let decoded = read_request(&mut payload("").as_slice()).unwrap().unwrap();
+        decoded.validate().unwrap();
+        let RequestOperation::SuggestRules {
+            candidates, topics, ..
+        } = &decoded.operation
+        else {
+            panic!("expected suggest_rules");
+        };
+        assert_eq!(candidates[0].dismissive, 11);
+        assert_eq!(topics[0].name, "Compliance");
+        assert!(read_request(&mut payload(r#","extra":1"#).as_slice()).is_err());
+        let response = serde_json::to_value(WireResponse::for_request(
+            &decoded,
+            ResponseResult::Suggestions {
+                model_id: "auto".to_owned(),
+                suggestions: vec![RuleSuggestion {
+                    candidate_id: "c1".into(),
+                    query: "author:dependabot[bot]".into(),
+                    action: "exclude".into(),
+                    name: "Hide bot updates".into(),
+                    rationale: "You never open them.".into(),
+                }],
+            },
+        ))
+        .unwrap();
+        assert_eq!(response["status"], "suggestions");
+        assert_eq!(response["suggestions"][0]["action"], "exclude");
     }
 
     #[test]

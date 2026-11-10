@@ -8,6 +8,8 @@ struct TriageFeedback: Codable, Equatable, Sendable {
     enum Kind: String, Codable, CaseIterable, Sendable {
         /// "Not right?" on a recommendation.
         case notRight
+        /// Opened, i.e. engaged with.
+        case opened
         /// Marked done without ever opening it.
         case doneUnopened
         /// Marked done within moments of opening something Copilot said needs action.
@@ -23,6 +25,7 @@ struct TriageFeedback: Codable, Equatable, Sendable {
         var title: String {
             switch self {
             case .notRight: "Said a recommendation wasn't right"
+            case .opened: "Opened"
             case .doneUnopened: "Marked done without opening"
             case .doneQuickly: "Marked done right after opening"
             case .snoozed: "Snoozed"
@@ -37,7 +40,7 @@ struct TriageFeedback: Codable, Equatable, Sendable {
         var isDismissive: Bool {
             switch self {
             case .notRight, .doneUnopened, .doneQuickly, .muted, .ignoredInInbox: true
-            case .snoozed, .ruleCreated, .ruleDeleted: false
+            case .opened, .snoozed, .ruleCreated, .ruleDeleted: false
             }
         }
     }

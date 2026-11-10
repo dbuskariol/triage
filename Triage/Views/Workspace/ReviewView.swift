@@ -5,6 +5,10 @@ import SwiftUI
 struct ReviewView: View {
     let presentation: WorkspacePresentation
     let actions: any WorkspaceActions
+    /// A strong pattern in how you handle work, if one is worth mentioning.
+    var suggestionHint: RuleSuggestionCandidate?
+    var seeSuggestions: () -> Void = {}
+    var dismissHint: (RuleSuggestionCandidate) -> Void = { _ in }
     @Environment(\.triageViewerLogin) private var viewer
 
     var body: some View {
@@ -26,6 +30,9 @@ struct ReviewView: View {
                 .init(title: "Typical Wait on You", value: review.medianWaitingOnYouDays.map { "\($0)d" } ?? "–",
                       systemImage: "hourglass"),
             ])
+            if let suggestionHint {
+                SuggestionHintCard(candidate: suggestionHint, see: seeSuggestions, dismiss: { dismissHint(suggestionHint) })
+            }
             DashboardGrid {
                 DashboardCard(title: "Done per Day", systemImage: "chart.bar") {
                     Chart(review.days) { day in
@@ -120,5 +127,35 @@ private struct RepositoryBars: View {
                 .accessibilityLabel("\(row.repository), \(row.count) open items")
             }
         }
+    }
+}
+
+/// An occasional, dismissible nudge: Triage noticed a pattern and can suggest a rule.
+private struct SuggestionHintCard: View {
+    let candidate: RuleSuggestionCandidate
+    let see: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "wand.and.sparkles")
+                .font(.title2)
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("A rule could save you time").font(.headline)
+                Text(candidate.evidence).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("See Suggestions", action: see).buttonStyle(.borderedProminent)
+                    Button("Don't Suggest This", action: dismiss)
+                }
+                .padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
     }
 }

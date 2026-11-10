@@ -191,6 +191,7 @@ enum CopilotXPCFrame {
     case models
     case triage
     case draft
+    case suggestRules = "suggest_rules"
     case cancel
     case shutdown
   }

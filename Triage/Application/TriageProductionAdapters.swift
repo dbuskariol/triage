@@ -24,6 +24,7 @@ struct TriageProductionComposition: Sendable {
             return try await vaultRegistry.open(accountID: accountID, vaultKey: key)
         }
         let drafts = CopilotDraftWriter(authorize: CopilotTriageAuthorization.resolver(openVault))
+        let suggester = CopilotRuleSuggester(authorize: CopilotTriageAuthorization.resolver(openVault))
         var dependencies = TriageApplicationDependencies(
             accountSession: TriageAccountSessionService(
                 vaultRegistry: vaultRegistry,
@@ -121,6 +122,9 @@ struct TriageProductionComposition: Sendable {
         )
         dependencies.draftReply = { scope, item, goal, style in
             try await drafts.draft(item, goal: goal, writingStyle: style, scope: scope)
+        }
+        dependencies.suggestRules = { scope, candidates, rules in
+            try await suggester.suggest(candidates, rules: rules, scope: scope)
         }
         return dependencies
     }

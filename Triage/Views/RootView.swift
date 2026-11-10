@@ -83,7 +83,16 @@ private struct WorkspaceView: View {
                     BriefingView(presentation: appModel.presentation, actions: appModel,
                                  followUpDays: appModel.followUpDays)
                 case .review:
-                    ReviewView(presentation: appModel.presentation, actions: appModel)
+                    ReviewView(
+                        presentation: appModel.presentation, actions: appModel,
+                        suggestionHint: appModel.reviewSuggestionHint,
+                        seeSuggestions: {
+                            appModel.requestSuggestions()
+                            appModel.openRulesSettings()
+                        },
+                        dismissHint: { appModel.dismissCandidate($0) }
+                    )
+                    .onAppear { appModel.reviewSuggestionHint.map(appModel.noteSuggestionHintShown) }
                 case .section, .savedSearch:
                     WorkspaceListAndDetail()
                 }

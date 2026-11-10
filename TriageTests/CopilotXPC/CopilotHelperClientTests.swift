@@ -769,6 +769,23 @@ extension CopilotHelperClientTests {
     XCTAssertThrowsError(try unsafe.validate())
   }
 
+  func testSuggestionResponsesAreStrictlyAllowlisted() throws {
+    let organization = try XCTUnwrap(OrganizationID(rawValue: "triage-org"))
+    let header = CopilotResponseHeader(requestID: UUID(), accountID: copilotTestAccountID, organizationID: organization, status: .suggestions)
+    func encoded(_ suggestions: [CopilotRuleSuggestion]) throws -> Data {
+      try JSONEncoder().encode(CopilotSuggestRulesResponse(header: header, modelID: "auto", suggestions: suggestions))
+    }
+    let good = CopilotRuleSuggestion(candidateID: "c1", query: "author:dependabot[bot]", action: "exclude", name: "Hide bot updates", rationale: "You never open them.")
+    XCTAssertNoThrow(try CopilotWireSchema.validate(encoded([good]), expectedStatus: .suggestions))
+    XCTAssertNoThrow(try CopilotWireSchema.validate(encoded([]), expectedStatus: .suggestions))
+    let badAction = CopilotRuleSuggestion(candidateID: "c1", query: "x", action: "delete:everything", name: "n", rationale: "r")
+    XCTAssertThrowsError(try CopilotWireSchema.validate(encoded([badAction]), expectedStatus: .suggestions))
+    XCTAssertThrowsError(try CopilotWireSchema.validate(encoded(Array(repeating: good, count: 6)), expectedStatus: .suggestions))
+    let longName = CopilotRuleSuggestion(candidateID: "c1", query: "x", action: "exclude", name: String(repeating: "n", count: 61), rationale: "r")
+    XCTAssertThrowsError(try CopilotWireSchema.validate(encoded([longName]), expectedStatus: .suggestions))
+    XCTAssertThrowsError(try CopilotWireSchema.validate(encoded([good]), expectedStatus: .draft))
+  }
+
   func testDraftResponsesAreStrictlyAllowlisted() throws {
     func frame(_ extra: String) -> Data {
       Data(#"{"protocol_version":2,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","account_id":"a","organization_id":"o","status":"draft","model_id":"auto","draft":"Thanks!"\#(extra)}"#.utf8)

@@ -141,6 +141,10 @@ A rule's *when* is a filter in the same language as [search](#search), so anythi
 
 Rules apply in a fixed order: **Hide** wins; then the first matching **Move**; then all matching **Rank** rules add up (small ±10, medium ±20, large ±35, at most ±40 in total). *Move to Inbox* never downgrades work Copilot says needs your action. Hidden work goes to **Hidden by Rules**, never to the Inbox, Briefing, Weekly Review, notifications, or the menu bar. Settings flags Move rules that conflict.
 
+### Suggested rules
+
+Triage remembers, on this Mac only, how you handle its recommendations: work you mark done without opening, mute, snooze, leave unopened for a week, or say is *Not right?*. When it sees a pattern — say, you set aside 14 of 15 Dependabot updates — **Settings ▸ Rules ▸ Suggestions ▸ Suggest Rules** asks Copilot to turn it into a rule, with the evidence, Copilot's reasoning, and what the rule would match now. **Add Rule**, **Edit…**, or **Don't Suggest This**; nothing changes until you choose. When a pattern is strong, the Weekly Review mentions it, at most once a week.
+
 ### Why this rank
 
 Click **Priority** on a recommendation to see exactly how it was ranked: Copilot's assessment, then a few fixed, explainable factors (asked to review directly +6, only through a team −6, waiting on you for 3+ days +4 or 7+ days +8, a required check failing on your pull request +6, mentioned since you last acted +5, no activity for a month −6; at most ±20 in total), then your Rank rules. To change how something ranks, add a Rank rule.
@@ -169,7 +173,7 @@ Open with ⌘, or **Settings** at the bottom of the sidebar.
 | **Notifications** | Notify when work newly needs your action · Daily follow-up reminder · Quiet hours · Dock badge |
 | **Accounts** | Connected GitHub accounts, their status, and when each personal access token expires · Replace a token in place · Which organization's work to show |
 | **Copilot** | Status, account, runtime · Use Copilot for this organization · Model, reasoning effort, and long context (offered when the model supports them) · Re-analyze all · Draft Replies: the same model or a separate one, and your writing style |
-| **Rules** | Hard rules and Instructions for Copilot, per organization |
+| **Rules** | Suggestions, Hide / Move / Rank rules, Topics, Instructions for Copilot, and Learning, per organization |
 | **Updates** | Automatic checks and installs · Current version · Check now |
 
 ## Privacy and security

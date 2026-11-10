@@ -477,6 +477,7 @@ protocol TriageCopilotHelping: Sendable {
   func models(_ request: CopilotModelsRequest) async throws -> CopilotModelsResponse
   func triage(_ request: CopilotTriageRequest) async throws -> CopilotTriageResponse
   func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse
+  func suggestRules(_ request: CopilotSuggestRulesRequest) async throws -> CopilotSuggestRulesResponse
   func cancel(_ request: CopilotCancelRequest) async throws -> CopilotCancelResponse
   func shutdown(_ request: CopilotShutdownRequest) async throws -> CopilotShutdownResponse
 }
@@ -487,6 +488,10 @@ extension TriageCopilotHelping {
   }
 
   func draft(_ request: CopilotDraftRequest) async throws -> CopilotDraftResponse {
+    throw CopilotXPCError.invalidResponse
+  }
+
+  func suggestRules(_ request: CopilotSuggestRulesRequest) async throws -> CopilotSuggestRulesResponse {
     throw CopilotXPCError.invalidResponse
   }
 }
@@ -501,7 +506,8 @@ private enum CopilotWireCodingKey: String, CodingKey {
   case deadline
   case triage
   case viewerLogin = "viewer_login"
-  case items, decisions, id, disposition, priority, reason, instructions, topics, item, goal, draft
+  case items, decisions, id, disposition, priority, reason, instructions, topics, item, goal, draft, candidates, suggestions
+  case existingRules = "existing_rules"
   case writingStyle = "writing_style"
   case reasoningEffort = "reasoning_effort"
   case contextTier = "context_tier"
@@ -771,5 +777,114 @@ struct CopilotDraftResponse: Codable, Equatable, Sendable {
     guard !modelID.isEmpty, !draft.isEmpty, draft.utf8.count <= Self.maximumDraftBytes else {
       throw CopilotXPCError.invalidResponse
     }
+  }
+}
+
+/// A group of similar work the user keeps handling the same way.
+struct CopilotSuggestionCandidate: Codable, Equatable, Sendable {
+  struct Outcome: Codable, Equatable, Sendable { let kind: String; let count: Int }
+  struct Example: Codable, Equatable, Sendable {
+    let repository: String
+    let title: String
+    var author: String? = nil
+    var labels: [String] = []
+    var signals: [String] = []
+  }
+  let id: String
+  let query: String
+  let total: Int
+  let dismissive: Int
+  let outcomes: [Outcome]
+  let examples: [Example]
+}
+
+/// Asks Copilot to propose rules from summarized local feedback.
+struct CopilotSuggestRulesRequest: Codable, Equatable, Sendable {
+  static let maximumCandidates = 20
+  let header: CopilotRequestHeader
+  let modelID: String?
+  let viewerLogin: String
+  let deadline: Date
+  let candidates: [CopilotSuggestionCandidate]
+  let existingRules: [String]
+  let topics: [CopilotTriageTopic]
+  let reasoningEffort: String?
+  let contextTier: String?
+
+  init(accountID: AccountID, organizationID: OrganizationID, viewerLogin: String, candidates: [CopilotSuggestionCandidate], existingRules: [String], topics: [CopilotTriageTopic], modelID: String? = nil, deadline: Date, reasoningEffort: String? = nil, contextTier: String? = nil, requestID: UUID = UUID()) {
+    header = .init(accountID: accountID, organizationID: organizationID, operation: .suggestRules, requestID: requestID)
+    self.modelID = modelID; self.viewerLogin = viewerLogin; self.deadline = deadline; self.candidates = candidates
+    self.existingRules = existingRules; self.topics = topics; self.reasoningEffort = reasoningEffort; self.contextTier = contextTier
+  }
+
+  init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CopilotWireCodingKey.self)
+    header = try .init(container: c)
+    modelID = try c.decodeIfPresent(String.self, forKey: .modelID)
+    viewerLogin = try c.decode(String.self, forKey: .viewerLogin)
+    deadline = try c.decode(Date.self, forKey: .deadline)
+    candidates = try c.decode([CopilotSuggestionCandidate].self, forKey: .candidates)
+    existingRules = try c.decodeIfPresent([String].self, forKey: .existingRules) ?? []
+    topics = try c.decodeIfPresent([CopilotTriageTopic].self, forKey: .topics) ?? []
+    reasoningEffort = try c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    contextTier = try c.decodeIfPresent(String.self, forKey: .contextTier)
+  }
+
+  func encode(to encoder: any Encoder) throws {
+    var c = encoder.container(keyedBy: CopilotWireCodingKey.self)
+    try header.encode(to: &c)
+    try c.encodeIfPresent(modelID, forKey: .modelID)
+    try c.encode(viewerLogin, forKey: .viewerLogin)
+    try c.encode(deadline, forKey: .deadline)
+    try c.encode(candidates, forKey: .candidates)
+    if !existingRules.isEmpty { try c.encode(existingRules, forKey: .existingRules) }
+    if !topics.isEmpty { try c.encode(topics, forKey: .topics) }
+    try c.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+    try c.encodeIfPresent(contextTier, forKey: .contextTier)
+  }
+
+  func validate() throws {
+    guard header.operation == .suggestRules, !viewerLogin.isEmpty,
+      (1...Self.maximumCandidates).contains(candidates.count), Set(candidates.map(\.id)).count == candidates.count,
+      candidates.allSatisfy({ !$0.id.isEmpty && !$0.id.contains(where: \.isWhitespace) && !$0.query.isEmpty && $0.query.utf8.count <= 300 && $0.dismissive <= $0.total && $0.examples.count <= 3 && $0.outcomes.count <= 10 }),
+      existingRules.count <= TriageRules.maximumRules, existingRules.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 400 }),
+      topics.count <= TriageTopic.maximumCount,
+      CopilotModelChoice.isValidReasoningEffort(reasoningEffort), CopilotModelChoice.isValidContextTier(contextTier)
+    else { throw CopilotXPCError.invalidResponse }
+    guard try JSONEncoder().encode(self).count <= 64 * 1024 else { throw CopilotXPCError.invalidResponse }
+  }
+}
+
+struct CopilotRuleSuggestion: Codable, Equatable, Sendable {
+  let candidateID: String
+  let query: String
+  let action: String
+  let name: String
+  let rationale: String
+  enum CodingKeys: String, CodingKey { case query, action, name, rationale; case candidateID = "candidate_id" }
+}
+
+struct CopilotSuggestRulesResponse: Codable, Equatable, Sendable {
+  static let maximumSuggestions = 5
+  let header: CopilotResponseHeader
+  let modelID: String
+  let suggestions: [CopilotRuleSuggestion]
+
+  init(header: CopilotResponseHeader, modelID: String, suggestions: [CopilotRuleSuggestion]) {
+    self.header = header; self.modelID = modelID; self.suggestions = suggestions
+  }
+
+  init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CopilotWireCodingKey.self)
+    header = try .init(container: c)
+    modelID = try c.decode(String.self, forKey: .modelID)
+    suggestions = try c.decode([CopilotRuleSuggestion].self, forKey: .suggestions)
+  }
+
+  func encode(to encoder: any Encoder) throws {
+    var c = encoder.container(keyedBy: CopilotWireCodingKey.self)
+    try header.encode(to: &c)
+    try c.encode(modelID, forKey: .modelID)
+    try c.encode(suggestions, forKey: .suggestions)
   }
 }

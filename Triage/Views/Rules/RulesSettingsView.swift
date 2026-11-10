@@ -9,6 +9,7 @@ struct RulesSettingsView: View {
     @State private var editingRule: RuleDraft?
     @State private var editingTopic: TriageTopic?
     @State private var isConfirmingClear = false
+    @State private var editingSuggestion: RuleSuggestion?
     @Environment(\.triageViewerLogin) private var viewer
 
     private static let examples = [
@@ -21,6 +22,7 @@ struct RulesSettingsView: View {
     var body: some View {
         Form {
             if appModel.selectedOrganization != nil {
+                suggestionsSection
                 rulesSection
                 topicsSection
                 instructionsSection
@@ -36,6 +38,12 @@ struct RulesSettingsView: View {
         .onChange(of: appModel.selectedOrganizationID) { instructions = appModel.rules.instructions }
         .onChange(of: appModel.rules.instructions) { _, saved in
             if instructions != saved, !hasUnsavedInstructions { instructions = saved }
+        }
+        .sheet(item: $editingSuggestion) { suggestion in
+            RuleEditorSheet(
+                draft: RuleDraft(rule: suggestion.rule, context: suggestion.rationale),
+                entries: appModel.presentation.allEntries, topics: appModel.rules.topics
+            ) { appModel.acceptSuggestion(suggestion, edited: $0) }
         }
         .sheet(item: $editingTopic) { topic in
             TopicEditorSheet(topic: topic, isNew: !appModel.rules.topics.contains { $0.id == topic.id }, existing: appModel.rules.topics) { updated in
@@ -233,6 +241,54 @@ struct RulesSettingsView: View {
         appModel.saveRules(rules)
     }
 
+    // MARK: Suggestions
+
+    @ViewBuilder
+    private var suggestionsSection: some View {
+        Section {
+            switch appModel.suggestions {
+            case .idle:
+                HStack(alignment: .firstTextBaseline) {
+                    Text(appModel.suggestionCandidates.isEmpty
+                         ? "As you use Triage, it notices work you keep setting aside and can suggest rules for it."
+                         : "Triage noticed \(appModel.suggestionCandidates.count) pattern\(appModel.suggestionCandidates.count == 1 ? "" : "s") in how you handle work.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Suggest Rules") { appModel.requestSuggestions() }
+                        .disabled(appModel.suggestionCandidates.isEmpty)
+                }
+            case .loading:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Asking Copilot for rules…").foregroundStyle(.secondary)
+                }
+            case .failed(let message):
+                HStack(alignment: .firstTextBaseline) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Spacer()
+                    Button("Try Again") { appModel.requestSuggestions() }
+                }
+            case .loaded(let suggestions):
+                if suggestions.isEmpty {
+                    Text("No suggestions right now. Triage will keep watching.").foregroundStyle(.secondary)
+                }
+                ForEach(suggestions) { suggestion in
+                    SuggestionRow(suggestion: suggestion, entries: appModel.presentation.allEntries) {
+                        appModel.acceptSuggestion(suggestion)
+                    } edit: {
+                        editingSuggestion = suggestion
+                    } dismiss: {
+                        appModel.dismissSuggestion(suggestion)
+                    }
+                }
+            }
+        } header: {
+            Text("Suggestions")
+        } footer: {
+            Text("Suggestions come from how you've handled work in the last 90 days. Nothing changes until you add one.")
+        }
+    }
+
     // MARK: Topics
 
     private var topicsSection: some View {
@@ -425,5 +481,42 @@ struct TopicEditorSheet: View {
             .padding(20)
         }
         .frame(width: 480, height: 300)
+    }
+}
+
+/// One suggested rule: what it does, why, and what it would match now.
+private struct SuggestionRow: View {
+    let suggestion: RuleSuggestion
+    let entries: [TriageEntry]
+    let add: () -> Void
+    let edit: () -> Void
+    let dismiss: () -> Void
+    @Environment(\.triageViewerLogin) private var viewer
+
+    var body: some View {
+        let matches = entries.filter { suggestion.rule.matches($0, viewer: viewer) }.count
+        VStack(alignment: .leading, spacing: 6) {
+            Label {
+                Text(suggestion.rule.displayName).fontWeight(.medium)
+            } icon: {
+                Image(systemName: suggestion.rule.action.systemImage).foregroundStyle(Color.accentColor)
+            }
+            Text("When \(suggestion.rule.query.description) → \(suggestion.rule.action.title.lowercased())")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            Text(suggestion.rationale).font(.callout)
+            Text("\(suggestion.candidate.evidence) Matches \(matches) current item\(matches == 1 ? "" : "s").")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Add Rule", action: add).buttonStyle(.borderedProminent)
+                Button("Edit…", action: edit)
+                Spacer()
+                Button("Don't Suggest This", action: dismiss).buttonStyle(.link)
+            }
+            .padding(.top, 2)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
     }
 }

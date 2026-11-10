@@ -27,6 +27,9 @@ struct TriageRules: Codable, Equatable, Sendable {
     var topics: [TriageTopic] = []
     /// Changed by "Re-analyze All" to make every decision stale.
     var reanalysisToken = ""
+    /// Rule-suggestion groups the user dismissed, by query; never suggested again.
+    var dismissedSuggestions: [String] = []
+    static let maximumDismissedSuggestions = 200
 
     init(instructions: String, rules: [TriageRule], topics: [TriageTopic] = [], reanalysisToken: String = "") {
         self.instructions = instructions
@@ -41,6 +44,7 @@ struct TriageRules: Codable, Equatable, Sendable {
         // Rules that can't be read (or migrated) are dropped, never the whole set.
         rules = try container.decode([LossyRule].self, forKey: .rules).compactMap(\.rule)
         topics = try container.decodeIfPresent([TriageTopic].self, forKey: .topics) ?? []
+        dismissedSuggestions = try container.decodeIfPresent([String].self, forKey: .dismissedSuggestions) ?? []
         reanalysisToken = try container.decodeIfPresent(String.self, forKey: .reanalysisToken) ?? ""
     }
 

@@ -241,6 +241,8 @@ final class CopilotHelperProcess: CopilotHelperProcessing {
       case "triage": .seconds(150)
       // One reply for one item; reasoning models can take a while.
       case "draft": .seconds(120)
+      // One model call over summarized feedback.
+      case "suggest_rules": .seconds(150)
       default: Self.maximumRuntime
       }
     timeout.schedule(deadline: .now() + maximumRuntime)

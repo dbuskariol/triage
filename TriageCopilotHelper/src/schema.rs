@@ -476,8 +476,201 @@ pub fn retain_valid_triage_outputs(
     Ok(valid)
 }
 
+// MARK: Rule suggestions
+
+/// A group of similar work the user keeps handling the same way, mined
+/// locally from their feedback.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionCandidate {
+    pub id: String,
+    /// The filter that selects this group, in Triage's query language.
+    pub query: String,
+    pub total: u32,
+    pub dismissive: u32,
+    pub outcomes: Vec<SuggestionOutcome>,
+    pub examples: Vec<SuggestionExample>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionOutcome {
+    pub kind: String,
+    pub count: u32,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestionExample {
+    pub repository: String,
+    pub title: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub signals: Vec<String>,
+}
+/// Model output: unknown fields are ignored.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuleSuggestion {
+    pub candidate_id: String,
+    pub query: String,
+    pub action: String,
+    pub name: String,
+    pub rationale: String,
+}
+
+pub const MAX_SUGGESTION_CANDIDATES: usize = 20;
+pub const MAX_RULE_SUGGESTIONS: usize = 5;
+pub const MAX_QUERY_BYTES: usize = 300;
+const RULE_ACTIONS: &[&str] = &[
+    "exclude",
+    "route:needsAction",
+    "route:inbox",
+    "route:waiting",
+    "route:noAction",
+    "rank:higher:small",
+    "rank:higher:medium",
+    "rank:higher:large",
+    "rank:lower:small",
+    "rank:lower:medium",
+    "rank:lower:large",
+];
+
+pub fn validate_suggestion_inputs(
+    viewer_login: &str,
+    candidates: &[SuggestionCandidate],
+    existing_rules: &[String],
+    topics: &[TriageTopic],
+) -> Result<(), ValidationError> {
+    validate_identifier(viewer_login, "viewer_login")?;
+    let invalid = || ValidationError::new("suggestion request is invalid");
+    if !(1..=MAX_SUGGESTION_CANDIDATES).contains(&candidates.len()) || existing_rules.len() > 100 {
+        return Err(invalid());
+    }
+    let mut ids = HashSet::new();
+    for candidate in candidates {
+        validate_identifier(&candidate.id, "candidate.id")?;
+        validate_text(&candidate.query, MAX_QUERY_BYTES, "candidate.query")?;
+        if !ids.insert(candidate.id.as_str())
+            || candidate.dismissive > candidate.total
+            || candidate.outcomes.len() > 10
+            || candidate
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.kind.is_empty() || outcome.kind.len() > 32)
+            || candidate.examples.len() > 3
+            || candidate.examples.iter().any(|example| {
+                example.repository.is_empty()
+                    || example.repository.len() > 200
+                    || example.title.len() > 200
+                    || example.labels.len() > 5
+                    || example.labels.iter().any(|label| label.len() > 100)
+                    || example.signals.len() > MAX_SIGNALS
+            })
+        {
+            return Err(invalid());
+        }
+    }
+    if existing_rules
+        .iter()
+        .any(|rule| rule.is_empty() || rule.len() > 400)
+    {
+        return Err(invalid());
+    }
+    validate_triage_topics(topics)
+}
+
+/// Parses model output leniently, keeping only suggestions for known
+/// candidates with a known action and bounded text.
+pub fn parse_rule_suggestions(
+    content: &str,
+    candidates: &[SuggestionCandidate],
+) -> Option<Vec<RuleSuggestion>> {
+    #[derive(Deserialize)]
+    struct Wrapper {
+        suggestions: Vec<RuleSuggestion>,
+    }
+    let trimmed = content.trim();
+    let start = trimmed.find(['[', '{'])?;
+    let body = &trimmed[start..];
+    let parsed = serde_json::from_str::<Vec<RuleSuggestion>>(body)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<Wrapper>(body)
+                .ok()
+                .map(|wrapper| wrapper.suggestions)
+        })
+        .or_else(|| {
+            let end = body.rfind(']')?;
+            serde_json::from_str::<Vec<RuleSuggestion>>(&body[..=end]).ok()
+        })?;
+    let known: HashSet<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    Some(
+        parsed
+            .into_iter()
+            .filter_map(|mut suggestion| {
+                suggestion.candidate_id = suggestion.candidate_id.trim().to_owned();
+                suggestion.query = suggestion.query.trim().to_owned();
+                suggestion.action = suggestion.action.trim().to_owned();
+                suggestion.name = clamp_text(suggestion.name.trim(), 60);
+                suggestion.rationale = clamp_text(suggestion.rationale.trim(), 280);
+                let usable = known.contains(suggestion.candidate_id.as_str())
+                    && !suggestion.query.is_empty()
+                    && suggestion.query.len() <= MAX_QUERY_BYTES
+                    && RULE_ACTIONS.contains(&suggestion.action.as_str())
+                    && !suggestion.name.is_empty()
+                    && !suggestion.rationale.is_empty()
+                    && seen.insert((suggestion.query.clone(), suggestion.action.clone()));
+                usable.then_some(suggestion)
+            })
+            .take(MAX_RULE_SUGGESTIONS)
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod triage_contract_tests {
+    #[test]
+    fn rule_suggestions_keep_only_known_candidates_and_actions() {
+        let candidate = |id: &str| super::SuggestionCandidate {
+            id: id.into(),
+            query: "author:dependabot[bot]".into(),
+            total: 12,
+            dismissive: 11,
+            outcomes: vec![super::SuggestionOutcome {
+                kind: "doneUnopened".into(),
+                count: 11,
+            }],
+            examples: vec![],
+        };
+        let candidates = [candidate("c1"), candidate("c2")];
+        let content = r#"Here you go: {"suggestions":[
+            {"candidate_id":"c1","query":"author:dependabot[bot] -status:failing","action":"exclude","name":"Hide passing bot updates","rationale":"You marked 11 of 12 done without opening them.","extra":1},
+            {"candidate_id":"c1","query":"author:dependabot[bot] -status:failing","action":"exclude","name":"Duplicate","rationale":"Same."},
+            {"candidate_id":"nope","query":"x","action":"exclude","name":"n","rationale":"r"},
+            {"candidate_id":"c2","query":"is:team","action":"delete everything","name":"n","rationale":"r"},
+            {"candidate_id":"c2","query":"is:team","action":"rank:lower:medium","name":"Team reviews lower","rationale":"r"}
+        ]}"#;
+        let suggestions = super::parse_rule_suggestions(content, &candidates).expect("parsed");
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0].action, "exclude");
+        assert_eq!(suggestions[1].action, "rank:lower:medium");
+        assert!(super::parse_rule_suggestions("no json", &candidates).is_none());
+        assert!(super::validate_suggestion_inputs("me", &candidates, &[], &[]).is_ok());
+        assert!(super::validate_suggestion_inputs("me", &[], &[], &[]).is_err());
+        let mut lying = candidate("c3");
+        lying.dismissive = 13;
+        assert!(super::validate_suggestion_inputs("me", &[lying], &[], &[]).is_err());
+        assert!(
+            super::validate_suggestion_inputs("me", &[candidate("c1"), candidate("c1")], &[], &[])
+                .is_err()
+        );
+    }
+
     #[test]
     fn signals_and_topics_are_normalized_and_bounded() {
         let content = r#"[{"id":"A","disposition":"act","priority":50,"confidence":0.5,"summary":"s","reason":"r",

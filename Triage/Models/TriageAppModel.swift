@@ -88,6 +88,9 @@ final class TriageAppModel: ObservableObject {
     }
     /// Feedback events kept for rule suggestions in the selected organization.
     @Published private(set) var feedbackCount = 0
+    /// Groups of work the user keeps setting aside, found locally.
+    @Published private(set) var suggestionCandidates: [RuleSuggestionCandidate] = []
+    @Published private(set) var suggestions = SuggestionsState.idle
     private var lastIgnoredScan = Date.distantPast
     /// Local status changes shown immediately, before the store confirms them.
     private var optimistic = OptimisticChanges()
@@ -903,9 +906,10 @@ extension TriageAppModel {
         let cutoff = Date.now.addingTimeInterval(-TriageFeedback.retention)
         do {
             if prune { try await store.pruneFeedback(before: cutoff, scope: scope) }
-            let count = try await store.feedback(since: cutoff, scope: scope).count
+            let events = try await store.feedback(since: cutoff, scope: scope)
             guard selectedScope == scope else { return }
-            feedbackCount = count
+            feedbackCount = events.count
+            suggestionCandidates = RuleSuggestionMiner.candidates(from: events, rules: rules, dismissed: Set(rules.dismissedSuggestions))
         } catch {
             Self.logger.error("feedback load failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
         }
@@ -914,6 +918,8 @@ extension TriageAppModel {
     func clearFeedback() {
         guard let runtime else { return }
         feedbackCount = 0
+        suggestionCandidates = []
+        suggestions = .idle
         Task {
             do {
                 try await runtime.value.store.clearFeedback(scope: runtime.scope)
@@ -921,6 +927,85 @@ extension TriageAppModel {
                 Self.logger.error("feedback clear failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
             }
         }
+    }
+}
+
+// MARK: Rule suggestions
+
+enum SuggestionsState: Equatable {
+    case idle
+    case loading
+    case loaded([RuleSuggestion])
+    case failed(String)
+}
+
+extension TriageAppModel {
+    /// A strong pattern worth mentioning in the Weekly Review, at most weekly.
+    var reviewSuggestionHint: RuleSuggestionCandidate? {
+        guard let candidate = suggestionCandidates.first(where: \.isStrong) else { return nil }
+        let last = defaults.object(forKey: TriagePreferenceKeys.lastSuggestionHint) as? Date ?? .distantPast
+        let shownKey = defaults.string(forKey: TriagePreferenceKeys.lastSuggestionHintKey)
+        // Keep showing the same hint through its week; a new one waits a week.
+        guard shownKey == candidate.key || Date.now.timeIntervalSince(last) >= 7 * 86_400 else { return nil }
+        return candidate
+    }
+
+    func noteSuggestionHintShown(_ candidate: RuleSuggestionCandidate) {
+        guard defaults.string(forKey: TriagePreferenceKeys.lastSuggestionHintKey) != candidate.key else { return }
+        defaults.set(Date.now, forKey: TriagePreferenceKeys.lastSuggestionHint)
+        defaults.set(candidate.key, forKey: TriagePreferenceKeys.lastSuggestionHintKey)
+    }
+
+    /// Asks Copilot to propose rules for the local candidates. Nothing is
+    /// applied until the user adds a suggestion.
+    func requestSuggestions() {
+        guard let runtime, suggestions != .loading else { return }
+        guard !suggestionCandidates.isEmpty else {
+            suggestions = .loaded([])
+            return
+        }
+        suggestions = .loading
+        let candidates = suggestionCandidates, rules = rules, scope = runtime.scope
+        Task {
+            do {
+                let result = try await dependencies.suggestRules(scope, candidates, rules)
+                guard self.runtime?.scope == scope else { return }
+                suggestions = .loaded(RuleSuggestion.validated(
+                    result.suggestions, candidates: result.candidates, rules: self.rules,
+                    entries: presentation.allEntries, viewer: scope.viewerLogin
+                ))
+            } catch let error as any TriageAvailabilityError {
+                suggestions = .failed(error.userMessage)
+            } catch {
+                Self.logger.error("suggestions failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+                suggestions = .failed("Copilot couldn't suggest rules right now. Try again shortly.")
+            }
+        }
+    }
+
+    func acceptSuggestion(_ suggestion: RuleSuggestion, edited: TriageRule? = nil) {
+        addRule(edited ?? suggestion.rule)
+        removeSuggestion(suggestion)
+    }
+
+    /// Never suggests this group again.
+    func dismissSuggestion(_ suggestion: RuleSuggestion) {
+        dismissCandidate(suggestion.candidate)
+        removeSuggestion(suggestion)
+    }
+
+    func dismissCandidate(_ candidate: RuleSuggestionCandidate) {
+        var updated = rules
+        updated.dismissedSuggestions = Array((updated.dismissedSuggestions + [candidate.key]).suffix(TriageRules.maximumDismissedSuggestions))
+        saveRules(updated)
+        suggestionCandidates.removeAll { $0.key == candidate.key }
+    }
+
+    private func removeSuggestion(_ suggestion: RuleSuggestion) {
+        if case .loaded(let current) = suggestions {
+            suggestions = .loaded(current.filter { $0.candidate.key != suggestion.candidate.key })
+        }
+        suggestionCandidates.removeAll { $0.key == suggestion.candidate.key }
     }
 }
 
@@ -1129,6 +1214,8 @@ extension TriageAppModel: WorkspaceActions {
         let changed = entries.filter { $0.isUnread == isRead }
         guard !changed.isEmpty else { return }
         let date: Date? = isRead ? .now : nil
+        // Reading one item is engagement; bulk "mark read" says nothing.
+        if isRead, changed.count == 1 { recordFeedback(changed.map { .item(.opened, $0, viewer: viewerLogin, at: .now) }) }
         changed.forEach { optimistic.setRead(date, for: $0.id) }
         publishPresentation()
         let ids = changed.map(\.id)
