@@ -100,7 +100,9 @@ struct TriageRules: Codable, Equatable, Sendable {
             decidedAt: decision.decidedAt, rulesDigest: decision.rulesDigest,
             instructionNote: decision.instructionNote,
             handled: decision.handled, handledEvidence: decision.handledEvidence,
-            effort: decision.effort
+            effort: decision.effort,
+            signals: decision.signals,
+            topics: decision.topics
         )
         return result
     }

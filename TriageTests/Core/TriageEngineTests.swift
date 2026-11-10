@@ -397,6 +397,9 @@ actor MemoryStore: TriageStore {
     func localStatus(_ id: String) -> LocalStatus? { local[GitHubNodeID(rawValue: id)!] }
     func seedDecision(_ decision: TriageDecision) { decisions[decision.itemID] = decision }
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws { savedRules = rules }
+    private var searches: [SavedSearch] = []
+    func savedSearches(scope: WorkspaceScope) async throws -> [SavedSearch] { searches }
+    func saveSavedSearches(_ searches: [SavedSearch], scope: WorkspaceScope) async throws { self.searches = searches }
 
     func decidedCount() -> Int { decisions.count }
     func failureCount() -> Int { failures.count }

@@ -127,8 +127,9 @@ struct SavedSearch: Codable, Equatable, Identifiable, Sendable {
     var search: WorkspaceSearch
 }
 
-/// Saved searches for one organization, kept in user defaults.
-struct SavedSearchStore: Sendable {
+/// Saved searches from versions that kept them in user defaults. Read once,
+/// imported into the vault, then removed.
+struct LegacySavedSearchStore: Sendable {
     let organizationID: OrganizationID
 
     private var key: String { "savedSearches.\(organizationID.rawValue)" }
@@ -140,6 +141,10 @@ struct SavedSearchStore: Sendable {
 
     func save(_ searches: [SavedSearch], defaults: UserDefaults = .triage) {
         defaults.set(try? JSONEncoder().encode(searches), forKey: key)
+    }
+
+    func remove(defaults: UserDefaults = .triage) {
+        defaults.removeObject(forKey: key)
     }
 }
 

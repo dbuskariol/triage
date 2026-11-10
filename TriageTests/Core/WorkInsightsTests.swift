@@ -118,14 +118,17 @@ struct WorkInsightsTests {
         #expect(review.byRepository.first?.repository == "octo/widgets")
     }
 
-    @Test func savedSearchesRoundTripPerOrganization() throws {
+    @Test func legacySavedSearchesReadPerOrganizationAndRemove() throws {
         let defaults = try #require(UserDefaults(suiteName: "WorkInsightsTests-\(UUID())"))
         let organization = try #require(OrganizationID(rawValue: "O_1"))
         let other = try #require(OrganizationID(rawValue: "O_2"))
         let saved = SavedSearch(name: "Security", search: WorkspaceSearch(text: "label:security", tokens: [SearchToken(kind: .repo, value: "widgets")]))
-        SavedSearchStore(organizationID: organization).save([saved], defaults: defaults)
-        #expect(SavedSearchStore(organizationID: organization).load(defaults: defaults) == [saved])
-        #expect(SavedSearchStore(organizationID: other).load(defaults: defaults).isEmpty)
+        LegacySavedSearchStore(organizationID: organization).save([saved], defaults: defaults)
+        #expect(LegacySavedSearchStore(organizationID: organization).load(defaults: defaults) == [saved])
+        #expect(LegacySavedSearchStore(organizationID: other).load(defaults: defaults).isEmpty)
+        #expect(saved.search.canonicalQueryText == "repo:widgets label:security")
+        LegacySavedSearchStore(organizationID: organization).remove(defaults: defaults)
+        #expect(LegacySavedSearchStore(organizationID: organization).load(defaults: defaults).isEmpty)
     }
 
     @Test func savedSearchRefinesAcrossAllWork() {

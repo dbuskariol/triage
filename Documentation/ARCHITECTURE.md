@@ -58,13 +58,17 @@ A decision is current only when both match:
 
 Stale items keep their previous decision and section while Copilot re-checks them, so the Inbox never flickers. They also appear in **Analyzing**.
 
+## Query language
+
+`TriageQuery` (`Triage/Core/Query`) is the one filter language for search, saved searches, and rules: GitHub-style qualifiers, implicit AND, `OR`, parentheses, `-` negation, quoted phrases, and `@me`. `TriageQueryParser` reports specific, positioned errors with suggestions; the printer emits canonical text, which is what is stored (`parse(print(q)) == q`). Each query has a phase — `facts` (GitHub facts only), `local` (read state), or `ai` (signals, Topics, priority, effort, disposition) — so callers know whether it can be evaluated before Copilot decides. Search chips are qualifiers, and a search compiles chips and typed text into one query; an invalid search matches nothing.
+
 ## Rules
 
 Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. The first matching rule with a disposition effect wins (*Always Inbox* never downgrades *Needs Action*); priority adjustments accumulate (±25 each, clamped 0–100). *Mute* moves items to the Muted section and the engine never sends them to Copilot. Matching rules are also sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome.
 
 ## Workspace navigation
 
-`WorkspaceDestination` is the sidebar selection: a list `Section`, a saved search, the Briefing, or the Weekly Review. Lists pair with the detail column in a resizable split; the Briefing and Review are full-width dashboards whose items open in their list (`show(_:)`). Destination changes are recorded for Back and Forward. `WorkspaceBriefing` and `WorkspaceReview` are pure values derived from the same `WorkspacePresentation` as the lists, and `WorkInsights` holds the shared derivations (references between items, waiting times, follow-ups, done dates, grouping). Saved searches are stored per organization in user defaults.
+`WorkspaceDestination` is the sidebar selection: a list `Section`, a saved search, the Briefing, or the Weekly Review. Lists pair with the detail column in a resizable split; the Briefing and Review are full-width dashboards whose items open in their list (`show(_:)`). Destination changes are recorded for Back and Forward. `WorkspaceBriefing` and `WorkspaceReview` are pure values derived from the same `WorkspacePresentation` as the lists, and `WorkInsights` holds the shared derivations (references between items, waiting times, follow-ups, done dates, grouping). Saved searches are stored per account and organization in the encrypted vault (`triage_saved_searches`) as canonical query text; searches that earlier versions kept in user defaults are imported once and removed.
 
 ## Notifications
 

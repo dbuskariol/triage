@@ -18,6 +18,22 @@ final class GRDBTriageStoreTests: XCTestCase {
         XCTAssertEqual(replacement.map(\.id), [first.id])
     }
 
+    func testSavedSearchesPersistInOrderWithCanonicalQueries() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let first = SavedSearch(name: "Failing", search: WorkspaceSearch(text: "STATUS:failing  is:review", scope: .all))
+        let second = SavedSearch(name: "Bots", search: WorkspaceSearch(tokens: [SearchToken(kind: .author, value: "dependabot[bot]")]))
+        try await fixture.store.saveSavedSearches([second, first], scope: fixture.scope)
+        let loaded = try await fixture.store.savedSearches(scope: fixture.scope)
+        XCTAssertEqual(loaded.map(\.id), [second.id, first.id])
+        XCTAssertEqual(loaded.map(\.search.text), ["author:dependabot[bot]", "status:failing is:review"])
+        XCTAssertEqual(loaded.map(\.search.scope), [.all, .all])
+
+        try await fixture.store.saveSavedSearches([first], scope: fixture.scope)
+        let remaining = try await fixture.store.savedSearches(scope: fixture.scope)
+        XCTAssertEqual(remaining.map(\.name), ["Failing"])
+    }
+
     func testDecisionFailureAndLocalStateFollowCurrentFingerprint() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

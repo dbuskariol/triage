@@ -54,6 +54,16 @@ struct WorkspaceSearchTests {
         #expect(results(WorkspaceSearch(text: "team:core")) == ["T"])
         #expect(results(WorkspaceSearch(text: "review", tokens: [SearchToken(kind: .repo, value: "widgets")])) == ["T", "D"])
         #expect(results(WorkspaceSearch(text: "unknown:thing review")).isEmpty)
+        #expect(results(WorkspaceSearch(tokens: [SearchToken(kind: .is, value: "action")])) == ["D"])
+        #expect(results(WorkspaceSearch(text: "is:team OR author:bob")) == ["T", "D"])
+        #expect(results(WorkspaceSearch(text: "-is:team")) == ["D"])
+    }
+
+    @Test func errorsAreHiddenWhileTypingTheLastWord() {
+        #expect(WorkspaceSearch(text: "status:").error != nil)
+        #expect(WorkspaceSearch(text: "status:").visibleError == nil)
+        #expect(WorkspaceSearch(text: "stauts:failing ").visibleError?.message.contains("status:") == true)
+        #expect(WorkspaceSearch(text: "stauts:failing is:pr").visibleError != nil)
     }
 
     @Test func suggestionsOfferMatchingValuesAndCommonFilters() {
@@ -61,7 +71,8 @@ struct WorkspaceSearchTests {
         #expect(!WorkspaceSearch(text: "").suggestions(from: entries).isEmpty)
         #expect(WorkspaceSearch(text: "wid").suggestions(from: entries).contains(SearchToken(kind: .repo, value: "widgets")))
         #expect(WorkspaceSearch(text: "label:sec").suggestions(from: entries) == [SearchToken(kind: .label, value: "security")])
-        #expect(WorkspaceSearch(text: "status:").suggestions(from: entries).count == 4)
+        #expect(WorkspaceSearch(text: "status:").suggestions(from: entries).count == 7)
+        #expect(WorkspaceSearch(text: "-label:sec").suggestions(from: entries) == [SearchToken(kind: .label, value: "security")])
         #expect(WorkspaceSearch(text: "fix wid").textWithoutLastWord == "fix ")
     }
 }

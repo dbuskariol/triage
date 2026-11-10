@@ -70,6 +70,13 @@ struct WorkspaceSearchBar: View {
                         }
                     }
                 }
+                if let error = search.visibleError {
+                    Label(error.message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Search problem: \(error.message)")
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -80,7 +87,7 @@ struct WorkspaceSearchBar: View {
     /// Every filter, grouped like GitHub's, plus values from current work.
     private var filterMenu: some View {
         Menu {
-            ForEach([SearchToken.Kind.is, .status, .priority, .effort], id: \.self) { kind in
+            ForEach([SearchToken.Kind.in, .is, .status, .priority, .effort], id: \.self) { kind in
                 Section(Self.sectionTitle(kind)) {
                     ForEach(SearchToken.knownValues[kind] ?? [], id: \.0) { value, title in
                         toggle(SearchToken(kind: kind, value: value), title: title)
@@ -88,7 +95,7 @@ struct WorkspaceSearchBar: View {
                 }
             }
             Divider()
-            ForEach([SearchToken.Kind.repo, .author, .label, .team], id: \.self) { kind in
+            ForEach(WorkspaceSearch.dynamicKinds, id: \.self) { kind in
                 let values = topValues(kind)
                 if !values.isEmpty {
                     Menu(Self.sectionTitle(kind)) {
@@ -126,32 +133,13 @@ struct WorkspaceSearchBar: View {
     private func topValues(_ kind: SearchToken.Kind) -> [String] {
         var counts: [String: Int] = [:]
         for entry in suggestionSource {
-            let item = entry.item
-            let values: [String] = switch kind {
-            case .repo: [item.repository.split(separator: "/").last.map(String.init) ?? item.repository]
-            case .author: item.author.map { [$0] } ?? []
-            case .label: item.labels
-            case .team: (item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }
-            default: []
-            }
-            for value in values { counts[value, default: 0] += 1 }
+            for value in WorkspaceSearch.values(of: kind, in: entry.item) { counts[value, default: 0] += 1 }
         }
         return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             .prefix(15).map(\.key)
     }
 
-    private static func sectionTitle(_ kind: SearchToken.Kind) -> String {
-        switch kind {
-        case .is: "Type and relationship"
-        case .status: "Pull request status"
-        case .priority: "Priority"
-        case .effort: "Effort"
-        case .repo: "Repository"
-        case .author: "Author"
-        case .label: "Label"
-        case .team: "Requested team"
-        }
-    }
+    private static func sectionTitle(_ kind: SearchToken.Kind) -> String { kind.title }
 
     private func appliedChip(_ token: SearchToken) -> some View {
         Button {

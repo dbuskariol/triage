@@ -302,6 +302,10 @@ struct TriageDecision: Codable, Equatable, Sendable {
     var handled: HandledState? = nil
     var handledEvidence: String? = nil
     var effort: TriageEffort? = nil
+    /// Copilot-detected signals from the fixed taxonomy.
+    var signals: [String]? = nil
+    /// Names of the user's Topics this item matches.
+    var topics: [String]? = nil
 }
 
 struct TriageHandledContext: Equatable, Sendable {
@@ -517,6 +521,10 @@ protocol TriageStore: Sendable {
         _ item: PersonalWorkItem, viewer: String, evidence: String, at date: Date, scope: WorkspaceScope
     ) async throws -> Bool
     func saveRules(_ rules: TriageRules, scope: WorkspaceScope) async throws
+    /// Saved searches in sidebar order.
+    func savedSearches(scope: WorkspaceScope) async throws -> [SavedSearch]
+    /// Replaces every saved search for `scope`, keeping the given order.
+    func saveSavedSearches(_ searches: [SavedSearch], scope: WorkspaceScope) async throws
 }
 
 /// Makes Copilot triage decisions for one batch of items.

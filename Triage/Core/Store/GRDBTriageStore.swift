@@ -423,6 +423,46 @@ actor GRDBTriageStore: TriageStore {
         Self.logger.notice("rules saved rules=\(rules.rules.count, privacy: .public) hasInstructions=\(rules.trimmedInstructions != nil, privacy: .public)")
     }
 
+    func savedSearches(scope: WorkspaceScope) async throws -> [SavedSearch] {
+        try await validate(scope)
+        return try await vault.read { database in
+            try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, name, query FROM triage_saved_searches
+                    WHERE account_id = ? AND organization_id = ? ORDER BY position
+                    """,
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            ).compactMap { row in
+                guard let id = UUID(uuidString: row["id"]) else { return nil }
+                return SavedSearch(id: id, name: row["name"], search: WorkspaceSearch(text: row["query"], scope: .all))
+            }
+        }
+    }
+
+    func saveSavedSearches(_ searches: [SavedSearch], scope: WorkspaceScope) async throws {
+        try await validate(scope)
+        let now = Self.milliseconds(Date())
+        try await vault.writeTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM triage_saved_searches WHERE account_id = ? AND organization_id = ?",
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue]
+            )
+            for (position, saved) in searches.enumerated() {
+                try database.execute(
+                    sql: """
+                        INSERT INTO triage_saved_searches (account_id, organization_id, id, name, query, position, updated_at_ms)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        scope.accountID.rawValue, scope.organizationID.rawValue, saved.id.uuidString,
+                        saved.name, saved.search.canonicalQueryText, position, now,
+                    ]
+                )
+            }
+        }
+    }
+
     private func validate(_ scope: WorkspaceScope) async throws {
         guard scope.accountID == vault.accountID else { throw GRDBTriageStoreError.invalidScope }
     }

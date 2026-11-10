@@ -77,9 +77,18 @@ Focus (⇧⌘F, or the target button above the list) shows one item at a time fr
 
 ### Search
 
-The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, people, labels, and Copilot's notes, or use GitHub-style filters:
+The search field at the top of the list filters instantly (⌘F). Type words to match titles, descriptions, comments, people, labels, and Copilot's notes, or use GitHub-style filters. Search, saved searches, and rules share one filter language:
 
-`repo:` `author:` `label:` `team:` · `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:action` `is:unread` `is:read` · `status:conflicts` `status:failing` `status:approved` `status:changes` · `priority:high` · `effort:quick` `effort:short` `effort:deep`
+| Filters | Examples |
+|---|---|
+| Places and people | `repo:acme/*` `author:dependabot[bot]` `assignee:@me` `commenter:github-actions[bot]` `reviewer:alice` `team:acme/core` `label:security` |
+| Type and relationship | `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:unread` `is:read` |
+| Pull request status | `status:failing` `status:required-failing` `status:passing` `status:pending` `status:conflicts` `status:approved` `status:changes` |
+| Text | `title:release` `body:"approval required"` `comment:"approval required"` |
+| Time and size | `updated:>14d` `created:<2w` `size:>500` |
+| Copilot | `in:action` `in:inbox` `in:waiting` `in:none` `priority:high` `priority:>70` `effort:quick` |
+
+Combine filters with spaces (all must match), `OR`, parentheses, and `-` to exclude: `is:review status:failing -author:@me`, or `repo:acme/* (label:security OR label:incident)`. Mistakes are explained under the field (“Unknown filter `stauts:`. Did you mean `status:`?”).
 
 **Save** keeps the current search in the sidebar as a saved search that stays up to date across all your work. Type in the search field to narrow it further; right-click it to rename or delete.
 

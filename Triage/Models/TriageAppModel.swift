@@ -60,7 +60,7 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var selectedOrganizationID: OrganizationID? {
         didSet {
             defaults.set(selectedOrganizationID?.rawValue, forKey: PreferenceKey.selectedOrganizationID)
-            savedSearches = selectedOrganizationID.map { SavedSearchStore(organizationID: $0).load(defaults: defaults) } ?? []
+            savedSearches = []
             if case .savedSearch = destination { destination = .section(.inbox) }
         }
     }
@@ -105,6 +105,8 @@ final class TriageAppModel: ObservableObject {
     @Published var focusQueue: [GitHubNodeID]?
     /// The selected organization's saved searches, shown in the sidebar.
     @Published private(set) var savedSearches: [SavedSearch] = []
+    /// The saved search to reopen at launch, once saved searches load.
+    private var pendingSavedSearchID: UUID?
     /// The selected rows. ⌘-click, ⇧-click, and ⌘A select several.
     @Published var selection: Set<GitHubNodeID> = []
 
@@ -157,11 +159,13 @@ final class TriageAppModel: ObservableObject {
         selectedAccountID = defaults.string(forKey: PreferenceKey.selectedAccountID).flatMap(AccountID.init(rawValue:))
         selectedOrganizationID = defaults.string(forKey: PreferenceKey.selectedOrganizationID)
             .flatMap(OrganizationID.init(rawValue:))
-        savedSearches = selectedOrganizationID.map { SavedSearchStore(organizationID: $0).load(defaults: defaults) } ?? []
         let launch = defaults.string(forKey: TriagePreferenceKeys.launchDestination).flatMap(LaunchDestination.init) ?? .inbox
-        destination = launch.resolve(
-            lastViewed: defaults.string(forKey: TriagePreferenceKeys.lastDestination), savedSearches: savedSearches
-        )
+        let lastViewed = defaults.string(forKey: TriagePreferenceKeys.lastDestination)
+        destination = launch.resolve(lastViewed: lastViewed, savedSearches: [])
+        // Saved searches load with the workspace; reopen the last one then.
+        if launch == .lastViewed, case .savedSearch(let id)? = lastViewed.flatMap(WorkspaceDestination.init(storageValue:)) {
+            pendingSavedSearchID = id
+        }
     }
 
     var hasConnectedAccount: Bool { !accounts.isEmpty }
@@ -301,6 +305,7 @@ final class TriageAppModel: ObservableObject {
                 guard !Task.isCancelled, self.selectedScope == scope else { return }
                 self.runtime = (scope, runtime)
                 self.rules = (try? await runtime.store.rules(scope: scope)) ?? .empty
+                await self.loadSavedSearches(runtime.store, scope: scope)
                 self.observe(runtime, scope: scope)
                 // GitHub discovery must never wait on Copilot sign-in or model listing.
                 Self.logger.notice("workspace activated; starting engine")
@@ -824,9 +829,42 @@ extension TriageAppModel {
     }
 
     private func updateSavedSearches(_ searches: [SavedSearch]) {
-        guard let organizationID = selectedOrganizationID else { return }
+        guard let runtime else { return }
         savedSearches = searches
-        SavedSearchStore(organizationID: organizationID).save(searches, defaults: defaults)
+        Task {
+            do {
+                try await runtime.value.store.saveSavedSearches(searches, scope: runtime.scope)
+            } catch {
+                Self.logger.error("saved searches save failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        }
+    }
+
+    /// Loads saved searches from the vault, first importing any kept in user
+    /// defaults by earlier versions, then reopens the launch saved search.
+    func loadSavedSearches(_ store: any TriageStore, scope: WorkspaceScope) async {
+        let legacy = LegacySavedSearchStore(organizationID: scope.organizationID)
+        do {
+            var loaded = try await store.savedSearches(scope: scope)
+            let imported = legacy.load(defaults: defaults)
+            if !imported.isEmpty {
+                let known = Set(loaded.map(\.id))
+                loaded += imported.filter { !known.contains($0.id) }.map {
+                    SavedSearch(id: $0.id, name: $0.name, search: WorkspaceSearch(text: $0.search.canonicalQueryText, scope: .all))
+                }
+                try await store.saveSavedSearches(loaded, scope: scope)
+                legacy.remove(defaults: defaults)
+                Self.logger.notice("saved searches imported count=\(imported.count, privacy: .public)")
+            }
+            guard selectedScope == scope else { return }
+            savedSearches = loaded
+        } catch {
+            Self.logger.error("saved searches load failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+        }
+        if let id = pendingSavedSearchID {
+            pendingSavedSearchID = nil
+            if destination == .section(.inbox), savedSearches.contains(where: { $0.id == id }) { destination = .savedSearch(id) }
+        }
     }
 }
 
@@ -957,7 +995,7 @@ extension TriageAppModel: WorkspaceActions {
             }
             // Loaded without it: the item is no longer tracked, so just open Triage.
         case .needsAction:
-            open(.section(.inbox), search: WorkspaceSearch(tokens: [SearchToken(kind: .is, value: "action")]))
+            open(.section(.inbox), search: WorkspaceSearch(tokens: [SearchToken(kind: .in, value: "action")]))
         case .followUps:
             destination = .briefing
         }
