@@ -82,6 +82,8 @@ final class TriageAppModel: ObservableObject {
     @Published private(set) var rulesError: String?
     /// The rule editor started from an item, if open.
     @Published var ruleDraft: RuleDraft?
+    /// The item whose recommendation the user said is not right, if that sheet is open.
+    @Published var correctionEntry: TriageEntry?
     /// Local status changes shown immediately, before the store confirms them.
     private var optimistic = OptimisticChanges()
     @Published var destination = WorkspaceDestination.section(.inbox) {
@@ -1015,16 +1017,26 @@ extension TriageAppModel: WorkspaceActions {
     }
 
     func beginRule(from entry: TriageEntry, correcting: Bool) {
-        let viewer = selectedAccount?.login ?? ""
-        let suggestions = TriageRule.suggestedTokens(for: entry, viewer: viewer)
-        let action: TriageRuleAction = if correcting {
-            // "Not right?" on something Copilot surfaced most often means "don't show me this kind of thing".
-            entry.decision?.disposition.isInbox == true ? .exclude : .route(.inbox)
-        } else {
-            entry.item.reviewRequestKind(viewer: viewer) == .team ? .rank(.lower, .medium) : .route(.inbox)
+        if correcting {
+            correctionEntry = entry
+            return
         }
-        ruleDraft = RuleDraft(
-            rule: TriageRule(query: TriageQuery(.all(suggestions.prefix(1).map { .qualifier($0.kind, $0.value) })), action: action),
+        let viewer = selectedAccount?.login ?? ""
+        beginRule(from: entry, action: entry.item.reviewRequestKind(viewer: viewer) == .team ? .rank(.lower, .medium) : .route(.inbox))
+    }
+
+    /// Opens the rule editor for work like `entry`, starting from its most
+    /// specific filter: something Copilot noticed, then a failing check, then
+    /// your relationship to it.
+    func beginRule(from entry: TriageEntry, action: TriageRuleAction) {
+        ruleDraft = makeRuleDraft(from: entry, action: action)
+    }
+
+    func makeRuleDraft(from entry: TriageEntry, action: TriageRuleAction) -> RuleDraft {
+        let suggestions = TriageRule.suggestedTokens(for: entry, viewer: selectedAccount?.login ?? "")
+        let preferred = suggestions.first { [.signal, .topic, .check].contains($0.kind) } ?? suggestions.first
+        return RuleDraft(
+            rule: TriageRule(query: TriageQuery(.all(preferred.map { [.qualifier($0.kind, $0.value)] } ?? [])), action: action),
             suggestions: suggestions,
             context: "From \(entry.item.reference): \(entry.item.title)"
         )

@@ -33,6 +33,7 @@
 		2BCAD30DD45D24CB1FFE3C2D /* CopilotXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 473D18D87CB68FA59AF1E43E /* CopilotXPCProtocol.swift */; };
 		3073FDC23CBFCC4BCDB8CC5C /* TriageCopilotXPCFailClosedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AB3D2B3184CDC9B7475F6EE /* TriageCopilotXPCFailClosedTests.swift */; };
 		30E77CF4BC6C85678E349C02 /* WorkspaceSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2A49AFE5AE3865C4492B154 /* WorkspaceSearchTests.swift */; };
+		34007FF6D0FFB0ACD828C6E6 /* TriagePriority.swift in Sources */ = {isa = PBXBuildFile; fileRef = C43F7413B77E633DBDB92AAD /* TriagePriority.swift */; };
 		350CE4963C2970BE59A5CFFC /* TriageEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAC600138CCC663FAE08E5F9 /* TriageEngineTests.swift */; };
 		3657ABDEB0E84B4EFC499B90 /* RateLimitRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 649954F4FEC0221A30BB04CC /* RateLimitRepository.swift */; };
 		3709A58AB8D853AD545A8C70 /* TriageCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CDCFD7E51264B4705CAF4C7 /* TriageCore.swift */; };
@@ -143,6 +144,7 @@
 		CEEEC7705769530CB940273C /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89EB0458B411E6A895FE992B /* main.swift */; };
 		D2EBA1B8070F27A170CF5586 /* CopilotIPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B22C86DD5D3920BD70BA230 /* CopilotIPC.swift */; };
 		D369C97DA5A19C2B20A4E5D2 /* ScrollBarSettingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 845CF6B5B88ACA9A8956F7CB /* ScrollBarSettingSection.swift */; };
+		D441EEE0F613C0BB2673484F /* NotRightSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF1410B14FE8E7A8571171B /* NotRightSheet.swift */; };
 		D54872D2981F3037BC473754 /* AuthBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DB64EED1550AAC88F3F78C /* AuthBrokerClientTests.swift */; };
 		D56F957C75EA9F0BDCCF19C7 /* SnoozeOptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E143D4DF5EDB467682BF141 /* SnoozeOptionTests.swift */; };
 		D6F59A3A9A4D84884B12274E /* OrganizationInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC764D6DECB53080072660BF /* OrganizationInventory.swift */; };
@@ -336,6 +338,7 @@
 		BB1D01831E8F9F2A8F3CE7A0 /* WorkspaceSortMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSortMenu.swift; sourceTree = "<group>"; };
 		BD65EE2EB9640B299C3BA48A /* ListSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListSelectionTests.swift; sourceTree = "<group>"; };
 		BDA5D08ACA7560833D95FAAD /* TriageUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TriageUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C43F7413B77E633DBDB92AAD /* TriagePriority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriagePriority.swift; sourceTree = "<group>"; };
 		C6AF26C67EA04CCB86479224 /* AttentionTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionTracker.swift; sourceTree = "<group>"; };
 		C80EB94E267D82037DB5FBBC /* AccountRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRepository.swift; sourceTree = "<group>"; };
 		CA2042C053AA1E789FE067CF /* RelativeTime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelativeTime.swift; sourceTree = "<group>"; };
@@ -356,6 +359,7 @@
 		DD24CECDFBC0C38A880B9621 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
 		DDA3A2AB9CA28768B15E6CE8 /* TriageDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageDetailView.swift; sourceTree = "<group>"; };
 		DE69AB77D9E4D87202E75C8B /* TriageRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriageRulesTests.swift; sourceTree = "<group>"; };
+		DEF1410B14FE8E7A8571171B /* NotRightSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotRightSheet.swift; sourceTree = "<group>"; };
 		DFEAA39182B9E10DB06C9F03 /* AccountCredentialReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCredentialReader.swift; sourceTree = "<group>"; };
 		E0B387828DBCBCDBA8F4383B /* AccountVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountVaultTests.swift; sourceTree = "<group>"; };
 		E2A49AFE5AE3865C4492B154 /* WorkspaceSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSearchTests.swift; sourceTree = "<group>"; };
@@ -470,6 +474,7 @@
 				CA2042C053AA1E789FE067CF /* RelativeTime.swift */,
 				8CDCFD7E51264B4705CAF4C7 /* TriageCore.swift */,
 				63146E95371A9BF3474C6E1C /* TriageEngine.swift */,
+				C43F7413B77E633DBDB92AAD /* TriagePriority.swift */,
 				6C847E2A0F9CB9226F78C821 /* TriageRules.swift */,
 				972CBBDA03D612155F16DD79 /* TriageRulesMigration.swift */,
 				14AD97D4FF1F004296DFFCF4 /* WorkInsights.swift */,
@@ -513,6 +518,7 @@
 		6B229C1D9C0AD135296FE4EE /* Rules */ = {
 			isa = PBXGroup;
 			children = (
+				DEF1410B14FE8E7A8571171B /* NotRightSheet.swift */,
 				AE81FDCF52FB46D5A5A26764 /* RulesSettingsView.swift */,
 				51F7CC47EA8DEAA943695F0F /* RuleViews.swift */,
 			);
@@ -1171,6 +1177,7 @@
 				63EBB778341F7465AB5B94E7 /* MarkdownText.swift in Sources */,
 				07CC35FB1115D6872F228DC6 /* MenuBarView.swift in Sources */,
 				65CEB18D9A158657D2350687 /* MultipleSelectionView.swift in Sources */,
+				D441EEE0F613C0BB2673484F /* NotRightSheet.swift in Sources */,
 				81FB64E82DDBEAA76507DDD0 /* NotificationSettingsPage.swift in Sources */,
 				5942E5936789D4F38F413A23 /* OAuthCredentialRefreshService.swift in Sources */,
 				5A14FEEF8BA270CA72856C07 /* OnboardingFlowView.swift in Sources */,
@@ -1203,6 +1210,7 @@
 				B536FC9EF0839A372D1DDF96 /* TriageEngine.swift in Sources */,
 				C70DF6C9BAC43A7C2BF981F3 /* TriageEntryRows.swift in Sources */,
 				1CB5C4A5DBA5D58E5F2A0A26 /* TriageListView.swift in Sources */,
+				34007FF6D0FFB0ACD828C6E6 /* TriagePriority.swift in Sources */,
 				FB1D2A3E2245883A04E0F093 /* TriageProductionAdapters.swift in Sources */,
 				A0C2A765699950287AC4E6D8 /* TriageQuery.swift in Sources */,
 				81D6872B4C4910B48D991456 /* TriageQueryMatcher.swift in Sources */,

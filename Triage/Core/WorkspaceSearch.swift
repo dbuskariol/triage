@@ -135,7 +135,7 @@ struct WorkspaceSearch: Equatable, Codable, Sendable {
             if kind == .topic { return entries.flatMap { $0.decision?.topics ?? [] } }
             return entries.flatMap { Self.values(of: kind, in: $0.item) }
         }
-        let kinds = kind.map { [$0] } ?? Self.dynamicKinds + [.is, .status, .in]
+        let kinds = kind.map { [$0] } ?? Self.dynamicKinds + [.is, .status, .in, .signal, .topic]
         var seen = Set<SearchToken>()
         var results: [SearchToken] = []
         for kind in kinds {

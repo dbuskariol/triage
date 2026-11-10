@@ -53,7 +53,7 @@ struct RulesSettingsView: View {
             }
         }
         .sheet(item: $editingRule) { draft in
-            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { updated in
+            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries, topics: appModel.rules.topics) { updated in
                 var rules = appModel.rules
                 if let index = rules.rules.firstIndex(where: { $0.id == updated.id }) {
                     rules.rules[index] = updated
@@ -67,36 +67,95 @@ struct RulesSettingsView: View {
 
     // MARK: Rules
 
-    private var rulesSection: some View {
-        Section {
-            if appModel.rules.rules.isEmpty {
-                Text("No rules yet. Select any item and choose Create Rule… to start from it.")
-                    .foregroundStyle(.secondary)
+    private enum Group: CaseIterable {
+        case hide, move, rank
+
+        func contains(_ action: TriageRuleAction) -> Bool {
+            switch (self, action) {
+            case (.hide, .exclude), (.move, .route), (.rank, .rank): true
+            default: false
             }
-            ForEach(Array(appModel.rules.rules.enumerated()), id: \.element.id) { index, rule in
-                ruleRow(rule, index: index)
+        }
+
+        var title: String {
+            switch self {
+            case .hide: "Hide"
+            case .move: "Move"
+            case .rank: "Rank"
             }
-            HStack {
-                Text("\(appModel.rules.rules.count) of \(TriageRules.maximumRules)")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button("Add Rule…") {
-                    editingRule = RuleDraft(rule: TriageRule(query: TriageQuery(.all([])), action: .exclude))
-                }
+        }
+
+        var explanation: String {
+            switch self {
+            case .hide: "Work these rules match never appears in your Inbox, Briefing, notifications, or menu bar. Find it under Hidden by Rules."
+            case .move: "Always put matching work in a section, whatever Copilot decides. When several match, the first one wins."
+            case .rank: "Move matching work up or down within its section. Rank rules add up, to at most ±\(TriageRules.maximumRankAdjustment)."
             }
-            if let error = appModel.rulesError {
-                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+
+        var emptyText: String {
+            switch self {
+            case .hide: "Nothing is hidden. Choose Not right? on a recommendation to hide work like it."
+            case .move: "No Move rules."
+            case .rank: "No Rank rules."
             }
-        } header: {
-            Text("Rules for \(appModel.selectedOrganization?.login ?? "")")
-        } footer: {
-            Text("Rules always win over Copilot and apply instantly. Hide work you never want to see, move work to a section, or rank it higher or lower. Hide wins over Move; the first matching Move wins; Rank rules add up.")
+        }
+
+        var defaultAction: TriageRuleAction {
+            switch self {
+            case .hide: .exclude
+            case .move: .route(.waiting)
+            case .rank: .rank(.lower, .medium)
+            }
         }
     }
 
-    private func ruleRow(_ rule: TriageRule, index: Int) -> some View {
-        HStack(spacing: 12) {
+    @ViewBuilder
+    private var rulesSection: some View {
+        ForEach(Group.allCases, id: \.self) { group in
+            let rules = appModel.rules.rules.filter { group.contains($0.action) }
+            Section {
+                if rules.isEmpty {
+                    Text(group.emptyText).foregroundStyle(.secondary)
+                }
+                ForEach(rules) { rule in
+                    ruleRow(rule, siblings: rules)
+                }
+                if group == .move {
+                    ForEach(Array(conflicts.enumerated()), id: \.offset) { _, conflict in
+                        Label("“\(conflict.winner.displayName)” and “\(conflict.loser.displayName)” both match some work; the first one wins. Reorder them to change that.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Add \(group.title) Rule…") {
+                        editingRule = RuleDraft(rule: TriageRule(query: TriageQuery(.all([])), action: group.defaultAction))
+                    }
+                    .disabled(appModel.rules.rules.count >= TriageRules.maximumRules)
+                }
+            } header: {
+                Text(group.title)
+            } footer: {
+                Text(group.explanation)
+            }
+        }
+        if let error = appModel.rulesError {
+            Section {
+                Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var conflicts: [(winner: TriageRule, loser: TriageRule)] {
+        appModel.rules.conflicts(in: appModel.presentation.allEntries, viewer: viewer)
+    }
+
+    private func ruleRow(_ rule: TriageRule, siblings: [TriageRule]) -> some View {
+        let position = siblings.firstIndex { $0.id == rule.id } ?? 0
+        return HStack(spacing: 12) {
             Toggle(rule.displayName, isOn: Binding(
                 get: { rule.isEnabled },
                 set: { enabled in update(rule) { $0.isEnabled = enabled } }
@@ -108,11 +167,12 @@ struct RulesSettingsView: View {
             Image(systemName: rule.action.systemImage)
                 .foregroundStyle(rule.isEnabled ? Color.accentColor : .secondary)
                 .frame(width: 20)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(rule.displayName).fontWeight(.medium).lineLimit(1)
                 Text("When \(rule.query.description) → \(rule.action.title.lowercased())")
-                    .font(.caption)
+                    .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -120,8 +180,8 @@ struct RulesSettingsView: View {
 
             Spacer(minLength: 8)
 
-            let matches = appModel.presentation.allEntries.filter { rule.matches($0, viewer: viewer) }.count
             if rule.isEnabled {
+                let matches = appModel.presentation.allEntries.filter { rule.matches($0, viewer: viewer) }.count
                 Text("\(matches) match\(matches == 1 ? "" : "es")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -130,8 +190,10 @@ struct RulesSettingsView: View {
 
             Menu {
                 Button("Edit…") { editingRule = RuleDraft(rule: rule, isNew: false) }
-                Button("Move Up") { move(index, by: -1) }.disabled(index == 0)
-                Button("Move Down") { move(index, by: 1) }.disabled(index == appModel.rules.rules.count - 1)
+                if siblings.count > 1 {
+                    Button("Move Up") { swap(rule, with: siblings[position - 1]) }.disabled(position == 0)
+                    Button("Move Down") { swap(rule, with: siblings[position + 1]) }.disabled(position == siblings.count - 1)
+                }
                 Divider()
                 Button("Delete", role: .destructive) { delete(rule) }
             } label: {
@@ -145,20 +207,21 @@ struct RulesSettingsView: View {
         .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { editingRule = RuleDraft(rule: rule, isNew: false) }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func swap(_ rule: TriageRule, with other: TriageRule) {
+        var rules = appModel.rules
+        guard let first = rules.rules.firstIndex(where: { $0.id == rule.id }),
+              let second = rules.rules.firstIndex(where: { $0.id == other.id }) else { return }
+        rules.rules.swapAt(first, second)
+        appModel.saveRules(rules)
     }
 
     private func update(_ rule: TriageRule, _ change: (inout TriageRule) -> Void) {
         var rules = appModel.rules
         guard let index = rules.rules.firstIndex(where: { $0.id == rule.id }) else { return }
         change(&rules.rules[index])
-        appModel.saveRules(rules)
-    }
-
-    private func move(_ index: Int, by offset: Int) {
-        var rules = appModel.rules
-        let target = index + offset
-        guard rules.rules.indices.contains(target) else { return }
-        rules.rules.swapAt(index, target)
         appModel.saveRules(rules)
     }
 

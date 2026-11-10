@@ -108,8 +108,11 @@ private struct WorkspaceView: View {
                 appModel.openOnGitHub(entry)
             }
         }
+        .sheet(item: $appModel.correctionEntry) { entry in
+            NotRightSheet(entry: entry, actions: appModel)
+        }
         .sheet(item: $appModel.ruleDraft) { draft in
-            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { appModel.addRule($0) }
+            RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries, topics: appModel.rules.topics) { appModel.addRule($0) }
                 .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")
         }
         .environment(\.triageViewerLogin, appModel.selectedAccount?.login ?? "")

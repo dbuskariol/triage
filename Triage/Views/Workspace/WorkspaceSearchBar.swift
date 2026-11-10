@@ -87,7 +87,7 @@ struct WorkspaceSearchBar: View {
     /// Every filter, grouped like GitHub's, plus values from current work.
     private var filterMenu: some View {
         Menu {
-            ForEach([SearchToken.Kind.in, .is, .status, .priority, .effort], id: \.self) { kind in
+            ForEach([SearchToken.Kind.in, .is, .status, .priority, .effort, .signal], id: \.self) { kind in
                 Section(Self.sectionTitle(kind)) {
                     ForEach(SearchToken.knownValues[kind] ?? [], id: \.0) { value, title in
                         toggle(SearchToken(kind: kind, value: value), title: title)
@@ -95,6 +95,12 @@ struct WorkspaceSearchBar: View {
                 }
             }
             Divider()
+            let topics = Array(Set(suggestionSource.flatMap { $0.decision?.topics ?? [] })).sorted()
+            if !topics.isEmpty {
+                Menu(SearchToken.Kind.topic.title) {
+                    ForEach(topics, id: \.self) { topic in toggle(SearchToken(kind: .topic, value: topic), title: topic) }
+                }
+            }
             ForEach(WorkspaceSearch.dynamicKinds, id: \.self) { kind in
                 let values = topValues(kind)
                 if !values.isEmpty {
