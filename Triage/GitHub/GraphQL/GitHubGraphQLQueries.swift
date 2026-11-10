@@ -1,13 +1,13 @@
 import Foundation
 
 enum GitHubGraphQLQueries {
-    private static let productionOperationNames = ["TriageViewer", "TriagePersonalWorkSearch"]
+    private static let productionOperationNames = ["TriageViewer", "TriagePersonalWorkSearch", "TriageRequiredChecks"]
 
     /// Every operation permitted to cross the GraphQL transport boundary.
     /// Keep this inventory exhaustive: callers cannot send dynamically-built
     /// documents, even when they are read-only.
     static func registeredQueries() throws -> [GitHubGraphQLQuery] {
-        let queries = try [viewer(), personalWorkSearch()]
+        let queries = try [viewer(), personalWorkSearch(), requiredChecks()]
         try validateProductionRegistry(queries)
         return queries
     }
@@ -127,7 +127,16 @@ enum GitHubGraphQLQueries {
                   }
                 }
                 latestReviews(first: 10) { nodes { author { login } state submittedAt } }
-                commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state } authors(first: 3) { nodes { user { login } } } } } }
+                commits(last: 1) { nodes { commit { committedDate statusCheckRollup {
+                  state
+                  contexts(first: 25) {
+                    nodes {
+                      __typename
+                      ... on CheckRun { name status conclusion }
+                      ... on StatusContext { context state }
+                    }
+                  }
+                } authors(first: 3) { nodes { user { login } } } } } }
                 reviewThreads(first: 50) { nodes { isResolved } }
               }
             }
@@ -136,6 +145,43 @@ enum GitHubGraphQLQueries {
         }
         """,
         operationName: "TriagePersonalWorkSearch"
+        )
+    }
+
+    /// Pull requests per `requiredChecks` request. GitHub reports whether a
+    /// check is required only for a named pull request, so each slot passes
+    /// its own ID; unused slots repeat the last ID.
+    static let requiredChecksSlots = 10
+
+    static func requiredChecks() throws -> GitHubGraphQLQuery {
+        let variables = (0..<requiredChecksSlots).map { "$id\($0): ID!" }.joined(separator: ", ")
+        let slots = (0..<requiredChecksSlots).map { index in
+            """
+              p\(index): node(id: $id\(index)) {
+                ... on PullRequest {
+                  id
+                  commits(last: 1) {
+                    nodes {
+                      commit {
+                        statusCheckRollup {
+                          contexts(first: 25) {
+                            nodes {
+                              __typename
+                              ... on CheckRun { name isRequired(pullRequestId: $id\(index)) }
+                              ... on StatusContext { context isRequired(pullRequestId: $id\(index)) }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            """
+        }.joined(separator: "\n")
+        return try GitHubGraphQLQuery(
+            document: "query TriageRequiredChecks(\(variables)) {\n\(slots)\n  rateLimit { cost remaining resetAt }\n}",
+            operationName: "TriageRequiredChecks"
         )
     }
 }

@@ -58,6 +58,10 @@ A decision is current only when both match:
 
 Stale items keep their previous decision and section while Copilot re-checks them, so the Inbox never flickers. They also appear in **Analyzing**.
 
+## Check runs
+
+Discovery reads up to 25 checks (check runs and commit statuses) from each pull request's head commit with the search itself. GitHub reports whether a check is *required* only for a named pull request, so for pull requests whose checks are failing, discovery makes one registered follow-up request (`TriageRequiredChecks`, ten pull requests per request, each slot passing its own ID). It is best effort: if it fails, `status:required-failing` falls back to any failing check. Required-ness is excluded from the decision fingerprint.
+
 ## Query language
 
 `TriageQuery` (`Triage/Core/Query`) is the one filter language for search, saved searches, and rules: GitHub-style qualifiers, implicit AND, `OR`, parentheses, `-` negation, quoted phrases, and `@me`. `TriageQueryParser` reports specific, positioned errors with suggestions; the printer emits canonical text, which is what is stored (`parse(print(q)) == q`). Each query has a phase — `facts` (GitHub facts only), `local` (read state), or `ai` (signals, Topics, priority, effort, disposition) — so callers know whether it can be evaluated before Copilot decides. Search chips are qualifiers, and a search compiles chips and typed text into one query; an invalid search matches nothing.

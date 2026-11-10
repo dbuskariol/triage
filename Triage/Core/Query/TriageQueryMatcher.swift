@@ -80,7 +80,7 @@ extension TriageQuery {
             case "changes": return facts.reviewDecision == .changesRequested
             default: return false
             }
-        case .check: return facts?.matchesCheck(value, same: same) == true
+        case .check: return facts?.matchesCheck(value) == true
         case .title: return contains(item.title)
         case .body: return contains(item.body)
         case .comment: return item.recentActivity.contains { contains($0.excerpt) }
@@ -147,8 +147,22 @@ struct TriageQueryContext: Sendable {
 }
 
 extension PullRequestFacts {
-    /// Until check runs are known, a failing rollup is the best evidence.
-    var hasFailingRequiredCheck: Bool { checks == .failure || checks == .error }
+    /// A required check is failing. When no check's requirement is known,
+    /// any failing check counts.
+    var hasFailingRequiredCheck: Bool {
+        guard let runs = checkRuns, runs.contains(where: { $0.isRequired != nil }) else {
+            return checks == .failure || checks == .error || checkRuns?.contains { $0.result == .failing } == true
+        }
+        return runs.contains { $0.isRequired == true && $0.result == .failing }
+    }
 
-    func matchesCheck(_ value: String, same: (String?) -> Bool) -> Bool { false }
+    /// `name` or `name:state`; `name` may use `*`.
+    func matchesCheck(_ value: String) -> Bool {
+        let (name, state) = TriageQuery.splitCheck(value)
+        let context = TriageQueryContext(viewer: "", now: .distantPast)
+        return (checkRuns ?? []).contains { run in
+            guard context.matches(run.name, pattern: name) else { return false }
+            return state.map { $0 == run.result.rawValue } ?? true
+        }
+    }
 }

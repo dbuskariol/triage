@@ -84,6 +84,18 @@ struct ReviewFact: Codable, Equatable, Sendable {
     let submittedAt: Date?
 }
 
+/// One check on a pull request's head commit: a GitHub Actions or app check
+/// run, or a commit status.
+struct CheckRunFact: Codable, Equatable, Sendable {
+    enum Result: String, Codable, Sendable { case passing, failing, pending, skipped, neutral }
+
+    let name: String
+    let result: Result
+    /// Whether branch protection requires it; `nil` when unknown (only
+    /// looked up for pull requests whose checks are failing).
+    var isRequired: Bool? = nil
+}
+
 struct PullRequestFacts: Codable, Equatable, Sendable {
     let isDraft: Bool
     let reviewDecision: ReviewDecision?
@@ -99,6 +111,10 @@ struct PullRequestFacts: Codable, Equatable, Sendable {
     /// The head commit, to tell whether the viewer or someone else pushed last.
     var lastCommitAt: Date? = nil
     var lastCommitAuthors: [String]? = nil
+    /// Individual checks on the head commit, at most `maximumCheckRuns`.
+    var checkRuns: [CheckRunFact]? = nil
+
+    static let maximumCheckRuns = 25
 }
 
 struct ActivityFact: Codable, Equatable, Sendable {
@@ -214,6 +230,14 @@ struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
         return facts.map { String($0.prefix(200)) }
     }
 
+    func replacingPullRequest(_ facts: PullRequestFacts) -> PersonalWorkItem {
+        PersonalWorkItem(
+            id: id, kind: kind, repository: repository, number: number, title: title, url: url, state: state,
+            author: author, createdAt: createdAt, updatedAt: updatedAt, relationships: relationships, labels: labels,
+            assignees: assignees, body: body, pullRequest: facts, recentActivity: recentActivity
+        )
+    }
+
     /// The most urgent relationship, used for ordering.
     var primaryRelationship: WorkRelationship? {
         relationships.min { $0.urgencyRank < $1.urgencyRank }
@@ -236,7 +260,11 @@ struct PersonalWorkItem: Identifiable, Codable, Equatable, Sendable {
             id: id, kind: kind, repository: repository, number: number, title: title,
             url: url, state: state, author: author, createdAt: createdAt, updatedAt: updatedAt,
             relationships: [], labels: [], assignees: [], body: body,
-            pullRequest: pullRequest, recentActivity: recentActivity
+            pullRequest: pullRequest.map { facts in
+                var facts = facts
+                facts.checkRuns = facts.checkRuns?.map { CheckRunFact(name: $0.name, result: $0.result) }
+                return facts
+            }, recentActivity: recentActivity
         )
         let canonical = Canonical(
             item: normalized,

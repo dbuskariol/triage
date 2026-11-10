@@ -172,7 +172,6 @@ struct TriageQueryTests {
     @Test func matchesStatusAndSize() throws {
         let failing = entry(checks: .failure, additions: 400, deletions: 200)
         #expect(try matches("status:failing", failing))
-        #expect(try matches("status:required-failing", failing))
         #expect(try !matches("status:passing", failing))
         #expect(try matches("status:passing", entry(checks: .success)))
         #expect(try matches("status:pending", entry(checks: .expected)))
@@ -181,6 +180,33 @@ struct TriageQueryTests {
         #expect(try !matches("size:<100", failing))
         #expect(try !matches("size:>0", entry(kind: .issue)))
         #expect(try !matches("check:build", failing))
+    }
+
+    @Test func matchesCheckRunsByNameAndResult() throws {
+        var work = entry(checks: .failure)
+        work = TriageEntry(item: work.item.replacingPullRequest({
+            var facts = work.item.pullRequest!
+            facts.checkRuns = [
+                CheckRunFact(name: "build", result: .failing, isRequired: false),
+                CheckRunFact(name: "unit tests", result: .passing, isRequired: true),
+            ]
+            return facts
+        }()), decision: nil, analysis: .pending, local: .active)
+        #expect(try matches("check:build", work))
+        #expect(try matches("check:build:failing", work))
+        #expect(try !matches("check:build:passing", work))
+        #expect(try matches("check:\"unit tests\":passing", work))
+        #expect(try matches("check:unit*", work))
+        #expect(try !matches("check:deploy", work))
+        #expect(try matches("status:failing", work))
+        // The only failing check isn't required.
+        #expect(try !matches("status:required-failing", work))
+    }
+
+    @Test func requiredFailingFallsBackToAnyFailingWhenUnknown() throws {
+        let work = entry(checks: .failure)
+        #expect(try matches("status:required-failing", work))
+        #expect(try !matches("status:required-failing", entry(checks: .success)))
     }
 
     @Test func matchesAges() throws {

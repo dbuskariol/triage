@@ -83,7 +83,7 @@ The search field at the top of the list filters instantly (⌘F). Type words to 
 |---|---|
 | Places and people | `repo:acme/*` `author:dependabot[bot]` `assignee:@me` `commenter:github-actions[bot]` `reviewer:alice` `team:acme/core` `label:security` |
 | Type and relationship | `is:pr` `is:issue` `is:draft` `is:review` `is:direct` `is:team` `is:assigned` `is:mine` `is:mentioned` `is:unread` `is:read` |
-| Pull request status | `status:failing` `status:required-failing` `status:passing` `status:pending` `status:conflicts` `status:approved` `status:changes` |
+| Pull request status | `status:failing` `status:required-failing` `status:passing` `status:pending` `status:conflicts` `status:approved` `status:changes` · `check:build` `check:"unit tests":failing` (`failing` `passing` `pending` `skipped`) |
 | Text | `title:release` `body:"approval required"` `comment:"approval required"` |
 | Time and size | `updated:>14d` `created:<2w` `size:>500` |
 | Copilot | `in:action` `in:inbox` `in:waiting` `in:none` `priority:high` `priority:>70` `effort:quick` |
