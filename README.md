@@ -56,6 +56,7 @@ Both fill the window. Clicking an item opens it in its list with its details; **
 | **No Action Needed** | FYI, stale, or informational. |
 | **Analyzing** | Copilot's queue: new work, items being re-checked after new activity, and retries. |
 | **Snoozed** | Work hidden until the time you chose; it returns sooner if someone responds. |
+| **Muted** | Work you muted. It returns when someone @mentions you, requests your review, assigns you, or requests changes on your pull request (appears only when non-empty). |
 | **Done** | Work you finished or that Triage marked *Handled by You*. Filter by how it was finished. |
 | **Hidden by Rules** | Work your Hide rules match, with the rule that hid it (appears only when non-empty). |
 
@@ -105,11 +106,12 @@ Or pick filters from the **Filter** menu (⊜) beside the field; applied filters
 | Draft reply | ⌥⌘D |
 | Mark done (restore in Done) | E or ⌫, ⌘E |
 | Snooze until tomorrow | S, ⇧⌘S |
+| Mute until you're mentioned | M, ⇧⌘M |
 | Mark as read or unread | U, ⇧⌘U |
 | Mark all as read | ⌥⇧⌘U |
 | Open on GitHub | ↩ or ⌘O, or double-click |
 | Select several | ⌘-click, ⇧-click, ⇧↓ ⇧↑, ⌘A |
-| Switch section | ⌘1 – ⌘7 |
+| Switch section | ⌘1 – ⌘8 |
 | Refresh | ⌘R |
 | Search | ⌘F |
 | Create rule from item | ⌥⌘R |

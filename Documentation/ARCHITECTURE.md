@@ -92,9 +92,9 @@ When an Inbox item with a next step has viewer activity since its decision, the 
 
 **Read state** is stored per item in `triage_read_state`. An entry is unread when it has never been viewed or when someone other than the viewer acted after `readAt` (the same `latestActivity(excluding:)` rule that brings back done work). `WorkspacePresentation` sets `isUnread` for the viewer. The detail view marks an item read after the user's chosen delay, so lists and Focus behave the same. `OptimisticChanges` shows Done, Snooze, Restore, and read changes immediately until the store confirms them. The first time an organization's work loads, existing items start as read, so the dot means new rather than flagging the backlog.
 
-`LocalStatus.hides(_:at:viewer:)` is the single rule for whether a status still applies. When it no longer does (someone else answered done work, a snooze elapsed), the presentation shows the item as active, and `markHandled` may replace it; a status that still applies is never overridden.
+`LocalStatus.hides(_:at:viewer:)` is the single rule for whether a status still applies. *Mute* (`.muted(at:relationships:)`) hides an item until someone else addresses the viewer after it was muted: an @mention in a comment, a review request or assignment that wasn't there when muted, or changes requested on the viewer's own pull request (`PersonalWorkItem.addressesViewer`). When it no longer does (someone else answered done work, a snooze elapsed), the presentation shows the item as active, and `markHandled` may replace it; a status that still applies is never overridden.
 
-Done and Snoozed are separate sections: Done is newest first with a *Handled by You* / *Marked Done* filter; Snoozed is ordered by when items return. Done, Snooze, and Restore update the UI optimistically and save in the background.
+Done, Snoozed, and Muted are separate sections: Done is newest first with a *Handled by You* / *Marked Done* filter; Snoozed is ordered by when items return. Done, Snooze, and Restore update the UI optimistically and save in the background.
 
 ## Prompting
 

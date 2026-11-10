@@ -232,6 +232,13 @@ private struct DetailActionBar: View {
                 }
                 .fixedSize()
                 .help("Hide until later")
+
+                Button {
+                    actions.mute(entry)
+                } label: {
+                    Label("Mute", systemImage: "speaker.slash")
+                }
+                .help("Hide until someone mentions you, requests your review, or assigns you (M)")
             }
 
             Button {

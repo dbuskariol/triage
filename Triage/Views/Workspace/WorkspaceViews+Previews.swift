@@ -5,6 +5,7 @@ private final class WorkspacePreviewActions: WorkspaceActions {
     func refreshNow() {}
     func markDone(_ entries: [TriageEntry]) {}
     func snooze(_ entries: [TriageEntry], until date: Date) {}
+    func mute(_ entries: [TriageEntry]) {}
     func restore(_ entries: [TriageEntry]) {}
     func openOnGitHub(_ entry: TriageEntry) {}
     func openCopilotSettings() {}

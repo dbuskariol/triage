@@ -67,6 +67,8 @@ struct MultipleSelectionView: View {
                     Label("Snooze", systemImage: "moon.zzz")
                 }
                 .fixedSize()
+                Button { actions.mute(entries) } label: { Label("Mute", systemImage: "speaker.slash") }
+                    .help("Hide until someone addresses you (M)")
             }
             Button { actions.setRead(entries, anyUnread) } label: {
                 Label(anyUnread ? "Mark as Read" : "Mark as Unread", systemImage: anyUnread ? "envelope.open" : "envelope.badge")

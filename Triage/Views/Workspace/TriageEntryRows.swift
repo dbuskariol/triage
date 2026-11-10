@@ -30,6 +30,7 @@ struct TriageEntryRows: View {
         } else {
             Button("Done") { actions.markDone(entry) }.tint(.green)
             Menu("Snooze") { SnoozeMenuItems(entries: [entry], actions: actions) }
+            Button("Mute") { actions.mute(entry) }.tint(.gray)
         }
     }
 }
@@ -52,6 +53,7 @@ struct TriageEntryMenu: View {
         } else {
             Button("Done") { actions.markDone(entries) }
             Menu("Snooze") { SnoozeMenuItems(entries: entries, actions: actions) }
+            Button("Mute Until I'm Mentioned") { actions.mute(entries) }
         }
         Divider()
         Button(entries.count == 1 ? "Open on GitHub" : "Open \(entries.count) on GitHub") { actions.openOnGitHub(entries) }
@@ -67,7 +69,7 @@ struct TriageEntryMenu: View {
 
 extension WorkspacePresentation {
     /// Done or snoozed work, which offers Restore instead of Done and Snooze.
-    var setAsideIDs: Set<GitHubNodeID> { Set((entries(in: .done) + entries(in: .snoozed)).map(\.id)) }
+    var setAsideIDs: Set<GitHubNodeID> { Set((entries(in: .done) + entries(in: .snoozed) + entries(in: .muted)).map(\.id)) }
 }
 
 /// Mail- and Superhuman-style keys on top of the native ↑/↓ (⇧ extends, ⌘A
@@ -97,6 +99,12 @@ private struct TriageListKeys: ViewModifier {
                 let chosen = selected.filter { !setAsideIDs.contains($0.id) }
                 guard !chosen.isEmpty else { return .ignored }
                 actions.snooze(chosen, until: SnoozeOption.tomorrow.date())
+                return .handled
+            }
+            .onKeyPress(characters: ["m"]) { _ in
+                let chosen = selected.filter { !setAsideIDs.contains($0.id) }
+                guard !chosen.isEmpty else { return .ignored }
+                actions.mute(chosen)
                 return .handled
             }
             .onKeyPress(characters: ["u"]) { _ in

@@ -241,3 +241,69 @@ struct HandledDetectionTests {
         #expect(work.latestActivity(excluding: "me") != nil)
     }
 }
+
+struct MuteTests {
+    private let mutedAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func item(
+        relationships: Set<WorkRelationship> = [.mentioned], comments: [ActivityFact] = [], reviews: [ReviewFact] = []
+    ) -> PersonalWorkItem {
+        PersonalWorkItem(
+            id: GitHubNodeID(rawValue: "PR_mute")!, kind: .pullRequest, repository: "octo/repo", number: 4,
+            title: "t", url: URL(string: "https://github.com/octo/repo/pull/4")!, state: .open, author: "alice",
+            createdAt: .distantPast, updatedAt: .now, relationships: relationships, labels: [], assignees: [],
+            body: "",
+            pullRequest: PullRequestFacts(
+                isDraft: false, reviewDecision: nil, requestedReviewers: [], latestReviews: reviews, checks: nil,
+                mergeable: nil, unresolvedReviewThreads: 0, additions: 0, deletions: 0
+            ),
+            recentActivity: comments
+        )
+    }
+
+    private func comment(_ author: String, _ text: String, after: Bool = true) -> ActivityFact {
+        ActivityFact(author: author, createdAt: mutedAt.addingTimeInterval(after ? 60 : -60), excerpt: text)
+    }
+
+    @Test func staysHiddenThroughOrdinaryActivity() {
+        let status = LocalStatus.muting(item(), at: mutedAt)
+        #expect(status == .muted(at: mutedAt, relationships: ["mentioned"]))
+        let busy = item(comments: [comment("bob", "LGTM"), comment("me", "@me note to self"), comment("bob", "cc @meg")])
+        #expect(status.hides(busy, at: .now, viewer: "me"))
+        #expect(status.hides(item(comments: [comment("bob", "@me earlier", after: false)]), at: .now, viewer: "me"))
+    }
+
+    @Test func returnsWhenAddressed() {
+        let status = LocalStatus.muting(item(), at: mutedAt)
+        #expect(!status.hides(item(comments: [comment("bob", "Can you look, @Me?")]), at: .now, viewer: "me"))
+        #expect(!status.hides(item(relationships: [.mentioned, .reviewRequested]), at: .now, viewer: "me"))
+        #expect(!status.hides(item(relationships: [.mentioned, .assigned]), at: .now, viewer: "me"))
+        let changes = [ReviewFact(author: "bob", state: "CHANGES_REQUESTED", submittedAt: mutedAt.addingTimeInterval(60))]
+        #expect(status.hides(item(reviews: changes), at: .now, viewer: "me"), "Only on your own pull request.")
+        #expect(!status.hides(item(relationships: [.mentioned, .authored], reviews: changes), at: .now, viewer: "me"))
+    }
+
+    @Test func existingReviewRequestDoesNotUnmute() {
+        let status = LocalStatus.muting(item(relationships: [.reviewRequested]), at: mutedAt)
+        #expect(status.hides(item(relationships: [.reviewRequested]), at: .now, viewer: "me"))
+    }
+
+    @Test func mutedWorkHasItsOwnSectionUntilAddressed() throws {
+        let quiet = item()
+        let decided = TriageDecision(
+            itemID: quiet.id, disposition: .act, priority: 90, confidence: 1, summary: "s", reason: "r",
+            nextAction: nil, fingerprint: quiet.fingerprint, modelID: "m", decidedAt: .now
+        )
+        let muted = TriageEntry(item: quiet, decision: decided, analysis: .current, local: .muting(quiet, at: mutedAt))
+        let presentation = WorkspacePresentation(entries: [muted], status: .initial, now: .now, viewer: "me")
+        #expect(presentation.count(in: .muted) == 1)
+        #expect(presentation.count(in: .inbox) == 0)
+
+        let addressed = item(comments: [comment("bob", "@me ping")])
+        let back = TriageEntry(item: addressed, decision: decided, analysis: .current, local: .muting(quiet, at: mutedAt))
+        #expect(WorkspacePresentation(entries: [back], status: .initial, now: .now, viewer: "me").count(in: .inbox) == 1)
+
+        let data = try JSONEncoder().encode(LocalStatus.muting(quiet, at: mutedAt))
+        #expect(try JSONDecoder().decode(LocalStatus.self, from: data) == .muted(at: mutedAt, relationships: ["mentioned"]))
+    }
+}

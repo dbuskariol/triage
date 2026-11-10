@@ -102,10 +102,16 @@ struct WorkspacePresentation: Equatable, Sendable {
             // Most recently finished first; soonest to return first.
             case .done: values.sorted { (WorkInsights.doneDate($0) ?? .distantPast) > (WorkInsights.doneDate($1) ?? .distantPast) }
             case .snoozed: values.sorted { (Self.snoozedUntil($0) ?? .distantFuture) < (Self.snoozedUntil($1) ?? .distantFuture) }
+            case .muted: values.sorted { (Self.mutedAt($0) ?? .distantPast) > (Self.mutedAt($1) ?? .distantPast) }
             default: values.sorted(by: Self.urgencyOrder)
             }
         }
         self.init(entries: grouped, status: status)
+    }
+
+    static func mutedAt(_ entry: TriageEntry) -> Date? {
+        if case .muted(let at, _) = entry.local { return at }
+        return nil
     }
 
     static func snoozedUntil(_ entry: TriageEntry) -> Date? {
@@ -115,8 +121,11 @@ struct WorkspacePresentation: Equatable, Sendable {
 
     static func section(for entry: TriageEntry, now: Date, viewer: String = "") -> Section {
         guard entry.isVisible(at: now, viewer: viewer) else {
-            if case .snoozed = entry.local { return .snoozed }
-            return .done
+            switch entry.local {
+            case .snoozed: return .snoozed
+            case .muted: return .muted
+            case .active, .done: return .done
+            }
         }
         guard !entry.isExcluded else { return .excluded }
         // A previous decision keeps the item in its section while changed
@@ -215,6 +224,8 @@ protocol WorkspaceActions: AnyObject {
     /// Bulk actions apply to every entry, in one step.
     func markDone(_ entries: [TriageEntry])
     func snooze(_ entries: [TriageEntry], until date: Date)
+    /// Hides entries until someone addresses you on them.
+    func mute(_ entries: [TriageEntry])
     func restore(_ entries: [TriageEntry])
     func openOnGitHub(_ entry: TriageEntry)
     func openCopilotSettings()
@@ -243,6 +254,7 @@ protocol WorkspaceActions: AnyObject {
 extension WorkspaceActions {
     func markDone(_ entry: TriageEntry) { markDone([entry]) }
     func snooze(_ entry: TriageEntry, until date: Date) { snooze([entry], until: date) }
+    func mute(_ entry: TriageEntry) { mute([entry]) }
     func restore(_ entry: TriageEntry) { restore([entry]) }
     func openOnGitHub(_ entries: [TriageEntry]) { entries.forEach(openOnGitHub) }
 }

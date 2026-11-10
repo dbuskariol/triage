@@ -911,6 +911,10 @@ extension TriageAppModel: WorkspaceActions {
         setLocalStatus(for: entries) { .done(fingerprint: $0.item.fingerprint, at: .now) }
     }
 
+    func mute(_ entries: [TriageEntry]) {
+        setLocalStatus(for: entries) { LocalStatus.muting($0.item, at: .now) }
+    }
+
     func snooze(_ entries: [TriageEntry], until date: Date) {
         setLocalStatus(for: entries) { _ in .snoozed(until: date) }
     }

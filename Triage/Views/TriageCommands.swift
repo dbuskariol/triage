@@ -72,6 +72,10 @@ struct TriageWorkspaceCommands: Commands {
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(selected.isEmpty)
 
+            Button("Mute Until I'm Mentioned") { appModel.mute(selected) }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(selected.isEmpty)
+
             let anyUnread = selected.contains(where: \.isUnread)
             Button(anyUnread || selected.isEmpty ? "Mark as Read" : "Mark as Unread") { appModel.setRead(selected, anyUnread) }
                 .keyboardShortcut("u", modifiers: [.command, .shift])

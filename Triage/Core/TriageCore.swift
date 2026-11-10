@@ -388,6 +388,10 @@ enum LocalStatus: Codable, Equatable, Sendable {
     case done(fingerprint: String, at: Date? = nil, handledEvidence: String? = nil)
     /// Hidden until the date passes.
     case snoozed(until: Date)
+    /// Hidden until someone addresses the viewer after `at`: an @mention,
+    /// a new review request or assignment (not among `relationships`, the
+    /// relationships when muted), or changes requested on their pull request.
+    case muted(at: Date, relationships: [String] = [])
 
     /// Whether this status still sets `item` aside. Done work stays hidden
     /// until someone *other than* `viewer` acts on it, so your own follow-up
@@ -400,6 +404,36 @@ enum LocalStatus: Codable, Equatable, Sendable {
             if let doneAt { (item.latestActivity(excluding: viewer) ?? .distantPast) <= doneAt }
             else { fingerprint == item.fingerprint }
         case .snoozed(let until): until > date
+        case .muted(let at, let relationships): !item.addressesViewer(after: at, viewer: viewer, mutedRelationships: relationships)
+        }
+    }
+
+    /// Mutes `item` now, remembering its relationships so only new ones count.
+    static func muting(_ item: PersonalWorkItem, at date: Date) -> LocalStatus {
+        .muted(at: date, relationships: item.relationships.map(\.rawValue).sorted())
+    }
+}
+
+extension PersonalWorkItem {
+    /// Whether someone other than `viewer` addressed them after `date`.
+    func addressesViewer(after date: Date, viewer: String, mutedRelationships: [String]) -> Bool {
+        guard !viewer.isEmpty else { return false }
+        func isViewer(_ login: String) -> Bool { login.caseInsensitiveCompare(viewer) == .orderedSame }
+        let mention = "@\(viewer)"
+        let mentioned = recentActivity.contains { comment in
+            guard comment.createdAt > date, !isViewer(comment.author),
+                  let range = comment.excerpt.range(of: mention, options: .caseInsensitive) else { return false }
+            // `@me` must not match `@meg`.
+            return comment.excerpt[range.upperBound...].first.map { !($0.isLetter || $0.isNumber || $0 == "-") } ?? true
+        }
+        if mentioned { return true }
+        let previous = Set(mutedRelationships)
+        if [WorkRelationship.reviewRequested, .assigned].contains(where: { relationships.contains($0) && !previous.contains($0.rawValue) }) {
+            return true
+        }
+        guard relationships.contains(.authored) else { return false }
+        return (pullRequest?.latestReviews ?? []).contains {
+            !isViewer($0.author) && $0.state == "CHANGES_REQUESTED" && ($0.submittedAt ?? .distantPast) > date
         }
     }
 }
