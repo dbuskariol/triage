@@ -22,9 +22,16 @@ jobs:
       matrix:
         runner: [macos-26, macos-26-intel]
     steps:
-      # The runner context isn't available in job-level env.
-      - name: Set derived data location
-        run: echo "TRIAGE_CI_DERIVED_DATA=$RUNNER_TEMP/triage-ci-derived-data" >> "$GITHUB_ENV"
+      # The runner context isn't available in job-level env. The helper build
+      # runs cargo with a cleared environment that forwards only these, and
+      # rustup's proxies need them to find the pinned toolchain.
+      - name: Set build environment
+        run: |
+          {
+            echo "TRIAGE_CI_DERIVED_DATA=$RUNNER_TEMP/triage-ci-derived-data"
+            echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+            echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
+          } >> "$GITHUB_ENV"
       - name: Check out
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
