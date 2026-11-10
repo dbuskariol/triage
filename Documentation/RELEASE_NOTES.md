@@ -1,4 +1,18 @@
-# Triage 0.1.2
+# Triage 0.2.0
+
+Filtering and prioritization, rebuilt: hide work completely, target what Copilot notices, see why anything ranks where it does, and let Triage suggest rules from how you work.
+
+- **One filter language for search and rules.** GitHub-style filters with `OR`, parentheses, `-` to exclude, and `@me`, plus new filters for assignees, commenters, reviewers, checks, comment and description text, age, and size. Mistakes are explained as you type (“Did you mean `status:`?”). Saved searches move into your encrypted vault automatically.
+- **Hide means gone.** Hide rules remove matching work from the Inbox, Briefing, Weekly Review, notifications, and the menu bar; it waits in **Hidden by Rules**. Rules now **Hide**, **Move** to a section, or **Rank** higher or lower, in a fixed, predictable order. Your existing rules convert automatically; Mute rules become Hide rules.
+- **Mute one item until you're addressed.** Mute (M, ⇧⌘M) hides an item until someone mentions you, requests your review, assigns you, or requests changes on your pull request.
+- **Rules for what Copilot notices.** Copilot tags work with signals such as *waiting on an approval gate*, *CI failing*, and *bot noise*, and with your own **Topics** — describe anything in plain English, like “blocked on a FedRAMP or other compliance deployment approval”, and use `topic:` in rules and search.
+- **Checks you can filter on.** Triage reads each pull request's individual checks and whether they're required: `check:build:failing`, `status:required-failing`.
+- **Why this rank.** Click Priority to see Copilot's assessment, a few fixed factors (asked directly, waiting on you for days, a failing required check on your pull request, a fresh mention, staleness), and your Rank rules.
+- **Not right? asks what you meant.** Hide work like this, mute just this one, move or rank work like this — straight into the rule editor, with its most specific filter chosen and an Add Filter menu for the rest.
+- **Suggested rules.** Triage notices work you keep setting aside and, when you ask, has Copilot suggest rules with the evidence and a live preview. Nothing changes until you add one. Learning history stays encrypted on your Mac for 90 days and can be cleared in Settings.
+- **Less re-analysis.** Changing a rule re-checks only the work Copilot needs to see again; Hide and Rank rules never do.
+
+## Triage 0.1.2
 
 - **Clear messages instead of an empty inbox.** If an organization's SAML single sign-on hides its work from your token, or your token is missing a permission Triage needs, Triage keeps your saved work and says exactly what to fix, with a link to authorize the token.
 - **Fine-grained tokens find your work.** Triage now searches issues and pull requests separately, which fine-grained tokens require; before, they found nothing.
