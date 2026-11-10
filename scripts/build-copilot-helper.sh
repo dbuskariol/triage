@@ -31,7 +31,9 @@ rustflags="${RUSTFLAGS:-}"
 rustflags="${rustflags:+$rustflags }-C link-arg=-Wl,-no_adhoc_codesign"
 cargo_executable="$(command -v "$CARGO")" \
   || { echo "Unable to resolve the configured Cargo executable: $CARGO" >&2; exit 69; }
-cargo_path="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin"
+# Cargo runs rustc by name, so the toolchain beside the chosen Cargo must come
+# first; otherwise a different (or missing) rustc is found on PATH.
+cargo_path="$(/usr/bin/dirname "$cargo_executable"):/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin"
 
 : "${ARCHS:?Xcode must provide ARCHS for the Copilot helper build}"
 : "${TARGET_BUILD_DIR:?Xcode must provide TARGET_BUILD_DIR for the Copilot helper build}"
