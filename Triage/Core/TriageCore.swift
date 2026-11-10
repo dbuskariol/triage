@@ -453,14 +453,7 @@ extension PersonalWorkItem {
     func addressesViewer(after date: Date, viewer: String, mutedRelationships: [String]) -> Bool {
         guard !viewer.isEmpty else { return false }
         func isViewer(_ login: String) -> Bool { login.caseInsensitiveCompare(viewer) == .orderedSame }
-        let mention = "@\(viewer)"
-        let mentioned = recentActivity.contains { comment in
-            guard comment.createdAt > date, !isViewer(comment.author),
-                  let range = comment.excerpt.range(of: mention, options: .caseInsensitive) else { return false }
-            // `@me` must not match `@meg`.
-            return comment.excerpt[range.upperBound...].first.map { !($0.isLetter || $0.isNumber || $0 == "-") } ?? true
-        }
-        if mentioned { return true }
+        if mentionsViewer(after: date, viewer: viewer) { return true }
         let previous = Set(mutedRelationships)
         if [WorkRelationship.reviewRequested, .assigned].contains(where: { relationships.contains($0) && !previous.contains($0.rawValue) }) {
             return true
@@ -493,6 +486,8 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
     var appliedRules: [String] = []
     /// The rule that hides this item, if any.
     var excludedBy: String?
+    /// How `decision.priority` was reached (set by `TriageRules.apply`).
+    var priorityBreakdown: PriorityBreakdown?
 
     var isExcluded: Bool { excludedBy != nil }
     /// When the viewer last viewed this item's details.

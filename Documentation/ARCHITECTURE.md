@@ -62,6 +62,10 @@ Stale items keep their previous decision and section while Copilot re-checks the
 
 Discovery reads up to 25 checks (check runs and commit statuses) from each pull request's head commit with the search itself. GitHub reports whether a check is *required* only for a named pull request, so for pull requests whose checks are failing, discovery makes one registered follow-up request (`TriageRequiredChecks`, ten pull requests per request, each slot passing its own ID). It is best effort: if it fails, `status:required-failing` falls back to any failing check. Required-ness is excluded from the decision fingerprint.
 
+## Ranking
+
+`PriorityBreakdown` (`Triage/Core/TriagePriority.swift`) explains every priority: Copilot's priority, fixed deterministic factors (direct or team-only review request, time the viewer has been blocking someone, a failing required check on the viewer's pull request, an @mention since the viewer last acted, a month without activity; capped at ±20 together), and the matching Rank rules (capped at ±40). `TriageRules.apply` sets `decision.priority` to the clamped total and keeps the breakdown on the entry for the detail view's *Why this rank*. Factor weights are code, covered by tests, and not user-editable.
+
 ## Query language
 
 `TriageQuery` (`Triage/Core/Query`) is the one filter language for search, saved searches, and rules: GitHub-style qualifiers, implicit AND, `OR`, parentheses, `-` negation, quoted phrases, and `@me`. `TriageQueryParser` reports specific, positioned errors with suggestions; the printer emits canonical text, which is what is stored (`parse(print(q)) == q`). Each query has a phase — `facts` (GitHub facts only), `local` (read state), or `ai` (signals, Topics, priority, effort, disposition) — so callers know whether it can be evaluated before Copilot decides. Search chips are qualifiers, and a search compiles chips and typed text into one query; an invalid search matches nothing.

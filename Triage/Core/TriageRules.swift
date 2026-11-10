@@ -108,10 +108,10 @@ struct TriageRules: Codable, Equatable, Sendable {
     }
 
     /// Applies rules on top of Copilot's decision: Exclude, then the first
-    /// matching Route, then the sum of Rank weights (capped).
+    /// matching Route, then ranking (Copilot's priority, fixed factors, and
+    /// capped Rank weights; see `PriorityBreakdown`).
     func apply(to entry: TriageEntry, viewer: String, now: Date = .now) -> TriageEntry {
         let matched = matches(for: entry, viewer: viewer, now: now)
-        guard !matched.isEmpty else { return entry }
         var result = entry
         result.appliedRules = matched.map(\.displayName)
         result.excludedBy = matched.first { $0.action == .exclude }?.displayName
@@ -121,10 +121,14 @@ struct TriageRules: Codable, Equatable, Sendable {
             // "Move to Inbox" never downgrades an item Copilot says needs action.
             updated.disposition = route == .inbox && decision.disposition == .act ? .act : route.disposition
         }
-        let adjustment = matched.reduce(0) { $0 + $1.action.rankAdjustment }
-        let capped = max(-Self.maximumRankAdjustment, min(Self.maximumRankAdjustment, adjustment))
-        updated.priority = min(100, max(0, decision.priority + capped))
         result.decision = updated
+        let breakdown = PriorityBreakdown(
+            copilot: decision.priority,
+            factors: PriorityBreakdown.factors(for: result, viewer: viewer, now: now),
+            rules: matched.filter { $0.action.rankAdjustment != 0 }.map { .init(title: $0.displayName, points: $0.action.rankAdjustment) }
+        )
+        result.decision?.priority = breakdown.total
+        result.priorityBreakdown = breakdown
         return result
     }
 

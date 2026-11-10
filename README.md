@@ -141,6 +141,10 @@ A rule's *when* is a filter in the same language as [search](#search), so anythi
 
 Rules apply in a fixed order: **Hide** wins; then the first matching **Move**; then all matching **Rank** rules add up (small ±10, medium ±20, large ±35, at most ±40 in total). *Move to Inbox* never downgrades work Copilot says needs your action. Hidden work goes to **Hidden by Rules**, never to the Inbox, Briefing, Weekly Review, notifications, or the menu bar. Settings flags Move rules that conflict.
 
+### Why this rank
+
+Click **Priority** on a recommendation to see exactly how it was ranked: Copilot's assessment, then a few fixed, explainable factors (asked to review directly +6, only through a team −6, waiting on you for 3+ days +4 or 7+ days +8, a required check failing on your pull request +6, mentioned since you last acted +5, no activity for a month −6; at most ±20 in total), then your Rank rules. To change how something ranks, add a Rank rule.
+
 Create a rule from any item with **Create Rule…** (detail view, right-click, or ⌥⌘R), or **Not right?** on a recommendation, which suggests hiding work like it. Both open the same editor with filters suggested from the item — including failing checks and bot commenters — as checkboxes, the filter as editable text, and a live preview of what the rule matches. Manage all rules in **Settings ▸ Rules**. Rules from earlier versions are converted automatically; *Mute* rules become *Hide* rules. The recommendation shows which rules applied and how your instructions changed the decision.
 
 The built-in prompt is intentionally not editable: it enforces the output format, treats GitHub content as untrusted (so text in an issue can't change your instructions), and improves with app updates. See [Architecture › Prompting](Documentation/ARCHITECTURE.md#prompting).

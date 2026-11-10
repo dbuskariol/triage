@@ -324,3 +324,70 @@ struct MuteTests {
         #expect(try JSONDecoder().decode(LocalStatus.self, from: data) == .muted(at: mutedAt, relationships: ["mentioned"]))
     }
 }
+
+struct PriorityBreakdownTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func item(
+        relationships: Set<WorkRelationship>, reviewers: [String] = [], checks: CheckStatus? = nil,
+        comments: [ActivityFact] = [], updatedDaysAgo: Double = 1
+    ) -> PersonalWorkItem {
+        PersonalWorkItem(
+            id: GitHubNodeID(rawValue: "PR_rank")!, kind: .pullRequest, repository: "octo/repo", number: 5,
+            title: "t", url: URL(string: "https://github.com/octo/repo/pull/5")!, state: .open, author: "alice",
+            createdAt: now.addingTimeInterval(-90 * 86_400), updatedAt: now.addingTimeInterval(-updatedDaysAgo * 86_400),
+            relationships: relationships, labels: [], assignees: [], body: "",
+            pullRequest: PullRequestFacts(
+                isDraft: false, reviewDecision: nil, requestedReviewers: reviewers, latestReviews: [], checks: checks,
+                mergeable: nil, unresolvedReviewThreads: 0, additions: 0, deletions: 0
+            ),
+            recentActivity: comments
+        )
+    }
+
+    private func applied(_ item: PersonalWorkItem, _ disposition: TriageDisposition = .act, priority: Int = 50, rules: [TriageRule] = []) -> TriageEntry {
+        let decision = TriageDecision(
+            itemID: item.id, disposition: disposition, priority: priority, confidence: 0.9, summary: "s", reason: "r",
+            nextAction: nil, fingerprint: item.fingerprint, modelID: "m", decidedAt: now
+        )
+        return TriageRules(instructions: "", rules: rules)
+            .apply(to: TriageEntry(item: item, decision: decision, analysis: .current, local: .active), viewer: "me", now: now)
+    }
+
+    @Test func directAndTeamRequestsAndWaitingTime() {
+        let waiting = [ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-9 * 86_400), excerpt: "ping")]
+        let direct = applied(item(relationships: [.reviewRequested], reviewers: ["me"], comments: waiting))
+        #expect(direct.priorityBreakdown?.factors.map(\.points) == [6, 8])
+        #expect(direct.decision?.priority == 64)
+        let team = applied(item(relationships: [.reviewRequested], reviewers: ["octo/core"]))
+        #expect(team.priorityBreakdown?.factors.map(\.title) == ["Review requested only through a team"])
+        #expect(team.decision?.priority == 44)
+        // Waiting time counts only when the next move is yours.
+        let notMine = applied(item(relationships: [.assigned], comments: waiting), .wait)
+        #expect(notMine.priorityBreakdown?.factors.isEmpty == true)
+    }
+
+    @Test func mentionsFailingRequiredChecksAndStaleness() {
+        let mention = [ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-3_600), excerpt: "@me can you check?")]
+        let entry = applied(item(relationships: [.authored], checks: .failure, comments: mention, updatedDaysAgo: 40), .review)
+        #expect(entry.priorityBreakdown?.factors.map(\.points) == [6, 5, -6])
+        let answered = [mention[0], ActivityFact(author: "me", createdAt: now, excerpt: "On it")]
+        #expect(applied(item(relationships: [.assigned], comments: answered)).priorityBreakdown?.factors.isEmpty == true)
+    }
+
+    @Test func factorsAndRulesAreCappedSeparatelyAndTotalClamps() throws {
+        let breakdown = PriorityBreakdown(
+            copilot: 90,
+            factors: [.init(title: "a", points: 8), .init(title: "b", points: 8), .init(title: "c", points: 8)],
+            rules: [.init(title: "r1", points: 35), .init(title: "r2", points: 35)]
+        )
+        #expect(breakdown.factorAdjustment == 20)
+        #expect(breakdown.ruleAdjustment == 40)
+        #expect(breakdown.total == 100)
+        let lower = TriageRule(query: try TriageQuery(parsing: "is:pr"), action: .rank(.lower, .large))
+        let entry = applied(item(relationships: [.assigned]), priority: 20, rules: [lower])
+        #expect(entry.priorityBreakdown?.rules.map(\.points) == [-35])
+        #expect(entry.decision?.priority == 0)
+        #expect(entry.priorityBreakdown?.copilot == 20)
+    }
+}

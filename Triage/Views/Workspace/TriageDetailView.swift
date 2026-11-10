@@ -334,8 +334,7 @@ private struct RecommendationCard: View {
                 }
 
                 HStack(spacing: 24) {
-                    Meter(title: "Priority", label: WorkspaceViewPresentation.priorityLabel(decision.priority),
-                          value: Double(decision.priority) / 100, tint: tint)
+                    PriorityMeter(priority: decision.priority, breakdown: entry.priorityBreakdown, tint: tint)
                     Meter(title: "Confidence", label: WorkspaceViewPresentation.confidenceLabel(decision.confidence),
                           value: decision.confidence, tint: .secondary)
                     if let effort = decision.effort {
@@ -448,6 +447,70 @@ private struct RecommendationCard: View {
         case nil: .secondary
         }
     }
+}
+
+/// The priority meter; click it to see why the item ranks where it does.
+private struct PriorityMeter: View {
+    let priority: Int
+    let breakdown: PriorityBreakdown?
+    let tint: Color
+    @State private var isExplaining = false
+
+    var body: some View {
+        Button { isExplaining = true } label: {
+            Meter(title: "Priority", label: WorkspaceViewPresentation.priorityLabel(priority),
+                  value: Double(priority) / 100, tint: tint)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Why this rank")
+        .accessibilityLabel("Priority \(WorkspaceViewPresentation.priorityLabel(priority)). Why this rank")
+        .popover(isPresented: $isExplaining, arrowEdge: .bottom) {
+            WhyThisRank(priority: priority, breakdown: breakdown)
+        }
+    }
+}
+
+/// Copilot's assessment, then each factor and rule as one plain line.
+struct WhyThisRank: View {
+    let priority: Int
+    let breakdown: PriorityBreakdown?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Why this rank").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                row("Copilot's assessment", value: "\(breakdown?.copilot ?? priority)", style: .primary)
+                if let breakdown {
+                    ForEach(breakdown.factors) { part in row(part.title, value: Self.signed(part.points), style: .secondary) }
+                    if breakdown.factorAdjustment != breakdown.factors.reduce(0, { $0 + $1.points }) {
+                        row("Factors are capped at ±\(PriorityBreakdown.maximumFactorAdjustment)", value: "", style: .tertiary)
+                    }
+                    ForEach(breakdown.rules) { part in row("Your rule “\(part.title)”", value: Self.signed(part.points), style: .secondary) }
+                    if breakdown.ruleAdjustment != breakdown.rules.reduce(0, { $0 + $1.points }) {
+                        row("Rank rules are capped at ±\(TriageRules.maximumRankAdjustment)", value: "", style: .tertiary)
+                    }
+                }
+                Divider().gridCellColumns(2)
+                row("Priority", value: "\(priority) · \(WorkspaceViewPresentation.priorityLabel(priority))", style: .primary)
+                    .fontWeight(.semibold)
+            }
+            Text("Rank work higher or lower with a Rank rule in Settings ▸ Rules.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+
+    private func row(_ title: String, value: String, style: HierarchicalShapeStyle) -> some View {
+        GridRow {
+            Text(title).foregroundStyle(style).fixedSize(horizontal: false, vertical: true)
+            Text(value).monospacedDigit().foregroundStyle(style).gridColumnAlignment(.trailing)
+        }
+    }
+
+    private static func signed(_ points: Int) -> String { points > 0 ? "+\(points)" : "\(points)" }
 }
 
 private struct Meter: View {
