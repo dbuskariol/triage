@@ -388,8 +388,18 @@ private struct RecommendationCard: View {
     /// Shows exactly which of the user's preferences shaped this result.
     @ViewBuilder
     private func attribution(_ decision: TriageDecision) -> some View {
-        if !entry.appliedRules.isEmpty || decision.instructionNote != nil {
+        let noticed = (decision.signals ?? []).compactMap { TriageSignal(rawValue: $0)?.title }
+            + (decision.topics ?? []).map { "#\($0)" }
+        if !entry.appliedRules.isEmpty || decision.instructionNote != nil || !noticed.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
+                if !noticed.isEmpty {
+                    Label {
+                        Text("Copilot noticed: \(noticed.joined(separator: " · "))").foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "sparkles").foregroundStyle(tint)
+                    }
+                    .accessibilityLabel("Copilot noticed \(noticed.joined(separator: ", "))")
+                }
                 if !entry.appliedRules.isEmpty {
                     Label {
                         Text("Your rule\(entry.appliedRules.count == 1 ? "" : "s"): ").foregroundStyle(.secondary)

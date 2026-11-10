@@ -56,6 +56,20 @@ struct TriageQuery: Hashable, Sendable, CustomStringConvertible {
     /// Both queries must match.
     func and(_ other: TriageQuery) -> TriageQuery { TriageQuery(.all([root, other.root])) }
 
+    /// The same query with `topic:` references to `old` pointing at `new`.
+    func renamingTopic(_ old: String, to new: String) -> TriageQuery {
+        func rename(_ node: Node) -> Node {
+            switch node {
+            case .all(let nodes): .all(nodes.map(rename))
+            case .any(let nodes): .any(nodes.map(rename))
+            case .not(let inner): .not(rename(inner))
+            case .qualifier(.topic, let value) where value.caseInsensitiveCompare(old) == .orderedSame: .qualifier(.topic, new)
+            case .qualifier, .text: node
+            }
+        }
+        return TriageQuery(rename(root))
+    }
+
     /// The AND-ed terms at the top level.
     var terms: [Node] { if case .all(let nodes) = root { nodes } else { [root] } }
 
@@ -108,6 +122,7 @@ struct TriageQuery: Hashable, Sendable, CustomStringConvertible {
                     ("action", "Needs your action"), ("inbox", "In your Inbox"), ("review", "Worth a look"),
                     ("waiting", "Waiting on others"), ("none", "No action needed"),
                 ]
+            case .signal: TriageSignal.allCases.map { ($0.rawValue, $0.title) }
             default: nil
             }
         }

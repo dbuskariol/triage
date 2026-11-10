@@ -132,6 +132,7 @@ struct WorkspaceSearch: Equatable, Codable, Sendable {
         }
         func candidates(_ kind: SearchToken.Kind) -> [String] {
             if let known = kind.knownValues { return known.map(\.value) }
+            if kind == .topic { return entries.flatMap { $0.decision?.topics ?? [] } }
             return entries.flatMap { Self.values(of: kind, in: $0.item) }
         }
         let kinds = kind.map { [$0] } ?? Self.dynamicKinds + [.is, .status, .in]
@@ -164,6 +165,7 @@ struct WorkspaceSearch: Equatable, Codable, Sendable {
         case .assignee: item.assignees
         case .commenter: Array(Set(item.recentActivity.map(\.author)))
         case .reviewer: Array(Set((facts?.latestReviews ?? []).map(\.author) + (facts?.requestedReviewers ?? []).filter { !$0.contains("/") }))
+        case .check: Array(Set((facts?.checkRuns ?? []).map(\.name)))
         default: []
         }
     }

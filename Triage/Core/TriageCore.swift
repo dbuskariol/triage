@@ -336,6 +336,40 @@ struct TriageDecision: Codable, Equatable, Sendable {
     var topics: [String]? = nil
 }
 
+/// What Copilot noticed about an item, from a fixed list, so rules and
+/// search can use `signal:`. Keep in sync with `SIGNALS` in the helper.
+enum TriageSignal: String, CaseIterable, Identifiable, Sendable {
+    case ciFailing = "ci-failing"
+    case approvalGate = "approval-gate"
+    case blockedOnYou = "blocked-on-you"
+    case questionForYou = "question-for-you"
+    case security
+    case releaseBlocker = "release-blocker"
+    case deadline
+    case waitingOnAuthor = "waiting-on-author"
+    case botNoise = "bot-noise"
+    case stale
+
+    static let maximumPerItem = 5
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .ciFailing: "CI failing"
+        case .approvalGate: "Waiting on an approval gate"
+        case .blockedOnYou: "Someone is blocked on you"
+        case .questionForYou: "A question for you"
+        case .security: "Security"
+        case .releaseBlocker: "Release blocker"
+        case .deadline: "Has a deadline"
+        case .waitingOnAuthor: "Waiting on the author"
+        case .botNoise: "Automated noise"
+        case .stale: "Stale"
+        }
+    }
+}
+
 struct TriageHandledContext: Equatable, Sendable {
     let previousNextAction: String
     let viewerActivity: [String]

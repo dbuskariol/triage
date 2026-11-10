@@ -61,6 +61,17 @@ final class CopilotTriageDeciderTests: XCTestCase {
         XCTAssertEqual(item.recentActivity.first?.excerpt, comment)
     }
 
+    func testTopicsAreSentAndOnlyKnownSignalsAndTopicsAreKept() async throws {
+        let helper = FakeTriageHelper(signals: ["approval-gate", "made-up"], topics: ["compliance approvals", "Unknown"])
+        let rules = TriageRules(instructions: "", rules: [], topics: [TriageTopic(name: " Compliance approvals ", description: " Blocked on a compliance approval. ")])
+        let decisions = try await makeDecider(helper).decide([deciderItem("A")], scope: deciderScope, rules: rules)
+        let sent = await helper.lastTriage?.topics
+        XCTAssertEqual(sent, [CopilotTriageTopic(name: "Compliance approvals", description: "Blocked on a compliance approval.")])
+        XCTAssertEqual(decisions.first?.signals, ["approval-gate"])
+        XCTAssertEqual(decisions.first?.topics, ["Compliance approvals"])
+        XCTAssertEqual(decisions.first?.rulesDigest, rules.digest(for: deciderItem("A"), viewer: "me"))
+    }
+
     func testRejectedCallerAsksForARelaunchWithoutRetrying() async throws {
         let helper = FakeTriageHelper(failAuthenticateWith: .callerRejected)
         do {
@@ -164,10 +175,14 @@ private actor FakeTriageHelper: TriageCopilotHelping {
     private(set) var lastTriage: CopilotTriageRequest?
 
     private let failAuthenticateWith: CopilotXPCError?
+    private let signals: [String]?
+    private let topics: [String]?
 
     init(login: String = "me", failFirstTriageWithMissingSession: Bool = false, dropLastDecision: Bool = false,
-         failAuthenticateWith: CopilotXPCError? = nil) {
+         failAuthenticateWith: CopilotXPCError? = nil, signals: [String]? = nil, topics: [String]? = nil) {
         self.failAuthenticateWith = failAuthenticateWith
+        self.signals = signals
+        self.topics = topics
         self.login = login
         self.dropLastDecision = dropLastDecision
         failNextTriage = failFirstTriageWithMissingSession
@@ -203,7 +218,7 @@ private actor FakeTriageHelper: TriageCopilotHelping {
             modelID: "auto",
             decisions: request.items.dropLast(dropLastDecision ? 1 : 0).map {
                 CopilotTriageItemDecision(id: $0.id, disposition: .review, priority: 50, confidence: 0.8,
-                                          summary: "Summary", reason: "Reason", nextAction: "Next")
+                                          summary: "Summary", reason: "Reason", nextAction: "Next", signals: signals, topics: topics)
             }
         )
     }

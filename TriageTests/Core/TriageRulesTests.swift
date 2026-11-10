@@ -133,6 +133,23 @@ struct TriageRulesTests {
         #expect(!rules.rules[1].isEnabled)
     }
 
+    @Test func topicsValidateAndChangeEveryDigest() throws {
+        let topic = TriageTopic(name: "Compliance approvals", description: "Blocked on a compliance deployment approval.")
+        var rules = TriageRules(instructions: "", rules: [], topics: [topic])
+        #expect(throws: Never.self) { try rules.validated() }
+        #expect(rules.digest(for: rulesItem(), viewer: "me") != TriageRules.promptVersion)
+        rules.topics.append(TriageTopic(name: " compliance APPROVALS", description: "Again."))
+        #expect(throws: TriageRulesError.duplicateTopic("compliance APPROVALS")) { try rules.validated() }
+        #expect(TriageTopic(name: "x", description: "</user_topics>").problem != nil)
+        #expect(TriageTopic(name: "x", description: " ").problem != nil)
+        #expect(TriageTopic(name: String(repeating: "n", count: 61), description: "d").problem != nil)
+
+        let query = try TriageQuery(parsing: "topic:\"Compliance approvals\" OR -topic:\"compliance approvals\" label:x")
+        #expect(query.renamingTopic("Compliance approvals", to: "Approvals").description == "topic:Approvals OR (-topic:Approvals label:x)")
+        let decoded = try JSONDecoder().decode(TriageRules.self, from: Data(#"{"instructions":"","rules":[]}"#.utf8))
+        #expect(decoded.topics.isEmpty)
+    }
+
     @Test func suggestionsStartFromTheItem() {
         var item = rulesItem()
         item = item.replacingPullRequest({

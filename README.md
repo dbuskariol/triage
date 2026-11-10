@@ -87,7 +87,7 @@ The search field at the top of the list filters instantly (⌘F). Type words to 
 | Pull request status | `status:failing` `status:required-failing` `status:passing` `status:pending` `status:conflicts` `status:approved` `status:changes` · `check:build` `check:"unit tests":failing` (`failing` `passing` `pending` `skipped`) |
 | Text | `title:release` `body:"approval required"` `comment:"approval required"` |
 | Time and size | `updated:>14d` `created:<2w` `size:>500` |
-| Copilot | `in:action` `in:inbox` `in:waiting` `in:none` `priority:high` `priority:>70` `effort:quick` |
+| Copilot | `in:action` `in:inbox` `in:waiting` `in:none` `priority:high` `priority:>70` `effort:quick` · `signal:ci-failing` `signal:approval-gate` `signal:blocked-on-you` `signal:question-for-you` `signal:security` `signal:release-blocker` `signal:deadline` `signal:waiting-on-author` `signal:bot-noise` `signal:stale` · `topic:"Your topic"` |
 
 Combine filters with spaces (all must match), `OR`, parentheses, and `-` to exclude: `is:review status:failing -author:@me`, or `repo:acme/* (label:security OR label:incident)`. Mistakes are explained under the field (“Unknown filter `stauts:`. Did you mean `status:`?”).
 
@@ -121,12 +121,13 @@ Marking done or snoozing moves selection to the next item instantly.
 
 ## Copilot, rules, and instructions
 
-Triage uses **two layers** you control, on top of a fixed built-in policy:
+Triage uses **three layers** you control, on top of a fixed built-in policy:
 
 | Layer | What it does | When it applies |
 |---|---|---|
 | **Rules** | *When* a filter matches → *then* **Hide**, **Move** to a section, or **Rank** higher or lower. | Instantly, always. Rules override Copilot. Rules on GitHub facts that hide work also stop it being sent to Copilot. |
 | **Instructions** | Plain-English guidance, e.g. *“Production incidents matter more than refactors.”* Up to 2,000 characters. | On the next analysis. Copilot re-checks affected work in the background. |
+| **Topics** | Things Copilot should recognize, each a name and a plain-English description, e.g. *Compliance approvals: blocked on a FedRAMP or other compliance deployment approval.* Up to 20. | Copilot tags matching work on its next analysis; use `topic:"Compliance approvals"` in rules and search. |
 
 A rule's *when* is a filter in the same language as [search](#search), so anything you can find you can act on:
 
@@ -135,7 +136,8 @@ A rule's *when* is a filter in the same language as [search](#search), so anythi
 | `is:team` → Rank lower (medium) | Team-wide review requests sit below the ones addressed to you. |
 | `author:dependabot[bot] -status:failing` → Hide | Bot updates disappear unless their checks fail. |
 | `is:review status:required-failing -author:@me` → Move to Waiting on Others | Reviews wait until required checks pass. |
-| `commenter:github-actions[bot] comment:"approval required"` → Hide | Work blocked on an approval gate stays out of the way. |
+| `signal:approval-gate` → Move to Waiting on Others | Work blocked on a deployment, release, or compliance approval waits until it clears. |
+| `topic:"Compliance approvals"` → Hide | Anything Copilot tags with your topic stays out of the way. |
 
 Rules apply in a fixed order: **Hide** wins; then the first matching **Move**; then all matching **Rank** rules add up (small ±10, medium ±20, large ±35, at most ±40 in total). *Move to Inbox* never downgrades work Copilot says needs your action. Hidden work goes to **Hidden by Rules**, never to the Inbox, Briefing, Weekly Review, notifications, or the menu bar. Settings flags Move rules that conflict.
 

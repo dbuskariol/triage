@@ -17,8 +17,9 @@ use crate::{
         EphemeralCredential, TrustedRuntimeBootstrap,
     },
     schema::{
-        TriageItem, TriageItemDecision, ValidationError, retain_valid_triage_outputs,
+        TriageItem, TriageItemDecision, TriageTopic, ValidationError, retain_valid_triage_outputs,
         validate_draft_inputs, validate_triage_inputs, validate_triage_instructions,
+        validate_triage_topics,
     },
 };
 
@@ -100,6 +101,7 @@ impl WireRequest {
                 viewer_login,
                 items,
                 instructions,
+                topics,
                 reasoning_effort,
                 context_tier,
                 ..
@@ -109,6 +111,7 @@ impl WireRequest {
                     .map_err(ProtocolError::InvalidRequest)?;
                 validate_triage_instructions(instructions.as_deref())
                     .map_err(ProtocolError::InvalidRequest)?;
+                validate_triage_topics(topics).map_err(ProtocolError::InvalidRequest)?;
             }
             RequestOperation::Draft {
                 viewer_login,
@@ -177,6 +180,8 @@ pub enum RequestOperation {
         deadline: DateTime<Utc>,
         #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        topics: Vec<TriageTopic>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +243,8 @@ struct TriageRequest {
     deadline: DateTime<Utc>,
     #[serde(default)]
     instructions: Option<String>,
+    #[serde(default)]
+    topics: Vec<TriageTopic>,
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
@@ -510,6 +517,7 @@ fn decode_request(payload: &[u8]) -> Result<WireRequest, ProtocolError> {
                     items: request.items,
                     deadline: request.deadline,
                     instructions: request.instructions,
+                    topics: request.topics,
                     reasoning_effort: request.reasoning_effort,
                     context_tier: request.context_tier,
                 },
@@ -705,8 +713,8 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                             continue;
                         }
                         match &mut request.operation {
-                        RequestOperation::Triage { model_id, viewer_login, items, deadline, instructions, reasoning_effort, context_tier } => {
-                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: instructions.clone() };
+                        RequestOperation::Triage { model_id, viewer_login, items, deadline, instructions, topics, reasoning_effort, context_tier } => {
+                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: instructions.clone(), topics: topics.clone() };
                             let model_id = model_id.clone();
                             let viewer_login = viewer_login.clone();
                             let items = items.clone();
@@ -731,7 +739,7 @@ pub async fn serve_stdio<E: CopilotEngine>(engine: Arc<E>) -> Result<(), Protoco
                         }
                         RequestOperation::Draft { model_id, viewer_login, item, deadline, goal, writing_style, reasoning_effort, context_tier } => {
                             let draft_request = crate::engine::DraftRequest { viewer_login: viewer_login.clone(), item: (**item).clone(), goal: goal.clone(), writing_style: writing_style.clone() };
-                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: None };
+                            let options = crate::engine::TriageModelOptions { model: model_id.clone(), reasoning_effort: reasoning_effort.clone(), context_tier: context_tier.clone(), instructions: None, topics: Vec::new() };
                             let model_id = model_id.clone();
                             let deadline = *deadline;
                             cancellation.begin(request.request_id, cancellation_scope(&request));

@@ -579,7 +579,12 @@ enum CopilotWireSchema {
   private static func validateTriage(_ object: [String: Any]) throws {
     guard let model = object["model_id"] as? String, !model.isEmpty,
       let decisions = object["decisions"] as? [[String: Any]], (1...20).contains(decisions.count) else { throw CopilotXPCError.invalidResponse }
-    let fields: Set<String> = ["id", "disposition", "priority", "confidence", "summary", "reason", "next_action", "instruction_note", "handled", "handled_evidence", "effort"]
+    let fields: Set<String> = ["id", "disposition", "priority", "confidence", "summary", "reason", "next_action", "instruction_note", "handled", "handled_evidence", "effort", "signals", "topics"]
+    func strings(_ value: Any?, maximumCount: Int, maximumBytes: Int) -> Bool {
+      guard let value else { return true }
+      guard let list = value as? [Any], list.count <= maximumCount else { return false }
+      return list.allSatisfy { ($0 as? String).map { !$0.isEmpty && $0.utf8.count <= maximumBytes } ?? false }
+    }
     var ids = Set<String>()
     for decision in decisions {
       guard Set(decision.keys).isSubset(of: fields), let id = decision["id"] as? String, !id.isEmpty, ids.insert(id).inserted,
@@ -595,7 +600,10 @@ enum CopilotWireSchema {
         decision["handled"] == nil || decision["handled"] is NSNull || ["yes", "partial", "no"].contains(decision["handled"] as? String ?? ""),
         decision["handled_evidence"] == nil || decision["handled_evidence"] is String || decision["handled_evidence"] is NSNull,
         (decision["handled_evidence"] as? String)?.utf8.count ?? 0 <= 200,
-        decision["effort"] == nil || decision["effort"] is NSNull || ["quick", "short", "deep"].contains(decision["effort"] as? String ?? "") else { throw CopilotXPCError.invalidResponse }
+        decision["effort"] == nil || decision["effort"] is NSNull || ["quick", "short", "deep"].contains(decision["effort"] as? String ?? ""),
+        strings(decision["signals"], maximumCount: TriageSignal.maximumPerItem, maximumBytes: 64),
+        (decision["signals"] as? [String] ?? []).allSatisfy({ TriageSignal(rawValue: $0) != nil }),
+        strings(decision["topics"], maximumCount: TriageTopic.maximumCount, maximumBytes: TriageTopic.maximumNameBytes) else { throw CopilotXPCError.invalidResponse }
     }
   }
 

@@ -100,9 +100,9 @@ Done, Snoozed, and Muted are separate sections: Done is newest first with a *Han
 
 Copilot receives four layers, highest precedence first:
 
-1. **Fixed system policy** (in the Rust helper): role, untrusted-data handling, dispositions and priority bands, writing rules with good and bad examples, handled-check rules, and the JSON schema. It is not user-editable; this keeps output parseable, protects against instructions embedded in GitHub content, and lets improvements ship with updates. `TriageRules.promptVersion` is bumped when it changes materially.
-2. **User preferences**: the organization's instructions, appended in a delimited `<user_preferences>` block that cannot change the format or policy.
-3. **Per-item hints**: `rule_hints`, and for handled checks `previous_next_action` and `viewer_activity`.
+1. **Fixed system policy** (in the Rust helper): role, untrusted-data handling, dispositions and priority bands, writing rules with good and bad examples, handled-check rules, the fixed signal taxonomy (`ci-failing`, `approval-gate`, …; anything else is dropped in the helper and rejected by the Swift allowlist), and the JSON schema. It is not user-editable; this keeps output parseable, protects against instructions embedded in GitHub content, and lets improvements ship with updates. `TriageRules.promptVersion` is bumped when it changes materially.
+2. **User preferences**: the organization's instructions, appended in a delimited `<user_preferences>` block, and its Topics (name and description, no angle brackets) in a delimited `<user_topics>` block. Neither can change the format or policy. Returned topic names are kept only when they match a defined topic, spelled as defined.
+3. **Per-item facts and hints**: `check_runs` (name, result, required), `rule_hints`, and for handled checks `previous_next_action` and `viewer_activity`.
 4. **Untrusted data**: today's date, then the items as JSON.
 
 Output is parsed leniently: fences, prose, and `{"decisions": [...]}` wrappers are tolerated; every complete decision is salvaged from a truncated or partly malformed reply; over-long text is clamped. Unreadable replies report only their shape (length and first character), never content. Parsed output is then validated strictly on both sides of the XPC boundary. A partial response saves the valid decisions and retries the rest.

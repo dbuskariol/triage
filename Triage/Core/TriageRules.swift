@@ -15,7 +15,7 @@ struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
     /// Bump when the triage prompt changes materially, so existing decisions
     /// are re-analyzed in the background with the improved prompt.
-    static let promptVersion = "prompt-4"
+    static let promptVersion = "prompt-5"
     static let maximumRules = 100
     /// Rank weights add up to at most this much either way.
     static let maximumRankAdjustment = 40
@@ -23,12 +23,15 @@ struct TriageRules: Codable, Equatable, Sendable {
 
     var instructions: String
     var rules: [TriageRule]
+    /// Things Copilot tags work with, so rules and search can use `topic:`.
+    var topics: [TriageTopic] = []
     /// Changed by "Re-analyze All" to make every decision stale.
     var reanalysisToken = ""
 
-    init(instructions: String, rules: [TriageRule], reanalysisToken: String = "") {
+    init(instructions: String, rules: [TriageRule], topics: [TriageTopic] = [], reanalysisToken: String = "") {
         self.instructions = instructions
         self.rules = rules
+        self.topics = topics
         self.reanalysisToken = reanalysisToken
     }
 
@@ -37,6 +40,7 @@ struct TriageRules: Codable, Equatable, Sendable {
         instructions = try container.decode(String.self, forKey: .instructions)
         // Rules that can't be read (or migrated) are dropped, never the whole set.
         rules = try container.decode([LossyRule].self, forKey: .rules).compactMap(\.rule)
+        topics = try container.decodeIfPresent([TriageTopic].self, forKey: .topics) ?? []
         reanalysisToken = try container.decodeIfPresent(String.self, forKey: .reanalysisToken) ?? ""
     }
 
@@ -55,6 +59,12 @@ struct TriageRules: Codable, Equatable, Sendable {
     func validated() throws -> TriageRules {
         guard instructions.utf8.count <= Self.maximumInstructionBytes else { throw TriageRulesError.instructionsTooLong }
         guard rules.count <= Self.maximumRules else { throw TriageRulesError.tooManyRules }
+        guard topics.count <= TriageTopic.maximumCount else { throw TriageRulesError.tooManyTopics }
+        var names = Set<String>()
+        for topic in topics {
+            if let problem = topic.problem { throw TriageRulesError.invalidTopic(problem) }
+            guard names.insert(topic.trimmedName.lowercased()).inserted else { throw TriageRulesError.duplicateTopic(topic.trimmedName) }
+        }
         return self
     }
 
@@ -86,12 +96,13 @@ struct TriageRules: Codable, Equatable, Sendable {
     /// rank rules, and rules on Copilot's output, never change it.
     func digest(for item: PersonalWorkItem, viewer: String) -> String {
         let hints = hints(for: item, viewer: viewer)
-        guard trimmedInstructions != nil || !hints.isEmpty || !reanalysisToken.isEmpty else { return Self.promptVersion }
-        struct Canonical: Encodable { let prompt: String; let instructions: String; let hints: [String]; let token: String }
+        guard trimmedInstructions != nil || !hints.isEmpty || !reanalysisToken.isEmpty || !topics.isEmpty else { return Self.promptVersion }
+        struct Canonical: Encodable { let prompt: String; let instructions: String; let hints: [String]; let topics: [String]; let token: String }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(Canonical(
-            prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", hints: hints, token: reanalysisToken
+            prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", hints: hints,
+            topics: topics.map { "\($0.trimmedName): \($0.trimmedDescription)" }, token: reanalysisToken
         ))) ?? Data()
         return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
@@ -136,12 +147,46 @@ struct TriageRules: Codable, Equatable, Sendable {
 enum TriageRulesError: Error, Equatable, LocalizedError {
     case instructionsTooLong
     case tooManyRules
+    case tooManyTopics
+    case invalidTopic(String)
+    case duplicateTopic(String)
 
     var errorDescription: String? {
         switch self {
         case .instructionsTooLong: "Instructions can be at most \(TriageRules.maximumInstructionBytes) characters."
         case .tooManyRules: "You can have at most \(TriageRules.maximumRules) rules."
+        case .tooManyTopics: "You can have at most \(TriageTopic.maximumCount) topics."
+        case .invalidTopic(let problem): problem
+        case .duplicateTopic(let name): "You already have a topic named “\(name)”."
         }
+    }
+}
+
+/// Something the user wants Copilot to recognize, e.g. "Compliance approvals:
+/// blocked on a FedRAMP or other compliance deployment approval". Copilot
+/// tags matching work; rules and search use `topic:"Compliance approvals"`.
+struct TriageTopic: Codable, Equatable, Hashable, Identifiable, Sendable {
+    static let maximumCount = 20
+    static let maximumNameBytes = 60
+    static let maximumDescriptionBytes = 280
+
+    var id = UUID()
+    var name: String
+    var description: String
+
+    var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var trimmedDescription: String { description.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Why this topic can't be saved, if it can't.
+    var problem: String? {
+        if trimmedName.isEmpty { return "Give the topic a name." }
+        if trimmedName.utf8.count > Self.maximumNameBytes { return "Topic names can be at most \(Self.maximumNameBytes) characters." }
+        if trimmedDescription.isEmpty { return "Describe what “\(trimmedName)” covers, so Copilot can recognize it." }
+        if trimmedDescription.utf8.count > Self.maximumDescriptionBytes { return "Topic descriptions can be at most \(Self.maximumDescriptionBytes) characters." }
+        if (name + description).contains(where: { "<>".contains($0) }) || name.contains(where: \.isNewline) {
+            return "Topics can't contain < or >, and names can't span lines."
+        }
+        return nil
     }
 }
 

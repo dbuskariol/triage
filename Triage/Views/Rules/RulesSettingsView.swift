@@ -7,6 +7,7 @@ struct RulesSettingsView: View {
 
     @State private var instructions = ""
     @State private var editingRule: RuleDraft?
+    @State private var editingTopic: TriageTopic?
     @Environment(\.triageViewerLogin) private var viewer
 
     private static let examples = [
@@ -20,6 +21,7 @@ struct RulesSettingsView: View {
         Form {
             if appModel.selectedOrganization != nil {
                 rulesSection
+                topicsSection
                 instructionsSection
             } else {
                 Section {
@@ -32,6 +34,23 @@ struct RulesSettingsView: View {
         .onChange(of: appModel.selectedOrganizationID) { instructions = appModel.rules.instructions }
         .onChange(of: appModel.rules.instructions) { _, saved in
             if instructions != saved, !hasUnsavedInstructions { instructions = saved }
+        }
+        .sheet(item: $editingTopic) { topic in
+            TopicEditorSheet(topic: topic, isNew: !appModel.rules.topics.contains { $0.id == topic.id }, existing: appModel.rules.topics) { updated in
+                var rules = appModel.rules
+                if let index = rules.topics.firstIndex(where: { $0.id == updated.id }) {
+                    let previous = rules.topics[index].trimmedName
+                    rules.topics[index] = updated
+                    if previous != updated.trimmedName {
+                        for ruleIndex in rules.rules.indices {
+                            rules.rules[ruleIndex].query = rules.rules[ruleIndex].query.renamingTopic(previous, to: updated.trimmedName)
+                        }
+                    }
+                } else {
+                    rules.topics.append(updated)
+                }
+                appModel.saveRules(rules)
+            }
         }
         .sheet(item: $editingRule) { draft in
             RuleEditorSheet(draft: draft, entries: appModel.presentation.allEntries) { updated in
@@ -149,6 +168,63 @@ struct RulesSettingsView: View {
         appModel.saveRules(rules)
     }
 
+    // MARK: Topics
+
+    private var topicsSection: some View {
+        Section {
+            if appModel.rules.topics.isEmpty {
+                Text("No topics yet. Add one for anything Copilot should recognize, then use it in rules and search.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(appModel.rules.topics) { topic in
+                HStack(spacing: 12) {
+                    Image(systemName: "number").foregroundStyle(Color.accentColor).frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(topic.trimmedName).fontWeight(.medium)
+                        Text(topic.trimmedDescription).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer(minLength: 8)
+                    let tagged = appModel.presentation.allEntries.filter { $0.decision?.topics?.contains(topic.trimmedName) == true }.count
+                    Text("\(tagged) tagged").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    Menu {
+                        Button("Edit…") { editingTopic = topic }
+                        Button("Hide Work with This Topic…") {
+                            editingRule = RuleDraft(rule: TriageRule(
+                                query: TriageQuery(.qualifier(.topic, topic.trimmedName)), action: .exclude
+                            ))
+                        }
+                        Divider()
+                        Button("Delete", role: .destructive) {
+                            var rules = appModel.rules
+                            rules.topics.removeAll { $0.id == topic.id }
+                            appModel.saveRules(rules)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("Actions for topic \(topic.trimmedName)")
+                }
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { editingTopic = topic }
+            }
+            HStack {
+                Text("\(appModel.rules.topics.count) of \(TriageTopic.maximumCount)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Add Topic…") { editingTopic = TriageTopic(name: "", description: "") }
+                    .disabled(appModel.rules.topics.count >= TriageTopic.maximumCount)
+            }
+        } header: {
+            Text("Topics")
+        } footer: {
+            Text("Copilot tags work with your topics as it analyzes it. Use them in rules and search with topic:\"Name\" — for example, hide everything waiting on a compliance approval. Adding or changing a topic re-analyzes your work in the background.")
+        }
+    }
+
     // MARK: Instructions
 
     private var hasUnsavedInstructions: Bool { instructions != appModel.rules.instructions }
@@ -199,4 +275,65 @@ struct RulesSettingsView: View {
         }
     }
 
+}
+
+/// Adds or edits one topic: a short name and what Copilot should look for.
+struct TopicEditorSheet: View {
+    @State private var topic: TriageTopic
+    let isNew: Bool
+    let existing: [TriageTopic]
+    let onSave: (TriageTopic) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    init(topic: TriageTopic, isNew: Bool, existing: [TriageTopic], onSave: @escaping (TriageTopic) -> Void) {
+        _topic = State(initialValue: topic)
+        self.isNew = isNew
+        self.existing = existing
+        self.onSave = onSave
+    }
+
+    private var problem: String? {
+        if let problem = topic.problem { return problem }
+        if existing.contains(where: { $0.id != topic.id && $0.trimmedName.caseInsensitiveCompare(topic.trimmedName) == .orderedSame }) {
+            return "You already have a topic named “\(topic.trimmedName)”."
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Form {
+                Section {
+                    TextField("Name", text: $topic.name, prompt: Text("e.g. Compliance approvals"))
+                    TextField("What to look for", text: $topic.description, prompt: Text("e.g. Blocked on a FedRAMP or other compliance deployment approval"), axis: .vertical)
+                        .lineLimit(3...5)
+                } footer: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Describe it the way you'd explain it to a colleague. Copilot tags matching work; use topic:\"\(topic.trimmedName.isEmpty ? "Name" : topic.trimmedName)\" in rules and search.")
+                        if let problem, !(topic.trimmedName.isEmpty && topic.trimmedDescription.isEmpty) {
+                            Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(isNew ? "Add Topic" : "Save") {
+                    var saved = topic
+                    saved.name = topic.trimmedName
+                    saved.description = topic.trimmedDescription
+                    onSave(saved)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(problem != nil)
+            }
+            .padding(20)
+        }
+        .frame(width: 480, height: 300)
+    }
 }

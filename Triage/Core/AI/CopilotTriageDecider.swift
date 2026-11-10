@@ -153,6 +153,7 @@ actor CopilotTriageDecider: TriageDeciding {
                     modelID: authorization.selectedModelID,
                     deadline: now().addingTimeInterval(Self.requestTimeout),
                     instructions: instructions,
+                    topics: rules.topics.map { CopilotTriageTopic(name: $0.trimmedName, description: $0.trimmedDescription) },
                     reasoningEffort: authorization.reasoningEffort,
                     contextTier: authorization.contextTier
                 ))
@@ -182,7 +183,11 @@ actor CopilotTriageDecider: TriageDeciding {
                     // Only meaningful when we asked (the viewer acted since the last decision).
                     handled: contexts[item.id] == nil ? nil : decision.handled,
                     handledEvidence: contexts[item.id] == nil ? nil : decision.handledEvidence,
-                    effort: decision.effort
+                    effort: decision.effort,
+                    signals: decision.signals.map { signals in signals.filter { TriageSignal(rawValue: $0) != nil } },
+                    topics: decision.topics.map { names in
+                        names.compactMap { name in rules.topics.first { $0.trimmedName.caseInsensitiveCompare(name) == .orderedSame }?.trimmedName }
+                    }
                 )
             }
         } catch let error as TriageDecisionError {
@@ -224,7 +229,10 @@ actor CopilotTriageDecider: TriageDeciding {
                     mergeable: pullRequest.mergeable,
                     unresolvedReviewThreads: pullRequest.unresolvedReviewThreads,
                     additions: pullRequest.additions,
-                    deletions: pullRequest.deletions
+                    deletions: pullRequest.deletions,
+                    checkRuns: pullRequest.checkRuns.map { runs in
+                        runs.map { CopilotTriageCheckRun(name: String($0.name.prefix(200)), result: $0.result.rawValue, required: $0.isRequired) }
+                    }
                 )
             },
             recentActivity: item.recentActivity.map { activity in
