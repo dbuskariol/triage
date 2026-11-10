@@ -56,6 +56,19 @@ struct TriageQuery: Hashable, Sendable, CustomStringConvertible {
     /// Both queries must match.
     func and(_ other: TriageQuery) -> TriageQuery { TriageQuery(.all([root, other.root])) }
 
+    /// The AND-ed terms at the top level.
+    var terms: [Node] { if case .all(let nodes) = root { nodes } else { [root] } }
+
+    /// Adds `term` (AND), or removes it when already a top-level term.
+    /// Returns `nil` when removing the last term.
+    func toggling(_ term: Node) -> TriageQuery? {
+        if terms.contains(term) {
+            let rest = terms.filter { $0 != term }
+            return rest.isEmpty ? nil : TriageQuery(.all(rest))
+        }
+        return TriageQuery(.all(terms + [term]))
+    }
+
     // MARK: Qualifiers
 
     enum Qualifier: String, CaseIterable, Codable, Hashable, Sendable {
@@ -79,7 +92,7 @@ struct TriageQuery: Hashable, Sendable, CustomStringConvertible {
                     ("pr", "Pull requests"), ("issue", "Issues"), ("draft", "Draft pull requests"),
                     ("review", "Review requested"), ("direct", "Review requested from you directly"),
                     ("team", "Review requested from your team only"), ("assigned", "Assigned to you"),
-                    ("mine", "Opened by you"), ("mentioned", "Mentions you"),
+                    ("mine", "Opened by you"), ("mentioned", "Mentions you"), ("commented", "You commented"),
                     ("unread", "Unread"), ("read", "Read"),
                 ]
             case .status:

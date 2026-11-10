@@ -305,9 +305,9 @@ enum PriorityBand: String, CaseIterable, Sendable {
 
 struct TriageDecision: Codable, Equatable, Sendable {
     let itemID: GitHubNodeID
-    let disposition: TriageDisposition
+    var disposition: TriageDisposition
     /// 0 (lowest) ... 100 (highest)
-    let priority: Int
+    var priority: Int
     /// 0 ... 1
     let confidence: Double
     /// One sentence: what this item is about right now.
@@ -423,7 +423,10 @@ struct TriageEntry: Identifiable, Equatable, Sendable {
     var local: LocalStatus
     /// Names of the user's rules that matched (set by `TriageRules.apply`).
     var appliedRules: [String] = []
-    var isMuted = false
+    /// The rule that hides this item, if any.
+    var excludedBy: String?
+
+    var isExcluded: Bool { excludedBy != nil }
     /// When the viewer last viewed this item's details.
     var readAt: Date?
     /// Whether the item is new to the viewer (set by `WorkspacePresentation`).
@@ -525,9 +528,10 @@ protocol TriageStore: Sendable {
     func replaceItems(_ items: [PersonalWorkItem], scope: WorkspaceScope, at date: Date) async throws
     /// Active items with no decision for their current fingerprint whose retry
     /// time (if any) has passed, most urgent first.
-    /// Also returns items whose decision was made under a different `rulesDigest`.
+    /// Also returns items whose decision was made under a different
+    /// preferences digest (`digest(item)`).
     func itemsNeedingAnalysis(
-        scope: WorkspaceScope, rulesDigest: String, at date: Date, limit: Int
+        scope: WorkspaceScope, at date: Date, limit: Int, digest: @escaping @Sendable (PersonalWorkItem) -> String
     ) async throws -> [PersonalWorkItem]
     func saveDecisions(_ decisions: [TriageDecision], scope: WorkspaceScope) async throws
     func recordAnalysisFailure(
@@ -560,7 +564,7 @@ protocol TriageDeciding: Sendable {
     /// Maximum items per request.
     var maximumBatchSize: Int { get }
     /// Returns exactly one decision per input item, or throws.
-    /// Decisions carry `rules.digest`. Muted items are never passed in.
+    /// Decisions carry `rules.digest(for:viewer:)`. Excluded items are never passed in.
     /// `contexts` holds, per item, the previous next step and what the viewer
     /// did since, so the decision can say whether that step was handled.
     func decide(

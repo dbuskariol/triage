@@ -8,18 +8,18 @@ extension EnvironmentValues {
 
 /// Live "this rule matches N items" preview against current work.
 struct RulePreview: View {
-    let rule: TriageRule
+    let rule: TriageRule?
     let entries: [TriageEntry]
     @Environment(\.triageViewerLogin) private var viewer
 
     var body: some View {
-        let matches = entries.filter { rule.matches($0.item, viewer: viewer) }
+        let matches = rule.map { rule in entries.filter { rule.query.matches($0, viewer: viewer) } } ?? []
         VStack(alignment: .leading, spacing: 6) {
             Label(
-                rule.isValid
-                    ? "Matches \(matches.count) current item\(matches.count == 1 ? "" : "s")"
-                    : "Add a value to every condition",
-                systemImage: rule.isValid ? "line.3.horizontal.decrease.circle" : "exclamationmark.circle"
+                rule == nil
+                    ? "Add a filter to see what this rule matches"
+                    : "Matches \(matches.count) current item\(matches.count == 1 ? "" : "s")",
+                systemImage: rule == nil ? "exclamationmark.circle" : "line.3.horizontal.decrease.circle"
             )
             .font(.callout.weight(.medium))
             ForEach(matches.prefix(4)) { entry in
@@ -35,25 +35,27 @@ struct RulePreview: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.quinary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 
 /// A rule being created or edited. From an item, `suggestions` holds
-/// conditions taken from it, shown as checkboxes.
+/// filters taken from it, shown as checkboxes.
 struct RuleDraft: Identifiable {
     let id = UUID()
     var rule: TriageRule
-    var suggestions: [TriageRuleCondition] = []
+    var suggestions: [SearchToken] = []
     var isNew = true
     /// Shown above the form, e.g. the item the rule was started from.
     var context: String?
 }
 
 /// The one rule editor, used from items and from Settings:
-/// When (suggested and custom conditions) → Then (one action), with a live preview.
+/// When (a filter) → Then (one action), with a live preview.
 struct RuleEditorSheet: View {
     @State private var rule: TriageRule
-    private let suggestions: [TriageRuleCondition]
+    @State private var queryText: String
+    private let suggestions: [SearchToken]
     private let isNew: Bool
     private let context: String?
     let entries: [TriageEntry]
@@ -62,6 +64,7 @@ struct RuleEditorSheet: View {
 
     init(draft: RuleDraft, entries: [TriageEntry], onSave: @escaping (TriageRule) -> Void) {
         _rule = State(initialValue: draft.rule)
+        _queryText = State(initialValue: draft.rule.query.description)
         suggestions = draft.suggestions
         isNew = draft.isNew
         context = draft.context
@@ -69,8 +72,15 @@ struct RuleEditorSheet: View {
         self.onSave = onSave
     }
 
-    private var customIndices: [Int] {
-        rule.conditions.indices.filter { !suggestions.contains(rule.conditions[$0]) }
+    private var parsed: Result<TriageQuery, TriageQueryError> {
+        Result { () throws(TriageQueryError) in try TriageQuery(parsing: queryText) }
+    }
+
+    private var draftRule: TriageRule? {
+        guard case .success(let query) = parsed else { return nil }
+        var value = rule
+        value.query = query
+        return value
     }
 
     var body: some View {
@@ -84,42 +94,48 @@ struct RuleEditorSheet: View {
                     }
                 }
                 Section {
-                    ForEach(suggestions, id: \.self) { condition in
-                        Toggle(capitalized(condition.summary), isOn: Binding(
-                            get: { rule.conditions.contains(condition) },
-                            set: { isOn in
-                                if isOn { rule.conditions.append(condition) } else { rule.conditions.removeAll { $0 == condition } }
-                            }
-                        ))
-                    }
-                    ForEach(customIndices, id: \.self) { index in
-                        conditionRow(index)
-                    }
-                    Button {
-                        rule.conditions.append(.init(field: .repository, value: ""))
-                    } label: {
-                        Label(suggestions.isEmpty ? "Add Condition" : "Add Other Condition", systemImage: "plus")
-                    }
-                    .buttonStyle(.link)
-                    .disabled(rule.conditions.count >= 5)
-                } header: {
-                    Text("When all of these match")
-                } footer: {
-                    if !suggestions.isEmpty {
-                        Text("Suggested from this item. Choose more for a narrower rule.")
-                    }
-                }
-                Section("Then") {
-                    Picker("Action", selection: $rule.effect) {
-                        ForEach(TriageRuleEffect.allCases) { option in
-                            Label(option.title, systemImage: option.systemImage).tag(option)
+                    ForEach(suggestions) { token in
+                        Toggle(isOn: suggestionBinding(token)) {
+                            Label(token.title, systemImage: token.systemImage)
                         }
                     }
-                    TextField("Name", text: $rule.name, prompt: Text(rule.isValid ? rule.defaultName : "Optional"))
+                    TextField("Filter", text: $queryText, prompt: Text("e.g. is:review status:failing -author:@me"))
+                        .font(.body.monospaced())
+                        .accessibilityHint("A search filter. Combine with OR, parentheses, and minus to exclude.")
+                    if case .failure(let error) = parsed {
+                        Label(error.message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("When work matches")
+                } footer: {
+                    Text(suggestions.isEmpty
+                         ? "Uses the same filters as search. Combine with OR, parentheses, and - to exclude."
+                         : "Suggested from this item. Check more for a narrower rule, or edit the filter.")
+                }
+                Section("Then") {
+                    Picker("Action", selection: $rule.action) {
+                        Label(TriageRuleAction.exclude.title, systemImage: TriageRuleAction.exclude.systemImage)
+                            .tag(TriageRuleAction.exclude)
+                        Section("Move") {
+                            ForEach(TriageRuleAction.Route.allCases, id: \.self) { route in
+                                Label(TriageRuleAction.route(route).title, systemImage: TriageRuleAction.route(route).systemImage)
+                                    .tag(TriageRuleAction.route(route))
+                            }
+                        }
+                        Section("Rank") {
+                            ForEach(TriageRuleAction.all.filter { $0.rankAdjustment != 0 }, id: \.self) { action in
+                                Label(action.title, systemImage: action.systemImage).tag(action)
+                            }
+                        }
+                    }
+                    Text(actionExplanation).font(.caption).foregroundStyle(.secondary)
+                    TextField("Name", text: $rule.name, prompt: Text(draftRule?.defaultName ?? "Optional"))
                     if !isNew { Toggle("Enabled", isOn: $rule.isEnabled) }
                 }
                 Section {
-                    RulePreview(rule: rule, entries: entries)
+                    RulePreview(rule: draftRule, entries: entries)
                         .listRowInsets(EdgeInsets())
                 }
             }
@@ -135,60 +151,38 @@ struct RuleEditorSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(isNew ? "Create Rule" : "Save") {
-                    onSave(rule)
+                    guard let draftRule else { return }
+                    onSave(draftRule)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(!rule.isValid)
+                .disabled(draftRule == nil)
             }
             .padding(20)
         }
-        .frame(width: 560, height: 600)
+        .frame(width: 560, height: 620)
     }
 
-    private func capitalized(_ text: String) -> String {
-        text.prefix(1).uppercased() + text.dropFirst()
-    }
-
-    @ViewBuilder
-    private func conditionRow(_ index: Int) -> some View {
-        HStack {
-            Picker("Field", selection: Binding(
-                get: { rule.conditions[index].field },
-                set: { field in
-                    rule.conditions[index].field = field
-                    rule.conditions[index].value = field.choices?.first?.value ?? ""
-                }
-            )) {
-                ForEach(TriageRuleCondition.Field.allCases) { Text($0.title).tag($0) }
-            }
-            .labelsHidden()
-            .frame(width: 170)
-
-            if let choices = rule.conditions[index].field.choices {
-                Picker("Value", selection: Binding(
-                    get: { rule.conditions[index].value },
-                    set: { rule.conditions[index].value = $0 }
-                )) {
-                    ForEach(choices, id: \.value) { Text($0.title).tag($0.value) }
-                }
-                .labelsHidden()
-            } else {
-                TextField("Value", text: Binding(
-                    get: { rule.conditions[index].value },
-                    set: { rule.conditions[index].value = $0 }
-                ), prompt: Text(rule.conditions[index].field.placeholder))
-                .labelsHidden()
-            }
-
-            Button {
-                rule.conditions.remove(at: index)
-            } label: {
-                Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Remove condition")
+    private var actionExplanation: String {
+        switch rule.action {
+        case .exclude: "Matching work is hidden everywhere — Inbox, Briefing, notifications — and kept in Hidden by Rules."
+        case .route: "Matching work always goes here, whatever Copilot decides."
+        case .rank: "Matching work moves up or down within its section. Rank rules add up, to a limit."
         }
+    }
+
+    private func suggestionBinding(_ token: SearchToken) -> Binding<Bool> {
+        let term = TriageQuery.Node.qualifier(token.kind, token.value)
+        return Binding(
+            get: { (try? TriageQuery(parsing: queryText))?.terms.contains(term) == true },
+            set: { _ in
+                guard let current = try? TriageQuery(parsing: queryText) else {
+                    queryText = TriageQuery(term).description
+                    return
+                }
+                queryText = current.toggling(term)?.description ?? ""
+            }
+        )
     }
 }

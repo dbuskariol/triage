@@ -19,8 +19,10 @@ struct WorkspacePresentation: Equatable, Sendable {
         case snoozed
         /// Marked done, by you or automatically when you handled it on GitHub.
         case done
-        /// Hidden by one of the user's mute rules; never analyzed.
+        /// Muted by the user until something is addressed to them.
         case muted
+        /// Hidden by one of the user's rules.
+        case excluded
 
         var id: String { rawValue }
 
@@ -33,6 +35,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             case .done: "Done"
             case .snoozed: "Snoozed"
             case .muted: "Muted"
+            case .excluded: "Hidden by Rules"
             }
         }
 
@@ -45,6 +48,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             case .done: "checkmark.circle"
             case .snoozed: "moon.zzz"
             case .muted: "speaker.slash"
+            case .excluded: "eye.slash"
             }
         }
     }
@@ -71,16 +75,16 @@ struct WorkspacePresentation: Equatable, Sendable {
     /// Groups entries. Inbox is ordered by AI priority, then confidence;
     /// other sections by urgency of relationship, then recency.
     init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty, viewer: String = "") {
-        let digest = rules.digest
         let all = raw.map { entry in
-            var entry = rules.apply(to: entry, viewer: viewer)
+            var entry = rules.apply(to: entry, viewer: viewer, now: now)
             entry.isUnread = entry.hasUnreadActivity(viewer: viewer)
             // An expired status (done work someone else answered, an elapsed
             // snooze) no longer applies: show the item as active, without its
             // old "Handled by You" evidence.
             if entry.isVisible(at: now, viewer: viewer) { entry.local = .active }
             // Decided under different preferences: queued for re-analysis.
-            if entry.analysis == .current, let decision = entry.decision, (decision.rulesDigest ?? "") != digest {
+            if entry.analysis == .current, let decision = entry.decision,
+               (decision.rulesDigest ?? "") != rules.digest(for: entry.item, viewer: viewer) {
                 entry.analysis = .pending
             }
             return entry
@@ -90,7 +94,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             grouped[Self.section(for: entry, now: now, viewer: viewer), default: []].append(entry)
         }
         grouped[.analyzing] = all.filter {
-            $0.analysis != .current && $0.isVisible(at: now, viewer: viewer) && !$0.isMuted
+            $0.analysis != .current && $0.isVisible(at: now, viewer: viewer) && !$0.isExcluded
         }
         for (section, values) in grouped {
             grouped[section] = switch section {
@@ -114,7 +118,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             if case .snoozed = entry.local { return .snoozed }
             return .done
         }
-        guard !entry.isMuted else { return .muted }
+        guard !entry.isExcluded else { return .excluded }
         // A previous decision keeps the item in its section while changed
         // facts are re-analyzed, so the Inbox does not flicker.
         guard let decision = entry.decision else { return .analyzing }

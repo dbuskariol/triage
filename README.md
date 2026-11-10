@@ -57,7 +57,7 @@ Both fill the window. Clicking an item opens it in its list with its details; **
 | **Analyzing** | Copilot's queue: new work, items being re-checked after new activity, and retries. |
 | **Snoozed** | Work hidden until the time you chose; it returns sooner if someone responds. |
 | **Done** | Work you finished or that Triage marked *Handled by You*. Filter by how it was finished. |
-| **Muted** | Work hidden by your mute rules (appears only when non-empty). |
+| **Hidden by Rules** | Work your Hide rules match, with the rule that hid it (appears only when non-empty). |
 
 A **blue dot** means unread: you haven't viewed the item since someone else last commented, reviewed, or pushed. Your own activity never marks work unread. An **orange flag** means Copilot says it needs your action. The Inbox shows how many items it holds, and any list with unread work adds a blue unread count. Times are compact (`25m`, `2h`, `5d`, `3mo`); hover for the exact date.
 
@@ -123,23 +123,21 @@ Triage uses **two layers** you control, on top of a fixed built-in policy:
 
 | Layer | What it does | When it applies |
 |---|---|---|
-| **Rules** | *When* conditions match → *then* Mute, Always Inbox, Needs Action, Waiting, No Action, Raise or Lower Priority. | Instantly, always. Rules override Copilot. Mute also stops the item being sent to Copilot. |
+| **Rules** | *When* a filter matches → *then* **Hide**, **Move** to a section, or **Rank** higher or lower. | Instantly, always. Rules override Copilot. Rules on GitHub facts that hide work also stop it being sent to Copilot. |
 | **Instructions** | Plain-English guidance, e.g. *“Production incidents matter more than refactors.”* Up to 2,000 characters. | On the next analysis. Copilot re-checks affected work in the background. |
 
-Rule conditions (all must match):
+A rule's *when* is a filter in the same language as [search](#search), so anything you can find you can act on:
 
-| Condition | Examples |
+| Rule | Effect |
 |---|---|
-| My relationship | Review requested from me **directly** or from **my team only**, assigned, opened by me, mentions me, I commented |
-| Requested team | `core` or `octo/core` |
-| Pull request status | Draft, ready for review, approved, changes requested, checks failing, has conflicts |
-| Repository, author, label | `octo/widgets`, `octo/*`, `dependabot[bot]`, `security` |
-| Type, title contains | Issue, pull request, draft pull request; any text |
-| No updates for | At least *N* days, for stale work |
+| `is:team` → Rank lower (medium) | Team-wide review requests sit below the ones addressed to you. |
+| `author:dependabot[bot] -status:failing` → Hide | Bot updates disappear unless their checks fail. |
+| `is:review status:required-failing -author:@me` → Move to Waiting on Others | Reviews wait until required checks pass. |
+| `commenter:github-actions[bot] comment:"approval required"` → Hide | Work blocked on an approval gate stays out of the way. |
 
-For example, *“My relationship is review requested from my team only → Lower priority”* keeps team-wide review requests from crowding out the ones addressed to you.
+Rules apply in a fixed order: **Hide** wins; then the first matching **Move**; then all matching **Rank** rules add up (small ±10, medium ±20, large ±35, at most ±40 in total). *Move to Inbox* never downgrades work Copilot says needs your action. Hidden work goes to **Hidden by Rules**, never to the Inbox, Briefing, Weekly Review, notifications, or the menu bar. Settings flags Move rules that conflict.
 
-Create a rule from any item with **Create Rule…** (detail view, right-click, or ⌥⌘R), or **Not right?** on a recommendation, which suggests moving it elsewhere. Both open the same editor with conditions suggested from the item as checkboxes and a live preview of what the rule matches. Manage all rules in **Settings ▸ Rules**. The recommendation shows which rules applied and how your instructions changed the decision.
+Create a rule from any item with **Create Rule…** (detail view, right-click, or ⌥⌘R), or **Not right?** on a recommendation, which suggests hiding work like it. Both open the same editor with filters suggested from the item — including failing checks and bot commenters — as checkboxes, the filter as editable text, and a live preview of what the rule matches. Manage all rules in **Settings ▸ Rules**. Rules from earlier versions are converted automatically; *Mute* rules become *Hide* rules. The recommendation shows which rules applied and how your instructions changed the decision.
 
 The built-in prompt is intentionally not editable: it enforces the output format, treats GitHub content as untrusted (so text in an issue can't change your instructions), and improves with app updates. See [Architecture › Prompting](Documentation/ARCHITECTURE.md#prompting).
 

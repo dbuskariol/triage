@@ -286,7 +286,7 @@ private struct FixtureTriageDecider: TriageDeciding {
     let maximumBatchSize = 500
 
     func decide(
-        _ items: [PersonalWorkItem], scope _: WorkspaceScope, rules: TriageRules,
+        _ items: [PersonalWorkItem], scope: WorkspaceScope, rules: TriageRules,
         contexts _: [GitHubNodeID: TriageHandledContext]
     ) async throws -> [TriageDecision] {
         items.map { item in
@@ -304,7 +304,7 @@ private struct FixtureTriageDecider: TriageDeciding {
                 fingerprint: item.fingerprint,
                 modelID: "fixture",
                 decidedAt: FixtureData.date,
-                rulesDigest: rules.digest
+                rulesDigest: rules.digest(for: item, viewer: scope.viewerLogin)
             )
         }
     }

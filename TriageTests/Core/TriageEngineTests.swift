@@ -96,7 +96,7 @@ final class TriageEngineTests: XCTestCase {
         }
         let failures = await store.failureCount()
         XCTAssertEqual(failures, 0)
-        let pending = try await store.itemsNeedingAnalysis(scope: scope, rulesDigest: "", at: .now, limit: 10)
+        let pending = try await store.itemsNeedingAnalysis(scope: scope, at: .now, limit: 10, digest: { _ in "" })
         XCTAssertEqual(pending.count, 2)
         await engine.stop()
     }
@@ -111,15 +111,15 @@ final class TriageEngineTests: XCTestCase {
         await engine.start(scope)
         try await waitUntil { let decided = await store.decidedCount(); let failed = await store.failureCount(); return decided == 1 && failed == 1 }
         let pending = try await store.itemsNeedingAnalysis(
-            scope: scope, rulesDigest: TriageRules.empty.digest, at: .now, limit: 10
+            scope: scope, at: .now, limit: 10, digest: { TriageRules.empty.digest(for: $0, viewer: "octocat") }
         )
         XCTAssertTrue(pending.isEmpty, "A failed item waits for its retry time.")
         await engine.stop()
     }
 
-    func testMutedItemsAreNeverSentToCopilotAndChangedInstructionsReanalyze() async throws {
+    func testExcludedItemsAreNeverSentToCopilotAndChangedInstructionsReanalyze() async throws {
         let store = MemoryStore()
-        try await store.saveRules(TriageRules(instructions: "", rules: [.quick(.mute, .author, "bot")]), scope: scope)
+        try await store.saveRules(TriageRules(instructions: "", rules: [TriageRule(query: try TriageQuery(parsing: "author:bot"), action: .exclude)]), scope: scope)
         let items = [engineItem("kept", relationship: .assigned), engineItem("noise", relationship: .assigned, author: "bot")]
         let decider = RecordingDecider(batchSize: 5)
         let engine = engine(store: store, items: items, decider: decider)
@@ -129,7 +129,7 @@ final class TriageEngineTests: XCTestCase {
         XCTAssertEqual(firstBatches.flatMap { $0 }, ["kept"])
 
         try await store.saveRules(
-            TriageRules(instructions: "Security first.", rules: [.quick(.mute, .author, "bot")]), scope: scope
+            TriageRules(instructions: "Security first.", rules: [TriageRule(query: try TriageQuery(parsing: "author:bot"), action: .exclude)]), scope: scope
         )
         await engine.refreshNow()
         try await waitUntil { await decider.batches.count == 2 }
@@ -365,7 +365,7 @@ private actor RecordingDecider: TriageDeciding {
             TriageDecision(
                 itemID: $0.id, disposition: .act, priority: 50, confidence: 0.9,
                 summary: "s", reason: "r", nextAction: nil, fingerprint: $0.fingerprint,
-                modelID: "test", decidedAt: .now, rulesDigest: rules.digest,
+                modelID: "test", decidedAt: .now, rulesDigest: rules.digest(for: $0, viewer: scope.viewerLogin),
                 handled: contexts[$0.id] == nil ? nil : (handledIDs.contains($0.id.rawValue) ? .yes : .no),
                 handledEvidence: contexts[$0.id] == nil ? nil : "You replied."
             )
@@ -411,11 +411,11 @@ actor MemoryStore: TriageStore {
     }
 
     func itemsNeedingAnalysis(
-        scope: WorkspaceScope, rulesDigest: String, at date: Date, limit: Int
+        scope: WorkspaceScope, at date: Date, limit: Int, digest: @escaping @Sendable (PersonalWorkItem) -> String
     ) async throws -> [PersonalWorkItem] {
         items.values
             .filter { item in
-                (decisions[item.id]?.fingerprint != item.fingerprint || (decisions[item.id]?.rulesDigest ?? "") != rulesDigest)
+                (decisions[item.id]?.fingerprint != item.fingerprint || (decisions[item.id]?.rulesDigest ?? "") != digest(item))
                     && (failures[item.id].map { $0.fingerprint != item.fingerprint || $0.retryAt <= date } ?? true)
             }
             .sorted {

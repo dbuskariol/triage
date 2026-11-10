@@ -177,7 +177,7 @@ actor CopilotTriageDecider: TriageDeciding {
                     fingerprint: item.fingerprint,
                     modelID: response.modelID,
                     decidedAt: now(),
-                    rulesDigest: rules.digest,
+                    rulesDigest: rules.digest(for: item, viewer: scope.viewerLogin),
                     instructionNote: decision.instructionNote,
                     // Only meaningful when we asked (the viewer acted since the last decision).
                     handled: contexts[item.id] == nil ? nil : decision.handled,

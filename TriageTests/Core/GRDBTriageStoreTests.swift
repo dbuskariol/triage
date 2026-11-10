@@ -10,11 +10,11 @@ final class GRDBTriageStoreTests: XCTestCase {
         let second = item(id: "second", relationship: .reviewRequested, updatedAt: Date(timeIntervalSince1970: 50))
 
         try await fixture.store.replaceItems([first, second], scope: fixture.scope, at: Date(timeIntervalSince1970: 200))
-        let initial = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: "", at: Date(), limit: 10)
+        let initial = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { _ in "" })
         XCTAssertEqual(initial.map(\.id), [second.id, first.id])
 
         try await fixture.store.replaceItems([first], scope: fixture.scope, at: Date(timeIntervalSince1970: 201))
-        let replacement = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: "", at: Date(), limit: 10)
+        let replacement = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { _ in "" })
         XCTAssertEqual(replacement.map(\.id), [first.id])
     }
 
@@ -43,7 +43,7 @@ final class GRDBTriageStoreTests: XCTestCase {
         try await fixture.store.recordAnalysisFailure(
             itemIDs: [work.id], reason: "unavailable", retryAt: .distantFuture, scope: fixture.scope
         )
-        let gated = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: "", at: Date(), limit: 10)
+        let gated = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { _ in "" })
         XCTAssertTrue(gated.isEmpty)
 
         let decision = TriageDecision(
@@ -52,7 +52,7 @@ final class GRDBTriageStoreTests: XCTestCase {
             fingerprint: work.fingerprint, modelID: "test", decidedAt: Date()
         )
         try await fixture.store.saveDecisions([decision], scope: fixture.scope)
-        let decided = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: "", at: Date(), limit: 10)
+        let decided = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { _ in "" })
         XCTAssertTrue(decided.isEmpty)
 
         try await fixture.store.setLocalStatus(.done(fingerprint: work.fingerprint), itemID: work.id, scope: fixture.scope)
@@ -95,7 +95,7 @@ final class GRDBTriageStoreTests: XCTestCase {
     func testRulesPersistPerOrganizationAndStaleDigestReanalyzes() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let rules = TriageRules(instructions: "Security first.", rules: [.quick(.mute, .author, "bot")])
+        let rules = TriageRules(instructions: "Security first.", rules: [TriageRule(query: try TriageQuery(parsing: "author:bot"), action: .exclude)])
         try await fixture.store.saveRules(rules, scope: fixture.scope)
         let saved = try await fixture.store.rules(scope: fixture.scope)
         XCTAssertEqual(saved, rules)
@@ -110,11 +110,11 @@ final class GRDBTriageStoreTests: XCTestCase {
         try await fixture.store.replaceItems([work], scope: fixture.scope, at: Date())
         try await fixture.store.saveDecisions([TriageDecision(
             itemID: work.id, disposition: .act, priority: 90, confidence: 1, summary: "s", reason: "r",
-            nextAction: nil, fingerprint: work.fingerprint, modelID: "m", decidedAt: Date(), rulesDigest: rules.digest
+            nextAction: nil, fingerprint: work.fingerprint, modelID: "m", decidedAt: Date(), rulesDigest: rules.digest(for: work, viewer: "me")
         )], scope: fixture.scope)
-        let current = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: rules.digest, at: Date(), limit: 10)
+        let current = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { rules.digest(for: $0, viewer: "me") })
         XCTAssertTrue(current.isEmpty)
-        let stale = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, rulesDigest: "changed", at: Date(), limit: 10)
+        let stale = try await fixture.store.itemsNeedingAnalysis(scope: fixture.scope, at: Date(), limit: 10, digest: { _ in "changed" })
         XCTAssertEqual(stale.map(\.id), [work.id])
     }
 

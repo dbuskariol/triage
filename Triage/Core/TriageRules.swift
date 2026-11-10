@@ -4,16 +4,21 @@ import Foundation
 /// The user's triage preferences for one organization.
 ///
 /// Two layers, following the "filters + custom instructions" pattern:
-/// - `rules` are deterministic. Triage applies them on top of Copilot's
-///   decision, so they always hold and take effect instantly.
+/// - `rules` are deterministic queries with one action each. Triage applies
+///   them on top of Copilot's decision, so they always hold and take effect
+///   instantly.
 /// - `instructions` are free-text guidance sent to Copilot in a delimited,
 ///   lower-precedence block after the fixed system policy.
+///
+/// Precedence is fixed: local status (Done, Snooze, Mute) → Exclude → Route → Rank.
 struct TriageRules: Codable, Equatable, Sendable {
     static let maximumInstructionBytes = 2_000
     /// Bump when the triage prompt changes materially, so existing decisions
     /// are re-analyzed in the background with the improved prompt.
     static let promptVersion = "prompt-4"
     static let maximumRules = 100
+    /// Rank weights add up to at most this much either way.
+    static let maximumRankAdjustment = 40
     static let empty = TriageRules(instructions: "", rules: [])
 
     var instructions: String
@@ -30,8 +35,14 @@ struct TriageRules: Codable, Equatable, Sendable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         instructions = try container.decode(String.self, forKey: .instructions)
-        rules = try container.decode([TriageRule].self, forKey: .rules)
+        // Rules that can't be read (or migrated) are dropped, never the whole set.
+        rules = try container.decode([LossyRule].self, forKey: .rules).compactMap(\.rule)
         reanalysisToken = try container.decodeIfPresent(String.self, forKey: .reanalysisToken) ?? ""
+    }
+
+    private struct LossyRule: Decodable {
+        let rule: TriageRule?
+        init(from decoder: any Decoder) throws { rule = try? TriageRule(from: decoder) }
     }
 
     var trimmedInstructions: String? {
@@ -39,71 +50,85 @@ struct TriageRules: Codable, Equatable, Sendable {
         return value.isEmpty ? nil : value
     }
 
-    var enabledRules: [TriageRule] { rules.filter { $0.isEnabled && $0.isValid } }
-
-    /// Changes whenever anything Copilot sees changes, so decisions made under
-    /// older preferences are re-analyzed. Disabled and invalid rules are ignored.
-    /// Just the prompt version when there are no preferences.
-    var digest: String {
-        guard trimmedInstructions != nil || !enabledRules.isEmpty || !reanalysisToken.isEmpty else { return Self.promptVersion }
-        struct Canonical: Encodable { let prompt: String; let instructions: String; let rules: [TriageRule]; let token: String }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = (try? encoder.encode(Canonical(prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", rules: enabledRules, token: reanalysisToken))) ?? Data()
-        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
-    }
+    var enabledRules: [TriageRule] { rules.filter(\.isEnabled) }
 
     func validated() throws -> TriageRules {
         guard instructions.utf8.count <= Self.maximumInstructionBytes else { throw TriageRulesError.instructionsTooLong }
         guard rules.count <= Self.maximumRules else { throw TriageRulesError.tooManyRules }
-        guard rules.allSatisfy(\.isValid) else { throw TriageRulesError.invalidRule }
         return self
     }
 
-    /// Enabled rules matching `item`, in list order. `viewer` is the signed-in
-    /// login, needed for "requested from me directly / from my team".
-    func matches(for item: PersonalWorkItem, viewer: String = "") -> [TriageRule] {
-        enabledRules.filter { $0.matches(item, viewer: viewer) }
+    // MARK: Matching
+
+    /// Enabled rules matching `entry`, in list order. Rules that use Copilot's
+    /// output match only once a decision exists.
+    func matches(for entry: TriageEntry, viewer: String, now: Date = .now) -> [TriageRule] {
+        enabledRules.filter { $0.matches(entry, viewer: viewer, now: now) }
     }
 
-    func isMuted(_ item: PersonalWorkItem, viewer: String = "") -> Bool {
-        matches(for: item, viewer: viewer).contains { $0.effect == .mute }
+    /// Whether a rule hides `item` on GitHub facts alone, so Copilot never sees it.
+    func isExcludedBeforeAnalysis(_ item: PersonalWorkItem, viewer: String, now: Date = .now) -> Bool {
+        enabledRules.contains { $0.action == .exclude && $0.query.phase == .facts && $0.query.matches(item, viewer: viewer, now: now) }
     }
 
-    /// Short, model-readable statements of what the user's rules will enforce.
-    func hints(for item: PersonalWorkItem, viewer: String = "") -> [String] {
-        matches(for: item, viewer: viewer).prefix(10).map { rule in
-            String("User rule “\(rule.displayName)”: \(rule.effect.hint)".prefix(200))
-        }
+    /// Route rules Copilot should agree with, as short model-readable statements.
+    /// Only fact rules qualify: they hold whatever Copilot decides.
+    func hints(for item: PersonalWorkItem, viewer: String, now: Date = .now) -> [String] {
+        enabledRules
+            .filter { if case .route = $0.action { $0.query.phase == .facts } else { false } }
+            .filter { $0.query.matches(item, viewer: viewer, now: now) }
+            .prefix(10)
+            .map { String("User rule “\($0.displayName)”: \($0.action.hint)".prefix(200)) }
     }
 
-    /// Applies hard rules on top of Copilot's decision. The first matching
-    /// disposition rule wins; priority adjustments accumulate.
-    func apply(to entry: TriageEntry, viewer: String = "") -> TriageEntry {
-        let matched = matches(for: entry.item, viewer: viewer)
+    /// Changes whenever anything Copilot sees for `item` changes, so only the
+    /// decisions affected by a preference change are re-analyzed. Exclude and
+    /// rank rules, and rules on Copilot's output, never change it.
+    func digest(for item: PersonalWorkItem, viewer: String) -> String {
+        let hints = hints(for: item, viewer: viewer)
+        guard trimmedInstructions != nil || !hints.isEmpty || !reanalysisToken.isEmpty else { return Self.promptVersion }
+        struct Canonical: Encodable { let prompt: String; let instructions: String; let hints: [String]; let token: String }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(Canonical(
+            prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", hints: hints, token: reanalysisToken
+        ))) ?? Data()
+        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Applies rules on top of Copilot's decision: Exclude, then the first
+    /// matching Route, then the sum of Rank weights (capped).
+    func apply(to entry: TriageEntry, viewer: String, now: Date = .now) -> TriageEntry {
+        let matched = matches(for: entry, viewer: viewer, now: now)
         guard !matched.isEmpty else { return entry }
         var result = entry
         result.appliedRules = matched.map(\.displayName)
-        result.isMuted = matched.contains { $0.effect == .mute }
+        result.excludedBy = matched.first { $0.action == .exclude }?.displayName
         guard let decision = entry.decision else { return result }
-        var disposition = decision.disposition
-        if let effect = matched.first(where: { $0.effect.disposition != nil })?.effect {
-            // "Always Inbox" never downgrades an item Copilot already says needs action.
-            disposition = effect == .alwaysInbox && decision.disposition.isInbox ? decision.disposition : effect.disposition!
+        var updated = decision
+        if let route = matched.lazy.compactMap(\.action.route).first {
+            // "Move to Inbox" never downgrades an item Copilot says needs action.
+            updated.disposition = route == .inbox && decision.disposition == .act ? .act : route.disposition
         }
-        let adjustment = matched.reduce(0) { $0 + $1.effect.priorityAdjustment }
-        result.decision = TriageDecision(
-            itemID: decision.itemID, disposition: disposition,
-            priority: min(100, max(0, decision.priority + adjustment)),
-            confidence: decision.confidence, summary: decision.summary, reason: decision.reason,
-            nextAction: decision.nextAction, fingerprint: decision.fingerprint, modelID: decision.modelID,
-            decidedAt: decision.decidedAt, rulesDigest: decision.rulesDigest,
-            instructionNote: decision.instructionNote,
-            handled: decision.handled, handledEvidence: decision.handledEvidence,
-            effort: decision.effort,
-            signals: decision.signals,
-            topics: decision.topics
-        )
+        let adjustment = matched.reduce(0) { $0 + $1.action.rankAdjustment }
+        let capped = max(-Self.maximumRankAdjustment, min(Self.maximumRankAdjustment, adjustment))
+        updated.priority = min(100, max(0, decision.priority + capped))
+        result.decision = updated
+        return result
+    }
+
+    /// Pairs of enabled route rules that both match some entry but send it to
+    /// different places; the earlier rule wins.
+    func conflicts(in entries: [TriageEntry], viewer: String, now: Date = .now) -> [(winner: TriageRule, loser: TriageRule)] {
+        let routes = enabledRules.filter { $0.action.route != nil }
+        var result: [(TriageRule, TriageRule)] = []
+        for (index, winner) in routes.enumerated() {
+            for loser in routes[(index + 1)...] where loser.action.route != winner.action.route {
+                if entries.contains(where: { winner.matches($0, viewer: viewer, now: now) && loser.matches($0, viewer: viewer, now: now) }) {
+                    result.append((winner, loser))
+                }
+            }
+        }
         return result
     }
 }
@@ -111,50 +136,54 @@ struct TriageRules: Codable, Equatable, Sendable {
 enum TriageRulesError: Error, Equatable, LocalizedError {
     case instructionsTooLong
     case tooManyRules
-    case invalidRule
 
     var errorDescription: String? {
         switch self {
         case .instructionsTooLong: "Instructions can be at most \(TriageRules.maximumInstructionBytes) characters."
         case .tooManyRules: "You can have at most \(TriageRules.maximumRules) rules."
-        case .invalidRule: "Every rule needs at least one condition with a value."
         }
     }
 }
 
+/// One rule: when `query` matches, do `action`.
 struct TriageRule: Codable, Equatable, Identifiable, Sendable {
+    enum Origin: String, Codable, Sendable { case user, suggestion }
+
     var id = UUID()
     var name: String
     var isEnabled = true
-    /// All conditions must match.
-    var conditions: [TriageRuleCondition]
-    var effect: TriageRuleEffect
+    var query: TriageQuery
+    var action: TriageRuleAction
+    var origin = Origin.user
 
-    var isValid: Bool { !conditions.isEmpty && conditions.allSatisfy(\.isValid) }
-
-    /// Conditions describing `item`, most useful first, for building a rule from it.
-    static func suggestedConditions(for item: PersonalWorkItem, viewer: String) -> [TriageRuleCondition] {
-        typealias Condition = TriageRuleCondition
-        var result: [Condition] = []
-        switch item.reviewRequestKind(viewer: viewer) {
-        case .team?: result.append(.init(field: .relationship, value: Condition.Field.reviewRequestedTeam))
-        case .direct?: result.append(.init(field: .relationship, value: Condition.Field.reviewRequestedDirect))
-        case nil:
-            if let relationship = item.primaryRelationship {
-                result.append(.init(field: .relationship, value: relationship.rawValue))
-            }
-        }
-        result += (item.pullRequest?.requestedReviewers ?? []).filter { $0.contains("/") }.prefix(2)
-            .map { .init(field: .requestedTeam, value: $0) }
-        result.append(.init(field: .repository, value: item.repository))
-        if let author = item.author { result.append(.init(field: .author, value: author)) }
-        result += item.labels.prefix(3).map { .init(field: .label, value: $0) }
-        if item.pullRequest?.isDraft == true { result.append(.init(field: .pullRequestStatus, value: "draft")) }
-        return result
+    init(id: UUID = UUID(), name: String = "", isEnabled: Bool = true, query: TriageQuery, action: TriageRuleAction, origin: Origin = .user) {
+        self.id = id
+        self.name = name
+        self.isEnabled = isEnabled
+        self.query = query
+        self.action = action
+        self.origin = origin
     }
 
-    static func quick(_ effect: TriageRuleEffect, _ field: TriageRuleCondition.Field, _ value: String) -> TriageRule {
-        TriageRule(name: "", conditions: [TriageRuleCondition(field: field, value: value)], effect: effect)
+    private enum CodingKeys: String, CodingKey { case id, name, isEnabled, query, action, origin }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        origin = try container.decodeIfPresent(Origin.self, forKey: .origin) ?? .user
+        if container.contains(.query) {
+            query = try container.decode(TriageQuery.self, forKey: .query)
+            action = try container.decode(TriageRuleAction.self, forKey: .action)
+        } else {
+            // Rules saved as conditions and an effect.
+            guard let migrated = try LegacyTriageRule(from: decoder).migrated() else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unusable legacy rule"))
+            }
+            query = migrated.query
+            action = migrated.action
+        }
     }
 
     var displayName: String {
@@ -162,197 +191,171 @@ struct TriageRule: Codable, Equatable, Identifiable, Sendable {
         return trimmed.isEmpty ? defaultName : trimmed
     }
 
-    var defaultName: String {
-        "\(effect.title): \(conditions.map(\.summary).joined(separator: " and "))"
+    var defaultName: String { "\(action.title): \(query.description)" }
+
+    /// Rules on Copilot's output wait for a decision.
+    func matches(_ entry: TriageEntry, viewer: String, now: Date = .now) -> Bool {
+        if query.phase == .ai, entry.decision == nil { return false }
+        return query.matches(entry, viewer: viewer, now: now)
     }
 
-    func matches(_ item: PersonalWorkItem, viewer: String = "") -> Bool {
-        isValid && conditions.allSatisfy { $0.matches(item, viewer: viewer) }
+    /// Filters describing `entry`, most useful first, for building a rule from it.
+    static func suggestedTokens(for entry: TriageEntry, viewer: String) -> [SearchToken] {
+        let item = entry.item
+        let facts = item.pullRequest
+        var result: [SearchToken] = []
+        func add(_ kind: SearchToken.Kind, _ value: String) {
+            let token = SearchToken(kind: kind, value: value)
+            if !result.contains(token) { result.append(token) }
+        }
+        switch item.reviewRequestKind(viewer: viewer) {
+        case .team?: add(.is, "team")
+        case .direct?: add(.is, "direct")
+        case nil:
+            switch item.primaryRelationship {
+            case .assigned?: add(.is, "assigned")
+            case .authored?: add(.is, "mine")
+            case .mentioned?: add(.is, "mentioned")
+            case .commented?: add(.is, "commented")
+            case .reviewRequested?, nil: break
+            }
+        }
+        for signal in entry.decision?.signals ?? [] { add(.signal, signal) }
+        for topic in entry.decision?.topics ?? [] { add(.topic, topic) }
+        if facts?.checks == .failure || facts?.checks == .error { add(.status, "failing") }
+        for run in (facts?.checkRuns ?? []).filter({ $0.result == .failing }).prefix(2) { add(.check, "\(run.name):failing") }
+        for team in (facts?.requestedReviewers ?? []).filter({ $0.contains("/") }).prefix(2) { add(.team, team) }
+        add(.repo, item.repository)
+        if let author = item.author { add(.author, author) }
+        for bot in Set(item.recentActivity.map(\.author)).filter({ $0.hasSuffix("[bot]") }).sorted().prefix(2) { add(.commenter, bot) }
+        for label in item.labels.prefix(3) { add(.label, label) }
+        if facts?.isDraft == true { add(.is, "draft") }
+        return result
     }
 }
 
-struct TriageRuleCondition: Codable, Equatable, Hashable, Sendable {
-    enum Field: String, Codable, CaseIterable, Identifiable, Sendable {
-        case relationship, requestedTeam, pullRequestStatus, repository, author, label, kind, titleContains, inactiveDays
+/// What a rule does. Exclude hides; Route moves to a section; Rank nudges order.
+enum TriageRuleAction: Hashable, Sendable {
+    enum Route: String, CaseIterable, Sendable {
+        case needsAction, inbox, waiting, noAction
 
-        var id: String { rawValue }
-
-        static let reviewRequestedDirect = "reviewRequestedDirect"
-        static let reviewRequestedTeam = "reviewRequestedTeam"
+        var disposition: TriageDisposition {
+            switch self {
+            case .needsAction: .act
+            case .inbox: .review
+            case .waiting: .wait
+            case .noAction: .none
+            }
+        }
 
         var title: String {
             switch self {
-            case .repository: "Repository"
-            case .author: "Author"
-            case .label: "Label"
-            case .relationship: "My relationship"
-            case .requestedTeam: "Requested team"
-            case .pullRequestStatus: "Pull request status"
-            case .kind: "Type"
-            case .titleContains: "Title contains"
-            case .inactiveDays: "No updates for (days)"
+            case .needsAction: "Needs my action"
+            case .inbox: "Inbox"
+            case .waiting: "Waiting on Others"
+            case .noAction: "No Action Needed"
             }
         }
+    }
 
-        var placeholder: String {
+    enum Direction: String, CaseIterable, Sendable { case higher, lower }
+
+    enum Strength: String, CaseIterable, Sendable {
+        case small, medium, large
+
+        var points: Int {
             switch self {
-            case .repository: "owner/name or owner/*"
-            case .author: "login, e.g. dependabot[bot]"
-            case .label: "label name"
-            case .relationship, .kind, .pullRequestStatus: ""
-            case .requestedTeam: "team slug or org/team"
-            case .titleContains: "text"
-            case .inactiveDays: "e.g. 14"
+            case .small: 10
+            case .medium: 20
+            case .large: 35
             }
         }
 
-        /// Fixed choices; `nil` means free text.
-        var choices: [(value: String, title: String)]? {
-            switch self {
-            case .relationship:
-                [
-                    ("reviewRequested", "Review requested (direct or team)"),
-                    (Self.reviewRequestedDirect, "Review requested from me directly"),
-                    (Self.reviewRequestedTeam, "Review requested from my team only"),
-                ] + WorkRelationship.allCases.filter { $0 != .reviewRequested }.map { ($0.rawValue, $0.title) }
-            case .pullRequestStatus:
-                [
-                    ("draft", "Draft"), ("ready", "Ready for review"), ("approved", "Approved"),
-                    ("changesRequested", "Changes requested"), ("checksFailing", "Checks failing"),
-                    ("conflicts", "Has conflicts"),
-                ]
-            case .kind: [("issue", "Issue"), ("pullRequest", "Pull request"), ("draftPullRequest", "Draft pull request")]
-            case .repository, .author, .label, .titleContains, .requestedTeam, .inactiveDays: nil
-            }
-        }
+        var title: String { rawValue.capitalized }
     }
 
-    var field: Field
-    var value: String
+    case exclude
+    case route(Route)
+    case rank(Direction, Strength)
 
-    var isValid: Bool {
-        guard !normalizedValue.isEmpty else { return false }
-        return field != .inactiveDays || (Int(normalizedValue) ?? 0) > 0
+    static let all: [TriageRuleAction] = [.exclude]
+        + Route.allCases.map(TriageRuleAction.route)
+        + Direction.allCases.flatMap { direction in Strength.allCases.map { .rank(direction, $0) } }
+
+    var route: Route? { if case .route(let route) = self { route } else { nil } }
+
+    var rankAdjustment: Int {
+        guard case .rank(let direction, let strength) = self else { return 0 }
+        return direction == .higher ? strength.points : -strength.points
     }
-
-    private var normalizedValue: String { value.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-    var summary: String {
-        let shown = field.choices?.first { $0.value == normalizedValue }?.title ?? normalizedValue
-        switch field {
-        case .titleContains: return "title contains “\(shown)”"
-        case .inactiveDays: return "no updates for \(shown)+ days"
-        case .relationship, .pullRequestStatus: return shown.prefix(1).lowercased() + shown.dropFirst()
-        default: return "\(field.title.lowercased()) is \(shown)"
-        }
-    }
-
-    func matches(_ item: PersonalWorkItem, viewer: String = "", now: Date = .now) -> Bool {
-        let value = normalizedValue
-        guard !value.isEmpty else { return false }
-        func same(_ other: String?) -> Bool { other?.caseInsensitiveCompare(value) == .orderedSame }
-        switch field {
-        case .repository:
-            if value.hasSuffix("/*") {
-                return item.repository.lowercased().hasPrefix(String(value.dropLast()).lowercased())
-            }
-            return same(item.repository) || same(item.repository.split(separator: "/").last.map(String.init))
-        case .author: return same(item.author)
-        case .label: return item.labels.contains { same($0) }
-        case .relationship:
-            switch value {
-            case Field.reviewRequestedDirect: return item.reviewRequestKind(viewer: viewer) == .direct
-            case Field.reviewRequestedTeam: return item.reviewRequestKind(viewer: viewer) == .team
-            default: return item.relationships.contains { $0.rawValue == value }
-            }
-        case .requestedTeam:
-            // Matches "org/team" exactly, or just the team slug.
-            return (item.pullRequest?.requestedReviewers ?? []).contains { reviewer in
-                reviewer.contains("/") && (same(reviewer) || same(reviewer.split(separator: "/").last.map(String.init)))
-            }
-        case .pullRequestStatus:
-            guard let facts = item.pullRequest else { return false }
-            switch value {
-            case "draft": return facts.isDraft
-            case "ready": return !facts.isDraft && item.state == .open
-            case "approved": return facts.reviewDecision == .approved
-            case "changesRequested": return facts.reviewDecision == .changesRequested
-            case "checksFailing": return facts.checks == .failure || facts.checks == .error
-            case "conflicts": return facts.mergeable?.uppercased() == "CONFLICTING"
-            default: return false
-            }
-        case .inactiveDays:
-            guard let days = Int(value), days > 0 else { return false }
-            return now.timeIntervalSince(item.updatedAt) >= TimeInterval(days * 86_400)
-        case .kind:
-            switch value {
-            case "issue": return item.kind == .issue
-            case "pullRequest": return item.kind == .pullRequest
-            case "draftPullRequest": return item.pullRequest?.isDraft == true
-            default: return false
-            }
-        case .titleContains: return item.title.localizedCaseInsensitiveContains(value)
-        }
-    }
-}
-
-enum TriageRuleEffect: String, Codable, CaseIterable, Identifiable, Sendable {
-    case alwaysInbox, needsAction, waiting, noAction, raisePriority, lowerPriority, mute
-
-    var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .alwaysInbox: "Always show in Inbox"
-        case .needsAction: "Mark as needs my action"
-        case .waiting: "Move to Waiting on Others"
-        case .noAction: "Move to No Action Needed"
-        case .raisePriority: "Raise priority"
-        case .lowerPriority: "Lower priority"
-        case .mute: "Mute"
+        case .exclude: "Hide"
+        case .route(let route): "Move to \(route.title)"
+        case .rank(let direction, let strength): "Rank \(direction.rawValue) (\(strength.title.lowercased()))"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .alwaysInbox: "tray.full"
-        case .needsAction: "exclamationmark.circle"
-        case .waiting: "hourglass"
-        case .noAction: "checkmark.circle"
-        case .raisePriority: "arrow.up.circle"
-        case .lowerPriority: "arrow.down.circle"
-        case .mute: "speaker.slash"
-        }
-    }
-
-    /// Hard disposition this effect enforces, if any.
-    var disposition: TriageDisposition? {
-        switch self {
-        case .alwaysInbox: .review
-        case .needsAction: .act
-        case .waiting: .wait
-        case .noAction: .none
-        case .raisePriority, .lowerPriority, .mute: nil
-        }
-    }
-
-    var priorityAdjustment: Int {
-        switch self {
-        case .raisePriority: 25
-        case .lowerPriority: -25
-        default: 0
+        case .exclude: "eye.slash"
+        case .route(.needsAction): "exclamationmark.circle"
+        case .route(.inbox): "tray.full"
+        case .route(.waiting): "hourglass"
+        case .route(.noAction): "checkmark.circle"
+        case .rank(.higher, _): "arrow.up.circle"
+        case .rank(.lower, _): "arrow.down.circle"
         }
     }
 
     var hint: String {
         switch self {
-        case .alwaysInbox: "the user always wants this in their Inbox (at least review)."
-        case .needsAction: "the user treats this as needing their action."
-        case .waiting: "the user treats this as waiting on others."
-        case .noAction: "the user treats this as needing no action."
-        case .raisePriority: "the user wants this ranked higher."
-        case .lowerPriority: "the user wants this ranked lower."
-        case .mute: "the user has muted this."
+        case .exclude: "the user has hidden this."
+        case .route(.needsAction): "the user treats this as needing their action."
+        case .route(.inbox): "the user always wants this in their Inbox (at least review)."
+        case .route(.waiting): "the user treats this as waiting on others."
+        case .route(.noAction): "the user treats this as needing no action."
+        case .rank(.higher, _): "the user wants this ranked higher."
+        case .rank(.lower, _): "the user wants this ranked lower."
         }
+    }
+}
+
+extension TriageRuleAction: Codable {
+    /// Stored as one string: `exclude`, `route:waiting`, `rank:lower:medium`.
+    var storageValue: String {
+        switch self {
+        case .exclude: "exclude"
+        case .route(let route): "route:\(route.rawValue)"
+        case .rank(let direction, let strength): "rank:\(direction.rawValue):\(strength.rawValue)"
+        }
+    }
+
+    init?(storageValue: String) {
+        let parts = storageValue.split(separator: ":").map(String.init)
+        switch parts.first {
+        case "exclude" where parts.count == 1: self = .exclude
+        case "route" where parts.count == 2:
+            guard let route = Route(rawValue: parts[1]) else { return nil }
+            self = .route(route)
+        case "rank" where parts.count == 3:
+            guard let direction = Direction(rawValue: parts[1]), let strength = Strength(rawValue: parts[2]) else { return nil }
+            self = .rank(direction, strength)
+        default: return nil
+        }
+    }
+
+    init(from decoder: any Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        guard let action = TriageRuleAction(storageValue: value) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown rule action \(value)"))
+        }
+        self = action
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(storageValue)
     }
 }

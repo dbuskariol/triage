@@ -142,16 +142,21 @@ actor GRDBTriageStore: TriageStore {
     }
 
     func itemsNeedingAnalysis(
-        scope: WorkspaceScope, rulesDigest: String, at date: Date, limit: Int
+        scope: WorkspaceScope, at date: Date, limit: Int, digest: @escaping @Sendable (PersonalWorkItem) -> String
     ) async throws -> [PersonalWorkItem] {
         try await validate(scope)
         guard limit > 0 else { return [] }
         let decoder = self.decoder
         return try await vault.read { database in
+            // A decision is stale when its facts changed (decided in SQL) or the
+            // preferences Copilot saw for that item changed (decided per item).
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT item_json FROM triage_items AS item
+                    SELECT item.item_json,
+                           decision.fingerprint IS NULL OR decision.fingerprint <> item.fingerprint AS stale_facts,
+                           decision.rules_digest
+                    FROM triage_items AS item
                     LEFT JOIN triage_decisions AS decision
                       ON decision.account_id = item.account_id
                      AND decision.organization_id = item.organization_id
@@ -162,23 +167,26 @@ actor GRDBTriageStore: TriageStore {
                      AND failure.node_id = item.node_id
                      AND failure.fingerprint = item.fingerprint
                     WHERE item.account_id = ? AND item.organization_id = ? AND item.is_active = 1
-                      AND (decision.fingerprint IS NULL OR decision.fingerprint <> item.fingerprint
-                           OR decision.rules_digest <> ?)
                       AND (failure.fingerprint IS NULL OR failure.retry_at_ms <= ?)
                     ORDER BY item.urgency_rank, item.updated_at_ms DESC
-                    LIMIT ?
                     """,
-                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, rulesDigest, Self.milliseconds(date), limit]
+                arguments: [scope.accountID.rawValue, scope.organizationID.rawValue, Self.milliseconds(date)]
             )
-            return rows.compactMap { row in
-                guard let data: Data = row["item_json"] else { return nil }
+            var result: [PersonalWorkItem] = []
+            for row in rows where result.count < limit {
+                guard let data: Data = row["item_json"] else { continue }
+                let item: PersonalWorkItem
                 do {
-                    return try decoder.decode(PersonalWorkItem.self, from: data)
+                    item = try decoder.decode(PersonalWorkItem.self, from: data)
                 } catch {
                     Self.logger.error("Skipping malformed triage item.")
-                    return nil
+                    continue
                 }
+                let staleFacts: Bool = row["stale_facts"]
+                let decidedDigest: String? = row["rules_digest"]
+                if staleFacts || decidedDigest != digest(item) { result.append(item) }
             }
+            return result
         }
     }
 

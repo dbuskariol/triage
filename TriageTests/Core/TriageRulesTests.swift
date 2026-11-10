@@ -2,71 +2,151 @@ import Foundation
 import Testing
 @testable import Triage
 
+private func rule(_ action: TriageRuleAction, _ query: String, enabled: Bool = true) -> TriageRule {
+    TriageRule(isEnabled: enabled, query: try! TriageQuery(parsing: query), action: action)
+}
+
+private func entry(_ item: PersonalWorkItem, _ decision: TriageDecision?) -> TriageEntry {
+    TriageEntry(item: item, decision: decision, analysis: decision == nil ? .pending : .current, local: .active)
+}
+
 struct TriageRulesTests {
-    @Test func conditionsMatchCaseInsensitivelyWithRepositoryShortNamesAndWildcards() {
-        let item = rulesItem(repository: "octo/widgets", author: "Dependabot[bot]", labels: ["Security"], draft: true)
-        #expect(TriageRuleCondition(field: .repository, value: "Octo/Widgets").matches(item))
-        #expect(TriageRuleCondition(field: .repository, value: "widgets").matches(item))
-        #expect(TriageRuleCondition(field: .repository, value: "octo/*").matches(item))
-        #expect(!TriageRuleCondition(field: .repository, value: "other/*").matches(item))
-        #expect(TriageRuleCondition(field: .author, value: "dependabot[bot]").matches(item))
-        #expect(TriageRuleCondition(field: .label, value: "security").matches(item))
-        #expect(TriageRuleCondition(field: .kind, value: "draftPullRequest").matches(item))
-        #expect(TriageRuleCondition(field: .relationship, value: "assigned").matches(item))
-        #expect(TriageRuleCondition(field: .titleContains, value: "BUMP").matches(item))
-        #expect(!TriageRuleCondition(field: .author, value: "  ").matches(item))
-    }
-
-    @Test func hardRulesOverrideCopilotAndAreAttributed() {
+    @Test func precedenceIsExcludeThenFirstRouteThenCappedRank() {
         let item = rulesItem()
-        let entry = TriageEntry(item: item, decision: decision(item, .none, priority: 30), analysis: .current, local: .active)
         let rules = TriageRules(instructions: "", rules: [
-            .quick(.needsAction, .repository, "octo/widgets"),
-            .quick(.noAction, .author, "dependabot[bot]"), // later disposition rule loses
-            .quick(.raisePriority, .label, "security"),
+            rule(.route(.needsAction), "repo:octo/widgets"),
+            rule(.route(.noAction), "author:dependabot[bot]"), // later route loses
+            rule(.rank(.higher, .large), "label:security"),
+            rule(.rank(.higher, .medium), "is:pr"), // 35 + 20 is capped at 40
         ])
-        let applied = rules.apply(to: entry)
+        let applied = rules.apply(to: entry(item, decision(item, .none, priority: 30)), viewer: "me")
         #expect(applied.decision?.disposition == .act)
-        #expect(applied.decision?.priority == 55)
-        #expect(applied.appliedRules.count == 3)
-        #expect(!applied.isMuted)
+        #expect(applied.decision?.priority == 70)
+        #expect(applied.appliedRules.count == 4)
+        #expect(!applied.isExcluded)
+
+        let hidden = TriageRules(instructions: "", rules: [rule(.route(.inbox), "is:pr"), rule(.exclude, "author:dependabot[bot]")])
+            .apply(to: entry(item, decision(item, .act, priority: 90)), viewer: "me")
+        #expect(hidden.isExcluded)
+        #expect(hidden.excludedBy == "Hide: author:dependabot[bot]")
     }
 
-    @Test func alwaysInboxNeverDowngradesActionAndMuteHidesWithoutAnalysis() {
+    @Test func moveToInboxNeverDowngradesNeedsAction() {
         let item = rulesItem()
-        let acting = TriageEntry(item: item, decision: decision(item, .act, priority: 90), analysis: .current, local: .active)
-        #expect(TriageRules(instructions: "", rules: [.quick(.alwaysInbox, .label, "security")]).apply(to: acting).decision?.disposition == .act)
-
-        let muted = TriageRules(instructions: "", rules: [.quick(.mute, .author, "dependabot[bot]")])
-        #expect(muted.isMuted(item))
-        let presentation = WorkspacePresentation(
-            entries: [TriageEntry(item: item, decision: nil, analysis: .pending, local: .active)],
-            status: .initial, now: .now, rules: muted
-        )
-        #expect(presentation.count(in: .muted) == 1)
-        #expect(presentation.count(in: .analyzing) == 0)
+        let rules = TriageRules(instructions: "", rules: [rule(.route(.inbox), "label:security")])
+        #expect(rules.apply(to: entry(item, decision(item, .act, priority: 90)), viewer: "me").decision?.disposition == .act)
+        #expect(rules.apply(to: entry(item, decision(item, .none, priority: 10)), viewer: "me").decision?.disposition == .review)
     }
 
-    @Test func digestIsPromptVersionWithoutPreferencesAndIgnoresDisabledRules() throws {
-        #expect(TriageRules.empty.digest == TriageRules.promptVersion)
-        var rule = TriageRule.quick(.mute, .author, "bot")
-        rule.isEnabled = false
-        #expect(TriageRules(instructions: "  ", rules: [rule]).digest == TriageRules.promptVersion)
-        let withInstructions = TriageRules(instructions: "Security first.", rules: [])
-        #expect(!withInstructions.digest.isEmpty)
-        #expect(withInstructions.digest != TriageRules(instructions: "Docs first.", rules: []).digest)
+    @Test func factExclusionsSkipCopilotAndAIExclusionsWaitForADecision() {
+        let item = rulesItem()
+        let facts = TriageRules(instructions: "", rules: [rule(.exclude, "author:dependabot[bot]")])
+        #expect(facts.isExcludedBeforeAnalysis(item, viewer: "me"))
+        let presentation = WorkspacePresentation(entries: [entry(item, nil)], status: .initial, now: .now, rules: facts)
+        #expect(presentation.count(in: .excluded) == 1)
+        #expect(presentation.count(in: .analyzing) == 0)
+
+        let ai = TriageRules(instructions: "", rules: [rule(.exclude, "-in:inbox")])
+        #expect(!ai.isExcludedBeforeAnalysis(item, viewer: "me"))
+        #expect(!ai.apply(to: entry(item, nil), viewer: "me").isExcluded)
+        #expect(ai.apply(to: entry(item, decision(item, .wait, priority: 20)), viewer: "me").isExcluded)
+        #expect(!ai.apply(to: entry(item, decision(item, .act, priority: 90)), viewer: "me").isExcluded)
+    }
+
+    @Test func perItemDigestChangesOnlyWithWhatCopilotSees() throws {
+        let item = rulesItem()
+        let other = rulesItem(repository: "octo/other", author: "alice", labels: [])
+        #expect(TriageRules.empty.digest(for: item, viewer: "me") == TriageRules.promptVersion)
+        // Hide, Rank, disabled, and Copilot-output rules never re-analyze.
+        let quiet = TriageRules(instructions: "  ", rules: [
+            rule(.exclude, "author:bot"), rule(.rank(.lower, .small), "is:pr"),
+            rule(.route(.waiting), "is:pr", enabled: false), rule(.route(.waiting), "priority:low"),
+        ])
+        #expect(quiet.digest(for: item, viewer: "me") == TriageRules.promptVersion)
+        // A fact Route rule changes only the items it matches.
+        let routed = TriageRules(instructions: "", rules: [rule(.route(.needsAction), "repo:widgets")])
+        #expect(routed.digest(for: item, viewer: "me") != TriageRules.promptVersion)
+        #expect(routed.digest(for: other, viewer: "me") == TriageRules.promptVersion)
+        let instructions = TriageRules(instructions: "Security first.", rules: [])
+        #expect(instructions.digest(for: other, viewer: "me") != TriageRules(instructions: "Docs first.", rules: []).digest(for: other, viewer: "me"))
         #expect(throws: TriageRulesError.instructionsTooLong) {
             try TriageRules(instructions: String(repeating: "a", count: 2_001), rules: []).validated()
         }
-        #expect(throws: TriageRulesError.invalidRule) {
-            try TriageRules(instructions: "", rules: [.quick(.mute, .author, "")]).validated()
-        }
     }
 
-    @Test func hintsDescribeEnforcedOutcomes() {
-        let hints = TriageRules(instructions: "", rules: [.quick(.needsAction, .repository, "widgets")]).hints(for: rulesItem())
+    @Test func hintsDescribeFactRoutesOnly() {
+        let rules = TriageRules(instructions: "", rules: [
+            rule(.route(.needsAction), "repo:widgets"), rule(.exclude, "is:draft"), rule(.route(.waiting), "effort:deep"),
+        ])
+        let hints = rules.hints(for: rulesItem(), viewer: "me")
         #expect(hints.count == 1)
         #expect(hints[0].contains("needing their action"))
+    }
+
+    @Test func conflictsNameTheWinningRoute() {
+        let first = rule(.route(.needsAction), "repo:widgets")
+        let second = rule(.route(.waiting), "label:security")
+        let third = rule(.route(.needsAction), "is:pr")
+        let rules = TriageRules(instructions: "", rules: [first, second, third])
+        let conflicts = rules.conflicts(in: [entry(rulesItem(), nil)], viewer: "me")
+        #expect(conflicts.map(\.winner.id) == [first.id, second.id])
+        #expect(conflicts.map(\.loser.id) == [second.id, third.id])
+    }
+
+    @Test func actionsRoundTripAsStrings() throws {
+        for action in TriageRuleAction.all {
+            #expect(TriageRuleAction(storageValue: action.storageValue) == action)
+        }
+        #expect(TriageRuleAction(storageValue: "rank:sideways:big") == nil)
+        let saved = TriageRules(instructions: "x", rules: [rule(.rank(.lower, .small), "repo:a/* -label:b")])
+        let data = try JSONEncoder().encode(saved)
+        #expect(try JSONDecoder().decode(TriageRules.self, from: data) == saved)
+    }
+
+    @Test func legacyRulesMigrateLosslessly() throws {
+        let json = #"""
+        { "instructions": "", "rules": [
+          { "id": "6F9619FF-8B86-D011-B42D-00C04FC964FF", "name": "Bots", "isEnabled": true,
+            "conditions": [{ "field": "author", "value": "dependabot[bot]" }, { "field": "pullRequestStatus", "value": "checksFailing" }],
+            "effect": "mute" },
+          { "name": "", "isEnabled": false,
+            "conditions": [{ "field": "relationship", "value": "reviewRequestedTeam" }, { "field": "inactiveDays", "value": "14" }],
+            "effect": "lowerPriority" },
+          { "name": "", "conditions": [{ "field": "pullRequestStatus", "value": "ready" }, { "field": "repository", "value": "octo/*" }], "effect": "alwaysInbox" },
+          { "name": "", "conditions": [{ "field": "kind", "value": "issue" }, { "field": "titleContains", "value": "release train" }], "effect": "needsAction" },
+          { "name": "", "conditions": [{ "field": "relationship", "value": "commented" }], "effect": "noAction" },
+          { "name": "", "conditions": [{ "field": "author", "value": "  " }], "effect": "mute" },
+          { "name": "", "conditions": [{ "field": "label", "value": "x" }], "effect": "somethingNew" }
+        ] }
+        """#
+        let rules = try JSONDecoder().decode(TriageRules.self, from: Data(json.utf8))
+        #expect(rules.rules.map(\.query.description) == [
+            "author:dependabot[bot] status:failing",
+            "is:team updated:>=14d",
+            "is:pr -is:draft repo:octo/*",
+            "is:issue title:\"release train\"",
+            "is:commented",
+        ])
+        #expect(rules.rules.map(\.action) == [.exclude, .rank(.lower, .medium), .route(.inbox), .route(.needsAction), .route(.noAction)])
+        #expect(rules.rules[0].id == UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF"))
+        #expect(rules.rules[0].name == "Bots")
+        #expect(!rules.rules[1].isEnabled)
+    }
+
+    @Test func suggestionsStartFromTheItem() {
+        var item = rulesItem()
+        item = item.replacingPullRequest({
+            var facts = item.pullRequest!
+            facts.checkRuns = [CheckRunFact(name: "deploy-gate", result: .failing)]
+            return facts
+        }())
+        var decided = decision(item, .act, priority: 80)
+        decided.signals = ["approval-gate"]
+        let work = TriageEntry(item: item, decision: decided, analysis: .current, local: .active)
+        let tokens = TriageRule.suggestedTokens(for: work, viewer: "me").map(\.title)
+        #expect(tokens.prefix(3) == ["is:assigned", "signal:approval-gate", "check:deploy-gate:failing"])
+        #expect(tokens.contains("repo:octo/widgets"))
+        #expect(tokens.contains("author:dependabot[bot]"))
     }
 }
 
@@ -159,50 +239,5 @@ struct HandledDetectionTests {
         #expect(activity[0].contains("Rebased and fixed the test"))
         #expect(activity[1].contains("approved review"))
         #expect(work.latestActivity(excluding: "me") != nil)
-    }
-}
-
-struct RuleConditionTests {
-    private func reviewItem(reviewers: [String], draft: Bool = false, updated: Date = .now) -> PersonalWorkItem {
-        PersonalWorkItem(
-            id: GitHubNodeID(rawValue: "PR_review")!, kind: .pullRequest, repository: "octo/widgets", number: 3,
-            title: "t", url: URL(string: "https://github.com/octo/widgets/pull/3")!, state: .open, author: "alice",
-            createdAt: .distantPast, updatedAt: updated, relationships: [.reviewRequested], labels: [], assignees: [],
-            body: "",
-            pullRequest: PullRequestFacts(
-                isDraft: draft, reviewDecision: .changesRequested, requestedReviewers: reviewers, latestReviews: [],
-                checks: .failure, mergeable: "CONFLICTING", unresolvedReviewThreads: 0, additions: 0, deletions: 0
-            ),
-            recentActivity: []
-        )
-    }
-
-    @Test func reviewRequestsTierIntoDirectAndTeamOnly() {
-        let direct = reviewItem(reviewers: ["Me", "octo/core"])
-        let team = reviewItem(reviewers: ["octo/core"])
-        let directRule = TriageRuleCondition(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedDirect)
-        let teamRule = TriageRuleCondition(field: .relationship, value: TriageRuleCondition.Field.reviewRequestedTeam)
-        #expect(directRule.matches(direct, viewer: "me"))
-        #expect(!teamRule.matches(direct, viewer: "me"))
-        #expect(teamRule.matches(team, viewer: "me"))
-        #expect(TriageRuleCondition(field: .relationship, value: "reviewRequested").matches(team, viewer: "me"))
-
-        let rules = TriageRules(instructions: "", rules: [.quick(.lowerPriority, .relationship, TriageRuleCondition.Field.reviewRequestedTeam)])
-        #expect(rules.matches(for: team, viewer: "me").count == 1)
-        #expect(rules.matches(for: direct, viewer: "me").isEmpty)
-    }
-
-    @Test func requestedTeamStatusAndInactivityConditions() {
-        let item = reviewItem(reviewers: ["octo/core"], draft: true, updated: Date(timeIntervalSinceNow: -20 * 86_400))
-        #expect(TriageRuleCondition(field: .requestedTeam, value: "core").matches(item))
-        #expect(TriageRuleCondition(field: .requestedTeam, value: "octo/core").matches(item))
-        #expect(!TriageRuleCondition(field: .requestedTeam, value: "octo/other").matches(item))
-        for status in ["draft", "changesRequested", "checksFailing", "conflicts"] {
-            #expect(TriageRuleCondition(field: .pullRequestStatus, value: status).matches(item))
-        }
-        #expect(!TriageRuleCondition(field: .pullRequestStatus, value: "approved").matches(item))
-        #expect(TriageRuleCondition(field: .inactiveDays, value: "14").matches(item))
-        #expect(!TriageRuleCondition(field: .inactiveDays, value: "30").matches(item))
-        #expect(!TriageRuleCondition(field: .inactiveDays, value: "soon").isValid)
     }
 }

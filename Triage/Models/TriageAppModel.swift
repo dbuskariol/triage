@@ -875,7 +875,7 @@ extension TriageAppModel {
     /// changed preferences make Copilot re-analyze affected work in the background.
     func saveRules(_ updated: TriageRules) {
         guard let runtime else { return }
-        let previousDigest = rules.digest
+        let previous = rules
         do {
             rules = try updated.validated()
             rulesError = nil
@@ -885,10 +885,14 @@ extension TriageAppModel {
         }
         publishPresentation()
         let saved = rules
+        let viewer = runtime.scope.viewerLogin
+        // Re-analyze only when what Copilot sees for some item changed.
+        let affectsCopilot = entries.contains { previous.digest(for: $0.item, viewer: viewer) != saved.digest(for: $0.item, viewer: viewer) }
+            || previous.trimmedInstructions != saved.trimmedInstructions || previous.reanalysisToken != saved.reanalysisToken
         Task {
             do {
                 try await runtime.value.store.saveRules(saved, scope: runtime.scope)
-                if saved.digest != previousDigest { await runtime.value.engine.refreshNow() }
+                if affectsCopilot { await runtime.value.engine.refreshNow() }
             } catch {
                 Self.logger.error("rules save failed errorType=\(String(reflecting: type(of: error)), privacy: .public)")
                 self.rulesError = "Triage could not save your rules."
@@ -1008,15 +1012,15 @@ extension TriageAppModel: WorkspaceActions {
 
     func beginRule(from entry: TriageEntry, correcting: Bool) {
         let viewer = selectedAccount?.login ?? ""
-        let suggestions = TriageRule.suggestedConditions(for: entry.item, viewer: viewer)
-        let teamOnly = entry.item.reviewRequestKind(viewer: viewer) == .team
-        let effect: TriageRuleEffect = if correcting {
-            entry.decision?.disposition.isInbox == true ? .noAction : .alwaysInbox
+        let suggestions = TriageRule.suggestedTokens(for: entry, viewer: viewer)
+        let action: TriageRuleAction = if correcting {
+            // "Not right?" on something Copilot surfaced most often means "don't show me this kind of thing".
+            entry.decision?.disposition.isInbox == true ? .exclude : .route(.inbox)
         } else {
-            teamOnly ? .lowerPriority : .alwaysInbox
+            entry.item.reviewRequestKind(viewer: viewer) == .team ? .rank(.lower, .medium) : .route(.inbox)
         }
         ruleDraft = RuleDraft(
-            rule: TriageRule(name: "", conditions: Array(suggestions.prefix(1)), effect: effect),
+            rule: TriageRule(query: TriageQuery(.all(suggestions.prefix(1).map { .qualifier($0.kind, $0.value) })), action: action),
             suggestions: suggestions,
             context: "From \(entry.item.reference): \(entry.item.title)"
         )

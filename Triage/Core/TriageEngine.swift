@@ -231,10 +231,13 @@ actor TriageEngine {
         let contexts: [GitHubNodeID: TriageHandledContext]
         do {
             rules = try await store.rules(scope: scope)
-            // Muted work is never sent to Copilot.
+            let viewer = scope.viewerLogin
+            let currentRules = rules
+            let date = now()
+            // Work a rule hides on GitHub facts alone is never sent to Copilot.
             let candidates = try await store.itemsNeedingAnalysis(
-                scope: scope, rulesDigest: rules.digest, at: now(), limit: 1_000
-            ).filter { !rules.isMuted($0, viewer: scope.viewerLogin) }
+                scope: scope, at: date, limit: 1_000, digest: { currentRules.digest(for: $0, viewer: viewer) }
+            ).filter { !rules.isExcludedBeforeAnalysis($0, viewer: viewer, now: date) }
             contexts = try await handledContexts(for: candidates, scope: scope)
             // Work you just acted on goes first, so it leaves the Inbox quickly.
             pending = candidates.filter { contexts[$0.id] != nil } + candidates.filter { contexts[$0.id] == nil }

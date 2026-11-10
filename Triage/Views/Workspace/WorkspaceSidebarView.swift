@@ -32,6 +32,9 @@ struct WorkspaceSidebarView<Pickers: View>: View {
                 if presentation.count(in: .muted) > 0 || selection == .section(.muted) {
                     row(.muted, showsBadge: true)
                 }
+                if presentation.count(in: .excluded) > 0 || selection == .section(.excluded) {
+                    row(.excluded, showsBadge: true)
+                }
                 Label("Weekly Review", systemImage: "chart.bar.xaxis")
                     .tag(WorkspaceDestination.review)
             }
@@ -79,7 +82,7 @@ struct WorkspaceSidebarView<Pickers: View>: View {
     /// The Inbox shows how much is in it; any list with unread work adds a
     /// blue unread count. Analyzing and Muted show their size.
     private func row(_ section: WorkspacePresentation.Section, showsBadge: Bool = false) -> some View {
-        let tracksUnread = ![.analyzing, .muted].contains(section)
+        let tracksUnread = ![.analyzing, .muted, .excluded].contains(section)
         let unread = tracksUnread ? presentation.unreadCount(in: section) : 0
         let total = presentation.count(in: section)
         let showsTotal = section == .inbox || showsBadge

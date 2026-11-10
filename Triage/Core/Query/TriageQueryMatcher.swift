@@ -64,6 +64,7 @@ extension TriageQuery {
             case "assigned": return item.relationships.contains(.assigned)
             case "mine": return item.relationships.contains(.authored)
             case "mentioned": return item.relationships.contains(.mentioned)
+            case "commented": return item.relationships.contains(.commented)
             case "unread": return entry.isUnread
             case "read": return !entry.isUnread
             default: return false

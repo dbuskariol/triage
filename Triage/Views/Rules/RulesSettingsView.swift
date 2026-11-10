@@ -63,7 +63,7 @@ struct RulesSettingsView: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Add Rule…") {
-                    editingRule = RuleDraft(rule: TriageRule(name: "", conditions: [.init(field: .repository, value: "")], effect: .alwaysInbox))
+                    editingRule = RuleDraft(rule: TriageRule(query: TriageQuery(.all([])), action: .exclude))
                 }
             }
             if let error = appModel.rulesError {
@@ -72,7 +72,7 @@ struct RulesSettingsView: View {
         } header: {
             Text("Rules for \(appModel.selectedOrganization?.login ?? "")")
         } footer: {
-            Text("Rules always win over Copilot and apply instantly: mute noisy repositories or bots, keep important work in your Inbox, or nudge priority. The first matching rule that moves an item wins.")
+            Text("Rules always win over Copilot and apply instantly. Hide work you never want to see, move work to a section, or rank it higher or lower. Hide wins over Move; the first matching Move wins; Rank rules add up.")
         }
     }
 
@@ -86,13 +86,13 @@ struct RulesSettingsView: View {
             .controlSize(.mini)
             .labelsHidden()
 
-            Image(systemName: rule.effect.systemImage)
+            Image(systemName: rule.action.systemImage)
                 .foregroundStyle(rule.isEnabled ? Color.accentColor : .secondary)
                 .frame(width: 20)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(rule.displayName).fontWeight(.medium).lineLimit(1)
-                Text("When \(rule.conditions.map(\.summary).joined(separator: " and ")) → \(rule.effect.title.lowercased())")
+                Text("When \(rule.query.description) → \(rule.action.title.lowercased())")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -101,7 +101,7 @@ struct RulesSettingsView: View {
 
             Spacer(minLength: 8)
 
-            let matches = appModel.presentation.allEntries.filter { rule.matches($0.item, viewer: viewer) }.count
+            let matches = appModel.presentation.allEntries.filter { rule.matches($0, viewer: viewer) }.count
             if rule.isEnabled {
                 Text("\(matches) match\(matches == 1 ? "" : "es")")
                     .font(.caption)

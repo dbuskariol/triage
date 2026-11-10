@@ -42,7 +42,7 @@ flowchart TB
 ## The engine cycle
 
 1. **Refresh.** Discovery returns every item involving the user. The store upserts them and deactivates items that no longer match (merged, closed, unassigned). Inactive work is kept for 30 days.
-2. **Select.** The store returns active items whose decision is missing or stale (see *Fingerprints and digests*), excluding items waiting on a retry and items muted by a rule.
+2. **Select.** The store returns active items whose decision is missing or stale (see *Fingerprints and digests*), excluding items waiting on a retry and items a fact-only Hide rule matches.
 3. **Prioritize.** Items the user has acted on since their last decision go first, then by relationship urgency and recency.
 4. **Analyze.** Batches of up to 10 items (90 KB cap) go to Copilot one at a time; the helper serves one request at a time. Valid decisions are saved as they arrive. Items Copilot skips are retried immediately once. A batch that fails is split in half and retried immediately, down to single items, so one problem item never holds back the rest.
 5. **Wait** for the configured interval (2 min to hourly, or manual), ⌘R, or app activation if enabled. Interval changes apply live. If any item failed, the engine also wakes when its retry is due (2 minutes) and re-analyzes without searching GitHub again.
@@ -54,7 +54,7 @@ GitHub discovery never waits for Copilot. If Copilot is unavailable (consent off
 A decision is current only when both match:
 
 - **Item fingerprint:** SHA-256 of the item's facts (title, body, state, labels, reviews, checks, head commit, recent comments, relationships). Any change on GitHub re-queues the item.
-- **Rules digest:** hash of the prompt version, enabled rules, instructions, and a re-analysis token. Changing instructions or rules, pressing **Re-analyze All**, or shipping a new prompt re-queues every item.
+- **Preferences digest (per item):** hash of the prompt version, instructions, the re-analysis token, and the Route hints that match that item. Changing instructions, pressing **Re-analyze All**, or shipping a new prompt re-queues every item; adding or editing a Route rule re-queues only the items it matches; Hide and Rank rules, and rules on Copilot output, never re-queue anything.
 
 Stale items keep their previous decision and section while Copilot re-checks them, so the Inbox never flickers. They also appear in **Analyzing**.
 
@@ -68,7 +68,7 @@ Discovery reads up to 25 checks (check runs and commit statuses) from each pull 
 
 ## Rules
 
-Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. The first matching rule with a disposition effect wins (*Always Inbox* never downgrades *Needs Action*); priority adjustments accumulate (±25 each, clamped 0–100). *Mute* moves items to the Muted section and the engine never sends them to Copilot. Matching rules are also sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome.
+Hard rules are evaluated in `WorkspacePresentation`, not stored on decisions, so they apply instantly and are reversible. A rule is a `TriageQuery` and one `TriageRuleAction`: *exclude* (Hide), *route* to a section, or *rank* by a bounded weight. Precedence is fixed: local status (Done, Snooze) → Exclude → the first matching Route (*Move to Inbox* never downgrades *Needs action*) → the sum of Rank weights (±10/20/35 each, capped at ±40, priority clamped 0–100). Rules whose query uses Copilot output (`ai` phase) match only once a decision exists. Exclude rules on facts alone are applied before analysis, so the engine never sends that work to Copilot. Fact-phase Route rules are sent to Copilot as `rule_hints` so its wording agrees with the enforced outcome. Rules saved as v1 conditions and effects decode through `LegacyTriageRule` into equivalent queries and actions; unreadable rules are dropped individually.
 
 ## Workspace navigation
 

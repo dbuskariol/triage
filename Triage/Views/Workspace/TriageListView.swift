@@ -242,6 +242,7 @@ struct TriageListView: View {
         case .done: "Nothing done yet"
         case .snoozed: "Nothing is snoozed"
         case .muted: "Nothing is muted"
+        case .excluded: "Nothing is hidden"
         case .inbox: "You’re all caught up"
         }
     }
@@ -253,7 +254,8 @@ struct TriageListView: View {
         case .analyzing: "New work will appear here while Copilot reviews it."
         case .done: "Work you finish, here or on GitHub, appears here until someone else responds."
         case .snoozed: "Snoozed work returns at the time you chose, or sooner if someone responds."
-        case .muted: "Work matching your mute rules appears here. Manage rules in Settings."
+        case .muted: "Muted work returns when someone mentions you, requests your review, or assigns you."
+        case .excluded: "Work your rules hide appears here. Manage rules in Settings."
         case .inbox: lastUpdatedText
         }
     }
