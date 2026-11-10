@@ -99,16 +99,31 @@ struct TriageRules: Codable, Equatable, Sendable {
     /// decisions affected by a preference change are re-analyzed. Exclude and
     /// rank rules, and rules on Copilot's output, never change it.
     func digest(for item: PersonalWorkItem, viewer: String) -> String {
-        let hints = hints(for: item, viewer: viewer)
-        guard trimmedInstructions != nil || !hints.isEmpty || !reanalysisToken.isEmpty || !topics.isEmpty else { return Self.promptVersion }
-        struct Canonical: Encodable { let prompt: String; let instructions: String; let hints: [String]; let topics: [String]; let token: String }
+        digest(for: item, viewer: viewer, base: sharedDigest)
+    }
+
+    /// The part of every item's digest that doesn't depend on the item.
+    /// Compute it once when digesting many items.
+    var sharedDigest: String {
+        guard trimmedInstructions != nil || !reanalysisToken.isEmpty || !topics.isEmpty else { return Self.promptVersion }
+        struct Canonical: Encodable { let prompt: String; let instructions: String; let topics: [String]; let token: String }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(Canonical(
-            prompt: Self.promptVersion, instructions: trimmedInstructions ?? "", hints: hints,
+            prompt: Self.promptVersion, instructions: trimmedInstructions ?? "",
             topics: topics.map { "\($0.trimmedName): \($0.trimmedDescription)" }, token: reanalysisToken
         ))) ?? Data()
-        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
+        return Self.hash(data)
+    }
+
+    func digest(for item: PersonalWorkItem, viewer: String, base: String) -> String {
+        let hints = hints(for: item, viewer: viewer)
+        guard !hints.isEmpty else { return base }
+        return Self.hash(Data(([base] + hints).joined(separator: "\n").utf8))
+    }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Applies rules on top of Copilot's decision: Exclude, then the first

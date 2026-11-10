@@ -1033,7 +1033,8 @@ extension TriageAppModel {
                 + previous.rules.filter { !after.contains($0.id) }.map { TriageFeedback(kind: .ruleDeleted, at: .now, detail: "\($0.action.storageValue) \($0.query)") }
         )
         // Re-analyze only when what Copilot sees for some item changed.
-        let affectsCopilot = entries.contains { previous.digest(for: $0.item, viewer: viewer) != saved.digest(for: $0.item, viewer: viewer) }
+        let previousBase = previous.sharedDigest, savedBase = saved.sharedDigest
+        let affectsCopilot = entries.contains { previous.digest(for: $0.item, viewer: viewer, base: previousBase) != saved.digest(for: $0.item, viewer: viewer, base: savedBase) }
             || previous.trimmedInstructions != saved.trimmedInstructions || previous.reanalysisToken != saved.reanalysisToken
         Task {
             do {

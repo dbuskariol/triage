@@ -75,6 +75,7 @@ struct WorkspacePresentation: Equatable, Sendable {
     /// Groups entries. Inbox is ordered by AI priority, then confidence;
     /// other sections by urgency of relationship, then recency.
     init(entries raw: [TriageEntry], status: TriageStatus, now: Date, rules: TriageRules = .empty, viewer: String = "") {
+        let base = rules.sharedDigest
         let all = raw.map { entry in
             var entry = rules.apply(to: entry, viewer: viewer, now: now)
             entry.isUnread = entry.hasUnreadActivity(viewer: viewer)
@@ -84,7 +85,7 @@ struct WorkspacePresentation: Equatable, Sendable {
             if entry.isVisible(at: now, viewer: viewer) { entry.local = .active }
             // Decided under different preferences: queued for re-analysis.
             if entry.analysis == .current, let decision = entry.decision,
-               (decision.rulesDigest ?? "") != rules.digest(for: entry.item, viewer: viewer) {
+               (decision.rulesDigest ?? "") != rules.digest(for: entry.item, viewer: viewer, base: base) {
                 entry.analysis = .pending
             }
             return entry

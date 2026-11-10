@@ -233,10 +233,11 @@ actor TriageEngine {
             rules = try await store.rules(scope: scope)
             let viewer = scope.viewerLogin
             let currentRules = rules
+            let base = rules.sharedDigest
             let date = now()
             // Work a rule hides on GitHub facts alone is never sent to Copilot.
             let candidates = try await store.itemsNeedingAnalysis(
-                scope: scope, at: date, limit: 1_000, digest: { currentRules.digest(for: $0, viewer: viewer) }
+                scope: scope, at: date, limit: 1_000, digest: { currentRules.digest(for: $0, viewer: viewer, base: base) }
             ).filter { !rules.isExcludedBeforeAnalysis($0, viewer: viewer, now: date) }
             contexts = try await handledContexts(for: candidates, scope: scope)
             // Work you just acted on goes first, so it leaves the Inbox quickly.
