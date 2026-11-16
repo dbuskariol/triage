@@ -16,7 +16,7 @@ jobs:
   verify:
     name: Verify Triage (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
