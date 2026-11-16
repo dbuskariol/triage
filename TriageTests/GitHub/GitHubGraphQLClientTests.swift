@@ -10,7 +10,7 @@ final class GitHubGraphQLClientTests: XCTestCase {
         let queries = try GitHubGraphQLQueries.registeredQueries()
         XCTAssertEqual(
             queries.map(\.operationName),
-            ["TriageViewer", "TriagePersonalWorkSearch", "TriageRequiredChecks"]
+            ["TriageViewer", "TriagePersonalWorkSearch", "TriageCheckDetails"]
         )
         XCTAssertNoThrow(try GitHubGraphQLQueries.validateProductionRegistry(queries))
         XCTAssertTrue(queries.allSatisfy { query in

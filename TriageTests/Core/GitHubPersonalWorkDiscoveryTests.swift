@@ -133,49 +133,58 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         ])
     }
 
-    func testRequiredChecksResponseDecodesSlotsAndIgnoresRateLimit() throws {
+    func testCheckDetailsResponseDecodesSlotsAndIgnoresRateLimit() throws {
         let json = #"""
         { "p0": { "id": "PR_1", "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "name": "build", "isRequired": true }, { "name": "lint", "isRequired": false }, { "context": "ci/legacy", "isRequired": true } ] } } } }] } },
-          "p1": { "id": "PR_1", "commits": { "nodes": [] } },
+              { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": true },
+              { "__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS", "isRequired": false } ] } } } }] } },
+          "p1": { "id": "PR_2", "commits": { "nodes": [] } },
           "p2": null,
           "rateLimit": { "cost": 1, "remaining": 4999, "resetAt": "2025-01-01T00:00:00Z" } }
         """#
-        let page = try JSONDecoder().decode(RequiredChecksPage.self, from: Data(json.utf8))
-        XCTAssertEqual(page.required, [GitHubNodeID(rawValue: "PR_1")!: ["build": true, "lint": false, "ci/legacy": true]])
+        let page = try JSONDecoder().decode(CheckDetailsPage.self, from: Data(json.utf8))
+        XCTAssertEqual(page.checks, [
+            GitHubNodeID(rawValue: "PR_1")!: [
+                CheckRunFact(name: "build", result: .failing, isRequired: true),
+                CheckRunFact(name: "ci/legacy", result: .passing, isRequired: false),
+            ],
+            GitHubNodeID(rawValue: "PR_2")!: [],
+        ])
     }
 
-    func testRequiredChecksAreLookedUpOnlyForFailingPullRequests() async throws {
-        let failing = Self.node(id: "PF", type: "PullRequest", author: "a", body: "", pr: true)
-            .replacingOccurrences(of: #""statusCheckRollup": { "state": "SUCCESS" }"#, with: Self.rollup("FAILURE"))
-        let passing = Self.node(id: "PP", type: "PullRequest", author: "a", body: "", pr: true)
-            .replacingOccurrences(of: #""statusCheckRollup": { "state": "SUCCESS" }"#, with: Self.rollup("SUCCESS"))
-        let executor = RequiredChecksExecutor(
-            page: Self.page("\(failing), \(passing)", hasNext: false),
-            required: [GitHubNodeID(rawValue: "PF")!: ["build": true]]
+    func testChecksAreReadOnlyForPullRequestsThatArentPassing() async throws {
+        let failing = Self.pullRequest(id: "PF", state: "FAILURE")
+        let pending = Self.pullRequest(id: "PW", state: "PENDING")
+        let passing = Self.pullRequest(id: "PP", state: "SUCCESS")
+        let build = CheckRunFact(name: "build", result: .failing, isRequired: true)
+        let executor = CheckDetailsExecutor(
+            page: Self.page("\(failing), \(pending), \(passing)", hasNext: false),
+            details: CheckDetails(checks: [GitHubNodeID(rawValue: "PF")!: [build]])
         )
         let items = try await GitHubPersonalWorkDiscovery(executor: executor).discover(scope: scope()) { _ in }
         let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id.rawValue, $0) })
         let requested = await executor.requested
-        XCTAssertEqual(requested, [["PF"]])
-        XCTAssertEqual(byID["PF"]?.pullRequest?.checkRuns?.map(\.isRequired), [true, false])
-        XCTAssertEqual(byID["PP"]?.pullRequest?.checkRuns?.map(\.isRequired), [nil, nil])
+        XCTAssertEqual(requested, [["PF", "PW"]])
+        XCTAssertEqual(byID["PF"]?.pullRequest?.checkRuns, [build])
+        XCTAssertNil(byID["PP"]?.pullRequest?.checkRuns)
         // Required-ness never changes the decision fingerprint.
         var unknown = try XCTUnwrap(byID["PF"]?.pullRequest)
         unknown.checkRuns = unknown.checkRuns?.map { CheckRunFact(name: $0.name, result: $0.result) }
         XCTAssertEqual(byID["PF"]?.fingerprint, byID["PF"]?.replacingPullRequest(unknown).fingerprint)
     }
 
-    func testRequiredChecksFailureKeepsDiscoveredWork() async throws {
-        let failing = Self.node(id: "PF", type: "PullRequest", author: "a", body: "", pr: true)
-            .replacingOccurrences(of: #""statusCheckRollup": { "state": "SUCCESS" }"#, with: Self.rollup("FAILURE"))
-        let executor = RequiredChecksExecutor(page: Self.page(failing, hasNext: false), required: nil)
+    func testCheckDetailsFailureKeepsDiscoveredWork() async throws {
+        let executor = CheckDetailsExecutor(page: Self.page(Self.pullRequest(id: "PF", state: "FAILURE"), hasNext: false), details: nil)
         let items = try await GitHubPersonalWorkDiscovery(executor: executor).discover(scope: scope()) { _ in }
-        XCTAssertEqual(items.first?.pullRequest?.checkRuns?.map(\.isRequired), [nil, nil])
+        XCTAssertEqual(items.first?.pullRequest?.checks, .failure)
+        XCTAssertNil(items.first?.pullRequest?.checkRuns)
     }
 
-    private static func rollup(_ state: String) -> String {
-        #""statusCheckRollup": { "state": "\#(state)", "contexts": { "nodes": [{ "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE" }, { "__typename": "StatusContext", "context": "ci/ok", "state": "SUCCESS" }] } }"#
+    private static func pullRequest(id: String, state: String, sha: String = "abc123") -> String {
+        node(id: id, type: "PullRequest", author: "a", body: "", pr: true).replacingOccurrences(
+            of: #""commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }] }"#,
+            with: #""baseRefName": "main", "commits": { "nodes": [{ "commit": { "oid": "\#(sha)", "statusCheckRollup": { "state": "\#(state)" } } }] }"#
+        )
     }
 
     func testPaginationStopsAtPageCap() async throws {
@@ -265,7 +274,7 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
 
     func testWithheldCheckRunsComeFromActionsWithRequiredChecks() async throws {
         let executor = ActionsExecutor(
-            page: Self.withheldPage(sha: "a1b2c3"),
+            page: Self.page(Self.pullRequest(id: "PG", state: "FAILURE", sha: "a1b2c3"), hasNext: false),
             actions: .success(ActionsChecks(checks: [
                 CheckRunFact(name: "compliance-approval", result: .failing), CheckRunFact(name: "unit tests", result: .pending),
             ], complete: false)),
@@ -283,24 +292,12 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
 
     func testActionsForbiddenKeepsWorkAndNamesThePermission() async throws {
         let executor = ActionsExecutor(
-            page: Self.withheldPage(sha: "d4e5f6"), actions: .failure(GitHubFailure(kind: .forbidden, statusCode: 403)), required: []
+            page: Self.page(Self.pullRequest(id: "PG", state: "FAILURE", sha: "d4e5f6"), hasNext: false), actions: .failure(GitHubFailure(kind: .forbidden, statusCode: 403)), required: []
         )
         let work = try await GitHubPersonalWorkDiscovery(executor: executor).discoverWork(scope: scope()) { _ in }
         XCTAssertEqual(work.items.count, 1)
         XCTAssertEqual(work.items.first?.pullRequest?.checks, .failure)
         XCTAssertEqual(work.missingOptionalPermissions, ["Actions"])
-    }
-
-    private static func withheldPage(sha: String) -> PersonalWorkSearchPage {
-        var page = page(
-            node(id: "PG", type: "PullRequest", author: "a", body: "", pr: true).replacingOccurrences(
-                of: #""commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }] }"#,
-                with: #""baseRefName": "main", "commits": { "nodes": [{ "commit": { "oid": "\#(sha)", "statusCheckRollup": { "state": "FAILURE" } } }] }"#
-            ),
-            hasNext: false
-        )
-        page.checkRunsWithheld = true
-        return page
     }
 
     private struct CancellingExecutor: PersonalWorkSearchExecuting {
@@ -363,15 +360,15 @@ private actor FixtureExecutor: PersonalWorkSearchExecuting {
     }
 }
 
-/// Returns one page for pull request searches and scripted required checks (`nil` throws).
-private actor RequiredChecksExecutor: PersonalWorkSearchExecuting {
+/// Returns one page for pull request searches and scripted check details (`nil` throws).
+private actor CheckDetailsExecutor: PersonalWorkSearchExecuting {
     private let page: PersonalWorkSearchPage
-    private let required: [GitHubNodeID: [String: Bool]]?
+    private let details: CheckDetails?
     private(set) var requested: [[String]] = []
 
-    init(page: PersonalWorkSearchPage, required: [GitHubNodeID: [String: Bool]]?) {
+    init(page: PersonalWorkSearchPage, details: CheckDetails?) {
         self.page = page
-        self.required = required
+        self.details = details
     }
 
     func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
@@ -382,10 +379,10 @@ private actor RequiredChecksExecutor: PersonalWorkSearchExecuting {
         return page
     }
 
-    func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] {
+    func checkDetails(pullRequestIDs: [GitHubNodeID]) async throws -> CheckDetails {
         requested.append(pullRequestIDs.map(\.rawValue))
-        guard let required else { throw GitHubGraphQLError.partialResponse }
-        return required
+        guard let details else { throw GitHubGraphQLError.partialResponse }
+        return details
     }
 }
 
@@ -410,9 +407,8 @@ private actor ActionsExecutor: PersonalWorkSearchExecuting {
         return page
     }
 
-    func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] {
-        XCTFail("GitHub withholds isRequired along with the check runs.")
-        return [:]
+    func checkDetails(pullRequestIDs: [GitHubNodeID]) async throws -> CheckDetails {
+        CheckDetails(checks: [:], withheld: true)
     }
 
     func actionsChecks(repository: String, headSHA: String) async throws -> ActionsChecks {
