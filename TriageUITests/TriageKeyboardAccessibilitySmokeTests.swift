@@ -300,6 +300,58 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertFalse(workCell(containing: "Fixture Beta release review").isSelected)
     }
 
+    func testFilteringHidesWorkLikeThisAndExplainsMistakes() throws {
+        launchFixture()
+        try requireMainWindow()
+        let gate = "Fixture Acme deployment gate"
+        let title = "Fixture Acme keyboard accessibility smoke"
+        XCTAssertTrue(workRow(containing: gate).waitForExistence(timeout: 10))
+
+        // Search shares the rule language and explains mistakes.
+        let search = app.searchFields["Search work"]
+        app.typeKey("f", modifierFlags: .command)
+        search.typeText("stauts:failing ")
+        XCTAssertTrue(element(containing: "Did you mean “status:”?").waitForExistence(timeout: 5), "Typos are explained.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(workRow(containing: gate).waitForExistence(timeout: 5))
+
+        // Not right? → Don't show me work like this → a Hide rule for what Copilot noticed.
+        workRow(containing: gate).click()
+        XCTAssertTrue(waitForSelection(of: gate))
+        XCTAssertTrue(element(containing: "Copilot noticed").waitForExistence(timeout: 5), "Signals are shown.")
+        let notRight = app.links["Not right?"].exists ? app.links["Not right?"] : app.buttons["Not right?"]
+        XCTAssertTrue(notRight.waitForExistence(timeout: 5))
+        notRight.click()
+        let hideChoice = element(containing: "Don't show me work like this")
+        XCTAssertTrue(hideChoice.waitForExistence(timeout: 5))
+        hideChoice.click()
+        XCTAssertTrue(element(containing: "signal:approval-gate").waitForExistence(timeout: 5), "The editor starts from what Copilot noticed.")
+        XCTAssertTrue(element(containing: "Matches 1 current item").exists, "The editor previews matches.")
+        app.buttons["Create Rule"].click()
+        XCTAssertTrue(workRow(containing: gate).waitForNonExistence(timeout: 5), "Hidden work leaves the Inbox.")
+        XCTAssertTrue(workRow(containing: title).exists)
+
+        app.typeKey("8", modifierFlags: .command)
+        XCTAssertTrue(app.outlines["Hidden by Rules work"].waitForExistence(timeout: 5), "Command-8 opens Hidden by Rules.")
+        XCTAssertTrue(workRow(containing: gate).waitForExistence(timeout: 5), "Hidden work is listed with its rule.")
+
+        let settings = openSettings(category: "Rules")
+        XCTAssertTrue(element(containing: "Hide: signal:approval-gate", in: settings).waitForExistence(timeout: 5), "Settings lists the Hide rule.")
+        for group in ["Suggestions", "Move", "Rank", "Topics", "Learning"] {
+            XCTAssertTrue(element(containing: group, in: settings).exists, "Settings shows the \(group) group.")
+        }
+        settings.typeKey("w", modifierFlags: .command)
+
+        // Mute sets one item aside until you're addressed (M).
+        app.typeKey("1", modifierFlags: .command)
+        XCTAssertTrue(workRow(containing: title).waitForExistence(timeout: 5))
+        workRow(containing: title).click()
+        app.typeKey("m", modifierFlags: [])
+        XCTAssertTrue(workRow(containing: title).waitForNonExistence(timeout: 5), "Muted work leaves the Inbox.")
+        app.typeKey("7", modifierFlags: .command)
+        XCTAssertTrue(workRow(containing: title).waitForExistence(timeout: 5), "Command-7 lists muted work.")
+    }
+
     // MARK: Helpers
 
     private func requireMainWindow() throws {

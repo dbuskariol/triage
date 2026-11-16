@@ -115,7 +115,7 @@ struct WorkspaceSidebarView<Pickers: View>: View {
                     .disabled(unread == 0)
             }
         }
-        .accessibilityLabel([section.title, unread > 0 ? "\(unread) unread" : nil, showsTotal ? "\(total) items" : nil]
+        .accessibilityLabel([section.title, unread > 0 ? "\(unread) unread" : nil, showsTotal ? "\(total) item\(total == 1 ? "" : "s")" : nil]
             .compactMap { $0 }.joined(separator: ", "))
     }
 }

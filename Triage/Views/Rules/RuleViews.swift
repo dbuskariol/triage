@@ -109,6 +109,7 @@ struct RuleEditorSheet: View {
                         Toggle(isOn: suggestionBinding(token)) {
                             Label(token.title, systemImage: token.systemImage)
                         }
+                        .accessibilityLabel("Filter \(token.title)")
                     }
                     HStack {
                         TextField("Filter", text: $queryText, prompt: Text("e.g. is:review status:failing -author:@me"))

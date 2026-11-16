@@ -227,18 +227,13 @@ private struct DetailActionBar: View {
 
                 Menu {
                     SnoozeMenuItems(entries: [entry], actions: actions)
+                    Divider()
+                    Button("Mute Until I'm Mentioned") { actions.mute(entry) }
                 } label: {
                     Label("Snooze", systemImage: "moon.zzz")
                 }
                 .fixedSize()
-                .help("Hide until later")
-
-                Button {
-                    actions.mute(entry)
-                } label: {
-                    Label("Mute", systemImage: "speaker.slash")
-                }
-                .help("Hide until someone mentions you, requests your review, or assigns you (M)")
+                .help("Hide until later, or mute until someone mentions you, requests your review, or assigns you (M)")
             }
 
             Button {

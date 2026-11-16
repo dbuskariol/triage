@@ -13,7 +13,7 @@ It is private by design: your data stays on your Mac in an encrypted database, T
 - **An Inbox you can trust.** Only work that needs your action or is worth a look. Everything else is sorted into *Waiting on Others* and *No Action Needed*.
 - **Specific calls to action.** Every item says what to do and why now: *“@bob has waited 3 days for your review; CI is green.”*
 - **Knows when you've handled it.** Comment, review, or push, and Copilot checks whether you completed its suggested step. Done work comes back only when someone *else* responds.
-- **Your rules win.** Mute noisy repos or bots, keep critical work in the Inbox, and tell Copilot what matters to you in plain English.
+- **Your rules win.** Hide noisy repos or bots, keep critical work in the Inbox, and tell Copilot what matters to you in plain English.
 - **Start the day with a Briefing.** What needs you, what's waited longest, quick wins, follow-ups to nudge, and what you finished today. End the week with a Weekly Review.
 - **Get through it fast.** Focus mode works through a list one item at a time, Copilot drafts replies in your voice for you to edit and post, and effort estimates surface the quick wins.
 - **Fast and fluid.** Mail-style keyboard navigation, saved searches, instant Done and Snooze, notifications and a Dock badge for what needs you.

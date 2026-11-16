@@ -41,13 +41,16 @@ struct PriorityBreakdown: Equatable, Sendable {
         case nil: break
         }
         let viewerLast = item.latestViewerActivity(viewer: viewer)
+        var isWaitingOnYou = false
         if entry.decision?.disposition.isInbox == true,
            let othersLast = item.latestActivity(excluding: viewer), othersLast > (viewerLast ?? .distantPast) {
             let days = WorkInsights.days(since: othersLast, now: now)
             if days > 7 {
                 parts.append(Part(title: "Waiting on you for \(days) days", points: 8))
+                isWaitingOnYou = true
             } else if days > 3 {
                 parts.append(Part(title: "Waiting on you for \(days) days", points: 4))
+                isWaitingOnYou = true
             }
         }
         if item.relationships.contains(.authored), item.pullRequest?.hasFailingRequiredCheck == true {
@@ -56,7 +59,8 @@ struct PriorityBreakdown: Equatable, Sendable {
         if item.mentionsViewer(after: viewerLast ?? .distantPast, viewer: viewer) {
             parts.append(Part(title: "Mentioned since you last acted", points: 5))
         }
-        if now.timeIntervalSince(item.updatedAt) >= 30 * 86_400 {
+        // Quiet work someone is waiting on you for isn't stale; it's overdue.
+        if !isWaitingOnYou, now.timeIntervalSince(item.updatedAt) >= 30 * 86_400 {
             parts.append(Part(title: "No activity for over a month", points: -6))
         }
         return parts

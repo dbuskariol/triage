@@ -20,6 +20,10 @@ struct TriageEntryRows: View {
                     Button(entry.isUnread ? "Read" : "Unread") { actions.setRead([entry], entry.isUnread) }
                         .tint(.blue)
                 }
+                // Without this, pressing a row (VoiceOver's VO-Space) performs a
+                // swipe action and sets the work aside. Pressing selects it;
+                // swipe actions stay available as custom actions.
+                .accessibilityAction(.default) { actions.show(entry) }
         }
     }
 

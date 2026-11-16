@@ -43,15 +43,18 @@ jobs:
           rustc --version
           cargo --version
           cargo fetch --locked --manifest-path TriageCopilotHelper/Cargo.toml
-          # Use rustup's proxy, wherever this image installs it, so the pinned
-          # override applies inside Xcode's cleared build environment.
-          echo "TRIAGE_COPILOT_HELPER_CARGO=$(command -v cargo)" >> "$GITHUB_ENV"
+          # Use the pinned toolchain's own cargo, not a rustup proxy: the helper
+          # build clears the environment and finds rustc beside cargo.
+          echo "TRIAGE_COPILOT_HELPER_CARGO=$(rustup which cargo)" >> "$GITHUB_ENV"
       - name: Show toolchain
         run: |
           sw_vers
           xcodebuild -version
           swift --version
       - name: Run verification gate
+        env:
+          # Hosted Intel images never deliver accessibility snapshots to XCUITest.
+          TRIAGE_CI_SKIP_UI_TESTS: ${{ matrix.runner == 'macos-26-intel' && '1' || '0' }}
         run: scripts/verify-ci.sh
       - name: Run declared Apple silicon performance baseline
         if: matrix.runner == 'macos-26' && vars.TRIAGE_PERFORMANCE_APPLE_SILICON_PROFILE != ''

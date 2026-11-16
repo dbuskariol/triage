@@ -291,10 +291,12 @@ private struct FixtureTriageDecider: TriageDeciding {
     ) async throws -> [TriageDecision] {
         items.map { item in
             let isFollowUp = item.relationships.contains(.assigned)
+            // Mentions sort last so the smoke and follow-up rows stay adjacent.
+            let isMention = item.relationships == [.mentioned]
             return TriageDecision(
                 itemID: item.id,
-                disposition: isFollowUp ? .review : .act,
-                priority: isFollowUp ? 55 : 85,
+                disposition: isFollowUp || isMention ? .review : .act,
+                priority: isMention ? 30 : isFollowUp ? 55 : 85,
                 confidence: 0.9,
                 summary: "Fixture summary for \(item.reference).",
                 reason: isFollowUp
@@ -304,7 +306,12 @@ private struct FixtureTriageDecider: TriageDeciding {
                 fingerprint: item.fingerprint,
                 modelID: "fixture",
                 decidedAt: FixtureData.date,
-                rulesDigest: rules.digest(for: item, viewer: scope.viewerLogin)
+                rulesDigest: rules.digest(for: item, viewer: scope.viewerLogin),
+                signals: item.recentActivity.contains { $0.author == "github-actions[bot]" } ? ["approval-gate", "ci-failing"] : [],
+                topics: rules.topics.filter { topic in
+                    ([item.title, item.body] + item.recentActivity.map(\.excerpt))
+                        .contains { $0.localizedCaseInsensitiveContains(topic.trimmedName) }
+                }.map(\.trimmedName)
             )
         }
     }
@@ -375,6 +382,29 @@ private enum FixtureData {
                     id: "fixture-acme-2", kind: .issue, repository: "acme/widgets", number: 43,
                     title: "Fixture Acme follow-up issue", relationships: [.assigned],
                     body: "Document the new keyboard shortcuts."
+                ),
+                // Older, so it never displaces the first item; exercises checks, signals, and Topics.
+                item(
+                    id: "fixture-acme-3", kind: .pullRequest, repository: "acme/deploy", number: 44,
+                    title: "Fixture Acme deployment gate", relationships: [.mentioned],
+                    body: "Ships the monthly report to production.",
+                    pullRequest: {
+                        var facts = PullRequestFacts(
+                            isDraft: false, reviewDecision: .reviewRequired, requestedReviewers: [],
+                            latestReviews: [], checks: .failure, mergeable: "MERGEABLE", unresolvedReviewThreads: 0,
+                            additions: 12, deletions: 4
+                        )
+                        facts.checkRuns = [
+                            CheckRunFact(name: "compliance-approval", result: .failing, isRequired: true),
+                            CheckRunFact(name: "unit tests", result: .passing, isRequired: true),
+                        ]
+                        return facts
+                    }(),
+                    activity: [ActivityFact(
+                        author: "github-actions[bot]", createdAt: date.addingTimeInterval(-7_200),
+                        excerpt: "Compliance deployment approval required before merge."
+                    )],
+                    updatedAt: date.addingTimeInterval(-7_200)
                 )
             ]
         case beta.id:

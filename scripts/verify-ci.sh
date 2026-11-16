@@ -44,12 +44,20 @@ triage_assert_no_unsafe_entitlements \
 /usr/bin/git -C "$ROOT_DIR" diff --check
 triage_assert_release_metadata "$ROOT_DIR" >/dev/null
 
+# Hosted Intel runners can't snapshot app accessibility, so CI may skip only
+# the UI suite there; unit tests and the universal release build still run.
+TEST_FILTER=()
+if [[ "${TRIAGE_CI_SKIP_UI_TESTS:-0}" == 1 ]]; then
+  triage_note 'Skipping TriageUITests (TRIAGE_CI_SKIP_UI_TESTS=1)'
+  TEST_FILTER=(-skip-testing:TriageUITests)
+fi
 /usr/bin/xcodebuild \
   -project "$ROOT_DIR/Triage.xcodeproj" \
   -scheme Triage \
   -configuration Debug \
   -destination "platform=macOS,arch=$HOST_ARCH" \
   -derivedDataPath "$DERIVED_DATA" \
+  ${TEST_FILTER[@]+"${TEST_FILTER[@]}"} \
   test
 /usr/bin/xcodebuild \
   -project "$ROOT_DIR/Triage.xcodeproj" \

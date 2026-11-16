@@ -369,8 +369,12 @@ struct PriorityBreakdownTests {
 
     @Test func mentionsFailingRequiredChecksAndStaleness() {
         let mention = [ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-3_600), excerpt: "@me can you check?")]
-        let entry = applied(item(relationships: [.authored], checks: .failure, comments: mention, updatedDaysAgo: 40), .review)
+        let entry = applied(item(relationships: [.authored], checks: .failure, comments: mention, updatedDaysAgo: 40), .wait)
         #expect(entry.priorityBreakdown?.factors.map(\.points) == [6, 5, -6])
+        // Long-quiet work that someone is waiting on you for is overdue, not stale.
+        let overdue = [ActivityFact(author: "bob", createdAt: now.addingTimeInterval(-40 * 86_400), excerpt: "ping")]
+        let waiting = applied(item(relationships: [.assigned], comments: overdue, updatedDaysAgo: 40), .act)
+        #expect(waiting.priorityBreakdown?.factors.map(\.title) == ["Waiting on you for 40 days"])
         let answered = [mention[0], ActivityFact(author: "me", createdAt: now, excerpt: "On it")]
         #expect(applied(item(relationships: [.assigned], comments: answered)).priorityBreakdown?.factors.isEmpty == true)
     }
