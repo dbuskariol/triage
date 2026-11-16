@@ -352,40 +352,6 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         XCTAssertTrue(workRow(containing: title).waitForExistence(timeout: 5), "Command-7 lists muted work.")
     }
 
-
-    // TEMPORARY: CI diagnostic for snapshot timeouts; remove before release.
-    func testAAADiagnoseSnapshotTiming() throws {
-        launchFixture()
-        try requireMainWindow()
-        XCTAssertTrue(workRow(containing: "Fixture Acme keyboard accessibility smoke").waitForExistence(timeout: 10))
-        workRow(containing: "Fixture Acme keyboard accessibility smoke").click()
-        sleep(2)
-        func time(_ name: String, _ element: XCUIElement) {
-            let start = Date()
-            do {
-                let snapshot = try element.snapshot()
-                func count(_ s: XCUIElementSnapshot) -> Int { 1 + s.children.reduce(0) { $0 + count($1) } }
-                print("DIAG \(name): \(count(snapshot)) nodes in \(Date().timeIntervalSince(start))s")
-            } catch {
-                print("DIAG \(name): FAILED after \(Date().timeIntervalSince(start))s: \(error)")
-            }
-        }
-        let window = app.windows["main"]
-        time("list", workList())
-        time("sidebar", app.outlines["Triage sidebar"])
-        time("toolbar", window.toolbars.firstMatch)
-        let areas = window.descendants(matching: .scrollView)
-        for index in 0..<areas.count { time("scrollArea[\(index)]", areas.element(boundBy: index)) }
-        let detail = areas.element(boundBy: areas.count - 1)
-        let children = detail.children(matching: .any)
-        for index in 0..<children.count {
-            let child = children.element(boundBy: index)
-            time("detail[\(index)] \(child.elementType.rawValue) \(child.label.prefix(40))", child)
-        }
-        time("window", window)
-        time("menuBar", app.menuBars.firstMatch)
-    }
-
     // MARK: Helpers
 
     private func requireMainWindow() throws {
