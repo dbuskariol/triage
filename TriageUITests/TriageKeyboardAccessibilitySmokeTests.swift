@@ -423,11 +423,8 @@ final class TriageKeyboardAccessibilitySmokeTests: XCTestCase {
         app.descendants(matching: .any)[identifier]
     }
 
-    /// Searches the main window (and its sheets) by default. App-wide label/value
-    /// queries also walk the menu bar extra, which hosted CI runners can't snapshot in time.
     private func element(containing text: String, in container: XCUIElement? = nil) -> XCUIElement {
-        let mainWindow = app.windows["main"]
-        return (container ?? (mainWindow.exists ? mainWindow : app)).descendants(matching: .any)
+        (container ?? app).descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text))
             .firstMatch
     }
