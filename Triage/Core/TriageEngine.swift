@@ -196,12 +196,14 @@ actor TriageEngine {
         publish()
         do {
             let discovery = try await makeDiscovery(scope)
-            let items = try await discovery.discover(scope: scope) { [weak self] progress in
+            let work = try await discovery.discoverWork(scope: scope) { [weak self] progress in
                 await self?.updateSearchProgress(progress.found)
             }
+            let items = work.items
             try Task.checkCancellation()
             try await store.replaceItems(items, scope: scope, at: now())
             status.lastRefreshAt = now()
+            status.missingOptionalPermissions = work.missingOptionalPermissions
             if status.problem?.isGitHubProblem == true { status.problem = nil }
             Self.logger.notice("refresh outcome=success items=\(items.count, privacy: .public) duration=\(String(describing: started.duration(to: .now)), privacy: .public)")
         } catch is CancellationError {

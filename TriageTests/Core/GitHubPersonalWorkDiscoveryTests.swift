@@ -244,6 +244,65 @@ final class GitHubPersonalWorkDiscoveryTests: XCTestCase {
         WorkspaceScope(accountID: AccountID(rawValue: "account")!, organizationID: OrganizationID(rawValue: "org")!, organizationLogin: "octo", viewerLogin: "me")
     }
 
+    func testOnlyRefusedIndividualChecksAreTolerated() {
+        func refused(_ path: String...) -> GitHubGraphQLPartialError {
+            GitHubGraphQLPartialError(
+                message: "Resource not accessible by personal access token",
+                path: path.map { GitHubGraphQLErrorPathComponent.field($0) }, type: "FORBIDDEN", extensions: nil
+            )
+        }
+        XCTAssertTrue(GitHubPersonalWorkSearchExecutor.isCheckRunRefusal(
+            refused("search", "nodes", "commits", "nodes", "commit", "statusCheckRollup", "contexts", "nodes")
+        ))
+        XCTAssertFalse(GitHubPersonalWorkSearchExecutor.isCheckRunRefusal(refused("search", "nodes", "commits", "nodes")))
+        // A deployment waiting on an environment approval is still running, not failed.
+        XCTAssertEqual(GitHubPersonalWorkSearchExecutor.result(status: "waiting", conclusion: nil).fact, .pending)
+        XCTAssertEqual(GitHubPersonalWorkSearchExecutor.result(status: "completed", conclusion: "action_required").fact, .failing)
+        XCTAssertFalse(GitHubPersonalWorkSearchExecutor.result(status: "completed", conclusion: "success").needsDetail)
+        XCTAssertTrue(GitHubPersonalWorkSearchExecutor.isRepositoryName("acme/deploy.tools"))
+        XCTAssertFalse(GitHubPersonalWorkSearchExecutor.isRepositoryName("acme/../x"))
+    }
+
+    func testWithheldCheckRunsComeFromActionsWithRequiredChecks() async throws {
+        let executor = ActionsExecutor(
+            page: Self.withheldPage(sha: "a1b2c3"),
+            actions: .success(ActionsChecks(checks: [
+                CheckRunFact(name: "compliance-approval", result: .failing), CheckRunFact(name: "unit tests", result: .pending),
+            ], complete: false)),
+            required: ["compliance-approval"]
+        )
+        let work = try await GitHubPersonalWorkDiscovery(executor: executor).discoverWork(scope: scope()) { _ in }
+        XCTAssertEqual(work.missingOptionalPermissions, [])
+        XCTAssertEqual(work.items.first?.pullRequest?.checkRuns, [
+            CheckRunFact(name: "compliance-approval", result: .failing, isRequired: true),
+            CheckRunFact(name: "unit tests", result: .pending, isRequired: false),
+        ])
+        let lookups = await executor.lookups
+        XCTAssertEqual(lookups, ["octo/repo@a1b2c3", "octo/repo#main"])
+    }
+
+    func testActionsForbiddenKeepsWorkAndNamesThePermission() async throws {
+        let executor = ActionsExecutor(
+            page: Self.withheldPage(sha: "d4e5f6"), actions: .failure(GitHubFailure(kind: .forbidden, statusCode: 403)), required: []
+        )
+        let work = try await GitHubPersonalWorkDiscovery(executor: executor).discoverWork(scope: scope()) { _ in }
+        XCTAssertEqual(work.items.count, 1)
+        XCTAssertEqual(work.items.first?.pullRequest?.checks, .failure)
+        XCTAssertEqual(work.missingOptionalPermissions, ["Actions"])
+    }
+
+    private static func withheldPage(sha: String) -> PersonalWorkSearchPage {
+        var page = page(
+            node(id: "PG", type: "PullRequest", author: "a", body: "", pr: true).replacingOccurrences(
+                of: #""commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }] }"#,
+                with: #""baseRefName": "main", "commits": { "nodes": [{ "commit": { "oid": "\#(sha)", "statusCheckRollup": { "state": "FAILURE" } } }] }"#
+            ),
+            hasNext: false
+        )
+        page.checkRunsWithheld = true
+        return page
+    }
+
     private struct CancellingExecutor: PersonalWorkSearchExecuting {
         func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
             try await Task.sleep(for: .seconds(10))
@@ -326,6 +385,43 @@ private actor RequiredChecksExecutor: PersonalWorkSearchExecuting {
     func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] {
         requested.append(pullRequestIDs.map(\.rawValue))
         guard let required else { throw GitHubGraphQLError.partialResponse }
+        return required
+    }
+}
+
+/// A fine-grained token's view: check runs withheld, GitHub Actions scripted.
+private actor ActionsExecutor: PersonalWorkSearchExecuting {
+    private let page: PersonalWorkSearchPage
+    private let actions: Result<ActionsChecks, GitHubFailure>
+    private let required: Set<String>
+    private(set) var lookups: [String] = []
+
+    init(page: PersonalWorkSearchPage, actions: Result<ActionsChecks, GitHubFailure>, required: Set<String>) {
+        self.page = page
+        self.actions = actions
+        self.required = required
+    }
+
+    func search(query: String, cursor: String?) async throws -> PersonalWorkSearchPage {
+        let empty = #"{ "search": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } }"#
+        guard query.contains("is:pr"), query.contains("assignee") else {
+            return try JSONDecoder().decode(PersonalWorkSearchPage.self, from: Data(empty.utf8))
+        }
+        return page
+    }
+
+    func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] {
+        XCTFail("GitHub withholds isRequired along with the check runs.")
+        return [:]
+    }
+
+    func actionsChecks(repository: String, headSHA: String) async throws -> ActionsChecks {
+        lookups.append("\(repository)@\(headSHA)")
+        return try actions.get()
+    }
+
+    func requiredCheckNames(repository: String, branch: String) async throws -> Set<String> {
+        lookups.append("\(repository)#\(branch)")
         return required
     }
 }

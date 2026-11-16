@@ -204,7 +204,7 @@ Triage only reads from GitHub; it never posts, comments, or changes anything. Co
 
 | Token | What to select |
 |---|---|
-| **Fine-grained** (recommended) | Resource owner: your organization (it must allow fine-grained tokens, and may need to approve yours). Repository access: all repositories, or the ones you work in. Repository permissions, read-only: Metadata, Issues, Pull requests, Commit statuses, Contents. Organization permissions, read-only: Members. |
+| **Fine-grained** (recommended) | Resource owner: your organization (it must allow fine-grained tokens, and may need to approve yours). Repository access: all repositories, or the ones you work in. Repository permissions, read-only: Metadata, Issues, Pull requests, Commit statuses, Contents, Actions. Organization permissions, read-only: Members. Fine-grained tokens can't read check runs, so Triage reads GitHub Actions jobs instead; without Actions, Triage still works but can't filter on checks by name. |
 | **Classic** | Scopes `repo` and `read:org`. Classic tokens have no read-only scope for private repositories. If your organization uses SAML single sign-on, authorize the token for it. |
 
 Triage shows each token's expiration in **Settings ▸ Accounts**, warns you a week before it expires, and lets you replace it without removing the account.

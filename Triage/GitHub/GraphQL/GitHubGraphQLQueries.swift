@@ -115,7 +115,7 @@ enum GitHubGraphQLQueries {
                 labels(first: 20) { nodes { name } }
                 assignees(first: 20) { nodes { login } }
                 comments(last: 5) { nodes { author { login } createdAt body } }
-                isDraft merged reviewDecision mergeable additions deletions
+                isDraft merged reviewDecision mergeable additions deletions baseRefName
                 reviewRequests(first: 20) {
                   nodes {
                     requestedReviewer {
@@ -127,7 +127,7 @@ enum GitHubGraphQLQueries {
                   }
                 }
                 latestReviews(first: 10) { nodes { author { login } state submittedAt } }
-                commits(last: 1) { nodes { commit { committedDate statusCheckRollup {
+                commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup {
                   state
                   contexts(first: 25) {
                     nodes {

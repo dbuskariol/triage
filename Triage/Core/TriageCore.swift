@@ -560,6 +560,8 @@ struct TriageStatus: Equatable, Sendable {
     var phase: Phase = .idle
     var problem: Problem?
     var lastRefreshAt: Date?
+    /// Optional token permissions the last refresh would have used.
+    var missingOptionalPermissions: [String] = []
     var nextRefreshAt: Date?
     /// Items marked done in the last analysis because the viewer handled them.
     var recentlyHandled = 0
@@ -582,6 +584,27 @@ protocol PersonalWorkDiscovering: Sendable {
         scope: WorkspaceScope,
         progress: @escaping @Sendable (DiscoveryProgress) async -> Void
     ) async throws -> [PersonalWorkItem]
+
+    /// The same work, plus token permissions that would let discovery read more.
+    func discoverWork(
+        scope: WorkspaceScope,
+        progress: @escaping @Sendable (DiscoveryProgress) async -> Void
+    ) async throws -> DiscoveredWork
+}
+
+struct DiscoveredWork: Sendable {
+    var items: [PersonalWorkItem]
+    /// Optional permission titles (from `GitHubTokenRequirements`) the token lacks.
+    var missingOptionalPermissions: [String] = []
+}
+
+extension PersonalWorkDiscovering {
+    func discoverWork(
+        scope: WorkspaceScope,
+        progress: @escaping @Sendable (DiscoveryProgress) async -> Void
+    ) async throws -> DiscoveredWork {
+        DiscoveredWork(items: try await discover(scope: scope, progress: progress))
+    }
 }
 
 /// Encrypted local storage for the workspace.

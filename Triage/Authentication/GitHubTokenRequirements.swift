@@ -19,6 +19,8 @@ enum GitHubTokenRequirements {
         Permission(parameter: "pull_requests", title: "Pull requests"),
         Permission(parameter: "statuses", title: "Commit statuses"),
         Permission(parameter: "contents", title: "Contents"),
+        // Fine-grained tokens can't read check runs; GitHub Actions jobs stand in for them.
+        Permission(parameter: "actions", title: "Actions"),
     ]
 
     static let organizationPermissions = [

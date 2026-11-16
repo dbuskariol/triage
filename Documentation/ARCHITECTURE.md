@@ -60,7 +60,7 @@ Stale items keep their previous decision and section while Copilot re-checks the
 
 ## Check runs
 
-Discovery reads up to 25 checks (check runs and commit statuses) from each pull request's head commit with the search itself. GitHub reports whether a check is *required* only for a named pull request, so for pull requests whose checks are failing, discovery makes one registered follow-up request (`TriageRequiredChecks`, ten pull requests per request, each slot passing its own ID). It is best effort: if it fails, `status:required-failing` falls back to any failing check. Required-ness is excluded from the decision fingerprint.
+Discovery reads up to 25 checks (check runs and commit statuses) from each pull request's head commit with the search itself. GitHub reports whether a check is *required* only for a named pull request, so for pull requests whose checks are failing, discovery makes one registered follow-up request (`TriageRequiredChecks`, ten pull requests per request, each slot passing its own ID). It is best effort: if it fails, `status:required-failing` falls back to any failing check. Required-ness is excluded from the decision fingerprint. Fine-grained tokens can't read check runs: GitHub refuses just that field, and discovery keeps the overall check state and commit statuses. It then reads GitHub Actions jobs (Actions: read) for up to 25 pull requests whose checks are failing or running, and which checks the base branch's protection and rulesets require. Jobs for commits whose workflow runs have all finished are cached. Without Actions access, Triage keeps working and suggests adding the permission.
 
 ## Ranking
 

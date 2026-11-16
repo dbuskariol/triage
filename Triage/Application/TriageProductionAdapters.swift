@@ -108,7 +108,11 @@ struct TriageProductionComposition: Sendable {
                         return GitHubPersonalWorkDiscovery(executor: GitHubPersonalWorkSearchExecutor(
                             client: client,
                             organizationLogin: scope.organizationLogin,
-                            organizationDatabaseID: organizationDatabaseID
+                            organizationDatabaseID: organizationDatabaseID,
+                            rest: GitHubRESTClient(
+                                transport: try GitHubRESTTransport(), credential: token,
+                                rateLimitController: rateLimit, personalWorkOnly: true
+                            )
                         ))
                     },
                     decider: CopilotTriageDecider(resolveVault: openVault),

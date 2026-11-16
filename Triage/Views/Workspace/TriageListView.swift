@@ -15,6 +15,7 @@ struct TriageListView: View {
     @AppStorage(TriagePreferenceKeys.sortField) private var sortField = WorkspaceSortField.recommended
     @AppStorage(TriagePreferenceKeys.sortAscending) private var sortAscending = false
     @AppStorage(TriagePreferenceKeys.grouping) private var grouping = WorkspaceGrouping.none
+    @AppStorage(TriageStatusView.dismissedPermissionAdviceKey) private var dismissedPermissionAdvice = ""
     @FocusState private var isListFocused: Bool
     @Binding var doneFilter: DoneFilter
     @State private var isNamingSavedSearch = false
@@ -68,7 +69,7 @@ struct TriageListView: View {
                         isNamingSavedSearch = true
                     }
                 )
-                if presentation.status.problem != nil || credentialNotice != nil {
+                if presentation.status.problem != nil || credentialNotice != nil || TriageStatusView.showsPermissionAdvice(presentation.status, dismissed: dismissedPermissionAdvice) {
                     TriageStatusView(status: presentation.status, credentialNotice: credentialNotice, actions: actions)
                 }
                 if section == .done, !search.isActive {

@@ -5,6 +5,19 @@ struct TriageStatusView: View {
     var credentialNotice: GitHubCredentialNotice?
     let actions: any WorkspaceActions
     @Environment(\.openURL) private var openURL
+    /// The permission advice the user dismissed, so the same advice stays hidden.
+    @AppStorage(Self.dismissedPermissionAdviceKey) private var dismissedPermissionAdvice = ""
+    static let dismissedPermissionAdviceKey = "github.dismissed-permission-advice"
+
+    static func showsPermissionAdvice(_ status: TriageStatus, dismissed: String) -> Bool {
+        !status.missingOptionalPermissions.isEmpty && status.missingOptionalPermissions.joined(separator: ",") != dismissed
+    }
+
+    private var permissionAdvice: String? {
+        let missing = status.missingOptionalPermissions
+        guard Self.showsPermissionAdvice(status, dismissed: dismissedPermissionAdvice) else { return nil }
+        return "Add \(ListFormatter.localizedString(byJoining: missing)) (read-only) to your GitHub token to filter on individual checks. The token keeps its value."
+    }
 
     /// The credential notice explains a rejected token better than the problem does.
     private var problem: TriageStatus.Problem? {
@@ -17,6 +30,16 @@ struct TriageStatusView: View {
             if let credentialNotice {
                 banner(credentialNotice.message, symbol: credentialNotice.isBlocking ? "key.slash" : "key", tint: .orange) {
                     Button(credentialNotice.actionTitle) { actions.replaceGitHubToken() }
+                }
+            }
+            if let permissionAdvice {
+                banner(permissionAdvice, symbol: "key", tint: .secondary) {
+                    Button("Edit Token on GitHub") {
+                        openURL(GitHubTokenRequirements.tokenSettingsURL(for: .fineGrainedPersonalAccessToken))
+                    }
+                    Button("Dismiss") {
+                        dismissedPermissionAdvice = status.missingOptionalPermissions.joined(separator: ",")
+                    }
                 }
             }
             if let problem {

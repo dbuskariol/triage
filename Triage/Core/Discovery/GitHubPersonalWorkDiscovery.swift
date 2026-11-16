@@ -30,10 +30,23 @@ protocol PersonalWorkSearchExecuting: Sendable {
     /// For each pull request, whether each named check is required to merge.
     /// At most `GitHubGraphQLQueries.requiredChecksSlots` IDs per call.
     func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]]
+    /// The GitHub Actions jobs on `headSHA` that aren't passing, standing in
+    /// for check runs when GitHub withholds them from fine-grained tokens.
+    func actionsChecks(repository: String, headSHA: String) async throws -> ActionsChecks
+    /// Check names the branch's protection or rulesets require to merge.
+    func requiredCheckNames(repository: String, branch: String) async throws -> Set<String>
+}
+
+/// Jobs from GitHub Actions; `complete` once every workflow run has finished.
+struct ActionsChecks: Equatable, Sendable {
+    var checks: [CheckRunFact]
+    var complete: Bool
 }
 
 extension PersonalWorkSearchExecuting {
     func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] { [:] }
+    func actionsChecks(repository: String, headSHA: String) async throws -> ActionsChecks { ActionsChecks(checks: [], complete: true) }
+    func requiredCheckNames(repository: String, branch: String) async throws -> Set<String> { [] }
 }
 
 /// The `TriageRequiredChecks` response: slots `p0`…`p9`, each a pull request.
@@ -82,6 +95,11 @@ struct RequiredChecksPage: Decodable, Sendable {
 
 struct PersonalWorkSearchPage: Decodable, Sendable {
     let search: Search
+    /// GitHub refused the individual checks (fine-grained tokens can't read
+    /// check runs) but answered everything else.
+    var checkRunsWithheld = false
+
+    enum CodingKeys: String, CodingKey { case search }
 
     struct Search: Decodable, Sendable {
         let pageInfo: PageInfo
@@ -115,13 +133,14 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
         let mergeable: String?
         let additions: Int?
         let deletions: Int?
+        let baseRefName: String?
         let reviewRequests: ReviewRequests?
         let latestReviews: Reviews?
         let commits: Commits?
         let reviewThreads: Threads?
 
         enum CodingKeys: String, CodingKey {
-            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, isDraft, merged, reviewDecision, mergeable, additions, deletions, reviewRequests, latestReviews, commits, reviewThreads
+            case typename = "__typename", id, number, title, url, state, createdAt, updatedAt, body, author, repository, labels, assignees, comments, isDraft, merged, reviewDecision, mergeable, additions, deletions, baseRefName, reviewRequests, latestReviews, commits, reviewThreads
         }
     }
 
@@ -145,6 +164,7 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
     struct Commits: Decodable, Sendable { let nodes: [CommitNode?] }
     struct CommitNode: Decodable, Sendable { let commit: Commit? }
     struct Commit: Decodable, Sendable {
+        let oid: String?
         let statusCheckRollup: StatusCheckRollup?
         let committedDate: Date?
         let authors: CommitAuthors?
@@ -167,15 +187,115 @@ struct PersonalWorkSearchPage: Decodable, Sendable {
 }
 
 struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
+    private static let logger = Logger(subsystem: "com.triage.mac", category: "Discovery")
     private let client: GitHubGraphQLClient
     private let organizationLogin: String
     /// GitHub's numeric organization ID, matched against single sign-on evidence.
     private let organizationDatabaseID: UInt64?
+    private let rest: GitHubRESTClient?
 
-    init(client: GitHubGraphQLClient, organizationLogin: String, organizationDatabaseID: UInt64?) {
+    init(
+        client: GitHubGraphQLClient, organizationLogin: String, organizationDatabaseID: UInt64?,
+        rest: GitHubRESTClient? = nil
+    ) {
         self.client = client
         self.organizationLogin = organizationLogin
         self.organizationDatabaseID = organizationDatabaseID
+        self.rest = rest
+    }
+
+    private struct WorkflowRuns: Decodable, Sendable {
+        struct Run: Decodable, Sendable { let id: Int; let status: String?; let conclusion: String? }
+        let workflowRuns: [Run]
+        enum CodingKeys: String, CodingKey { case workflowRuns = "workflow_runs" }
+    }
+
+    private struct WorkflowJobs: Decodable, Sendable {
+        struct Job: Decodable, Sendable { let name: String; let status: String?; let conclusion: String? }
+        let jobs: [Job]
+    }
+
+    /// Workflow runs whose jobs are read per commit; only runs that haven't passed.
+    static let maximumActionsRuns = 5
+
+    func actionsChecks(repository: String, headSHA: String) async throws -> ActionsChecks {
+        guard let rest, Self.isRepositoryName(repository), headSHA.allSatisfy(\.isHexDigit), !headSHA.isEmpty else {
+            return ActionsChecks(checks: [], complete: true)
+        }
+        let runs = try await rest.get(WorkflowRuns.self, request: GitHubRESTRequest(
+            path: "/repos/\(repository)/actions/runs",
+            query: [URLQueryItem(name: "head_sha", value: headSHA), URLQueryItem(name: "per_page", value: "30")]
+        )).workflowRuns
+        let unfinished = runs.filter { Self.result(status: $0.status, conclusion: $0.conclusion).needsDetail }
+        var checks: [CheckRunFact] = []
+        for run in unfinished.prefix(Self.maximumActionsRuns) {
+            let jobs = try await rest.get(WorkflowJobs.self, request: GitHubRESTRequest(
+                path: "/repos/\(repository)/actions/runs/\(run.id)/jobs",
+                query: [URLQueryItem(name: "filter", value: "latest"), URLQueryItem(name: "per_page", value: "100")]
+            )).jobs
+            for job in jobs where !checks.contains(where: { $0.name == job.name }) {
+                checks.append(CheckRunFact(name: job.name, result: Self.result(status: job.status, conclusion: job.conclusion).fact))
+            }
+        }
+        return ActionsChecks(
+            checks: Array(checks.prefix(PullRequestFacts.maximumCheckRuns)),
+            complete: runs.allSatisfy { $0.status == "completed" }
+        )
+    }
+
+    private struct BranchPayload: Decodable, Sendable {
+        struct Protection: Decodable, Sendable {
+            let requiredStatusChecks: Required?
+            enum CodingKeys: String, CodingKey { case requiredStatusChecks = "required_status_checks" }
+        }
+        struct Required: Decodable, Sendable { let contexts: [String]? }
+        let protection: Protection?
+        var contexts: [String] { protection?.requiredStatusChecks?.contexts ?? [] }
+    }
+
+    private struct BranchRulePayload: Decodable, Sendable {
+        struct Parameters: Decodable, Sendable {
+            let requiredStatusChecks: [Check]?
+            enum CodingKeys: String, CodingKey { case requiredStatusChecks = "required_status_checks" }
+        }
+        struct Check: Decodable, Sendable { let context: String }
+        let type: String
+        let parameters: Parameters?
+        var contexts: [String] { type == "required_status_checks" ? (parameters?.requiredStatusChecks ?? []).map(\.context) : [] }
+    }
+
+    func requiredCheckNames(repository: String, branch: String) async throws -> Set<String> {
+        // A branch name with a slash can't be sent as one path segment.
+        guard let rest, Self.isRepositoryName(repository), !branch.isEmpty, !branch.contains("/"), branch != "..", branch != "." else {
+            return []
+        }
+        var names = Set<String>()
+        // Branch protection and rulesets are independent; use whichever answers.
+        if let payload = try? await rest.get(BranchPayload.self, request: GitHubRESTRequest(path: "/repos/\(repository)/branches/\(branch)")) {
+            names.formUnion(payload.contexts)
+        }
+        if let rules = try? await rest.get([BranchRulePayload].self, request: GitHubRESTRequest(path: "/repos/\(repository)/rules/branches/\(branch)")) {
+            names.formUnion(rules.flatMap(\.contexts))
+        }
+        return names
+    }
+
+    static func isRepositoryName(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 2 && parts.allSatisfy { part in
+            !part.isEmpty && part != ".." && part != "." && part.allSatisfy { $0.isLetter || $0.isNumber || "-_.".contains($0) }
+        }
+    }
+
+    /// A workflow run's or job's state as a check result.
+    static func result(status: String?, conclusion: String?) -> (fact: CheckRunFact.Result, needsDetail: Bool) {
+        guard status == "completed" else { return (.pending, true) }
+        switch conclusion {
+        case "success": return (.passing, false)
+        case "skipped": return (.skipped, false)
+        case "neutral": return (.neutral, false)
+        default: return (.failing, true)
+        }
     }
 
     func requiredChecks(pullRequestIDs: [GitHubNodeID]) async throws -> [GitHubNodeID: [String: Bool]] {
@@ -204,12 +324,26 @@ struct GitHubPersonalWorkSearchExecutor: PersonalWorkSearchExecuting {
         try Self.checkSingleSignOn(
             response.metadata.ssoHeader, organizationLogin: organizationLogin, organizationDatabaseID: organizationDatabaseID
         )
-        if let missing = Self.missingPermissions(in: response.errors) {
+        // Fine-grained tokens can't read check runs; GitHub refuses just those.
+        let errors = response.errors.filter { !Self.isCheckRunRefusal($0) }
+        if let missing = Self.missingPermissions(in: errors) {
+            let fields = errors.compactMap { $0.path?.compactMap { if case .field(let name) = $0 { name } else { nil } }.joined(separator: ".") }
+            Self.logger.error("search refused fields=\(fields.joined(separator: " "), privacy: .public)")
             throw PersonalWorkDiscoveryError.missingTokenPermissions(missing)
         }
-        guard response.errors.isEmpty else { throw GitHubGraphQLError.partialResponse }
-        guard let data = response.data else { throw GitHubGraphQLError.missingData }
+        guard errors.isEmpty else { throw GitHubGraphQLError.partialResponse }
+        guard var data = response.data else { throw GitHubGraphQLError.missingData }
+        data.checkRunsWithheld = errors.count < response.errors.count
         return data
+    }
+
+    /// A refusal of a pull request's individual checks, which the overall
+    /// check state and commit statuses survive.
+    static func isCheckRunRefusal(_ error: GitHubGraphQLPartialError) -> Bool {
+        guard (error.type ?? error.extensions?.type) == "FORBIDDEN" else { return false }
+        return (error.path ?? []).contains { component in
+            if case .field("contexts") = component { true } else { false }
+        }
     }
 
     /// GitHub refuses individual fields a fine-grained token can't read
@@ -275,6 +409,13 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         scope: WorkspaceScope,
         progress: @escaping @Sendable (DiscoveryProgress) async -> Void
     ) async throws -> [PersonalWorkItem] {
+        try await discoverWork(scope: scope, progress: progress).items
+    }
+
+    func discoverWork(
+        scope: WorkspaceScope,
+        progress: @escaping @Sendable (DiscoveryProgress) async -> Void
+    ) async throws -> DiscoveredWork {
         try Self.validate(scope: scope)
         let queries = try WorkRelationship.allCases.sorted { $0.urgencyRank < $1.urgencyRank }.flatMap { relationship in
             try Self.searchQueries(for: relationship, scope: scope, now: now()).map { (relationship, $0) }
@@ -294,7 +435,76 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
                 index += 1
             }
         }
-        return await withRequiredChecks(collector.items())
+        let items = await collector.items()
+        guard await collector.checkRunsWithheld else {
+            return DiscoveredWork(items: await withRequiredChecks(items))
+        }
+        return await withActionsChecks(items, references: collector.references())
+    }
+
+    /// Pull requests whose jobs are read from GitHub Actions per refresh.
+    static let maximumActionsPullRequests = 25
+    private static let actionsCache = ActionsChecksCache()
+
+    /// When GitHub withholds check runs, reads GitHub Actions jobs for pull
+    /// requests whose checks are failing or still running, and which of them
+    /// the base branch requires. Best effort: without Actions access, work
+    /// keeps its overall check state and commit statuses.
+    private func withActionsChecks(
+        _ items: [PersonalWorkItem], references: [GitHubNodeID: PullRequestReference]
+    ) async -> DiscoveredWork {
+        let candidates = items.filter { item in
+            guard let checks = item.pullRequest?.checks, references[item.id]?.headSHA != nil else { return false }
+            return [.failure, .error, .pending, .expected].contains(checks)
+        }.prefix(Self.maximumActionsPullRequests)
+        var jobs: [GitHubNodeID: [CheckRunFact]] = [:]
+        var missing: [String] = []
+        for item in candidates {
+            guard let reference = references[item.id], let sha = reference.headSHA else { continue }
+            let key = "\(item.repository)@\(sha)"
+            if let cached = await Self.actionsCache.value(for: key) {
+                jobs[item.id] = cached
+                continue
+            }
+            do {
+                let result = try await executor.actionsChecks(repository: item.repository, headSHA: sha)
+                jobs[item.id] = result.checks
+                if result.complete { await Self.actionsCache.store(result.checks, for: key) }
+            } catch let failure as GitHubFailure where failure.kind == .forbidden {
+                missing = ["Actions"]
+                Self.logger.notice("actions-checks outcome=forbidden")
+                break
+            } catch is CancellationError {
+                break
+            } catch {
+                Self.logger.notice("actions-checks outcome=skipped errorType=\(String(reflecting: type(of: error)), privacy: .public)")
+            }
+        }
+        var required: [String: Set<String>] = [:]
+        for item in candidates where jobs[item.id]?.contains(where: { $0.result == .failing }) == true
+            || item.pullRequest?.checkRuns?.contains(where: { $0.result == .failing }) == true {
+            guard let branch = references[item.id]?.baseRefName else { continue }
+            let key = "\(item.repository)#\(branch)"
+            if required[key] == nil {
+                required[key] = (try? await executor.requiredCheckNames(repository: item.repository, branch: branch)) ?? []
+            }
+        }
+        let enriched = items.map { item -> PersonalWorkItem in
+            guard var facts = item.pullRequest else { return item }
+            var runs = facts.checkRuns ?? []
+            for job in jobs[item.id] ?? [] where !runs.contains(where: { $0.name == job.name }) { runs.append(job) }
+            if let branch = references[item.id]?.baseRefName, let names = required["\(item.repository)#\(branch)"], !names.isEmpty {
+                runs = runs.map { run in
+                    var run = run
+                    run.isRequired = names.contains(run.name)
+                    return run
+                }
+            }
+            guard runs != (facts.checkRuns ?? []) else { return item }
+            facts.checkRuns = Array(runs.prefix(PullRequestFacts.maximumCheckRuns))
+            return item.replacingPullRequest(facts)
+        }
+        return DiscoveredWork(items: enriched, missingOptionalPermissions: missing)
     }
 
     /// Marks which checks are required on pull requests whose checks are
@@ -355,7 +565,7 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
         for pageNumber in 1...Self.maximumPages {
             try Task.checkCancellation()
             let page = try await fetchPage(query: query, cursor: cursor, relationship: relationship, pageNumber: pageNumber)
-            let found = await collector.add(page.search.nodes, relationship: relationship)
+            let found = await collector.add(page.search.nodes, relationship: relationship, checkRunsWithheld: page.checkRunsWithheld)
             await progress(.init(relationship: relationship, found: found))
             Self.logger.notice("search relationship=\(relationship.rawValue, privacy: .public) page=\(pageNumber, privacy: .public) results=\(page.search.nodes.count, privacy: .public) totalFound=\(found, privacy: .public)")
             guard page.search.pageInfo.hasNextPage, let next = page.search.pageInfo.endCursor else { return }
@@ -424,19 +634,49 @@ struct GitHubPersonalWorkDiscovery: PersonalWorkDiscovering {
     }
 }
 
+struct PullRequestReference: Equatable, Sendable {
+    let headSHA: String?
+    let baseRefName: String?
+}
+
+/// GitHub Actions jobs for commits whose workflow runs have all finished;
+/// those never change, so later refreshes don't ask again.
+actor ActionsChecksCache {
+    static let capacity = 500
+    private var values: [String: [CheckRunFact]] = [:]
+    private var order: [String] = []
+
+    func value(for key: String) -> [CheckRunFact]? { values[key] }
+
+    func store(_ checks: [CheckRunFact], for key: String) {
+        if values.updateValue(checks, forKey: key) == nil { order.append(key) }
+        while order.count > Self.capacity { values[order.removeFirst()] = nil }
+    }
+}
+
 private actor Collector {
     private let organizationLogin: String
     private var values: [GitHubNodeID: PersonalWorkItem] = [:]
+    private var pullRequestReferences: [GitHubNodeID: PullRequestReference] = [:]
+    private(set) var checkRunsWithheld = false
+
+    func references() -> [GitHubNodeID: PullRequestReference] { pullRequestReferences }
 
     init(organizationLogin: String) {
         self.organizationLogin = organizationLogin
     }
 
-    func add(_ nodes: [PersonalWorkSearchPage.Node?], relationship: WorkRelationship) -> Int {
+    func add(_ nodes: [PersonalWorkSearchPage.Node?], relationship: WorkRelationship, checkRunsWithheld: Bool = false) -> Int {
+        if checkRunsWithheld { self.checkRunsWithheld = true }
         for node in nodes.compactMap({ $0 })
         where !node.repository.isArchived &&
             node.repository.nameWithOwner.lowercased().hasPrefix("\(organizationLogin.lowercased())/") {
             guard let item = map(node, relationship: relationship) else { continue }
+            if item.kind == .pullRequest {
+                pullRequestReferences[item.id] = PullRequestReference(
+                    headSHA: node.commits?.nodes.compactMap(\.self).last?.commit?.oid, baseRefName: node.baseRefName
+                )
+            }
             if var current = values[item.id] {
                 let relationships = current.relationships.union(item.relationships)
                 current = newer(current, item)
